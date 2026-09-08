@@ -637,10 +637,12 @@ async def test_fresh_thread_process_preference_bypass_never_fails_a_request_the_
         {"session_id": "process", "thread-id": "fresh"}, enabled=True, max_age_seconds=600
     )
     assert affinity is not None
+    seed_key = affinity.seed_selection_key
+    assert seed_key is not None
 
     def _balancer(*, sibling_in_cooldown: bool) -> LoadBalancer:
         sticky_repo = _StubStickySessionsRepository()
-        sticky_repo.account_ids_by_key = {affinity.seed_selection_key: preferred.id}
+        sticky_repo.account_ids_by_key = {seed_key: preferred.id}
         usage = _StubUsageRepository(
             {
                 preferred.id: _usage_row_with_percent(1, preferred.id, used_percent=96.0, reset_at=now + 3600),

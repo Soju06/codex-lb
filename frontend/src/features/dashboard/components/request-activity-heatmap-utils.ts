@@ -29,8 +29,21 @@ function parseDateOnly(value: string): Date | null {
     : null;
 }
 
-function startOfUtcDay(value: Date): Date {
-  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
+function startOfTimeZoneDayAsUtcDate(value: Date, timeZone: string): Date {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const values = new Map(parts.map((part) => [part.type, part.value]));
+  return new Date(
+    Date.UTC(
+      Number(values.get("year")),
+      Number(values.get("month")) - 1,
+      Number(values.get("day")),
+    ),
+  );
 }
 
 function addDays(value: Date, amount: number): Date {
@@ -51,8 +64,9 @@ function activityLevel(requests: number, maximumRequests: number): RequestActivi
 export function buildRequestActivityCalendar(
   days: RequestActivityDay[],
   today = new Date(),
+  timeZone = "UTC",
 ): RequestActivityCalendar {
-  const end = startOfUtcDay(today);
+  const end = startOfTimeZoneDayAsUtcDate(today, timeZone);
   const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - 5, 1));
   const startDate = formatDateOnly(start);
   const endDate = formatDateOnly(end);

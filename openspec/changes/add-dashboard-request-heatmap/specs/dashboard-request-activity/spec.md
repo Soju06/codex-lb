@@ -24,24 +24,53 @@ The dashboard SHALL provide a local-only display mode setting with `weeklyPace` 
 
 ### Requirement: Request activity data
 
-The dashboard SHALL expose daily non-warmup request counts for the latest six-month display period through a dashboard activity endpoint. The endpoint MUST combine hourly rollup rows with only the un-folded raw tail and MUST filter by a bounded time range.
+The dashboard SHALL expose sparse daily non-warmup request counts for the latest six calendar months, including the current calendar month, through a dashboard activity endpoint. The endpoint SHALL accept an optional IANA timezone identifier. An absent or invalid timezone value MUST use UTC.
 
 #### Scenario: Return daily counts
 
 - **WHEN** the request activity endpoint is queried
-- **THEN** it SHALL return UTC calendar-day buckets and non-negative request counts
-- **AND** days with no requests MAY be omitted from the response because the frontend fills them as zero
+- **THEN** it SHALL capture the current instant once and use the effective timezone to select the local date range beginning on the first day of the calendar month five months before the current local month and ending at that captured instant on the current local date
+- **AND** it SHALL return local calendar-day labels and non-negative request counts
+- **AND** it SHALL omit days with no requests from the response because the frontend fills them as zero
+
+#### Scenario: Cap the current local day at the captured instant
+
+- **WHEN** the endpoint aggregates the current local date
+- **THEN** it SHALL use that date's independently converted local-midnight UTC start and the captured current instant as the exclusive UTC end
+- **AND** it SHALL NOT use the following local midnight or any future time as the current-day end
+
+#### Scenario: Resolve the request timezone
+
+- **WHEN** the endpoint receives no timezone or an invalid timezone identifier
+- **THEN** it SHALL use UTC for local-day labels, bounds, and aggregation
+- **WHEN** the endpoint receives a valid IANA timezone identifier
+- **THEN** it SHALL use that timezone for the complete request
+
+#### Scenario: Convert local days across daylight-saving transitions
+
+- **WHEN** the endpoint builds a bound for a completed labeled local calendar day
+- **THEN** it SHALL convert that day's local midnight and the following local midnight independently to UTC
+- **AND** it SHALL not assume that every local calendar day is a fixed 24-hour UTC interval
 
 #### Scenario: Avoid an unindexed full table scan
 
-- **WHEN** hourly rollups cover part of the requested period
-- **THEN** folded data SHALL be read using the hourly rollup time-bucket key range
-- **AND** only the raw tail after the rollup watermark SHALL be read from `request_logs` using its requested-at time bound
-- **AND** the endpoint SHALL NOT scan all historical request-log rows
+- **WHEN** the endpoint loads activity data
+- **THEN** the folded rollup aggregation and fold watermark SHALL come from one watermark-consistent `AccountUsageRollupState LEFT JOIN` rollup SQL statement
+- **AND** that statement SHALL construct bounded, labeled local-day ranges and sum folded hourly `request_count` values in SQL by those labels
+- **AND** separate bounded raw SQL reads SHALL cover exactly the requested UTC intervals not represented by whole folded UTC-hour buckets, including bounded pre-watermark partial edge windows when a local-day boundary is not UTC-hour-aligned, excluding warmup traffic and grouping by the same local-day labels
+- **AND** application code SHALL merge only the small per-day folded and raw totals, not materialize full-grain hourly or raw rows
+- **AND** the endpoint SHALL NOT scan all historical request-log rows or issue a separate watermark query
+
+#### Scenario: Preserve the hourly-retention boundary limitation
+
+- **WHEN** a local midnight falls between UTC hour boundaries, such as in a non-hour-offset timezone, and raw detail for the relevant pre-watermark partial edge window has been pruned
+- **THEN** the endpoint MAY omit or undercount the unreconstructable partial contribution
+- **AND** it SHALL NOT attribute the whole folded UTC-hour bucket solely because the partial edge detail is unavailable
+- **AND** the bounded SQL path SHALL remain in use rather than reading unbounded historical raw logs
 
 ### Requirement: Request activity heatmap
 
-The request activity view SHALL display the latest six months of daily request counts in a GitHub-style calendar heatmap.
+The request activity view SHALL display the latest six calendar months, including the current calendar month, of daily request counts in a GitHub-style calendar heatmap using the requested browser IANA timezone.
 
 #### Scenario: Render themed heatmap
 
@@ -49,6 +78,17 @@ The request activity view SHALL display the latest six months of daily request c
 - **THEN** the view SHALL render six months of daily activity cells in seven weekday rows, with intensity increasing with request count
 - **AND** the view SHALL NOT render month or weekday axis labels
 - **AND** the view SHALL use the active light or dark theme colors
+
+#### Scenario: Use browser-local calendar components
+
+- **WHEN** the frontend constructs the heatmap's date labels, bounds, or cells
+- **THEN** it SHALL use browser-local calendar date components rather than UTC date components
+- **AND** it SHALL include the browser's IANA timezone in the activity request and client query/cache key
+
+#### Scenario: Refresh at a bounded interval
+
+- **WHEN** requestHeatmap mode is active
+- **THEN** the activity query SHALL refresh on a fixed interval of at least 60 seconds
 
 #### Scenario: Explain a day
 

@@ -11,10 +11,12 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.orm import Session as SyncSession
 
 from app.core.auth import generate_unique_account_id
 from app.core.auth.dependencies import require_dashboard_write_access
+from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardPermissionError
 from app.core.utils.time import utcnow
 from app.db.models import AuditLog, ModelSourcePin
@@ -206,6 +208,93 @@ async def test_designation_put_honours_the_expected_version_cas(async_client):
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "settings_conflict"
     assert (await _get_settings(async_client))["subscriptionOverflowSourceId"] == source_id
+
+
+# ---------------------------------------------------------------------------
+# Deleting the designated source (kill switch 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_designated_source_clears_the_designation_and_arms_the_drain(async_client):
+    designated = await _create_model_source(async_client, name="overflow-a")
+    other = await _create_model_source(async_client, name="overflow-b")
+    assert (
+        await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": designated})
+    ).status_code == 200
+
+    # Unknown source: 404 and the designation is untouched.
+    missing = await async_client.delete("/api/model-sources/src_missing")
+    assert missing.status_code == 404
+    assert (await _get_settings(async_client))["subscriptionOverflowSourceId"] == designated
+
+    # A different source: deleted, designation untouched.
+    assert (await async_client.delete(f"/api/model-sources/{other}")).status_code == 204
+    untouched = await _get_settings(async_client)
+    assert untouched["subscriptionOverflowSourceId"] == designated
+    assert untouched["subscriptionOverflowDrainUntil"] is None
+    other_audit = await _wait_for_audit_log("model_source_deleted")
+    assert other_audit.details is not None
+    assert json.loads(other_audit.details) == {"source_id": other, "subscription_overflow_cleared": False}
+
+    # The designated source: deleted, designation cleared, drain armed.
+    assert (await async_client.delete(f"/api/model-sources/{designated}")).status_code == 204
+    cleared = await _get_settings(async_client)
+    assert cleared["subscriptionOverflowSourceId"] is None
+    _assert_drain_armed(cleared["subscriptionOverflowDrainUntil"])
+    for _ in range(20):
+        designated_audit = await _wait_for_audit_log("model_source_deleted")
+        if designated_audit.id != other_audit.id:
+            break
+        await asyncio.sleep(0.05)
+    assert designated_audit.details is not None
+    assert json.loads(designated_audit.details) == {"source_id": designated, "subscription_overflow_cleared": True}
+    listed = await async_client.get("/api/model-sources/")
+    assert listed.status_code == 200
+    assert listed.json()["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_designated_source_invalidates_the_settings_cache_after_the_commit(
+    async_client, monkeypatch
+):
+    designated = await _create_model_source(async_client, name="overflow-a")
+    other = await _create_model_source(async_client, name="overflow-b")
+    assert (
+        await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": designated})
+    ).status_code == 200
+
+    cache = get_settings_cache()
+    original_invalidate = cache.invalidate
+    sequence: list[str] = []
+    armed = {"on": False}
+
+    def _after_commit(_session: SyncSession) -> None:
+        if armed["on"]:
+            sequence.append("commit")
+
+    async def _spy_invalidate(*args, **kwargs):
+        if armed["on"]:
+            sequence.append("invalidate")
+        return await original_invalidate(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "invalidate", _spy_invalidate)
+    event.listen(SyncSession, "after_commit", _after_commit)
+    try:
+        armed["on"] = True
+        assert (await async_client.delete(f"/api/model-sources/{other}")).status_code == 204
+        assert "invalidate" not in sequence, "deleting a non-designated source must not bump the settings cache"
+        sequence.clear()
+        assert (await async_client.delete(f"/api/model-sources/{designated}")).status_code == 204
+    finally:
+        armed["on"] = False
+        event.remove(SyncSession, "after_commit", _after_commit)
+
+    assert "commit" in sequence and "invalidate" in sequence, sequence
+    # The clear + delete commit lands first; the invalidation (and its
+    # cross-replica bump) must follow it so peers re-read the cleared row.
+    assert sequence.index("commit") < sequence.index("invalidate")
+    assert sequence.count("invalidate") == 1
 
 
 # ---------------------------------------------------------------------------

@@ -129,7 +129,14 @@ def test_relative_availability_draw_honors_the_multiplier_without_changing_top_k
         top_k=5,
         deterministic_probe=True,
     )
-    assert probe.account_id in {"penalized", "healthy"}
+    baseline = _select_relative_availability(
+        [_state("penalized"), _state("healthy")],
+        current=1_000.0,
+        power=2.0,
+        top_k=5,
+        deterministic_probe=True,
+    )
+    assert probe.account_id == baseline.account_id
 
 
 def test_bad_multipliers_are_clamped() -> None:

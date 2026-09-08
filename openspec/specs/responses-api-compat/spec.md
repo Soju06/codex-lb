@@ -467,16 +467,35 @@ Public Responses endpoints MUST NOT return an OpenAI-shaped `previous_response_n
 - **AND** the missing `previous_response_id` is not exposed in the response body
 
 ### Requirement: Public /v1 responses SSE stream emits only OpenAI Responses contract events
-When serving streaming `POST /v1/responses`, the service MUST emit only event types defined by the OpenAI Responses SSE contract (the `response.*` and `error` families) on the public stream. The service MUST drop any vendor-internal event types — specifically, any event whose `type` begins with `codex.` (for example `codex.rate_limits`) — before they reach the public stream. The `/backend-api/codex/*` routes are NOT subject to this requirement and MUST continue forwarding these events unchanged.
+
+When serving streaming `POST /v1/responses`, the service MUST forward a
+string-valued event type only when it is exactly `error` or begins with
+`response.`. Other string-valued event types MUST be dropped before they reach
+the public stream. OpenAI-shaped backend requests with public contract
+enforcement enabled MUST follow the same filtering rule. Native Codex requests
+with public contract enforcement disabled MUST retain upstream vendor events.
 
 #### Scenario: Codex-internal rate-limit event is dropped before response.created
-- **WHEN** the upstream Codex backend emits `codex.rate_limits` before `response.created` for a streaming `/v1/responses` request
-- **THEN** the public stream MUST NOT contain the `codex.rate_limits` event
-- **AND** the first event the public stream emits MUST be `response.created`
+
+- **WHEN** upstream emits `codex.rate_limits` before `response.created` for a streaming `/v1/responses` request
+- **THEN** the public stream MUST NOT contain `codex.rate_limits`
+- **AND** its first event MUST be `response.created`
+
+#### Scenario: Timing diagnostics are filtered without losing text or completion
+
+- **WHEN** upstream emits `responsesapi.websocket_timing` before, between, or after standard response events
+- **THEN** a public-contract stream MUST NOT contain that diagnostic
+- **AND** standard text deltas and completion events MUST remain in order
+
+#### Scenario: OpenAI-shaped backend request filters vendor events
+
+- **WHEN** an OpenAI-shaped `/backend-api/codex/responses` request enables public contract enforcement
+- **THEN** its response stream MUST apply the public event-family filtering rule
 
 #### Scenario: Codex-internal events on the Codex CLI route are preserved
-- **WHEN** the upstream emits `codex.rate_limits` for a `POST /backend-api/codex/responses` request
-- **THEN** the response stream forwards the `codex.rate_limits` event to the Codex CLI client unchanged
+
+- **WHEN** a native `/backend-api/codex/responses` request disables public contract enforcement
+- **THEN** the response stream MUST retain `codex.rate_limits` and `responsesapi.websocket_timing` in upstream order
 
 ### Requirement: Streamed /v1 responses terminal output is backfilled from item events
 When serving streaming `POST /v1/responses`, if the upstream's terminal `response.completed` or `response.incomplete` event carries `output` as missing or as an empty list, the service MUST reconstruct `output` from the `response.output_item.done` events emitted earlier in the same stream before yielding the terminal SSE event. The reconstructed `output` MUST preserve the `output_index` ordering and the raw item payloads. When the terminal `response.completed` / `response.incomplete` already carries a non-empty `output`, the service MUST forward it unchanged.
@@ -5536,15 +5555,17 @@ captured when the connection began.
 - **GIVEN** `prohibitFastMode` is enabled
 - **WHEN** an internal owner-forwarded payload carries a priority service tier
 - **THEN** the receiving preparation boundary omits `service_tier` before upstream forwarding
+
 ### Requirement: Native direct HTTP egress preserves Responses streaming semantics
 
 Direct Responses HTTP/SSE requests sent through native egress MUST preserve the existing normalized upstream payload and headers, rate-limit header ingestion, maximum SSE event size, idle and total request deadlines, terminal-event requirements, downstream event normalization, archives, and error envelope behavior. Downstream cancellation MUST cancel and await only the owned native request task, unregister its event stream, and leave unrelated multiplexed requests usable. Native transport selection MUST NOT change the public HTTP status or SSE framing contract.
 
 #### Scenario: Native SSE response uses the ordinary parser
 
-- **GIVEN** native direct egress returns an HTTP success and streamed SSE chunks
+- **GIVEN** native direct egress returns an HTTP success for a streaming Responses request
 - **WHEN** the proxy consumes the response
-- **THEN** chunks pass through the ordinary SSE parser, normalizer, terminal-event detection, and archive path
+- **THEN** Rust frames body bytes into SSE blocks with the existing CR/LF, UTF-8 replacement, whitespace, EOF, and size-limit behavior
+- **AND** Python applies the ordinary normalizer, terminal-event detection, and archive path without byte reframing
 - **AND** the downstream event sequence matches the Python transport contract
 
 #### Scenario: Downstream cancellation owns helper cleanup
@@ -5554,6 +5575,12 @@ Direct Responses HTTP/SSE requests sent through native egress MUST preserve the 
 - **THEN** only that native request task is cancelled and awaited
 - **AND** the helper and unrelated request streams remain usable
 - **AND** the cancelled POST is not replayed through another HTTP client
+
+#### Scenario: Framing failures retain public error behavior
+
+- **WHEN** native SSE framing exceeds the configured event byte limit or receives no body bytes within the idle deadline
+- **THEN** the public response uses the existing stream-event-too-large or stream-idle-timeout error behavior
+- **AND** idle timeout remains account-neutral
 
 ### Requirement: HTTP session bridge admission obeys downstream transport policy
 
@@ -5731,3 +5758,111 @@ rule. A missing or invalid value MUST remain absent.
 - **WHEN** an upstream retry hint contains a line break or exceeds the bounded
   field length
 - **THEN** codex-lb does not copy that value downstream
+
+### Requirement: Routed native Responses streams consume Rust-framed SSE
+
+Account-routed streaming Responses HTTP requests using native egress MUST
+delegate byte framing, event byte limits, and body-read idle deadlines to the
+existing Rust SSE transport contract. Python MUST consume the framed events
+without byte reframing, preserving normalization, terminal detection, rate-limit
+headers, archives, route trace, and public error envelopes. Non-streaming HTTP
+responses and HTTP errors MUST retain raw body consumption. Body failures and
+cancellation MUST NOT replay a dispatched POST or switch its proxy endpoint.
+
+#### Scenario: Routed native success skips Python byte framing
+
+- **WHEN** the selected proxy endpoint returns a successful streaming Responses body
+- **THEN** Rust emits the same SSE event contract as direct native streaming
+- **AND** Python performs ordinary downstream event processing without scanning bytes
+
+#### Scenario: Framing failure preserves route and error behavior
+
+- **WHEN** a routed body exceeds its byte limit or goes idle
+- **THEN** the existing stream-event-too-large or stream-idle-timeout envelope is produced
+- **AND** route metadata remains associated with that attempt without endpoint replay
+
+#### Scenario: Routed cancellation isolates the owned stream
+
+- **WHEN** a routed native SSE stream closes or is cancelled, including in an already cancelled scope
+- **THEN** its owned native request is cancelled and unregistered
+- **AND** a locally created routed client finishes closing its session before cancellation propagates
+- **AND** another active request in the same helper remains usable
+
+#### Scenario: Routed error or non-streaming response remains raw
+
+- **WHEN** the routed response is an HTTP error or the request disables streaming
+- **THEN** the ordinary JSON/error body path and public response envelope are preserved
+
+### Requirement: Native compact Responses preserve terminal and ownership contracts
+
+Direct and account-routed compact requests MUST use native transport when the
+helper has negotiated `http_compact_sse_v1` and `http_compact_collect_v1`. Native SSE framing MUST apply only
+to successful responses selected by the outbound HTTP Content-Type rule; other
+responses MUST retain raw body handling. Python MUST retain request shaping,
+compact normalization, terminal error mapping, archives, routing, and settlement.
+Responses MUST remain open until consumption finishes, and owned responses and
+routed sessions MUST close on completion, failure, and cancellation. Missing
+helpers MAY use Python transport only before dispatch. An installed helper lacking
+either required compact capability MUST fail negotiation before dispatch without Python fallback. Native failures after
+dispatch MUST NOT replay the POST through Python or another proxy endpoint.
+
+#### Scenario: Compact completes before HTTP EOF
+
+- **WHEN** response.completed follows compact output items while upstream keeps the body open
+- **THEN** compact returns the existing normalized payload without waiting for EOF
+- **AND** the owned transport request closes while unrelated helper requests stay usable
+
+#### Scenario: Terminal and framing failures
+
+- **WHEN** compact receives a terminal SSE error or exceeds its event/idle/total limit
+- **THEN** existing compact public error codes, status mapping, and replay safety are preserved
+- **AND** the response and owned client are cleaned up
+
+#### Scenario: Routed fallback before dispatch
+
+- **WHEN** a confirmed pre-dispatch connection failure permits the next configured endpoint
+- **THEN** native SSE options follow that attempt and its exact route metadata is recorded
+- **AND** an accepted response or ambiguous body failure never triggers endpoint replay
+
+#### Scenario: Missing helper and cancelled caller
+
+- **WHEN** the helper is missing before dispatch
+- **THEN** the resolved Python transport receives no native-only option and retains compact parsing
+- **AND** cancellation finishes owned response/session cleanup even in an already cancelled scope
+
+#### Scenario: Cancellation while waiting for native response headers
+
+- **WHEN** an already cancelled caller scope interrupts native response-head waiting
+- **THEN** request cancellation completes and its stream registration is removed
+- **AND** a completed native exchange wins a simultaneous shutdown/cancel race without an additional terminal event
+
+### Requirement: Native compact collection preserves terminal output assembly
+
+For direct and account-routed compact SSE requests with negotiated native
+collection, Rust MUST collect output items and assemble the terminal response.
+The last item for each integer output index MUST win; indexed items MUST be
+ordered numerically, followed by unindexed done items in arrival order. A
+nonempty terminal output array MUST take precedence over collected items.
+Unknown JSON fields and integer values MUST be preserved. Python MUST retain
+public shape normalization, error translation, archives, routing, and settlement.
+
+#### Scenario: Completion without terminal output
+
+- **WHEN** output-item events precede a completed response with missing or empty output
+- **THEN** the result includes collected items in the documented order
+- **AND** returns on completion without waiting for HTTP EOF or interpreting later events
+
+#### Scenario: Existing terminal output
+
+- **WHEN** the completed response contains a nonempty output array
+- **THEN** that array is returned without merging earlier collected items
+
+#### Scenario: Terminal failure or missing completion
+
+- **WHEN** an SSE stream fails, is incomplete, has no valid completed response object, or ends before completion
+- **THEN** the existing compact error envelope and failure classification are preserved
+
+#### Scenario: Missing-helper compatibility
+
+- **WHEN** the native helper is unavailable before dispatch
+- **THEN** Python transport and collection preserve the same output assembly contract

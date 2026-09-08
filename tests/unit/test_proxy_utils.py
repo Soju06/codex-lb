@@ -484,8 +484,9 @@ async def test_non_400_model_rejection_message_still_penalizes_account() -> None
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_still_marks_rate_limit() -> None:
-    """Negative control: quota/rate-limit accounting is unchanged."""
+@pytest.mark.parametrize("code", ["rate_limit_exceeded", "usage_limit_reached"])
+async def test_rate_limit_still_marks_rate_limit(code: str) -> None:
+    """Both upstream codes retain the rate-limit health contract."""
     load_balancer = SimpleNamespace(
         record_error=AsyncMock(),
         mark_rate_limit=AsyncMock(),
@@ -494,15 +495,17 @@ async def test_rate_limit_still_marks_rate_limit() -> None:
     )
     proxy = SimpleNamespace(_load_balancer=load_balancer)
 
-    await streaming_helpers_module._handle_stream_error(
+    classified = await streaming_helpers_module._handle_stream_error(
         proxy,
         cast(Account, SimpleNamespace(id="acc-1")),
         {"message": "Rate limit reached"},
-        "rate_limit_exceeded",
+        code,
         429,
     )
 
+    assert classified["failure_class"] == "rate_limit"
     load_balancer.mark_rate_limit.assert_awaited_once()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
     load_balancer.record_error.assert_not_awaited()
 
 
@@ -12580,6 +12583,7 @@ async def test_compact_responses_without_trigger_canonicalization_hits_upstream_
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
         upstream_compact_timeout_seconds = 12.0
+        max_sse_event_bytes = 16 * 1024 * 1024
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
 

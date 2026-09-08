@@ -10,6 +10,9 @@ pub const CAPABILITIES: &[&str] = &[
     "failure_provenance_v1",
     "http",
     "http2_profile_v1",
+    "http_compact_collect_v1",
+    "http_compact_sse_v1",
+    "http_sse_v1",
     "websocket",
     "websocket_send_ack",
 ];
@@ -51,9 +54,21 @@ pub struct NativeRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
-    pub timeout_ms: u64,
+    pub timeout_ms: Option<u64>,
     pub connect_timeout_ms: Option<u64>,
     pub proxy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse: Option<NativeSseOptions>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+pub struct NativeSseOptions {
+    pub idle_timeout_ms: u64,
+    pub max_event_bytes: usize,
+    #[serde(default)]
+    pub content_type_aware: bool,
+    #[serde(default)]
+    pub collect_compact: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -84,6 +99,21 @@ pub enum NativeEvent {
     Chunk {
         request_id: String,
         data: String,
+    },
+    Sse {
+        request_id: String,
+        text: String,
+        more: bool,
+    },
+    SseEventTooLarge {
+        request_id: String,
+        size_bytes: usize,
+        limit_bytes: usize,
+    },
+    Compact {
+        request_id: String,
+        text: String,
+        more: bool,
     },
     End {
         request_id: String,

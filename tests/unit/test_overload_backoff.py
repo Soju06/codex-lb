@@ -12,20 +12,25 @@ import pytest
 import app.modules.proxy._service.streaming.helpers as streaming_helpers_module
 from app.core.balancer import ERROR_BACKOFF_THRESHOLD
 from app.core.balancer.logic import AccountState
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.proxy._load_balancer.overload_backoff import (
     OVERLOAD_BACKOFF_BASE_SECONDS,
     OVERLOAD_BACKOFF_MAX_SECONDS,
+    OVERLOAD_ISOLATION_TRIP_LEVEL,
     OVERLOAD_LEVEL_DECAY_SECONDS,
     OVERLOAD_MAX_LEVEL,
     OVERLOAD_TRIP_COUNT,
     OVERLOAD_WINDOW_SECONDS,
+    OverloadIsolationPolicy,
     filter_overload_backoff_candidates,
     overload_backoff_active,
     overload_backoff_seconds,
+    overload_isolation_active,
     record_overload_rejection_locked,
     record_upstream_overload,
+    sticky_owner_isolation_reroute_pool,
 )
 from app.modules.proxy._load_balancer.types import RuntimeState
 from app.modules.proxy._service.streaming.retry import _transient_retry_error_code
@@ -383,3 +388,420 @@ async def test_fresh_sticky_binding_reports_the_pool_it_selected_from() -> None:
     owned = await _outcome([hot, clean], "hot")
     assert owned.selection.account is not None and owned.selection.account.account_id == "hot"
     assert owned.effective_states is None
+
+
+# --- isolation stage -------------------------------------------------------
+
+
+def test_isolation_engages_at_the_trip_level_and_holds_for_the_configured_interval() -> None:
+    policy = OverloadIsolationPolicy(seconds=1800.0)
+    runtime = RuntimeState()
+    now = 0.0
+    for level in range(1, OVERLOAD_ISOLATION_TRIP_LEVEL + 1):
+        for _ in range(OVERLOAD_TRIP_COUNT - 1):
+            assert record_overload_rejection_locked(runtime, now, isolation=policy) is None
+        deadline = record_overload_rejection_locked(runtime, now, isolation=policy)
+        assert deadline is not None
+        if level < OVERLOAD_ISOLATION_TRIP_LEVEL:
+            assert deadline - now == pytest.approx(overload_backoff_seconds(level))
+            assert not overload_isolation_active(runtime, now)
+        else:
+            assert deadline - now == pytest.approx(1800.0)
+            assert overload_isolation_active(runtime, now)
+            assert overload_backoff_active(runtime, now)
+        now = deadline
+
+
+def test_isolation_disabled_when_the_interval_is_zero() -> None:
+    policy = OverloadIsolationPolicy(seconds=0.0)
+    assert not policy.enabled
+    runtime = RuntimeState(overload_backoff_level=OVERLOAD_MAX_LEVEL, overload_last_trip_at=0.0)
+    for _ in range(OVERLOAD_TRIP_COUNT - 1):
+        record_overload_rejection_locked(runtime, 10.0, isolation=policy)
+    deadline = record_overload_rejection_locked(runtime, 10.0, isolation=policy)
+    assert deadline == pytest.approx(10.0 + OVERLOAD_BACKOFF_MAX_SECONDS)
+    assert runtime.overload_isolated_until is None
+
+
+def test_level_does_not_decay_while_the_account_is_held_out() -> None:
+    # Isolated for 1800 s: the quiet period is measured from the deadline, so a
+    # trip right after isolation ends keeps the saturated level (re-isolates)
+    # instead of dropping back to a 60 s soft backoff.
+    policy = OverloadIsolationPolicy(seconds=1800.0)
+    runtime = RuntimeState(
+        overload_backoff_level=OVERLOAD_ISOLATION_TRIP_LEVEL,
+        overload_last_trip_at=0.0,
+        overload_backoff_until=1800.0,
+        overload_isolated_until=1800.0,
+    )
+    now = 1800.0 + 60.0
+    for _ in range(OVERLOAD_TRIP_COUNT - 1):
+        record_overload_rejection_locked(runtime, now, isolation=policy)
+    deadline = record_overload_rejection_locked(runtime, now, isolation=policy)
+    assert runtime.overload_backoff_level == OVERLOAD_ISOLATION_TRIP_LEVEL + 1
+    assert deadline == pytest.approx(now + 1800.0)
+    assert overload_isolation_active(runtime, now)
+
+    # A full quiet window after the deadline decays the level as before.
+    quiet = RuntimeState(overload_backoff_level=4, overload_last_trip_at=0.0, overload_backoff_until=100.0)
+    later = 100.0 + OVERLOAD_LEVEL_DECAY_SECONDS + 1.0
+    for _ in range(OVERLOAD_TRIP_COUNT - 1):
+        record_overload_rejection_locked(quiet, later, isolation=policy)
+    record_overload_rejection_locked(quiet, later, isolation=policy)
+    assert quiet.overload_backoff_level == 1
+
+
+@pytest.mark.asyncio
+async def test_record_upstream_overload_logs_isolation_at_the_trip_level(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS", "900")
+    get_settings.cache_clear()
+    try:
+        clock = VirtualClock(epoch_value=2_000_000_000.0)
+        balancer = LoadBalancer(cast(Any, None), clock=clock)
+        account = _make_account("acc-sustained")
+        runtime = balancer._runtime.setdefault(account.id, RuntimeState())
+        runtime.overload_backoff_level = OVERLOAD_ISOLATION_TRIP_LEVEL - 1
+        runtime.overload_last_trip_at = clock.time()
+        with caplog.at_level(logging.WARNING, logger="app.modules.proxy._load_balancer.overload_backoff"):
+            for _ in range(OVERLOAD_TRIP_COUNT):
+                await record_upstream_overload(balancer, account)
+        assert (
+            "Account overload isolation engaged account_id=acc-sustained level=3 isolation_seconds=900" in caplog.text
+        )
+        assert overload_isolation_active(runtime, clock.time())
+        assert runtime.overload_backoff_until == pytest.approx(clock.time() + 900.0)
+    finally:
+        get_settings.cache_clear()
+
+
+def _isolated_runtime(now: float, *, seconds: float = 1800.0) -> RuntimeState:
+    return RuntimeState(
+        overload_backoff_until=now + seconds,
+        overload_isolated_until=now + seconds,
+        overload_backoff_level=OVERLOAD_ISOLATION_TRIP_LEVEL,
+        overload_last_trip_at=now,
+    )
+
+
+def test_sticky_owner_reroute_pool_requires_isolation_and_an_overload_free_sibling() -> None:
+    now = 1000.0
+    states = [_state("hot"), _state("clean")]
+    soft = {"hot": RuntimeState(overload_backoff_until=now + 60.0)}
+    assert sticky_owner_isolation_reroute_pool(states, soft, owner_account_id="hot", now=now) is None
+    isolated = {"hot": _isolated_runtime(now)}
+    pool = sticky_owner_isolation_reroute_pool(states, isolated, owner_account_id="hot", now=now)
+    assert pool is not None and [state.account_id for state in pool] == ["clean"]
+    # Every sibling isolated too: the owner keeps its session.
+    both = {"hot": _isolated_runtime(now), "clean": _isolated_runtime(now)}
+    assert sticky_owner_isolation_reroute_pool(states, both, owner_account_id="hot", now=now) is None
+    assert sticky_owner_isolation_reroute_pool([_state("hot")], isolated, owner_account_id="hot", now=now) is None
+    assert sticky_owner_isolation_reroute_pool(states, None, owner_account_id="hot", now=now) is None
+    # Expired isolation releases nothing.
+    assert sticky_owner_isolation_reroute_pool(states, isolated, owner_account_id="hot", now=now + 1801.0) is None
+
+
+async def _select_sticky_outcome(
+    balancer: LoadBalancer,
+    states: list[AccountState],
+    repo: AsyncMock,
+    *,
+    kind: StickySessionKind = StickySessionKind.PROMPT_CACHE,
+    initial_preferred_account_id: str | None = None,
+):
+    account_map = {state.account_id: cast(Account, AsyncMock()) for state in states}
+    return await balancer._select_with_stickiness(
+        states=states,
+        account_map=account_map,
+        sticky_key="owned-key",
+        sticky_kind=kind,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=600 if kind == StickySessionKind.PROMPT_CACHE else None,
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        sticky_repo=repo,
+        initial_preferred_account_id=initial_preferred_account_id,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    [StickySessionKind.PROMPT_CACHE, StickySessionKind.STICKY_THREAD, StickySessionKind.CODEX_SESSION],
+)
+async def test_isolated_soft_sticky_owner_is_rerouted_and_rebound(kind: StickySessionKind) -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = _isolated_runtime(clock.time())
+
+    outcome = await _select_sticky_outcome(balancer, [_state("hot"), _state("clean")], _sticky_repo("hot"), kind=kind)
+    assert outcome.selection.account is not None
+    assert outcome.selection.account.account_id == "clean"
+    # The session is rebound to the replacement, not left flapping back to the
+    # isolated owner on every request.
+    assert outcome.mutation is not None and outcome.mutation.account_id == "clean"
+    assert outcome.effective_states is not None
+    assert [state.account_id for state in outcome.effective_states] == ["clean"]
+
+
+@pytest.mark.asyncio
+async def test_soft_backoff_below_isolation_keeps_the_established_owner() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = RuntimeState(
+        overload_backoff_until=clock.time() + OVERLOAD_BACKOFF_MAX_SECONDS,
+        overload_backoff_level=OVERLOAD_ISOLATION_TRIP_LEVEL - 1,
+    )
+    outcome = await _select_sticky_outcome(balancer, [_state("hot"), _state("clean")], _sticky_repo("hot"))
+    assert outcome.selection.account is not None
+    assert outcome.selection.account.account_id == "hot"
+    assert outcome.mutation is None or outcome.mutation.account_id in (None, "hot")
+
+
+@pytest.mark.asyncio
+async def test_isolated_owner_is_kept_when_no_overload_free_sibling_can_be_selected() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = _isolated_runtime(clock.time())
+
+    alone = await _select_sticky_outcome(balancer, [_state("hot")], _sticky_repo("hot"))
+    assert alone.selection.account is not None and alone.selection.account.account_id == "hot"
+
+    # The only sibling is rate-limited: the strategy rejects the overload-free
+    # pool, so the owner is kept rather than failing the request.
+    limited = AccountState(
+        account_id="limited",
+        status=AccountStatus.RATE_LIMITED,
+        used_percent=100.0,
+        reset_at=clock.time() + 3600.0,
+    )
+    kept = await _select_sticky_outcome(balancer, [_state("hot"), limited], _sticky_repo("hot"))
+    assert kept.selection.account is not None and kept.selection.account.account_id == "hot"
+
+
+@pytest.mark.asyncio
+async def test_expired_isolation_returns_the_owner_to_normal_pinning() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = _isolated_runtime(clock.time(), seconds=300.0)
+    clock.advance(301.0)
+    outcome = await _select_sticky_outcome(balancer, [_state("hot"), _state("clean")], _sticky_repo("hot"))
+    assert outcome.selection.account is not None and outcome.selection.account.account_id == "hot"
+
+
+@pytest.mark.asyncio
+async def test_backed_off_process_session_preference_is_skipped_for_a_fresh_thread() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = RuntimeState(overload_backoff_until=clock.time() + OVERLOAD_BACKOFF_BASE_SECONDS)
+
+    outcome = await _select_sticky_outcome(
+        balancer,
+        [_state("hot"), _state("clean")],
+        _sticky_repo(None),
+        kind=StickySessionKind.CODEX_SESSION,
+        initial_preferred_account_id="hot",
+    )
+    assert outcome.selection.account is not None and outcome.selection.account.account_id == "clean"
+
+    # Without an overload-free alternative the preference is honored as before.
+    alone = await _select_sticky_outcome(
+        balancer,
+        [_state("hot")],
+        _sticky_repo(None),
+        kind=StickySessionKind.CODEX_SESSION,
+        initial_preferred_account_id="hot",
+    )
+    assert alone.selection.account is not None and alone.selection.account.account_id == "hot"
+
+
+@pytest.mark.asyncio
+async def test_fresh_thread_process_preference_bypass_never_fails_a_request_the_preference_would_serve() -> None:
+    """Request path (``LoadBalancer.select_account`` with a thread affinity):
+    the backed-off process preference is skipped only when the strategy can
+    actually select an overload-free sibling; an unselectable sibling
+    (cooldown) keeps the preference instead of surfacing its rate-limit error."""
+    from app.modules.proxy.affinity import _thread_codex_session_affinity
+    from tests.unit.test_load_balancer_concurrency import (
+        _StubStickySessionsRepository,
+        _usage_row_with_percent,
+    )
+
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    now = int(clock.time())
+    preferred = _make_account("acc-preferred")
+    sibling = _make_account("acc-sibling")
+    affinity = _thread_codex_session_affinity(
+        {"session_id": "process", "thread-id": "fresh"}, enabled=True, max_age_seconds=600
+    )
+    assert affinity is not None
+    seed_key = affinity.seed_selection_key
+    assert seed_key is not None
+
+    def _balancer(*, sibling_in_cooldown: bool) -> LoadBalancer:
+        sticky_repo = _StubStickySessionsRepository()
+        sticky_repo.account_ids_by_key = {seed_key: preferred.id}
+        usage = _StubUsageRepository(
+            {
+                preferred.id: _usage_row_with_percent(1, preferred.id, used_percent=96.0, reset_at=now + 3600),
+                sibling.id: _usage_row_with_percent(2, sibling.id, used_percent=0.0, reset_at=now + 3600),
+            },
+            {},
+        )
+        balancer = LoadBalancer(
+            lambda: _repo_factory(_StubAccountsRepository([preferred, sibling]), usage, sticky_repo),
+            clock=clock,
+        )
+        balancer._runtime[preferred.id] = RuntimeState(overload_backoff_until=clock.time() + 60.0)
+        if sibling_in_cooldown:
+            balancer._runtime[sibling.id] = RuntimeState(cooldown_until=clock.time() + 3600.0)
+        return balancer
+
+    kept = await _balancer(sibling_in_cooldown=True).select_account(
+        **affinity.selection_kwargs(), routing_strategy="sequential_drain"
+    )
+    assert kept.account is not None, kept.error_message
+    assert kept.account.id == preferred.id
+
+    moved = await _balancer(sibling_in_cooldown=False).select_account(
+        **affinity.selection_kwargs(), routing_strategy="sequential_drain"
+    )
+    assert moved.account is not None, moved.error_message
+    assert moved.account.id == sibling.id
+
+
+def _isolate(balancer: LoadBalancer, account_id: str) -> None:
+    balancer._runtime[account_id] = _isolated_runtime(balancer._clock.time())
+
+
+@pytest.mark.asyncio
+async def test_isolated_bare_session_owner_is_kept_when_the_only_sibling_is_at_cap_and_spillover_is_off() -> None:
+    """Request path: with cap spillover disabled the owner keeps its cap
+    exemption and the isolation reroute must not pick a saturated sibling
+    that lease admission then rejects (``account_stream_cap``) while the
+    isolated owner still had capacity."""
+    from tests.unit.test_load_balancer_concurrency import (
+        _codex_session_selection_key,
+        _make_cap_spillover_balancer,
+    )
+
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("iso-cap-off")
+    assert alternate is not None
+    _isolate(balancer, owner.id)
+    saturated = [await balancer.acquire_account_lease(alternate.id, kind="stream") for _ in range(8)]
+    raw_session = "bare-session-iso-cap-off"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=False,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert selected.account is not None, selected.error_message
+    assert selected.account.id == owner.id
+    assert sticky_repo.upserts == []
+    for lease in [*saturated, selected.lease]:
+        await balancer.release_account_lease(lease)
+
+    # With capacity on the sibling the isolated owner is released and rebound.
+    moved = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=False,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert moved.account is not None, moved.error_message
+    assert moved.account.id == alternate.id
+    assert any(account_id == alternate.id for _, account_id, _ in sticky_repo.upserts)
+    await balancer.release_account_lease(moved.lease)
+
+
+@pytest.mark.asyncio
+async def test_isolated_and_capped_bare_session_owner_is_rebound_instead_of_request_local_spillover() -> None:
+    """Request path: cap spillover alone preserves the mapping (the session
+    returns to its owner when the cap clears); an owner that is also isolated
+    is rebound to the sibling so later turns do not bounce across accounts."""
+    from tests.unit.test_load_balancer_concurrency import (
+        _codex_session_selection_key,
+        _make_cap_spillover_balancer,
+    )
+
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("iso-cap-spill")
+    assert alternate is not None
+    saturated = [await balancer.acquire_account_lease(owner.id, kind="stream") for _ in range(8)]
+    raw_session = "bare-session-iso-cap-spill"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    def _select():
+        return balancer.select_account(
+            sticky_key=_codex_session_selection_key(raw_session),
+            sticky_kind=StickySessionKind.CODEX_SESSION,
+            sticky_source="session_header",
+            legacy_sticky_key=raw_session,
+            spill_bare_session_on_account_cap=True,
+            routing_strategy="usage_weighted",
+            lease_kind="stream",
+        )
+
+    # Capped but not isolated: request-local spillover, mapping preserved (unchanged behavior).
+    spilled = await _select()
+    assert spilled.account is not None and spilled.account.id == alternate.id
+    assert sticky_repo.upserts == []
+    await balancer.release_account_lease(spilled.lease)
+
+    # Capped and isolated: the fallback is rebound to the sibling.
+    _isolate(balancer, owner.id)
+    rebound = await _select()
+    assert rebound.account is not None and rebound.account.id == alternate.id
+    assert any(account_id == alternate.id for _, account_id, _ in sticky_repo.upserts)
+    for lease in [*saturated, rebound.lease]:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_budget_pressured_isolated_owner_is_released_with_the_secondary_budget_filter() -> None:
+    """Round-robin would otherwise take the least-recently-selected sibling
+    (the equally pressured one), which the next turn's budget reallocation
+    would move again; the reroute must honor the secondary-budget filter."""
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["owner"] = _isolated_runtime(clock.time())
+
+    def _st(account_id: str, secondary_used: float, last_selected: float | None) -> AccountState:
+        return AccountState(
+            account_id=account_id,
+            status=AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=secondary_used,
+            last_selected_at=last_selected,
+            plan_type="plus",
+        )
+
+    states = [_st("owner", 85.0, None), _st("pressured", 85.0, None), _st("safe", 20.0, clock.time())]
+    account_map = {state.account_id: cast(Account, AsyncMock()) for state in states}
+    outcome = await balancer._select_with_stickiness(
+        states=states,
+        account_map=account_map,
+        sticky_key="budget-key",
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=600,
+        budget_threshold_pct=80.0,
+        secondary_budget_threshold_pct=80.0,
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="round_robin",
+        sticky_repo=_sticky_repo("owner"),
+    )
+    assert outcome.selection.account is not None
+    assert outcome.selection.account.account_id == "safe"
+    assert outcome.mutation is not None and outcome.mutation.account_id == "safe"

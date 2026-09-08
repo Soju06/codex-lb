@@ -2091,12 +2091,22 @@ def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_stored_prefi
     )
 
 
-def test_host_automation_heartbeat_is_account_neutral_fresh_input() -> None:
+@pytest.mark.parametrize(
+    "output",
+    [
+        "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        (
+            "<heartbeat><automation_id>follow-pr</automation_id>"
+            "<current_time_iso>2026-09-04T13:58:17Z</current_time_iso></heartbeat>"
+        ),
+    ],
+)
+def test_host_automation_heartbeat_is_account_neutral_fresh_input(output: str) -> None:
     heartbeat: JsonValue = {
         "type": "function_call_output",
         "name": "automation_update",
         "namespace": "codex_app",
-        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "output": output,
         "internal_chat_message_metadata_passthrough": {
             "turn_id": "turn_current",
             "create_time": 1_788_526_697.25,
@@ -2160,6 +2170,14 @@ def test_full_resend_tool_loop_manifest_rejects_host_automation_heartbeat(
         ("output", "<heartbeat></heartbeat>"),
         ("output", "<heartbeat><automation_id></automation_id></heartbeat>"),
         ("output", "<heartbeat><message>not a host trigger</message></heartbeat>"),
+        (
+            "output",
+            "<heartbeat><automation_id>follow-pr</automation_id><current_time_iso></current_time_iso></heartbeat>",
+        ),
+        (
+            "output",
+            "<heartbeat><automation_id>follow-pr</automation_id><message>not a host trigger</message></heartbeat>",
+        ),
         ("output", " <heartbeat><automation_id>follow-pr</automation_id></heartbeat>"),
         ("output", "<heartbeat></heartbeat>trailing-data"),
         ("output", "<heartbeat></heartbeat></heartbeat>"),

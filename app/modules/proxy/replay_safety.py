@@ -28,7 +28,10 @@ _HOST_AUTOMATION_HEARTBEAT_FIELDS = frozenset(
     {"internal_chat_message_metadata_passthrough", "name", "namespace", "output", "type"}
 )
 _HOST_AUTOMATION_HEARTBEAT_METADATA_FIELDS = frozenset({"create_time", "turn_id"})
-_HOST_AUTOMATION_HEARTBEAT_OUTPUT_RE = re.compile(r"<heartbeat><automation_id>[^<>\s]+</automation_id></heartbeat>")
+_HOST_AUTOMATION_HEARTBEAT_OUTPUT_RE = re.compile(
+    r"<heartbeat><automation_id>[^<>\s]+</automation_id>"
+    r"(?:<current_time_iso>[^<>\s]+</current_time_iso>)?</heartbeat>"
+)
 _ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
 _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS = {
     "custom": frozenset({"description", "format", "name", "type"}),

@@ -91,6 +91,49 @@ def test_chat_stream_usage_parser_handles_crlf_split_across_chunks() -> None:
     assert holder.usage.output_tokens == 1
 
 
+def test_chat_stream_usage_parser_keeps_a_crlf_split_inside_a_frame_as_one_line_ending() -> None:
+    """A CRLF whose CR closes one chunk and whose LF opens the next is one line ending, not a frame boundary."""
+
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="chat")
+
+    parser.feed(b'data: {"usage":{"prompt_tokens":2,\r')
+    parser.feed(b'\ndata: "completion_tokens":1}}\r\n\r\n')
+
+    assert holder.usage is not None
+    assert holder.usage.input_tokens == 2
+    assert holder.usage.output_tokens == 1
+
+
+def test_responses_stream_usage_parser_keeps_a_crlf_split_inside_a_frame_as_one_line_ending() -> None:
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+
+    parser.feed(b'data: {"type":"response.completed",\r')
+    parser.feed(b'\ndata: "response":{"id":"resp_crlf","usage":{"input_tokens":3,"output_tokens":2}}}\r\n\r\n')
+
+    assert holder.usage is not None
+    assert holder.usage.input_tokens == 3
+    assert holder.usage.output_tokens == 2
+    assert holder.terminal_kind == "completed"
+    assert holder.response_id == "resp_crlf"
+    assert holder.first_content_seen is True
+
+
+def test_stream_usage_parser_bare_cr_before_a_crlf_chunk_is_still_two_line_endings() -> None:
+    """Control: a CR closing a chunk followed by a chunk that opens with CRLF (not a lone LF) stays a blank line."""
+
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="chat")
+
+    parser.feed(b'data: {"usage":{"prompt_tokens":5,"completion_tokens":4}}\r')
+    parser.feed(b"\r\ndata: [DONE]\r\n\r\n")
+
+    assert holder.usage is not None
+    assert holder.usage.input_tokens == 5
+    assert holder.usage.output_tokens == 4
+
+
 def test_stream_usage_parser_bounds_buffer_without_frame_boundaries() -> None:
     holder = SourceUsageHolder()
     parser = SourceStreamUsageParser(holder, response_shape="chat")
@@ -1179,6 +1222,32 @@ async def test_stream_body_success_terminal_without_output_triggers_the_hook(
 
     assert await _collect(stream.body) == [created, completed]
     assert hooked == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_stream_body_crlf_split_across_chunks_runs_the_hook_before_flushing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CRLF-framed success terminal whose line ending is cut between two aiohttp chunks is one frame to the
+    reassembler that delivers it, so it must be one frame to the parser that arms the hook."""
+
+    created = b'data: {"type":"response.created","response":{"id":"resp_crlf"}}\r\n\r\n'
+    head = b'data: {"type":"response.completed",\r'
+    tail = b'\ndata: "response":{"id":"resp_crlf","output":[],"usage":{"input_tokens":3,"output_tokens":2}}}\r\n\r\n'
+    response = _FakeResponse(content=_FakeContent(created, [head, tail]))
+    _session, _context, lease = _install_session(monkeypatch, response)
+    hooked: list[str | None] = []
+
+    async def hook(holder: SourceUsageHolder) -> None:
+        hooked.append(holder.terminal_kind)
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+
+    assert b"".join(await _collect(stream.body)) == created + head + tail
+    assert hooked == ["completed"]
+    assert stream.usage_holder.usage is not None
+    assert stream.usage_holder.usage.input_tokens == 3
+    assert lease.released == 1
 
 
 @pytest.mark.asyncio

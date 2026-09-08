@@ -1264,11 +1264,23 @@ class SourceStreamUsageParser:
         self._response_shape = response_shape
         self._buffer = ""
         self._bom_pending = True
+        self._cr_pending = False
 
     def feed(self, chunk: bytes) -> None:
         # SSE permits CRLF (and bare CR) line endings; normalize so frame
-        # detection below only has to handle "\n\n".
-        text = chunk.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+        # detection below only has to handle "\n\n". A CRLF split across two
+        # chunks must stay one line ending: the CR that closed the previous
+        # chunk was already normalized to "\n", so a chunk that opens with its
+        # LF drops that LF -- otherwise the pair became "\n\n" and cut one
+        # frame into two halves that parse to nothing while the event-block
+        # reassembler delivers the whole event to the client (I11: delivered
+        # => pinned; usage never captured).
+        text = chunk.decode("utf-8", errors="ignore")
+        if self._cr_pending:
+            self._cr_pending = False
+            text = text.removeprefix("\n")
+        self._cr_pending = text.endswith("\r")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         if self._bom_pending and text:
             # One optional leading UTF-8 BOM, ignored exactly as the public
             # wrapper's event-block reassembler ignores it: left in place it

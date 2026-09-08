@@ -10,7 +10,7 @@ Source `4xx`/`5xx` answers MUST pass through honestly: the source status code, t
 
 For Responses streams the stream body MUST yield the first chunk the open already read before reading further, so the first-frame deadline is the only wait between the headers and the first byte the client receives.
 
-While a pre-content hook is armed on a Responses stream, the frames withheld ahead of the hook MUST be classified by the same frame parser that classifies complete frames, at EOF included: a final record the source closed without the blank-line terminator MUST be parsed as a frame before the withheld bytes are released, so a success terminal or content frame in that tail runs the hook first and a failure terminal or an empty tail flushes without it. The withheld bytes MUST be bounded by an aggregate cap of twice the parser's single-frame cap; a source that keeps producing complete bookkeeping frames past that bound MUST fail closed with `502 invalid_upstream_response` and release the source connection, never flush unpinned and never run the hook on bookkeeping alone. Without a hook nothing is withheld and the cap does not apply. The frame parser MUST ignore one leading UTF-8 byte-order mark exactly as the proxy's event-block reassembler does, so a source that prefixes its stream with a BOM never has its first record delivered by the wrapper while the parser observes nothing.
+While a pre-content hook is armed on a Responses stream, the frames withheld ahead of the hook MUST be classified by the same frame parser that classifies complete frames, at EOF included: a final record the source closed without the blank-line terminator MUST be parsed as a frame before the withheld bytes are released, so a success terminal or content frame in that tail runs the hook first and a failure terminal or an empty tail flushes without it. The withheld bytes MUST be bounded by an aggregate cap of twice the parser's single-frame cap; a source that keeps producing complete bookkeeping frames past that bound MUST fail closed with `502 invalid_upstream_response` and release the source connection, never flush unpinned and never run the hook on bookkeeping alone. Without a hook nothing is withheld and the cap does not apply. The frame parser MUST ignore one leading UTF-8 byte-order mark exactly as the proxy's event-block reassembler does, so a source that prefixes its stream with a BOM never has its first record delivered by the wrapper while the parser observes nothing. The frame parser MUST treat a CRLF line ending whose CR closes one transport chunk and whose LF opens the next as a single line ending, exactly as the reassembler does: the split MUST NOT become a frame boundary, so a frame cut that way is still one frame to the parser (its usage, terminal kind and content classification reach the holder and the pre-content hook runs before it is released).
 
 #### Scenario: source accepts the TCP connection but never sends headers
 
@@ -87,6 +87,13 @@ While a pre-content hook is armed on a Responses stream, the frames withheld ahe
 - **GIVEN** a pre-content hook is armed
 - **WHEN** the source's first bytes are a UTF-8 byte-order mark followed by a data-only `response.completed` frame carrying `output` and `usage`
 - **THEN** the hook runs once with terminal kind `completed` before the frame is released, the frame is relayed byte-identically and the holder records the frame's usage
+
+#### Scenario: CRLF split across transport chunks is one line ending
+
+- **GIVEN** a pre-content hook is armed and the source frames its stream with CRLF line endings
+- **WHEN** a `response.completed` frame arrives as two chunks, the first ending with the CR of a line ending inside the frame and the second starting with its LF
+- **THEN** the parser observes one frame with terminal kind `completed` and its usage
+- **AND** the hook runs once before any byte of the frame is released and the frame is relayed byte-identically
 
 #### Scenario: bookkeeping past the withheld cap fails closed
 

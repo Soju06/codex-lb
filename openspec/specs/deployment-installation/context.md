@@ -144,8 +144,9 @@ upgrade with `terminationGracePeriodSeconds` absent.
 codex-lb captures the incoming ASGI client before delegating once to Uvicorn's
 proxy projection. Shipped launchers disable the outer server middleware so raw
 transport policy can use the original peer while downstream handlers still see
-the projected client and scheme. `FORWARDED_ALLOW_IPS` remains the sole trust
-input and is passed through unchanged.
+the projected client and scheme. The `forwarded_allow_ips` setting (env
+`FORWARDED_ALLOW_IPS`, alias `CODEX_LB_FORWARDED_ALLOW_IPS`, also loadable from
+`.env` files) is the sole trust input and keeps Uvicorn's semantics unchanged.
 
 For example, a TCP peer at `10.0.0.8` may project client `192.168.65.1` and
 scheme `https`; raw-peer authorization still evaluates `10.0.0.8`.

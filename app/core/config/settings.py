@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from dotenv import dotenv_values
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
@@ -311,6 +311,12 @@ class Settings(BaseSettings):
     token_refresh_interval_days: int = 8
     usage_fetch_timeout_seconds: float = 10.0
     usage_fetch_max_retries: int = 2
+    # T1 (topology). Path to a JSON registry of additional usage quota keys
+    # that replaces the bundled ``config/additional_quota_registry.json``.
+    # Unset (or blank) keeps the bundled registry. The Alembic backfill
+    # migration ``20260312_000000`` reads the same env name directly because
+    # migrations must not depend on ``Settings``.
+    additional_quota_registry_file: Path | None = None
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     live_usage_ingestion_enabled: bool = True
@@ -443,6 +449,19 @@ class Settings(BaseSettings):
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
     firewall_ip_cache_ttl_seconds: int = Field(default=30, gt=0)
+    # T1 (topology). Uvicorn-compatible proxy-projection trust list consumed by
+    # ``TrustedProxyHeadersMiddleware``. Semantics are Uvicorn's, unchanged:
+    # unset trusts ``127.0.0.1``, empty trusts no peer, ``*`` trusts every
+    # peer, anything else is a comma-separated host/network list. The bare
+    # ``FORWARDED_ALLOW_IPS`` env name stays authoritative for compatibility
+    # with Uvicorn deployments; ``CODEX_LB_FORWARDED_ALLOW_IPS`` is the
+    # prefixed alias. This governs ``scope["client"]``/scheme projection only;
+    # ``firewall_trusted_proxy_cidrs`` governs firewall and auth client
+    # resolution from the raw socket peer.
+    forwarded_allow_ips: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FORWARDED_ALLOW_IPS", "CODEX_LB_FORWARDED_ALLOW_IPS"),
+    )
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
     dashboard_trust_loopback_host_header_for_long_sessions: bool = False
 
@@ -480,6 +499,10 @@ class Settings(BaseSettings):
     bulkhead_proxy_limit: int = Field(default=512, ge=0)
     bulkhead_dashboard_limit: int = Field(default=50, ge=0)
     dashboard_bootstrap_token: str | None = None
+    # T1 (topology). Address the dashboard tells operators to point clients at
+    # (``GET /api/settings/runtime/connect-address``). Unset derives it from
+    # the request host; a blank value collapses to unset.
+    connect_address: str | None = None
     proxy_token_refresh_limit: int = Field(default=64, ge=0)
     proxy_upstream_websocket_connect_limit: int = Field(default=128, ge=0)
     proxy_response_create_limit: int = Field(default=256, ge=0)
@@ -616,6 +639,14 @@ class Settings(BaseSettings):
                         normalized.append(host)
             return normalized
         raise TypeError("image_inline_allowed_hosts must be a list or comma-separated string")
+
+    @field_validator("connect_address", "additional_quota_registry_file", mode="before")
+    @classmethod
+    def _blank_optional_to_none(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
 
     @field_validator("firewall_trusted_proxy_cidrs", mode="before")
     @classmethod

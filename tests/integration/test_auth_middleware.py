@@ -312,6 +312,7 @@ async def test_proxy_family_consensus_controls_local_proxy_and_dashboard_access(
 ) -> None:
     monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.0.0.2")
+    get_settings.cache_clear()
     _set_dashboard_auth_env(
         monkeypatch,
         mode=DashboardAuthMode.STANDARD,
@@ -384,6 +385,7 @@ async def test_proxy_unauthenticated_client_cidr_rejects_projected_client_when_r
     monkeypatch,
 ):
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    get_settings.cache_clear()
     _set_proxy_unauthenticated_client_cidrs_env(
         monkeypatch,
         cidrs="192.168.65.1/32",

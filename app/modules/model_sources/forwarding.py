@@ -16,6 +16,7 @@ from app.core.clients.http import lease_model_source_session
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.openai.parsing import classify_event_type
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.shared_future import (
@@ -221,6 +222,9 @@ def classify_responses_frame(event_type: str | None) -> FrameKind:
     type -- ``response.output_item.added``, the ``*.delta`` family, and any
     event this proxy does not know -- is ``content``: unknown frames are never
     withheld past the hook, so a newer event vocabulary cannot stall a stream.
+    Callers read the type with the public wrapper's own ``classify_event_type``
+    so a typeless ``{"error": {...}}`` record is the ``error`` terminal on both
+    sides of the pipeline.
     """
 
     if event_type is None or event_type in _NON_CONTENT_EVENT_TYPES:
@@ -1356,8 +1360,11 @@ class SourceStreamUsageParser:
         """
 
         holder = self._usage_holder
-        raw_type = event.get("type")
-        event_type = raw_type if isinstance(raw_type, str) else None
+        # The wrapper's classifier: a string ``type`` wins and a typeless record
+        # carrying an ``error`` object is the ``error`` terminal (the wrapper
+        # relays or rewrites it as a failure; the parser must not read it as
+        # bookkeeping that is withheld ahead of the hook or settled as a cancel).
+        event_type = classify_event_type(dict(event))
         kind = classify_responses_frame(event_type)
         response = event.get("response")
         if is_json_mapping(response):

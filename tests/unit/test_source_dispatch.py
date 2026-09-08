@@ -1185,6 +1185,42 @@ _RELAYED_COMPLETED = (
 
 
 @pytest.mark.asyncio
+async def test_settlement_stream_cancel_after_a_relayed_typeless_error_record_releases_not_estimates(
+    recorder: _Recorder,
+) -> None:
+    """Native mode relays a source's typeless ``{"error": {...}}`` record verbatim; the public wrapper classifies it as
+    the ``error`` terminal, so a client that tears down on it received a failure: released, never the estimate."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True, delta_chars=400)
+    stream = _attach_stream(owner, holder=holder)
+    gate = asyncio.Event()
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.output_text.delta\ndata: {}\n\n"
+        yield 'data: {"error":{"message":"boom","code":"server_error"}}\n\n'
+        await gate.wait()
+
+    async def consume() -> None:
+        async for _chunk in settlement_stream(owner, inner()):
+            pass
+
+    task = asyncio.create_task(consume())
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert stream.closed == 1
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.rows[0]["error_code"] == "model_source_response_failed"
+
+
+@pytest.mark.asyncio
 async def test_settlement_stream_clean_eof_without_a_terminal_is_truncated_and_released(recorder: _Recorder) -> None:
     """A source that closes after content but before any terminal delivered a failure (the wrapper synthesizes
     ``response.failed upstream_stream_truncated``): the row is an error and a limited key is never charged."""
@@ -1341,6 +1377,8 @@ async def test_settlement_stream_success_terminal_relayed_as_a_success_stays_a_s
         ("event: response.failed\ndata: {}\n\n", "failed"),
         ("event: error\ndata: {}\n\n", "error"),
         ('data: {"type":"response.completed"}\n\n', "completed"),
+        ('data: {"error":{"message":"boom","code":"server_error"}}\n\n', "error"),
+        ('data: {"error":"boom"}\n\n', None),
         ('data: {"type":"response.output_text.delta"}\n\n', None),
         ("event: response.output_item.added\ndata: {}\n\n", None),
         ("data: [DONE]\n\n", None),
@@ -1371,6 +1409,7 @@ def test_relayed_terminal_kind_table(frame: str | None, kind: str | None) -> Non
         ('data: {"type":"response.output_item.added"}\n\n', True),
         ('data: {"type":"response.created"}\n\n', False),
         ('data: {"type":"response.failed"}\n\n', False),
+        ('data: {"error":{"message":"boom"}}\n\n', False),
         ('data: {"type":"response.completed"}\n\n', True),
         ('data: {"delta":"no type"}\n\n', False),
         ("data: [1,2]\n\n", False),

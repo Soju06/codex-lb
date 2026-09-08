@@ -67,6 +67,7 @@ from app.core.metrics.prometheus import (
     model_source_timeout_total,
     model_source_usage_estimated_total,
 )
+from app.core.openai.parsing import classify_event_type
 from app.core.request_locality import resolve_request_client_host
 from app.core.types import JsonValue
 from app.core.utils.request_id import ensure_request_id
@@ -258,7 +259,8 @@ def _is_event_frame(chunk: str) -> bool:
 
 def _relayed_event_type(frame: str) -> str | None:
     """Event type of a relayed frame: the ``event:`` line the public wrapper frames every typed event with, else the
-    ``type`` of a raw pass-through block's ``data:`` JSON; ``None`` when neither names one."""
+    type of a raw pass-through block's ``data:`` JSON as the wrapper's own ``classify_event_type`` reads it (a
+    typeless ``{"error": {...}}`` record is an ``error`` terminal there too); ``None`` when neither names one."""
 
     if frame.startswith("event: "):
         return frame[7:].split("\n", 1)[0].rstrip("\r")
@@ -273,10 +275,7 @@ def _relayed_event_type(frame: str) -> str | None:
             parsed = json.loads(data)
         except ValueError:
             return None
-        if not isinstance(parsed, Mapping):
-            return None
-        event_type = parsed.get("type")
-        return event_type if isinstance(event_type, str) else None
+        return classify_event_type(parsed)
     return None
 
 

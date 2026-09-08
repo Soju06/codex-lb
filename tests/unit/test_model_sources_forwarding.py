@@ -633,6 +633,26 @@ def test_responses_parser_records_terminal_kind(event_type: str, terminal_kind: 
     assert holder.first_content_seen is (terminal_kind in {"completed", "incomplete"})
 
 
+def test_responses_parser_classifies_a_typeless_error_record_as_a_failure_terminal() -> None:
+    """The public wrapper's ``classify_event_type`` reads a typeless ``{"error": {...}}`` record as ``error``; the
+    parser must agree so the record is a failure terminal (flushed without the hook, settled as an error), not
+    bookkeeping."""
+
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+
+    parser.feed(_sse({"type": "response.created", "response": {"id": "resp_typeless"}}))
+    parser.feed(_sse({"error": {"message": "boom", "type": "server_error", "code": "overloaded"}}))
+
+    assert holder.terminal_kind == "error"
+    assert holder.first_content_seen is False
+    # A typeless record without an error object stays untyped bookkeeping, as in the wrapper.
+    other = SourceUsageHolder()
+    SourceStreamUsageParser(other, response_shape="responses").feed(_sse({"error": "boom"}))
+    assert other.terminal_kind is None
+    assert other.first_content_seen is False
+
+
 def test_responses_parser_falls_back_to_any_response_id_when_created_was_not_seen() -> None:
     holder = SourceUsageHolder()
     parser = SourceStreamUsageParser(holder, response_shape="responses")
@@ -1270,6 +1290,34 @@ async def test_stream_body_failure_terminal_without_content_flushes_without_the_
     assert hook_calls == 0
     assert stream.usage_holder.terminal_kind == "failed"
     assert stream.usage_holder.first_content_seen is False
+    assert lease.released == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_body_typeless_error_record_flushes_without_the_hook_before_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typeless ``{"error": {...}}`` record is the failure terminal: the withheld frames flush at once (not at
+    EOF) and the hook never runs."""
+
+    created = _sse({"type": "response.created", "response": {"id": "resp_typeless"}})
+    failed = _sse({"error": {"message": "boom", "type": "server_error", "code": "overloaded"}})
+    response = _FakeResponse(content=_FakeContent(created, [failed], stall_after_rest=True))
+    _session, _context, lease = _install_session(monkeypatch, response)
+    hook_calls = 0
+
+    async def hook(_holder: SourceUsageHolder) -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+
+    assert await asyncio.wait_for(anext(stream.body), timeout=1) == created
+    assert await asyncio.wait_for(anext(stream.body), timeout=1) == failed
+    assert hook_calls == 0
+    assert stream.usage_holder.terminal_kind == "error"
+    assert stream.usage_holder.first_content_seen is False
+    await stream.aclose()
     assert lease.released == 1
 
 

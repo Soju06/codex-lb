@@ -1129,6 +1129,82 @@ async def test_source_failure_terminal_releases_the_limited_key(async_client, so
 
 
 @pytest.mark.asyncio
+async def test_typeless_error_record_is_a_failure_terminal_for_the_settlement(async_client, source_upstream) -> None:
+    """A source that ends with a typeless ``{"error": {...}}`` record (no ``type`` field) produced no answer: the
+    public wrapper classifies it as the ``error`` terminal and relays ``response.failed``; the settlement must record
+    ``model_source_response_failed`` (not a truncated stream) and release the limited key."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    typeless_error = _sse({"error": {"message": "overloaded", "type": "server_error", "code": "overloaded"}})
+    base_url = await source_upstream(_sse_handler(state, before_hold=[_created(), typeless_error]))
+    model = "dispatch-typeless-error"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    async with async_client.stream(
+        "POST", "/v1/responses", headers={"Authorization": f"Bearer {key}"}, json=_request_body(model)
+    ) as response:
+        assert response.status_code == 200
+        text = "".join([chunk async for chunk in response.aiter_text()])
+
+    assert "response.failed" in text and "overloaded" in text
+    assert "upstream_stream_truncated" not in text
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["released"]
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("error", "model_source_response_failed")]
+    assert rows[0].input_tokens is None and rows[0].output_tokens is None
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_native_client_tearing_down_on_a_typeless_error_record_is_an_error_not_a_cancel(
+    async_client, source_upstream
+) -> None:
+    """Native Codex receives the typeless ``{"error": {...}}`` record verbatim and tears the stream down on it while
+    the source still holds the connection: the client received a failure, so the attempt is
+    ``error model_source_response_failed`` and released -- never a ``cancelled`` row settled at the estimate."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    hold = asyncio.Event()
+    typeless_error = _sse({"error": {"message": "overloaded", "type": "server_error", "code": "overloaded"}})
+    base_url = await source_upstream(
+        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, typeless_error], hold=hold),
+        handler_cancellation=True,
+        shutdown_timeout=1.0,
+    )
+    model = "dispatch-native-typeless-error"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    stream = _AsgiStream(
+        app=_app(async_client),
+        path="/backend-api/codex/responses",
+        headers={"authorization": f"Bearer {key}", "originator": "codex_cli_rs"},
+        body=json.dumps({"model": model, "instructions": "hi", "input": [], "stream": True}).encode(),
+    )
+    runner = asyncio.create_task(stream.run())
+    await stream.wait_for_text('"overloaded"')
+    stream.disconnect()
+    await asyncio.wait_for(runner, timeout=10)
+    await _drain(async_client)
+    hold.set()
+
+    assert stream.received().count(b'"error"') >= 1
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["released"]
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("error", "model_source_response_failed")]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
 async def test_clean_eof_without_a_terminal_is_recorded_as_truncated_and_released(
     async_client, source_upstream
 ) -> None:

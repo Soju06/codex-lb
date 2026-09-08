@@ -79,14 +79,13 @@ class _BoundedEventQueue(asyncio.Queue[dict[str, object] | BaseException]):
         self._max_bytes = max_bytes
         self.queued_bytes = 0
 
-    def full(self) -> bool:
-        return super().full() or self.queued_bytes >= self._max_bytes
-
     def put_nowait(self, item: dict[str, object] | BaseException) -> None:
-        # Account for the incoming event too: a queue just under budget must
-        # not accept an event that carries it far past the budget. An event
-        # arriving at an empty queue is always accepted (the SSE event size cap
-        # bounds it separately) so a lone large chunk is never a failure.
+        # The byte budget is enforced against the projected total, so a queue
+        # just under budget rejects an event that would carry it past, while a
+        # zero-byte terminal (``end``/``error``) at exactly the budget is still
+        # accepted as long as the event cap has room. An event arriving at an
+        # empty queue is always accepted (the SSE event size cap bounds it
+        # separately) so a lone large chunk is never a failure.
         if not self.empty() and self.queued_bytes + _event_payload_size(item) > self._max_bytes:
             raise asyncio.QueueFull
         super().put_nowait(item)

@@ -35,6 +35,9 @@
   and the scheduling opportunity after every accepted native event.
 - The large compact result regression fixes its queue capacity at 64 so it
   continues to exercise consumer progress after the default capacity increased.
+- Buffered Responses SSE/JSON/error and adapter burst regressions also fix the
+  queue capacity at 64; their consumers start reading immediately. This preserves
+  over-capacity coverage for 256- and 2,000-event bursts after the main update.
 - Combined adapter/client/shared fixture tests: 125 passed; compact route and
   packaging/framing fixture tests: 62 passed; real-worker integration: 119 passed.
 - Release workspace tests: 21 passed. Release build, Ruff, changed-file typing,

@@ -205,8 +205,9 @@ def _stream(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("response_kind", ["sse", "json", "error"])
 async def test_buffered_native_burst_preserves_responses_result(
-    tmp_path: Path, routed: bool, response_kind: str
+    tmp_path: Path, routed: bool, response_kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(native_module, "_NATIVE_STREAM_QUEUE_LIMIT", 64)
     handshake = json.loads(
         (Path(__file__).resolve().parents[2] / "crates/codex-lb-protocol/tests/fixtures/handshake-v1.json").read_text()
     )

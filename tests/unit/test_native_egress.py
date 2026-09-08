@@ -425,7 +425,8 @@ async def test_client_close_is_idempotent_and_prevents_restart(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_buffered_body_burst_reaches_active_consumer(tmp_path: Path) -> None:
+async def test_buffered_body_burst_reaches_active_consumer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(native_egress_module, "_NATIVE_STREAM_QUEUE_LIMIT", 64)
     helper = tmp_path / "native-helper"
     _write_helper(
         helper,
@@ -1099,10 +1100,13 @@ def test_bounded_event_queue_trips_on_bytes_or_events_and_releases_bytes_on_get(
 
 
 @pytest.mark.asyncio
-async def test_burst_of_small_events_does_not_trip_the_queue_while_the_consumer_drains(tmp_path: Path) -> None:
+async def test_burst_of_small_events_does_not_trip_the_queue_while_the_consumer_drains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Hundreds of tiny framed deltas buffered in the helper pipe must not fail
     a healthy consumer (the pre-budget 64-event cap did exactly that on a
     saturated event loop, #2167)."""
+    monkeypatch.setattr(native_egress_module, "_NATIVE_STREAM_QUEUE_LIMIT", 64)
     helper = tmp_path / "native-helper"
     _write_helper(
         helper,
@@ -1133,8 +1137,6 @@ for line in sys.stdin:
     )
     client = SubprocessNativeEgressClient(helper)
     response = await client.request(NativeEgressRequest(method="GET", url="https://example.test/burst", headers={}))
-    # Let the whole burst land in the pipe before the consumer starts reading.
-    await asyncio.sleep(0.2)
     body = await asyncio.wait_for(response.read(), timeout=5.0)
     assert body == b"delta" * 2000
     await asyncio.wait_for(client.aclose(), timeout=2.0)

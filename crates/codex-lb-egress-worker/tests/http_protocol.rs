@@ -103,6 +103,7 @@ fn sse_request(
             idle_timeout_ms,
             max_event_bytes,
             content_type_aware: false,
+            collect_compact: false,
         }),
     })
 }

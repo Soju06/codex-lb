@@ -8,13 +8,14 @@ import socket
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import aiohttp
 import anyio
 import pytest
 
+import app.core.clients.native_egress as native_module
 import app.core.clients.proxy as proxy_module
 from app.core.clients.codex import CodexClient
 from app.core.clients.native_egress import SubprocessNativeEgressClient
@@ -734,6 +735,89 @@ _COMPACT_EVENTS = (
     b'{"object":"response","id":"resp_compact","output":[]}}\n\n'
 )
 
+_COMPACT_CASES = json.loads(
+    (Path(__file__).resolve().parents[2] / "crates/codex-lb-responses/tests/fixtures/compact-v1.json").read_text()
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _COMPACT_CASES, ids=[case["name"] for case in _COMPACT_CASES])
+async def test_native_compact_collection_matches_python_public_result(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    tmp_path: Path,
+    routed: bool,
+    case: dict[str, Any],
+) -> None:
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        body = "".join(case["blocks"]).encode()
+        if body:
+            await _write_chunk(writer, body)
+        await _finish_chunks(writer)
+
+    async def outcome(
+        base_url: str, worker: SubprocessNativeEgressClient, session: aiohttp.ClientSession | None
+    ) -> object:
+        try:
+            result = await _compact(base_url, worker, monkeypatch, routed=routed, session=session)
+            return result.model_dump()
+        except ProxyResponseError as exc:
+            return exc.status_code, exc.payload, exc.failure_phase
+
+    async with _serve_http(handler) as base_url, aiohttp.ClientSession() as session:
+        missing = SubprocessNativeEgressClient(tmp_path / "missing-helper")
+        expected = await outcome(base_url, missing, session)
+
+        def forbidden_collection(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("native compact must not enter the Python collector")
+
+        monkeypatch.setattr(proxy_module, "_compact_response_payload_from_sse", forbidden_collection)
+        assert await outcome(base_url, native_worker, None) == expected
+    assert not native_worker._streams
+
+
+@pytest.mark.asyncio
+async def test_native_compact_large_result_is_fragmented_and_stops_before_late_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    routed: bool,
+) -> None:
+    items = [{"index": i, "padding": "한글" * 4096, "integer": 10**70} for i in range(96)]
+    blocks = [
+        json.dumps({"type": "response.output_item.done", "output_index": i, "item": item}, ensure_ascii=False)
+        for i, item in enumerate(items)
+    ]
+    blocks.append(json.dumps({"type": "response.completed", "response": {"object": "response.compact", "id": "large"}}))
+    body = "".join("data: " + block + "\n\n" for block in blocks).encode() + b"data: " + b"x" * 100_000 + b"\n\n"
+    monkeypatch.setattr(proxy_module.get_settings(), "max_sse_event_bytes", 64 * 1024)
+    original_read = native_module._read_event
+    fragments: list[int] = []
+
+    async def read_event(stdout: asyncio.StreamReader) -> dict[str, object]:
+        event = await original_read(stdout)
+        if event.get("type") == "compact":
+            fragments.append(len(str(event["text"]).encode()))
+        assert event.get("type") != "sse", "compact intermediate events must stay in Rust"
+        return event
+
+    monkeypatch.setattr(native_module, "_read_event", read_event)
+    closed = asyncio.Event()
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        await _write_chunk(writer, body)
+        await reader.read()
+        closed.set()
+
+    async with _serve_http(handler) as base_url:
+        result = await asyncio.wait_for(_compact(base_url, native_worker, monkeypatch, routed=routed), timeout=5)
+        await asyncio.wait_for(closed.wait(), timeout=2)
+    assert result.model_extra is not None
+    assert result.model_extra["output"] == items
+    assert len(fragments) > 64
+    assert max(fragments) <= 16 * 1024
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("content_type", ["text/event-stream", "Text/Event-Stream; charset=utf-8", None, ""])
@@ -750,6 +834,7 @@ async def test_native_compact_frames_and_returns_before_body_eof(
         raise AssertionError("compact native SSE must bypass the Python byte scanner")
 
     monkeypatch.setattr(proxy_module, "_find_sse_separator", forbidden_python_scan)
+    monkeypatch.setattr(proxy_module, "_compact_response_payload_from_sse", forbidden_python_scan)
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, body: bytes) -> None:
         requests.append(json.loads(body))

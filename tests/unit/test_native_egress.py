@@ -41,6 +41,7 @@ print(json.dumps({
         "failure_provenance_v1",
         "http",
         "http2_profile_v1",
+        "http_compact_collect_v1",
         "http_compact_sse_v1",
         "http_sse_v1",
         "websocket",
@@ -804,7 +805,8 @@ for line in sys.stdin:
     if command["type"] == "cancel":
         print(json.dumps({{"type": "cancelled", "request_id": request_id}}), flush=True)
         continue
-    assert command["sse"] == {{"idle_timeout_ms": 1000, "max_event_bytes": 1024, "content_type_aware": False}}
+    assert command["sse"] == {{"idle_timeout_ms": 1000, "max_event_bytes": 1024,
+                              "content_type_aware": False, "collect_compact": False}}
     print(json.dumps({{"type": "head", "request_id": request_id, "status": 200,
                        "http_version": "HTTP/1.1", "headers": []}}), flush=True)
     for event in {events!r}:
@@ -869,7 +871,7 @@ async def test_native_sse_failure_releases_owned_stream(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capability", ["http_sse_v1", "http_compact_sse_v1"])
+@pytest.mark.parametrize("capability", ["http_sse_v1", "http_compact_sse_v1", "http_compact_collect_v1"])
 async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path, capability: str) -> None:
     helper = tmp_path / "native-helper"
     preamble = _HELPER_PROTOCOL_PREAMBLE.replace(f'        "{capability}",\n', "")
@@ -888,6 +890,47 @@ async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "events",
+    [
+        [{"type": "end"}],
+        [{"type": "compact", "text": "{", "more": True}, {"type": "end"}],
+        [{"type": "compact", "text": "not-json", "more": False}, {"type": "end"}],
+        [{"type": "compact", "text": "{}", "more": "false"}],
+        [{"type": "compact", "text": "x" * (16 * 1024 + 1), "more": False}],
+        [{"type": "compact", "text": "{}", "more": False}] * 2 + [{"type": "end"}],
+        [{"type": "sse", "text": "data: {}\n\n", "more": False}],
+    ],
+)
+async def test_native_compact_rejects_broken_result_without_replay(
+    tmp_path: Path,
+    events: list[dict[str, object]],
+) -> None:
+    helper = tmp_path / "compact-helper"
+    source = _sse_helper_source(events).replace(
+        '"content_type_aware": False, "collect_compact": False',
+        '"content_type_aware": True, "collect_compact": True',
+    )
+    _write_helper(helper, source)
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        response = await client.request(
+            NativeEgressRequest(
+                "POST",
+                "https://example.test",
+                {},
+                sse=NativeSseOptions(1, 1024, True, True),
+            )
+        )
+        with pytest.raises(NativeEgressProtocolError):
+            await asyncio.wait_for(response.compact_result(), timeout=2)
+        assert client._request_sequence == 1
+        assert not client._streams
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "options",
     [
         NativeSseOptions(0, 1),
@@ -895,6 +938,7 @@ async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path,
         NativeSseOptions(float("inf"), 1),
         NativeSseOptions(1, 0),
         NativeSseOptions(1, True),
+        NativeSseOptions(1, 1024, collect_compact=True),
     ],
 )
 async def test_native_sse_options_are_validated_before_start(tmp_path: Path, options: NativeSseOptions) -> None:

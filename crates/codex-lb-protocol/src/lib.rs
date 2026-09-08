@@ -10,6 +10,7 @@ pub const CAPABILITIES: &[&str] = &[
     "failure_provenance_v1",
     "http",
     "http2_profile_v1",
+    "http_compact_collect_v1",
     "http_compact_sse_v1",
     "http_sse_v1",
     "websocket",
@@ -66,6 +67,8 @@ pub struct NativeSseOptions {
     pub max_event_bytes: usize,
     #[serde(default)]
     pub content_type_aware: bool,
+    #[serde(default)]
+    pub collect_compact: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -106,6 +109,11 @@ pub enum NativeEvent {
         request_id: String,
         size_bytes: usize,
         limit_bytes: usize,
+    },
+    Compact {
+        request_id: String,
+        text: String,
+        more: bool,
     },
     End {
         request_id: String,

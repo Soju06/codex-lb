@@ -1566,6 +1566,20 @@ async def _compact_response_payload_from_success_response(
     idle_timeout_seconds: float,
     max_event_bytes: int,
 ) -> JsonValue:
+    if isinstance(resp, NativeEgressResponse) and resp.compact_collected:
+        result = await resp.compact_result()
+        if not is_json_mapping(result):
+            raise NativeEgressProtocolError("native compact result has an invalid envelope")
+        kind = result.get("kind")
+        if kind == "completed" and is_json_mapping(response := result.get("response")):
+            return response
+        if kind == "terminal_error" and is_json_mapping(event := result.get("event")):
+            event_type = event.get("type")
+            if isinstance(event_type, str) and event_type in {"response.failed", "response.incomplete", "error"}:
+                raise _proxy_response_error_from_compact_sse_terminal(event, event_type)
+        if kind == "invalid" and isinstance(message := result.get("message"), str):
+            raise ValueError(message)
+        raise NativeEgressProtocolError("native compact result has an invalid envelope")
     headers = _codex_response_headers(resp)
     content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
     content = getattr(resp, "content", None)
@@ -4831,6 +4845,7 @@ class _CompactCommandTransport:
             compact_timeout_seconds or settings.stream_idle_timeout_seconds,
             settings.max_sse_event_bytes,
             content_type_aware=True,
+            collect_compact=True,
         )
 
         @asynccontextmanager

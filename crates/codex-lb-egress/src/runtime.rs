@@ -89,6 +89,7 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                             || request.connect_timeout_ms == Some(0)
                             || request.sse.is_some_and(|options| {
                                 options.idle_timeout_ms == 0 || options.max_event_bytes == 0
+                                    || (options.collect_compact && !options.content_type_aware)
                             })
                         {
                             emit_error(

@@ -2,7 +2,7 @@
 
 ## Environment
 
-- Python: .venv/bin/python (uv, CPython 3.13.3)
+- Python: `>=3.13` via `uv` (`uv sync --frozen`; interpreter at `.venv/bin/python`)
 - GitHub auth for git/API is available via env vars: `GITHUB_USER`, `GITHUB_TOKEN` (PAT). Do not hardcode or commit tokens.
 - For authenticated git over HTTPS in automation, use: `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<repo>.git`
 

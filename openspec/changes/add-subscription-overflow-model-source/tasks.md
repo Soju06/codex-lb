@@ -7,7 +7,13 @@
 
 ## 2. Designation settings, preflight, drain deadline, dashboard (WP-B)
 
-- [ ] 2.1 Extend this change with the `model-source-routing` designation requirements and implement the inert settings API tri-state, preflight endpoint, delete-source clearing, dashboard control, i18n, and docs.
+- [x] 2.1 Extend this change with the `model-source-routing` designation and preflight requirements.
+- [x] 2.2 Settings API: tri-state `subscription_overflow_source_id`, eligibility validation (`400 subscription_overflow_source_invalid`), drain deadline arming/clearing in the same row update, audit `changed_fields`, cross-replica cache invalidation.
+- [x] 2.3 `GET /api/settings/subscription-overflow/preflight` (write access; 404 for unknown sources; warnings never block).
+- [x] 2.4 Deleting the designated model source clears the designation and arms the drain deadline in the delete's transaction, then invalidates the settings cache.
+- [x] 2.5 Dashboard Routing card: designation select (Off sentinel), drain notice, inline preflight, help text, i18n en/ko/zh-CN, vitest coverage.
+- [x] 2.6 `docs/routing.md` operator explainer linking back to `model-source-routing`.
+- [x] 2.7 Inertness proof: request-path/core ratchet unit test plus the end-to-end test that an exhausted pool still answers `429 usage_limit_reached` with a source designated and never contacts it.
 
 ## 3. Pins, routing, observability, rollout (WP-C1, WP-C2, WP-D, WP-G)
 

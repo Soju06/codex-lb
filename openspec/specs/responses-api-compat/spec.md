@@ -5545,9 +5545,10 @@ Direct Responses HTTP/SSE requests sent through native egress MUST preserve the 
 
 #### Scenario: Native SSE response uses the ordinary parser
 
-- **GIVEN** native direct egress returns an HTTP success and streamed SSE chunks
+- **GIVEN** native direct egress returns an HTTP success for a streaming Responses request
 - **WHEN** the proxy consumes the response
-- **THEN** chunks pass through the ordinary SSE parser, normalizer, terminal-event detection, and archive path
+- **THEN** Rust frames body bytes into SSE blocks with the existing CR/LF, UTF-8 replacement, whitespace, EOF, and size-limit behavior
+- **AND** Python applies the ordinary normalizer, terminal-event detection, and archive path without byte reframing
 - **AND** the downstream event sequence matches the Python transport contract
 
 #### Scenario: Downstream cancellation owns helper cleanup
@@ -5557,6 +5558,12 @@ Direct Responses HTTP/SSE requests sent through native egress MUST preserve the 
 - **THEN** only that native request task is cancelled and awaited
 - **AND** the helper and unrelated request streams remain usable
 - **AND** the cancelled POST is not replayed through another HTTP client
+
+#### Scenario: Framing failures retain public error behavior
+
+- **WHEN** native SSE framing exceeds the configured event byte limit or receives no body bytes within the idle deadline
+- **THEN** the public response uses the existing stream-event-too-large or stream-idle-timeout error behavior
+- **AND** idle timeout remains account-neutral
 
 ### Requirement: HTTP session bridge admission obeys downstream transport policy
 
@@ -5767,3 +5774,80 @@ The rejected account's stream lease MUST be released before replacement selectio
 - **GIVEN** A has already emitted downstream-visible output
 - **WHEN** authentication subsequently fails
 - **THEN** the proxy does not replay the request on another account
+
+### Requirement: Routed native Responses streams consume Rust-framed SSE
+
+Account-routed streaming Responses HTTP requests using native egress MUST
+delegate byte framing, event byte limits, and body-read idle deadlines to the
+existing Rust SSE transport contract. Python MUST consume the framed events
+without byte reframing, preserving normalization, terminal detection, rate-limit
+headers, archives, route trace, and public error envelopes. Non-streaming HTTP
+responses and HTTP errors MUST retain raw body consumption. Body failures and
+cancellation MUST NOT replay a dispatched POST or switch its proxy endpoint.
+
+#### Scenario: Routed native success skips Python byte framing
+
+- **WHEN** the selected proxy endpoint returns a successful streaming Responses body
+- **THEN** Rust emits the same SSE event contract as direct native streaming
+- **AND** Python performs ordinary downstream event processing without scanning bytes
+
+#### Scenario: Framing failure preserves route and error behavior
+
+- **WHEN** a routed body exceeds its byte limit or goes idle
+- **THEN** the existing stream-event-too-large or stream-idle-timeout envelope is produced
+- **AND** route metadata remains associated with that attempt without endpoint replay
+
+#### Scenario: Routed cancellation isolates the owned stream
+
+- **WHEN** a routed native SSE stream closes or is cancelled, including in an already cancelled scope
+- **THEN** its owned native request is cancelled and unregistered
+- **AND** a locally created routed client finishes closing its session before cancellation propagates
+- **AND** another active request in the same helper remains usable
+
+#### Scenario: Routed error or non-streaming response remains raw
+
+- **WHEN** the routed response is an HTTP error or the request disables streaming
+- **THEN** the ordinary JSON/error body path and public response envelope are preserved
+
+### Requirement: Native compact Responses preserve terminal and ownership contracts
+
+Direct and account-routed compact requests MUST use native transport when the
+helper has negotiated `http_compact_sse_v1`. Native SSE framing MUST apply only
+to successful responses selected by the outbound HTTP Content-Type rule; other
+responses MUST retain raw body handling. Python MUST retain request shaping, output collection,
+compact normalization, terminal error mapping, archives, routing, and settlement.
+Responses MUST remain open until consumption finishes, and owned responses and
+routed sessions MUST close on completion, failure, and cancellation. Missing
+helpers MAY use Python transport only before dispatch. An installed helper lacking
+`http_compact_sse_v1` MUST fail negotiation before dispatch without Python fallback. Native failures after
+dispatch MUST NOT replay the POST through Python or another proxy endpoint.
+
+#### Scenario: Compact completes before HTTP EOF
+
+- **WHEN** response.completed follows compact output items while upstream keeps the body open
+- **THEN** compact returns the existing normalized payload without waiting for EOF
+- **AND** the owned transport request closes while unrelated helper requests stay usable
+
+#### Scenario: Terminal and framing failures
+
+- **WHEN** compact receives a terminal SSE error or exceeds its event/idle/total limit
+- **THEN** existing compact public error codes, status mapping, and replay safety are preserved
+- **AND** the response and owned client are cleaned up
+
+#### Scenario: Routed fallback before dispatch
+
+- **WHEN** a confirmed pre-dispatch connection failure permits the next configured endpoint
+- **THEN** native SSE options follow that attempt and its exact route metadata is recorded
+- **AND** an accepted response or ambiguous body failure never triggers endpoint replay
+
+#### Scenario: Missing helper and cancelled caller
+
+- **WHEN** the helper is missing before dispatch
+- **THEN** the resolved Python transport receives no native-only option and retains compact parsing
+- **AND** cancellation finishes owned response/session cleanup even in an already cancelled scope
+
+#### Scenario: Cancellation while waiting for native response headers
+
+- **WHEN** an already cancelled caller scope interrupts native response-head waiting
+- **THEN** request cancellation completes and its stream registration is removed
+- **AND** a completed native exchange wins a simultaneous shutdown/cancel race without an additional terminal event

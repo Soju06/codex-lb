@@ -12580,6 +12580,7 @@ async def test_compact_responses_without_trigger_canonicalization_hits_upstream_
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
         upstream_compact_timeout_seconds = 12.0
+        max_sse_event_bytes = 16 * 1024 * 1024
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
 

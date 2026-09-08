@@ -78,6 +78,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.accepted_replay import (
     _claim_websocket_replay_create_gate,
+    _http_bridge_accepted_replay_may_exclude_account,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR,
@@ -4125,7 +4126,15 @@ class _HTTPBridgeRequestSubmitMixin:
                         request_state.preferred_account_id = session.account.id
                     else:
                         request_state.preferred_account_id = None
-                        request_state.excluded_account_ids.add(session.account.id)
+                        # An accepted replay whose session affinity may resolve
+                        # a hard sticky owner reconnects unexcluded: the owner
+                        # is the only account selection can return, so the
+                        # exclusion would spin on ``hard_affinity_saturated``
+                        # until the bridge request budget ran out.
+                        if model_fallback_replay or _http_bridge_accepted_replay_may_exclude_account(
+                            request_state, session
+                        ):
+                            request_state.excluded_account_ids.add(session.account.id)
             if session.account.id in request_state.excluded_account_ids:
                 session.upstream_turn_state = None
                 session.downstream_turn_state = None

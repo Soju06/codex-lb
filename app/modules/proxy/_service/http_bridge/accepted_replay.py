@@ -26,6 +26,8 @@ from typing import Literal
 from app.core.types import JsonValue
 from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_WEBSOCKET,
+    _affinity_may_resolve_hard_owner,
+    _HTTPBridgeSession,
     _websocket_request_is_accepted_lifecycle_only,
     _WebSocketRequestState,
 )
@@ -139,6 +141,42 @@ def _http_bridge_accepted_capacity_retry_allowed(request_state: _WebSocketReques
     if not accepted or request_state.previous_response_id is None:
         return True
     return _http_bridge_accepted_anchored_replay_candidate(request_state)
+
+
+def _http_bridge_accepted_replay_may_exclude_account(
+    request_state: _WebSocketRequestState,
+    session: _HTTPBridgeSession,
+) -> bool:
+    """Return whether the bridge's fresh-request replay may exclude the account that accepted it.
+
+    ``_retry_http_bridge_precreated_request`` moves an account-neutral fresh
+    request off the failing account by excluding it from the reconnect
+    selection. The accepted-lifecycle replay of #2127 inherited that
+    exclusion on hard session keys (``session_header`` / ``thread_header`` /
+    ``turn_state_header``, every native Codex bridge session) -- yet the
+    reconnect selects with the session's affinity, and when that affinity
+    resolves a hard ``CODEX_SESSION`` owner (a turn-state row, or the raw
+    compatibility row an old replica persisted for the bare session header)
+    selection is narrowed to that owner. Excluding it makes every
+    re-selection fail with ``hard_affinity_saturated``, which the reconnect
+    loop treats as a transient owner outage and sleeps on until the bridge
+    request budget (7200s by default) is spent, long after the client gave up.
+
+    Mirror of ``_websocket_accepted_replay_may_exclude_account``: an accepted
+    replay (``replay_downstream_response_id`` captured) on a hard session key
+    whose affinity may resolve a hard owner reconnects without an exclusion,
+    so the same owner is re-selected and the request is re-sent to it within
+    the single lifecycle the client is reading. Everything else keeps the
+    established exclusion: the created-only replay (unchanged from before
+    accepted replays existed), soft session keys (never derived alongside a
+    hard-capable affinity -- turn-state, thread and bare session headers all
+    produce hard keys), and hard keys whose affinity cannot resolve an owner.
+    """
+    if request_state.replay_downstream_response_id is None:
+        return True
+    if session.key.strength != "hard":
+        return True
+    return not _affinity_may_resolve_hard_owner(session.affinity)
 
 
 def _positive_token_count(value: JsonValue | None) -> bool:

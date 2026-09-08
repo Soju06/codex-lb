@@ -10,6 +10,7 @@ from typing import Protocol, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_MODEL_REGISTRY, get_cache_invalidation_poller
+from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import refresh_http_client
 from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
 from app.core.config.settings import get_settings
@@ -63,6 +64,25 @@ def _get_leader_election() -> _LeaderElectionLike:
     return cast(_LeaderElectionLike, module.get_leader_election())
 
 
+async def _warm_codex_version_cache() -> None:
+    """Refresh the in-process Codex client version on every replica.
+
+    The version is presented as the outbound fingerprint of non-native
+    requests (``codex_cli_rs/<version>``); upstream gates newer models on it.
+    It used to be fetched only inside the leader's model refresh, so a
+    non-leader replica -- for instance the live color of a blue/green pair
+    whose standby still holds the scheduler lease -- served the configured
+    fallback version indefinitely and had its non-native ``gpt-6-astra``
+    requests rejected with "requires a newer version of Codex". The fetch is
+    a public GitHub/npm lookup (no account token) cached for an hour, so
+    every replica may perform it, and it must never fail the tick.
+    """
+    try:
+        await get_codex_version_cache().get_version()
+    except Exception:  # pragma: no cover - the cache itself already logs and falls back
+        logger.warning("Codex client version warm-up failed; keeping the cached or default version", exc_info=True)
+
+
 @dataclass(slots=True)
 class ModelRefreshScheduler:
     interval_seconds: int
@@ -89,6 +109,7 @@ class ModelRefreshScheduler:
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
+            await _warm_codex_version_cache()
             await self._refresh_once()
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)

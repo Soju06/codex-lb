@@ -1454,7 +1454,7 @@ def _install_owned_codex_client(monkeypatch: pytest.MonkeyPatch, client: _OwnedC
     # No codex_client is passed, so the routed branch builds and owns its own
     # per-stream client exactly like production does.
     monkeypatch.setattr(proxy_module, "create_codex_session", lambda: None)
-    monkeypatch.setattr(proxy_module, "CodexClient", lambda session: client)
+    monkeypatch.setattr(proxy_module, "CodexClient", lambda session, *, native_egress_client=None: client)
 
 
 def _routed_stream(route: ResolvedUpstreamRoute, *, raise_for_status: bool = False):

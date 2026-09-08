@@ -65,6 +65,7 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
 from app.modules.proxy import account_cache
+from app.modules.proxy._load_balancer.error_rate import error_rate_weight_multiplier, record_outcome_locked
 from app.modules.proxy._load_balancer.model_eligibility import (
     _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES,
     CatalogOmissionQuotaAdmission,
@@ -1746,13 +1747,9 @@ class LoadBalancer:
     async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
         """Downgrade *account* to its permanent-failure status.
 
-        Returns whether the downgrade applied or was already in effect.
-        When the guarded status write MISSES because a peer replica
-        concurrently re-authed/imported and rotated ``refresh_token_encrypted``
-        (the DB row was repaired and left ACTIVE), the account keeps its
-        repaired state. DEACTIVATED and proven access-authentication failure
-        are excluded from routing; refresh-only REAUTH_REQUIRED warnings may
-        continue using an unexpired access token.
+        Returns whether the downgrade applied or was already in effect. Concurrent
+        credential repairs are preserved. Deactivation and proven access rejection
+        block routing; refresh-only warnings may keep using unexpired access tokens.
         """
         lock = await self._get_account_lock(account.id)
         async with lock:
@@ -1802,6 +1799,7 @@ class LoadBalancer:
             state.last_error_at = self._clock.time()
             self._sync_runtime_state(account, state)
             runtime = self._runtime.get(account.id)
+            record_outcome_locked(self._runtime[account.id], state.last_error_at, success=False, count=count)
             if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
                 runtime.probe_success_streak = 0
             async with self._repo_factory() as repos:
@@ -1811,7 +1809,8 @@ class LoadBalancer:
         """Clear transient error state after a successful upstream request."""
         lock = await self._get_account_lock(account.id)
         async with lock:
-            runtime = self._runtime.get(account.id)
+            runtime = self._runtime.setdefault(account.id, RuntimeState())
+            record_outcome_locked(runtime, self._clock.time(), success=True)
             if runtime and runtime.error_count > 0:
                 runtime.error_count = 0
                 runtime.last_error_at = None
@@ -2614,6 +2613,7 @@ def _state_from_account(
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
         routing_policy=routing_policy,
+        selection_weight_multiplier=error_rate_weight_multiplier(runtime, now),
     )
 
 

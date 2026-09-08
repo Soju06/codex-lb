@@ -11,7 +11,7 @@ from sqlalchemy import text
 import app.modules.settings.api as settings_api_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings_cache import get_settings_cache
-from app.db.models import Account, AccountStatus, DashboardSettings
+from app.db.models import Account, AccountStatus, DashboardSettings, ProxyEndpoint
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -75,6 +75,9 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["relativeAvailabilityPower"] == 2.0
     assert payload["relativeAvailabilityTopK"] == 5
     assert payload["singleAccountId"] is None
+    assert payload["subscriptionOverflowSourceId"] is None
+    assert payload["subscriptionOverflowDrainUntil"] is None
+    assert payload["subscriptionOverflowPinsExpireBy"] is None
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["dashboardSessionTtlSeconds"] == 31536000
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
@@ -758,11 +761,11 @@ async def test_upstream_proxy_endpoint_test_rejects_proxy_auth_response(async_cl
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])
-async def test_upstream_proxy_endpoint_create_rejects_plaintext_credentials(async_client, scheme: str):
+async def test_upstream_proxy_endpoint_create_allows_plaintext_credentials_with_warning_flag(async_client, scheme: str):
     response = await async_client.post(
         "/api/settings/upstream-proxy/endpoints",
         json={
-            "name": "Unsafe proxy",
+            "name": "Plaintext proxy",
             "scheme": scheme,
             "host": "proxy.internal",
             "port": 8080,
@@ -771,8 +774,70 @@ async def test_upstream_proxy_endpoint_create_rejects_plaintext_credentials(asyn
         },
     )
 
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["plaintextCredentials"] is True
+    assert "secret" not in str(payload)
+
+    listing = await async_client.get("/api/settings/upstream-proxy")
+    assert listing.status_code == 200
+    flags = {endpoint["id"]: endpoint["plaintextCredentials"] for endpoint in listing.json()["endpoints"]}
+    assert flags[payload["id"]] is True
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_https_credentials_are_not_flagged(async_client):
+    response = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "TLS proxy",
+            "scheme": "https",
+            "host": "proxy.internal",
+            "port": 8443,
+            "username": "user",
+            "password": "secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plaintextCredentials"] is False
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_create_rejects_colon_in_username(async_client):
+    response = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Colon proxy",
+            "scheme": "https",
+            "host": "proxy.internal",
+            "port": 8080,
+            "username": "user:name",
+            "password": "secret",
+        },
+    )
+
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "plaintext_proxy_credentials_forbidden"
+    assert response.json()["error"]["code"] == "invalid_proxy_username"
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_test_reports_unresolvable_persisted_row(async_client):
+    # A row persisted before the resolver rule existed must report the reason,
+    # not surface an unhandled 500 from the test route.
+    async with SessionLocal() as session:
+        row = ProxyEndpoint(name="Legacy", scheme="https", host="proxy.internal", port=8080, username="user:name")
+        session.add(row)
+        await session.commit()
+        endpoint_id = row.id
+
+    response = await async_client.post(f"/api/settings/upstream-proxy/endpoints/{endpoint_id}/test")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["error"] == "invalid_proxy_username"
+    assert payload["statusCode"] is None
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     normalize_realtime_call_id,
 )
+from app.core.clock import clock_for, scheduler_for
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.upstream_proxy import ResolvedUpstreamRoute
@@ -212,6 +213,9 @@ class _CloseOnceLiveWebSocket:
         timeout_seconds: float | None = None,
     ) -> None:
         if self._close_task is None:
+            # The realtime relay is its own transport loop outside the responses
+            # turn lifecycle, so this close owner and its bounded waits stay on
+            # raw asyncio (PR B allowance) rather than a per-turn scheduler.
             self._close_task = asyncio.create_task(
                 self._wrapped.close(code=code, reason=reason),
                 name="realtime-live-close-upstream",
@@ -336,6 +340,8 @@ async def _relay_live_websocket(
     max_message_bytes: int,
     close_timeout_seconds: float,
 ) -> None:
+    # Relay children belong to the realtime transport loop, not to a proxy
+    # turn; they stay raw asyncio tasks (PR B allowance).
     tasks = {
         asyncio.create_task(
             _relay_downstream_to_upstream(
@@ -369,6 +375,8 @@ async def _maybe_purge_realtime_call_affinity(proxy: _RealtimeLiveServiceProtoco
     """Throttle cleanup and delete at most one bounded batch per process."""
 
     global _realtime_call_cleanup_last_monotonic
+    # Process-global cleanup throttle: shared by every connection, so it stays
+    # on the real monotonic clock rather than a per-turn injected clock.
     now = time.monotonic()
     if now - _realtime_call_cleanup_last_monotonic < _REALTIME_CALL_CLEANUP_INTERVAL_SECONDS:
         return
@@ -467,7 +475,9 @@ class _RealtimeLiveMixin:
             )
 
         request_id = get_request_id() or ensure_request_id(None)
-        start = time.monotonic()
+        clock = clock_for(proxy)
+        scheduler = scheduler_for(proxy)
+        start = clock.monotonic()
         settings = get_settings()
         upstream_close_timeout_seconds = max(1.0, settings.upstream_connect_timeout_seconds)
         offered_subprotocols = tuple(cast(Sequence[str], websocket.scope.get("subprotocols", ())))
@@ -487,7 +497,7 @@ class _RealtimeLiveMixin:
         account = selection.account
         account_lease: AccountLease | None = selection.lease
         if account is None or account.id != owner_account_id:
-            release_task = asyncio.create_task(proxy._load_balancer.release_account_lease(account_lease))
+            release_task = scheduler.create_task(proxy._load_balancer.release_account_lease(account_lease))
             _, release_cancellation = await _await_task_deferring_cancellation(release_task)
             if release_cancellation is not None:
                 raise release_cancellation
@@ -614,7 +624,7 @@ class _RealtimeLiveMixin:
                         logger.warning("Failed to close realtime live upstream websocket")
                         log_status = "error"
             finally:
-                release_task = asyncio.create_task(proxy._load_balancer.release_account_lease(account_lease))
+                release_task = scheduler.create_task(proxy._load_balancer.release_account_lease(account_lease))
                 _, release_cancellation = await _await_task_deferring_cancellation(release_task)
             try:
                 await proxy._write_request_log(
@@ -622,7 +632,7 @@ class _RealtimeLiveMixin:
                     api_key=api_key,
                     request_id=request_id,
                     model=None,
-                    latency_ms=int((time.monotonic() - start) * 1000),
+                    latency_ms=int((clock.monotonic() - start) * 1000),
                     status=log_status,
                     request_kind="realtime_live",
                     error_code=None,

@@ -5,9 +5,10 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clock import Clock, Scheduler
 from app.core.openai.requests import ResponsesRequest
 from app.db.models import Account
-from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey
+from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey, _WebSocketRequestState
 from app.modules.proxy.durable_bridge_repository import DurableBridgeAliasRegistrationReceipt
 from app.modules.proxy.load_balancer import AccountSelection
 
@@ -15,6 +16,9 @@ from app.modules.proxy.load_balancer import AccountSelection
 class _HTTPBridgeServiceProtocol(Protocol):
     _repo_factory: Any
     _encryptor: Any
+    _clock: Clock
+    _scheduler: Scheduler
+    _remaining_budget_seconds: Any
     _load_balancer: Any
     _http_client: Any
     _ring_membership: Any
@@ -69,9 +73,27 @@ class _HTTPBridgeServiceProtocol(Protocol):
         inflight_future: asyncio.Future[_HTTPBridgeSession] | None,
         exc: BaseException,
     ) -> bool: ...
-    async def _retire_http_bridge_after_drain_if_ready(self, session: _HTTPBridgeSession) -> bool: ...
+    async def _retire_http_bridge_after_drain_if_ready(
+        self,
+        session: _HTTPBridgeSession,
+        *,
+        lock_wait_timeout_seconds: float | None = None,
+    ) -> bool: ...
+    async def _release_http_bridge_admission_preregistration(
+        self,
+        session: _HTTPBridgeSession,
+        *,
+        request_state: _WebSocketRequestState,
+    ) -> bool: ...
+    async def _retire_idle_http_bridge_session_on_cooldown_suppression(
+        self,
+        session: _HTTPBridgeSession,
+        *,
+        owned_unanchored_handoff: bool,
+    ) -> bool: ...
     async def _refresh_durable_http_bridge_session(self, session: _HTTPBridgeSession) -> None: ...
     def _http_bridge_pending_count_nowait(self, session: _HTTPBridgeSession, *, context: str) -> int | None: ...
+    async def abandon_stale_http_bridge_operations(self) -> int: ...
     def _detach_http_bridge_session_locked(
         self,
         key: _HTTPBridgeSessionKey,

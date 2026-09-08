@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import Field, field_validator
 
 from app.modules.shared.schemas import DashboardModel
@@ -61,6 +63,12 @@ class DashboardSettingsResponse(DashboardModel):
     relative_availability_power: float = Field(gt=0.0)
     relative_availability_top_k: int = Field(ge=1, le=20)
     single_account_id: str | None = None
+    subscription_overflow_source_id: str | None = None
+    subscription_overflow_drain_until: datetime | None = None
+    # Derived, read-only: the drain deadline minus the tombstone grace and one
+    # day (the clear time plus the 7-day pin idle limit); ``None`` when no drain
+    # is armed. The date every pinned conversation has expired by.
+    subscription_overflow_pins_expire_by: datetime | None = None
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     dashboard_session_ttl_seconds: int = Field(ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
@@ -126,6 +134,10 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     relative_availability_power: float | None = Field(default=None, gt=0.0)
     relative_availability_top_k: int | None = Field(default=None, ge=1, le=20)
     single_account_id: str | None = Field(default=None, max_length=255)
+    # Tri-state via ``model_fields_set``: absent = unchanged, null = off
+    # (arms the drain deadline), value = designate. The drain deadline itself
+    # is read-only.
+    subscription_overflow_source_id: str | None = Field(default=None, max_length=255)
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
     dashboard_session_ttl_seconds: int | None = Field(default=None, ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
@@ -196,6 +208,39 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         return value
 
 
+class SubscriptionOverflowContextWindowMismatch(DashboardModel):
+    registry: int
+    source: int | None = None
+    max_output_tokens: int | None = None
+
+
+class SubscriptionOverflowPreflightModel(DashboardModel):
+    slug: str
+    enabled: bool
+    never_overflows: bool
+    never_overflows_reason: str | None = None
+    undeclared_tool_types: list[str] = Field(default_factory=list)
+    supports_vision: bool
+    supports_streaming: bool
+    priced: bool
+    context_window_mismatch: SubscriptionOverflowContextWindowMismatch | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SubscriptionOverflowPreflightResponse(DashboardModel):
+    source_id: str
+    source_name: str
+    source_enabled: bool
+    eligible: bool
+    blockers: list[str] = Field(default_factory=list)
+    drain_until: datetime | None = None
+    served_models: list[SubscriptionOverflowPreflightModel] = Field(default_factory=list)
+    missing_models: list[str] = Field(default_factory=list)
+    scoped_api_key_count: int = Field(ge=0)
+    live_pin_count: int = Field(ge=0)
+    tombstone_count: int = Field(ge=0)
+
+
 class RuntimeConnectAddressResponse(DashboardModel):
     connect_address: str
 
@@ -218,6 +263,9 @@ class UpstreamProxyEndpointResponse(DashboardModel):
     port: int
     username: str | None
     is_active: bool
+    # Credentials cross the LB-to-proxy hop unencrypted (http/socks5/socks5h
+    # with a username or password); the dashboard renders a warning.
+    plaintext_credentials: bool = False
 
 
 class UpstreamProxyEndpointTestResponse(DashboardModel):

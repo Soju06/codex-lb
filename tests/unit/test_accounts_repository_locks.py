@@ -91,7 +91,7 @@ def _make_postgres_repo(monkeypatch: pytest.MonkeyPatch) -> tuple[AccountsReposi
         del email
         return None
 
-    async def fake_single_account_by_email(_email: str):
+    async def fake_single_account_by_email(_email: str, *, include_pending_deletion: bool = True):
         return None
 
     async def fake_next_available_account_id(account_id: str) -> str:

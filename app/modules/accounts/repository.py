@@ -279,20 +279,28 @@ class AccountsRepository:
             existing = await self._account_by_bundle_slot_identity(account)
             if existing is None:
                 existing_by_id = await self._session.get(Account, account.id)
-                if existing_by_id is not None and (
-                    _same_unknown_workspace_identity(existing_by_id, account)
-                    or (
-                        _normalized_email(existing_by_id.email) == _normalized_email(account.email)
-                        and _workspace_slot_key(existing_by_id) == _workspace_slot_key(account)
-                        and _can_reuse_email_fallback(existing_by_id, account)
+                if (
+                    existing_by_id is not None
+                    and existing_by_id.delete_requested_at is None
+                    and (
+                        _same_unknown_workspace_identity(existing_by_id, account)
+                        or (
+                            _normalized_email(existing_by_id.email) == _normalized_email(account.email)
+                            and _workspace_slot_key(existing_by_id) == _workspace_slot_key(account)
+                            and _can_reuse_email_fallback(existing_by_id, account)
+                        )
                     )
                 ):
                     existing = existing_by_id
             if existing is None and not preserve_unknown_workspace_duplicates:
                 if _workspace_slot_key(account):
-                    existing_by_email = await self._single_unknown_workspace_account_by_email(account.email)
+                    existing_by_email = await self._single_unknown_workspace_account_by_email(
+                        account.email, include_pending_deletion=False
+                    )
                 else:
-                    existing_by_email = await self._single_account_by_email(account.email)
+                    existing_by_email = await self._single_account_by_email(
+                        account.email, include_pending_deletion=False
+                    )
                 if existing_by_email is not None and _can_reuse_email_fallback(existing_by_email, account):
                     existing = existing_by_email
             matches.append(existing)
@@ -1623,13 +1631,11 @@ class AccountsRepository:
             sequence += 1
         return candidate
 
-    async def _single_account_by_email(self, email: str) -> Account | None:
-        result = await self._session.execute(
-            select(Account)
-            .where(func.lower(Account.email) == _normalized_email(email))
-            .order_by(Account.created_at.asc(), Account.id.asc())
-            .limit(2)
-        )
+    async def _single_account_by_email(self, email: str, *, include_pending_deletion: bool = True) -> Account | None:
+        stmt = select(Account).where(func.lower(Account.email) == func.lower(email))
+        if not include_pending_deletion:
+            stmt = stmt.where(Account.delete_requested_at.is_(None))
+        result = await self._session.execute(stmt.order_by(Account.created_at.asc(), Account.id.asc()).limit(2))
         matches = list(result.scalars().all())
         if not matches:
             return None
@@ -1637,15 +1643,18 @@ class AccountsRepository:
             raise AccountIdentityConflictError(email)
         return matches[0]
 
-    async def _single_unknown_workspace_account_by_email(self, email: str) -> Account | None:
-        result = await self._session.execute(
+    async def _single_unknown_workspace_account_by_email(
+        self, email: str, *, include_pending_deletion: bool = True
+    ) -> Account | None:
+        stmt = (
             select(Account)
-            .where(func.lower(Account.email) == _normalized_email(email))
+            .where(func.lower(Account.email) == func.lower(email))
             .where(Account.workspace_id.is_(None))
             .where(Account.workspace_label.is_(None))
-            .order_by(Account.created_at.asc(), Account.id.asc())
-            .limit(2)
         )
+        if not include_pending_deletion:
+            stmt = stmt.where(Account.delete_requested_at.is_(None))
+        result = await self._session.execute(stmt.order_by(Account.created_at.asc(), Account.id.asc()).limit(2))
         matches = list(result.scalars().all())
         if not matches:
             return None
@@ -1660,7 +1669,7 @@ class AccountsRepository:
             result = await self._session.execute(
                 select(Account)
                 .where(Account.chatgpt_account_id == account.chatgpt_account_id)
-                .where(func.lower(Account.email) == _normalized_email(account.email))
+                .where(func.lower(Account.email) == func.lower(account.email))
                 .where(column == value)
                 .order_by(Account.created_at.asc(), Account.id.asc())
                 .limit(1)
@@ -1671,7 +1680,7 @@ class AccountsRepository:
             result = await self._session.execute(
                 select(Account)
                 .where(Account.chatgpt_account_id == account.chatgpt_account_id)
-                .where(func.lower(Account.email) == _normalized_email(account.email))
+                .where(func.lower(Account.email) == func.lower(account.email))
                 .where(Account.workspace_id.is_(None))
                 .where(Account.workspace_label == account.workspace_label)
                 .order_by(Account.created_at.asc(), Account.id.asc())
@@ -1683,7 +1692,7 @@ class AccountsRepository:
             column, value = workspace_slot
             result = await self._session.execute(
                 select(Account)
-                .where(func.lower(Account.email) == _normalized_email(account.email))
+                .where(func.lower(Account.email) == func.lower(account.email))
                 .where(column == value)
                 .order_by(Account.created_at.asc(), Account.id.asc())
                 .limit(1)
@@ -1699,7 +1708,8 @@ class AccountsRepository:
             return None
         stmt = (
             select(Account)
-            .where(func.lower(Account.email) == _normalized_email(account.email))
+            .where(func.lower(Account.email) == func.lower(account.email))
+            .where(Account.delete_requested_at.is_(None))
             .where(_bundle_workspace_slot_database_predicate(workspace_key))
         )
         if account.chatgpt_account_id:
@@ -1961,7 +1971,7 @@ def _upsert_identity_candidate_predicates(account: Account, *, include_email: bo
     if account.chatgpt_account_id:
         predicates.append(Account.chatgpt_account_id == account.chatgpt_account_id)
     if include_email and account.email:
-        predicates.append(func.lower(Account.email) == _normalized_email(account.email))
+        predicates.append(func.lower(Account.email) == func.lower(account.email))
     return predicates
 
 
@@ -1970,9 +1980,9 @@ def _bundle_identity_candidate_predicates(accounts: list[Account]) -> list[Any]:
     identities = sorted({account.chatgpt_account_id for account in accounts if account.chatgpt_account_id})
     if identities:
         predicates.append(Account.chatgpt_account_id.in_(identities))
-    emails = sorted({_normalized_email(account.email) for account in accounts if account.email})
+    emails = sorted({account.email for account in accounts if account.email})
     if emails:
-        predicates.append(func.lower(Account.email).in_(emails))
+        predicates.append(func.lower(Account.email).in_([func.lower(email) for email in emails]))
     return predicates
 
 

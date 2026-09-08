@@ -46,6 +46,23 @@ describe("UpstreamProxySettings", () => {
     expect(screen.getByText(/1 endpoint\(s\)/)).toBeInTheDocument();
   });
 
+  it("warns when an endpoint sends credentials over a plaintext scheme", () => {
+    const admin = createUpstreamProxyAdmin();
+    renderSettings({
+      admin: { ...admin, endpoints: admin.endpoints.map((endpoint) => ({ ...endpoint, plaintextCredentials: true })) },
+    });
+
+    const warning = screen.getByTestId("proxy-endpoint-plaintext-warning-ep_primary");
+    expect(warning).toHaveTextContent(/unencrypted over http/);
+    expect(warning).toHaveTextContent(/https:\/\/ proxy or an IP allowlist/);
+  });
+
+  it("does not warn for endpoints whose credentials are encrypted in transit", () => {
+    renderSettings();
+
+    expect(screen.queryByTestId("proxy-endpoint-plaintext-warning-ep_primary")).not.toBeInTheDocument();
+  });
+
   it("shows explicit empty states when nothing is configured", () => {
     renderSettings({ admin: createUpstreamProxyAdmin({ endpoints: [], pools: [] }) });
 

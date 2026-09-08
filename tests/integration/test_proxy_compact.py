@@ -1272,6 +1272,85 @@ async def test_proxy_compact_token_invalidated_marks_reauth_and_fails_over(async
 
 
 @pytest.mark.asyncio
+async def test_backend_compact_permanent_forced_refresh_failure_fails_over(async_client, monkeypatch):
+    from app.core.auth.refresh import RefreshError
+
+    account_ids: list[str] = []
+    upstream_account_ids: list[str | None] = []
+    for suffix in ("a", "b"):
+        email = f"compact-revoked-refresh-{suffix}@example.com"
+        raw_account_id = f"acc_compact_revoked_refresh_{suffix}"
+        response = await async_client.post(
+            "/api/accounts/import",
+            files={
+                "auth_json": (
+                    f"auth-{suffix}.json",
+                    json.dumps(_make_auth_json(raw_account_id, email)),
+                    "application/json",
+                )
+            },
+        )
+        assert response.status_code == 200
+        account_ids.append(generate_unique_account_id(raw_account_id, email))
+
+    async with SessionLocal() as session:
+        for suffix, account_id in zip(("a", "b"), account_ids, strict=True):
+            account = await session.get(Account, account_id)
+            assert account is not None
+            account.chatgpt_account_id = f"chatgpt_compact_revoked_refresh_{suffix}"
+        await session.commit()
+
+    failed_account_id: str | None = None
+    failed_upstream_account_id: str | None = None
+
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
+        del self, timeout_seconds
+        nonlocal failed_account_id
+        if failed_account_id is None:
+            failed_account_id = account.id
+        if force and account.id == failed_account_id:
+            raise RefreshError(
+                "refresh_token_invalidated",
+                "Refresh token was revoked",
+                True,
+            )
+        return account
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        nonlocal failed_upstream_account_id
+        if failed_upstream_account_id is None:
+            failed_upstream_account_id = account_id
+        upstream_account_ids.append(account_id)
+        if account_id == failed_upstream_account_id:
+            raise ProxyResponseError(
+                401,
+                openai_error(
+                    "token_revoked",
+                    "Encountered invalidated oauth token for user, failing request",
+                    error_type="authentication_error",
+                ),
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.6-sol", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    assert len(upstream_account_ids) == 2
+    assert upstream_account_ids[0] == failed_upstream_account_id
+    assert upstream_account_ids[1] != failed_upstream_account_id
+    assert failed_account_id is not None
+    async with SessionLocal() as session:
+        failed_account = await session.get(Account, failed_account_id)
+        assert failed_account is not None
+        assert failed_account.status == AccountStatus.REAUTH_REQUIRED
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_repeated_401_settles_reservation_if_error_recording_fails(async_client, monkeypatch):
     email = "compact-invalidated-settle@example.com"
     raw_account_id = "acc_compact_invalidated_settle"

@@ -26,6 +26,21 @@ class RuntimeState:
     leased_tokens: float = 0.0
     leases: dict[str, AccountLease] | None = None
     stream_key_inflight: dict[str, int] | None = None
+    # Upstream-overload soft backoff (see ``_load_balancer/overload_backoff.py``).
+    # Recent ``server_is_overloaded`` rejection times inside the trip window,
+    # the deprioritization deadline once tripped, the exponential level, and
+    # when the level last tripped (for decay). Replica-local, never persisted.
+    overload_rejections: list[float] | None = None
+    overload_backoff_until: float | None = None
+    overload_backoff_level: int = 0
+    overload_last_trip_at: float | None = None
+    # Isolation stage deadline (subset of the backoff deadline): while set and
+    # in the future, soft sticky owners are rerouted too.
+    overload_isolated_until: float | None = None
+    # Recent upstream outcome window (see ``_load_balancer/error_rate.py``):
+    # minute bucket -> [successes, failures], pruned to the configured window.
+    # Feeds the selection weight multiplier; replica-local, never persisted.
+    outcome_buckets: dict[int, list[int]] | None = None
 
 
 @dataclass(frozen=True, slots=True)

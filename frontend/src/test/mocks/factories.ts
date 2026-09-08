@@ -51,12 +51,14 @@ import {
 } from "@/features/dashboard/schemas";
 import type {
 	DashboardSettings,
+	SubscriptionOverflowPreflight,
 	TelemetryConsent,
 	TelemetrySnapshotEnvelope,
 	UpstreamProxyAdmin,
 } from "@/features/settings/schemas";
 import {
 	DashboardSettingsSchema,
+	SubscriptionOverflowPreflightSchema,
 	TelemetryConsentSchema,
 	TelemetrySnapshotEnvelopeSchema,
 	UpstreamProxyAdminSchema,
@@ -513,6 +515,9 @@ export function createDashboardSettings(
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,
 		singleAccountId: null,
+		subscriptionOverflowSourceId: null,
+		subscriptionOverflowDrainUntil: null,
+		subscriptionOverflowPinsExpireBy: null,
 		proxyAccountResponseCreateLimit: 4,
 		proxyAccountResponseCreateLimitEnvironmentValue: 4,
 		proxyAccountResponseCreateLimitOverride: 4,
@@ -720,6 +725,50 @@ export function createQuotaPlannerWarmupActionResponse(
 		reason: "synthetic_traffic_disabled",
 		requestId: null,
 		executedAt: null,
+		...overrides,
+	});
+}
+
+export function createSubscriptionOverflowPreflight(
+	overrides: Partial<SubscriptionOverflowPreflight> = {},
+): SubscriptionOverflowPreflight {
+	return SubscriptionOverflowPreflightSchema.parse({
+		sourceId: "src_vllm",
+		sourceName: "vLLM",
+		sourceEnabled: true,
+		eligible: true,
+		blockers: [],
+		drainUntil: null,
+		servedModels: [
+			{
+				slug: "gpt-5.4",
+				enabled: true,
+				neverOverflows: false,
+				neverOverflowsReason: null,
+				undeclaredToolTypes: ["shell", "tool_search"],
+				supportsVision: false,
+				supportsStreaming: true,
+				priced: false,
+				contextWindowMismatch: { registry: 272000, source: 8192, maxOutputTokens: 1024 },
+				warnings: ["undeclared_tool_types", "no_vision", "unpriced", "context_window_smaller"],
+			},
+			{
+				slug: "gpt-5.6-sol",
+				enabled: true,
+				neverOverflows: true,
+				neverOverflowsReason: "responses_lite",
+				undeclaredToolTypes: [],
+				supportsVision: true,
+				supportsStreaming: true,
+				priced: true,
+				contextWindowMismatch: null,
+				warnings: ["responses_lite_excluded"],
+			},
+		],
+		missingModels: ["gpt-5.5"],
+		scopedApiKeyCount: 1,
+		livePinCount: 2,
+		tombstoneCount: 1,
 		...overrides,
 	});
 }

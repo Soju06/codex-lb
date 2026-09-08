@@ -40,3 +40,5 @@
 - [x] 6.6 Bind restoration to the exact credential version used by successful validation, including guarded token rotation, without adopting an unrelated concurrent replacement.
 - [x] 6.7 Reject an oversized export request chunk before appending or retaining it, and preserve legacy ordinary-import matching outside the bundle path.
 - [x] 6.8 Restrict bundle validation refreshes to guarded token-only rotation, suppress metadata/status/routing writes, and keep failed credentials quarantined.
+- [x] 6.9 Exclude pending-deletion destinations from bundle identity matching without changing ordinary-import revival, and cover skip/replace and id collisions through the API.
+- [x] 6.10 Preserve indexed database email comparisons with database-side normalization on both operands, and verify repeated Unicode auth.json imports reuse their slot.

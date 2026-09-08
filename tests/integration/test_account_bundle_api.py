@@ -8,14 +8,84 @@ import pytest
 from app.core.auth import generate_unique_account_id
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardPermissionError
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts import api as accounts_api_module
-from app.modules.accounts.repository import BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
+from app.modules.accounts.repository import ACCOUNT_PENDING_DELETION_REASON, BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
 
 from .test_account_opencode_auth_export import _make_auth_json
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflict_mode", ["skip", "replace"])
+@pytest.mark.parametrize("matching_path", ["slot", "id", "email", "unknown_workspace_email"])
+async def test_account_bundle_import_ignores_pending_deletion(async_client, conflict_mode, matching_path) -> None:
+    email = "pending-bundle@example.invalid"
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json("pending-bundle", email)), "application/json")},
+    )
+    assert imported.status_code == 200
+    original_id = imported.json()["accountId"]
+    async with SessionLocal() as session:
+        account = await session.get(Account, original_id)
+        assert account is not None
+        if matching_path in {"slot", "unknown_workspace_email"}:
+            account.workspace_id = "pending-workspace"
+        await session.commit()
+
+    exported = await async_client.post(
+        "/api/accounts/bundle/export", json={"accountIds": [original_id], "passphrase": "test-passphrase"}
+    )
+    assert exported.status_code == 200
+    deleted_at = utcnow()
+    deleted_id = original_id
+    async with SessionLocal() as session:
+        account = await session.get(Account, original_id)
+        assert account is not None
+        if matching_path in {"email", "unknown_workspace_email"}:
+            deleted_id = account.id = "pending-deletion-legacy-id"
+        if matching_path == "unknown_workspace_email":
+            account.workspace_id = None
+        account.delete_requested_at = deleted_at
+        account.status = AccountStatus.DEACTIVATED
+        account.deactivation_reason = ACCOUNT_PENDING_DELETION_REASON
+        account.alias = "must remain unchanged"
+        await session.commit()
+
+    preview = await async_client.post(
+        "/api/accounts/bundle/import/preflight",
+        files={"bundle": ("accounts.clb-account-bundle", exported.content)},
+        data={"passphrase": "test-passphrase"},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["matchingCount"] == 0
+    assert preview.json()["newCount"] == 1
+    committed = await async_client.post(
+        "/api/accounts/bundle/import/commit",
+        files={"bundle": ("accounts.clb-account-bundle", exported.content)},
+        data={
+            "passphrase": "test-passphrase",
+            "integrity_token": preview.json()["integrityToken"],
+            "conflict_mode": conflict_mode,
+            "confirm_replace": str(conflict_mode == "replace").lower(),
+        },
+    )
+    assert committed.status_code == 200
+    assert committed.json()["summary"] == {"imported": 1, "replaced": 0, "skipped": 0, "failed": 0}
+    visible = (await async_client.get("/api/accounts")).json()["accounts"]
+    assert len(visible) == 1
+    assert visible[0]["accountId"] != deleted_id
+    async with SessionLocal() as session:
+        deleted = await session.get(Account, deleted_id)
+        assert deleted is not None
+        assert deleted.delete_requested_at == deleted_at
+        assert deleted.status == AccountStatus.DEACTIVATED
+        assert deleted.deactivation_reason == ACCOUNT_PENDING_DELETION_REASON
+        assert deleted.alias == "must remain unchanged"
 
 
 @pytest.mark.asyncio

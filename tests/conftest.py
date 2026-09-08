@@ -4,6 +4,7 @@ import asyncio
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -119,6 +120,41 @@ async def _reset_db_state():
     return True
 
 
+async def _reap_leaked_http_bridge_recovery_settlement_tasks(app) -> None:
+    """Cancel bridge retries before the fixture's database is reused.
+
+    Recovery-settlement retries deliberately keep their durable owner fence
+    alive with backoff that can exceed the app lifespan drain.  A test that
+    exercises the fail-closed replay path can therefore leave one of those
+    tasks on the session loop after lifespan teardown; its next retry then
+    races ``_reset_db_state`` or the next lifespan's startup write against
+    the same SQLite file.  The production retry contract stays unchanged —
+    this is only the test boundary reclaiming work owned by this app instance.
+
+    TestClient uses a private portal loop.  Tasks bound to that already-closed
+    loop cannot be driven from this fixture's session loop, so only cancel and
+    await tasks that belong to the current loop.
+    """
+    service = getattr(getattr(app, "state", None), "proxy_service", None)
+    if service is None:
+        return
+    loop = asyncio.get_running_loop()
+    tasks = [
+        task
+        for task in getattr(service, "_background_cleanup_tasks", ())
+        if not task.done()
+        and task.get_name().startswith("http-bridge-recovery-settlement-")
+        and task.get_loop() is loop
+    ]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # Let the tracking callbacks discard the settled tasks before the
+        # service becomes unreachable and the next fixture resets the DB.
+        await asyncio.sleep(0)
+
+
 @pytest_asyncio.fixture
 async def app_instance(_reset_db_state, monkeypatch):
     del _reset_db_state
@@ -130,7 +166,8 @@ async def app_instance(_reset_db_state, monkeypatch):
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
     monkeypatch.setattr(main_module, "build_rate_limit_reset_credits_scheduler", lambda: _NoopScheduler())
     app = create_app()
-    return app
+    yield app
+    await _reap_leaked_http_bridge_recovery_settlement_tasks(app)
 
 
 @pytest.fixture(autouse=True)
@@ -238,6 +275,11 @@ async def async_client(app_instance):
             event_hooks={"response": [_drain_proxy_persistence]},
         ) as client:
             yield client
+        # Reclaim bridge retries before the lifespan's own shutdown drain. A
+        # retry that has already outlived the response hook would otherwise
+        # consume the shutdown budget and keep the shared SQLite file active
+        # while the next app fixture starts.
+        await _reap_leaked_http_bridge_recovery_settlement_tasks(app_instance)
 
 
 @pytest.fixture(autouse=True)
@@ -406,7 +448,7 @@ def _reset_shutdown_task_admission():
     shutdown_state.reset()
 
 
-_SESSION_LOOP: asyncio.AbstractEventLoop | None = None
+_session_loop: asyncio.AbstractEventLoop | None = None
 
 # Both task names the live-usage ingestor owns (consumer and throttled
 # trailing cache invalidation); the fence below reclaims them by name when the
@@ -414,7 +456,7 @@ _SESSION_LOOP: asyncio.AbstractEventLoop | None = None
 _LIVE_INGEST_TASK_NAMES = ("live-usage-ingestor", "live-usage-trailing-invalidation")
 
 
-def _pending_live_ingest_tasks(loop: asyncio.AbstractEventLoop) -> list[asyncio.Task]:
+def _pending_live_ingest_tasks(loop: asyncio.AbstractEventLoop) -> list[asyncio.Task[Any]]:
     return [task for task in asyncio.all_tasks(loop) if not task.done() and task.get_name() in _LIVE_INGEST_TASK_NAMES]
 
 
@@ -427,10 +469,10 @@ async def _capture_session_loop():
     fixture), and pytest-asyncio has no public API to reach the session loop
     from sync code.
     """
-    global _SESSION_LOOP
-    _SESSION_LOOP = asyncio.get_running_loop()
+    global _session_loop
+    _session_loop = asyncio.get_running_loop()
     yield
-    _SESSION_LOOP = None
+    _session_loop = None
 
 
 async def _reap_leaked_live_usage_ingestor() -> None:
@@ -547,7 +589,7 @@ def _stop_leaked_live_usage_ingestor():
     from app.core.usage import live_hub
     from app.modules.usage import live_ingest
 
-    loop = _SESSION_LOOP
+    loop = _session_loop
     loop_usable = loop is not None and not loop.is_closed() and not loop.is_running()
     needs_reap = (
         live_ingest._ingestor is not None

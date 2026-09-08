@@ -36,6 +36,7 @@ allowed = [
   ".agents",
   ".all-contributorsrc",
   ".claude",
+  ".coderabbit.yaml",
   ".dockerignore",
   ".env.example",
   ".gitattributes",

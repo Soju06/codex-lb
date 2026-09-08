@@ -58,6 +58,7 @@ from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
 from app.core.resilience.loop_lag_monitor import run_event_loop_lag_monitor
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.retention.scheduler import build_data_retention_scheduler
+from app.core.runtime_logging import install_redacting_loop_exception_handler
 from app.core.scheduling.leader_election import get_leader_election
 from app.core.shutdown import close_control_plane_task_admission
 from app.core.timeout_invariants import validate_runtime_timeout_invariants
@@ -158,17 +159,18 @@ _ensure_web_asset_mime_types()
 async def run_http_bridge_heartbeat_maintenance(proxy_service: Any) -> None:
     """Per-replica bridge upkeep driven by the ring heartbeat.
 
-    Both passes are request-independent by design: durable ownership must be
+    All passes are request-independent by design: durable ownership must be
     reconciled even on a replica nothing is routing to, and the idle sweep is
     otherwise only reached from ``_get_or_create_http_bridge_session``, so a
     replica that stops taking bridge requests would keep its idle sessions'
     upstream WebSockets open until restart (issue #1354). Each pass is isolated
-    so one failing cannot skip the other or stop the heartbeat.
+    so one failing cannot skip the others or stop the heartbeat.
     """
     if proxy_service is None:
         return
     for attribute, failure_message in (
         ("reconcile_durable_http_bridge_ownership", "HTTP bridge durable ownership reconciliation failed"),
+        ("abandon_stale_http_bridge_operations", "HTTP bridge stale operation abandonment failed"),
         ("prune_idle_http_bridge_sessions", "HTTP bridge idle sweep failed"),
     ):
         pass_callable = getattr(proxy_service, attribute, None)
@@ -447,6 +449,10 @@ async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
 
     shutdown_state = import_module("app.core.shutdown")
+    # First app code on uvicorn's loop: mask credential-bearing object reprs
+    # (aiohttp ConnectionKey proxy URLs, BasicAuth) before the default handler
+    # renders them into the 'asyncio' logger.
+    install_redacting_loop_exception_handler(asyncio.get_running_loop())
     metrics_server = None
     metrics_server_task: asyncio.Task[None] | None = None
     ring_service = None

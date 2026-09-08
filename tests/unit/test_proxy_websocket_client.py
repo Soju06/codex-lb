@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import json
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -1935,8 +1936,13 @@ async def test_connect_responses_websocket_maps_generic_invalid_handshake(monkey
 
 
 @pytest.mark.asyncio
-async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
-    invalid_proxy = InvalidProxy("http://proxy.invalid", "unsupported proxy scheme")
+async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch, caplog):
+    # websockets' InvalidProxy str() embeds the full proxy URL (userinfo
+    # included); the Responses path must use the fixed message like live does.
+    invalid_proxy = InvalidProxy(
+        runtime_basic_auth_url("proxy-user", "proxy-secret", "proxy.invalid:1/path"),
+        "path is meaningless",
+    )
 
     async def fake_websocket_connect(url: str, **kwargs):
         del url, kwargs
@@ -1966,8 +1972,10 @@ async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
 
     assert exc_info.value.status_code == 502
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
-
-    assert _proxy_error_message(exc_info.value) == str(invalid_proxy)
+    assert _proxy_error_message(exc_info.value) == "Invalid upstream websocket proxy configuration"
+    assert "proxy-secret" not in json.dumps(exc_info.value.payload)
+    assert "proxy-secret" not in caplog.text
+    assert "path is meaningless" in caplog.text
 
 
 @pytest.mark.asyncio

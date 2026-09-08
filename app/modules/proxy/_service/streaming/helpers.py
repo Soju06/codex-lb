@@ -53,8 +53,9 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.openai.models import OpenAIError, OpenAIEvent
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.models import OpenAIError, OpenAIEvent, OpenAIResponsePayload, ResponseUsage
+from app.core.openai.parsing import classify_event_type, parse_sse_event
+from app.core.openai.requests import ResponsesRequest
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
 )
@@ -69,6 +70,7 @@ from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
+from app.modules.proxy._load_balancer.overload_backoff import UPSTREAM_OVERLOAD_CODES, record_upstream_overload
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -256,6 +258,9 @@ from app.modules.proxy._service.observability import (
     _interesting_header_keys as _interesting_header_keys,
 )
 from app.modules.proxy._service.observability import (
+    _is_reasoning_replay_rejection as _is_reasoning_replay_rejection,
+)
+from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_payload as _maybe_log_proxy_request_payload,
 )
 from app.modules.proxy._service.observability import (
@@ -265,10 +270,16 @@ from app.modules.proxy._service.observability import (
     _maybe_log_proxy_service_tier_trace as _maybe_log_proxy_service_tier_trace,
 )
 from app.modules.proxy._service.observability import (
+    _observe_terminal_stream_error_frame as _observe_terminal_stream_error_frame,
+)
+from app.modules.proxy._service.observability import (
     _record_continuity_fail_closed as _record_continuity_fail_closed,
 )
 from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
+)
+from app.modules.proxy._service.observability import (
+    _record_upstream_reasoning_replay_rejection as _record_upstream_reasoning_replay_rejection,
 )
 from app.modules.proxy._service.observability import (
     _summarize_input as _summarize_input,
@@ -404,10 +415,76 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
+from app.modules.usage.updater import UsageUpdater
 
 
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
+
+
+def _canonical_background_ack(
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> tuple[str, OpenAIResponsePayload] | None:
+    if event_type not in {"response.queued", "response.in_progress"}:
+        return None
+    response = event_payload.get("response") if event_payload is not None else None
+    response_id = response.get("id") if isinstance(response, dict) else None
+    if not (
+        isinstance(response, dict)
+        and response.get("object") == "response"
+        and isinstance(response_id, str)
+        and bool(response_id)
+        and response_id == response_id.strip()
+        and response.get("status") == event_type.removeprefix("response.")
+        and response.get("output") == []
+    ):
+        return None
+    # The relayed payload model drops known submodels that fail validation
+    # instead of raising, so a malformed `usage` or `error` would otherwise be
+    # discarded silently on a response classified as successful.
+    payload = OpenAIResponsePayload.model_validate(response)
+    if (response.get("usage") is None) != (payload.usage is None):
+        return None
+    if (response.get("error") is None) != (payload.error is None):
+        return None
+    return response_id, payload
+
+
+def _canonical_background_ack_response_id(
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> str | None:
+    canonical_ack = _canonical_background_ack(event_payload, event_type)
+    return canonical_ack[0] if canonical_ack is not None else None
+
+
+def _is_background_json_ack(
+    stream: bool | None,
+    event_payload: dict[str, JsonValue] | None,
+    event_type: str | None,
+) -> bool:
+    return stream is False and _canonical_background_ack_response_id(event_payload, event_type) is not None
+
+
+def _settle_background_ack(
+    settlement: _StreamSettlement,
+    payload: ResponsesRequest,
+    event_payload: dict[str, JsonValue] | None,
+    response_id: str,
+) -> tuple[bool, str, ResponseUsage | None]:
+    """Treat a canonical background acknowledgement as the terminal event of a `stream: false` request."""
+    canonical_ack = (
+        _canonical_background_ack(event_payload, classify_event_type(event_payload))
+        if payload.stream is False
+        else None
+    )
+    if canonical_ack is None:
+        return False, response_id, None
+    ack_response_id, ack_payload = canonical_ack
+    settlement.response_id = ack_response_id
+    return True, ack_response_id, ack_payload.usage
 
 
 def _stream_iterator_after_capacity_admission(
@@ -631,6 +708,24 @@ def _raw_stream_error_code_or_upstream(
     ):
         return "upstream_error"
     return error_code
+
+
+def _classify_terminal_stream_error_frame(
+    event_type: str | None,
+    event_payload: dict[str, JsonValue] | None,
+    error_code: str,
+    error_message: str | None,
+) -> str:
+    """Resolve a terminal frame's error code and record its observability in one step.
+
+    ``streaming/mixin.py`` sits at its line ceiling, so the two parsed
+    terminal-frame sites resolve the code (``_raw_stream_error_code_or_upstream``)
+    and observe the frame (``_observe_terminal_stream_error_frame``) through
+    this single call instead of one statement each.
+    """
+    resolved_code = _raw_stream_error_code_or_upstream(event_type, event_payload, error_code)
+    _observe_terminal_stream_error_frame(resolved_code, error_message)
+    return resolved_code
 
 
 def _mark_stream_settlement_interrupted(
@@ -954,6 +1049,23 @@ def _is_model_scoped_rejection(
     return is_model_scoped_upstream_rejection(message)
 
 
+def _request_usage_refresh(proxy: Any, account_id: str) -> None:
+    """Schedule a tracked, coalesced usage refresh after a streamed ``usage_limit_reached``.
+
+    ``mark_rate_limit`` persists status only, while the pool-exhaustion
+    predicate also needs a >= 100 % usage row that would otherwise wait for
+    the next scheduler tick. The refresh runs on its own background session
+    and never touches this request's ``Account``.
+    """
+    schedule = getattr(proxy, "_schedule_cancel_safe_cleanup", None)
+    if schedule is None:
+        return
+    refresh = UsageUpdater.request_refresh(account_id)
+    if refresh is None:
+        return
+    schedule(refresh, action="request_usage_refresh", request_id=get_request_id() or "unknown")
+
+
 async def _handle_stream_error(
     proxy: Any,
     account: Account,
@@ -969,6 +1081,13 @@ async def _handle_stream_error(
         http_status=http_status,
         phase="first_event",
     )
+    # Terminal frames are counted where they are classified
+    # (``_observe_terminal_stream_error_frame``); only HTTP status rejections
+    # reach the counter from here, so a failure is never counted twice.
+    if http_status is not None and _is_reasoning_replay_rejection(
+        code=code, http_status=http_status, message=error.get("message")
+    ):
+        _record_upstream_reasoning_replay_rejection()
     if _facade()._is_account_neutral_error_code(code):
         return classified
     if _is_account_neutral_request_rejection(
@@ -996,6 +1115,8 @@ async def _handle_stream_error(
         return classified
     if classified["failure_class"] == "rate_limit":
         await proxy._load_balancer.mark_rate_limit(account, error)
+        if code == USAGE_LIMIT_REACHED:
+            _request_usage_refresh(proxy, account.id)
     elif classified["failure_class"] == "quota":
         await proxy._load_balancer.mark_quota_exceeded(account, error)
     elif code in PERMANENT_FAILURE_CODES:
@@ -1008,6 +1129,15 @@ async def _handle_stream_error(
             get_request_id(),
             code,
         )
+        if code in UPSTREAM_OVERLOAD_CODES:
+            # Overload is an admission rejection that successes on the same
+            # account's warm sessions keep masking from ``error_count``; feed
+            # the dedicated sliding window so fresh selection can deprioritize.
+            await record_upstream_overload(
+                proxy._load_balancer,
+                account,
+                redact_account_id=privacy_policy.redacts_sensitive_details,
+            )
     return classified
 
 

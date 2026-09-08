@@ -231,7 +231,6 @@ async def test_bundle_replace_preserves_durably_unavailable_destination_local_st
         existing.deactivation_reason = "destination-local-reason"
         existing.reset_at = 101
         existing.blocked_at = 202
-        existing.delete_requested_at = utcnow()
         existing.delete_history_requested = True
         await repo.upsert(existing, merge_by_email=False)
 
@@ -256,7 +255,7 @@ async def test_bundle_replace_preserves_durably_unavailable_destination_local_st
         assert stored.deactivation_reason == "destination-local-reason"
         assert stored.reset_at == 101
         assert stored.blocked_at == 202
-        assert stored.delete_requested_at is not None
+        assert stored.delete_requested_at is None
         assert stored.delete_history_requested is True
 
 
@@ -541,6 +540,27 @@ async def test_bundle_destination_matching_treats_workspace_id_and_label_keys_as
 
         assert matches[0] is not None
         assert matches[0].id == existing.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_id", [None, "visible-workspace"])
+async def test_bundle_matching_ignores_deleted_candidates_before_ambiguity_check(db_setup, workspace_id):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        for account_id in ("deleted-a", "deleted-b", "visible"):
+            account = _make_account(account_id, "visible-bundle@example.invalid")
+            account.workspace_id = workspace_id
+            account.chatgpt_account_id = "visible-upstream"
+            if account_id != "visible":
+                account.delete_requested_at = utcnow()
+            session.add(account)
+        await session.commit()
+        incoming = _make_account("source", "visible-bundle@example.invalid")
+        incoming.workspace_id = workspace_id
+        incoming.chatgpt_account_id = "visible-upstream"
+        matches = await repo.account_bundle_identity_matches([incoming])
+        assert matches[0] is not None
+        assert matches[0].id == "visible"
 
 
 @pytest.mark.asyncio

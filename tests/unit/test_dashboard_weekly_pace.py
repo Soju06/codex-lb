@@ -432,3 +432,50 @@ async def test_weekly_pace_attribution_merges_rankings_and_dedupes_unnamed_key(d
     assert any(row.billable_tokens == 1_500 for row in rows)
     request_logs_table = cast(Table, RequestLog.__table__)
     assert "idx_logs_dash_usage_covering" in {index.name for index in request_logs_table.indexes}
+
+
+def _assert_close(actual: object, expected: object, path: str = "") -> None:
+    if isinstance(expected, dict):
+        assert isinstance(actual, dict), path
+        assert actual.keys() == expected.keys(), path
+        for key in expected:
+            _assert_close(actual[key], expected[key], f"{path}.{key}")
+    elif isinstance(expected, list):
+        assert isinstance(actual, list) and len(actual) == len(expected), path
+        for index, (left, right) in enumerate(zip(actual, expected)):
+            _assert_close(left, right, f"{path}[{index}]")
+    elif isinstance(expected, float) and not isinstance(expected, bool):
+        assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12), path
+    else:
+        assert actual == expected, path
+
+
+def test_weekly_pace_is_unchanged_by_ewma_tail_cap_under_fleet_burn_floor() -> None:
+    """The projections fetch returns every row inside the 3h fleet-burn floor
+    plus only the newest 64 older rows. The equal-weight consumers (fleet
+    burn, smoothing mean, latest) read nothing older than the floor, so they
+    are exact; the 6h recent-burn EWMA sees a 64-row tail instead of the full
+    3h..6h stretch and must agree to floating-point noise (the per-minute
+    cadence here gives the tail one EWMA update per row)."""
+    from app.modules.dashboard.service import _PROJECTION_EWMA_TAIL_ROWS
+    from app.modules.dashboard.weekly_pace import FLEET_BURN_WINDOW
+
+    account_id = "acc-dense"
+    # One row per minute for 7 days (denser than the cap inside 3h..6h).
+    rows: list[UsageHistory] = []
+    used = 2.0
+    for index in range(7 * 24 * 60, 0, -1):
+        used += 0.0045 + 0.002 * ((index * 7919) % 11) / 11.0
+        rows.append(_row(account_id, round(used, 6), NOW - timedelta(minutes=index)))
+    floor = NOW - FLEET_BURN_WINDOW
+    older = [row for row in rows if row.recorded_at < floor]
+    tail_bounded = older[-_PROJECTION_EWMA_TAIL_ROWS:] + [row for row in rows if row.recorded_at >= floor]
+    assert len(tail_bounded) < len(rows)
+
+    summaries = [_summary(account_id, used_percent=round(used, 6), reset_in_hours=30.0)]
+    full_pace = _build(summaries, {account_id: rows})
+    tail_pace = _build(summaries, {account_id: tail_bounded})
+
+    assert full_pace.burn_rate_recent_credits_per_hour is not None
+    assert full_pace.burn_rate_recent_credits_per_hour > 0
+    _assert_close(tail_pace.model_dump(), full_pace.model_dump())

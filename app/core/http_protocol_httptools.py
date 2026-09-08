@@ -23,6 +23,16 @@ parser with the declined offer's hop-by-hop headers removed, and the request is
 served as plain HTTP/1.1. Legitimate WebSocket upgrades keep the stock path.
 
 See https://github.com/Soju06/codex-lb/issues/1757.
+
+The subclass has a second, independent job: releasing the keep-alive timer on
+*every* connection loss. Stock uvicorn cancels it only when the peer closed
+cleanly (``exc is None``); after an RST/``ECONNRESET`` the armed
+``TimerHandle`` keeps the protocol — and with it the transport, request cycle
+and ASGI scope — reachable from the event loop for ``--timeout-keep-alive``
+seconds. Reverse proxies purge idle server-side connections with RST, so
+behind one every request leaked its protocol for the whole window. Fixing the
+upgrade handling upstream therefore does not by itself make this module
+retirable; see ``tests/integration/test_http_keepalive_timer.py``.
 """
 
 from __future__ import annotations
@@ -35,6 +45,18 @@ from app.core.http_protocol import combined_upgrade_offer, offers_ignorable_upgr
 
 class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
     """httptools protocol that serves non-WebSocket upgrade offers as HTTP/1.1."""
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        # uvicorn (<= 0.52.4 and master) cancels the keep-alive timer only when
+        # the peer closed cleanly (exc is None). On RST/ECONNRESET the armed
+        # TimerHandle holds a bound method of this protocol, pinning it and its
+        # transport/cycle/scope for timeout_keep_alive seconds. Cancel it on
+        # every loss. super() first: the base clears ``self.parser`` last and
+        # the cancel touches only ``timeout_keep_alive_task``. The transport is
+        # not closed here on the exc path (stock semantics: the loop already
+        # force-closed it).
+        super().connection_lost(exc)
+        self._unset_keepalive_if_required()
 
     def _active_parser(self) -> httptools.HttpRequestParser:
         # The base class only clears ``self.parser`` in connection_lost, after

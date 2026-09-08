@@ -23,6 +23,7 @@ import {
   createDashboardOverview,
   createDashboardProjections,
   createDashboardSettings,
+  createSubscriptionOverflowPreflight,
   createDefaultAccounts,
   createDefaultApiKeys,
   createDefaultConversations,
@@ -108,6 +109,7 @@ const AccountRoutingPolicyPayloadSchema = z.object({
 
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
+  subscriptionOverflowSourceId: z.string().nullable().optional(),
   upstreamStreamTransport: z
     .enum(["default", "auto", "http", "websocket"])
     .optional(),
@@ -1209,6 +1211,28 @@ export const handlers = [
     return HttpResponse.json(state.settings);
   }),
 
+  http.get("/api/settings/subscription-overflow/preflight", ({ request }) => {
+    const sourceId = new URL(request.url).searchParams.get("source_id") ?? "";
+    const source = state.modelSources.find((candidate) => candidate.id === sourceId);
+    if (!source) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Model source not found" } },
+        { status: 404 },
+      );
+    }
+    const eligible = source.kind === "openai_compatible" && source.supportsResponses;
+    return HttpResponse.json(
+      createSubscriptionOverflowPreflight({
+        sourceId: source.id,
+        sourceName: source.name,
+        sourceEnabled: source.isEnabled,
+        eligible,
+        blockers: eligible ? [] : ["source_responses_unsupported"],
+        drainUntil: state.settings.subscriptionOverflowDrainUntil,
+      }),
+    );
+  }),
+
   http.get("/api/settings/telemetry", ({ request }) => {
     // include_preview=true is the on-demand path: the envelope is attached
     // regardless of consent state.
@@ -1270,6 +1294,9 @@ export const handlers = [
       port: payload.port,
       username: payload.username ?? null,
       isActive: payload.isActive ?? true,
+      // Mirrors the server: credentials on http/socks5 cross the proxy hop unencrypted.
+      plaintextCredentials:
+        payload.scheme !== "https" && (payload.username != null || payload.password != null),
     };
     state.upstreamProxyAdmin = {
       ...state.upstreamProxyAdmin,

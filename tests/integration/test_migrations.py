@@ -2324,19 +2324,84 @@ async def test_model_source_pins_migration_upgrade_and_downgrade(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decoy_index_ddl",
+    [
+        pytest.param("CREATE INDEX ix_model_source_pins_purge_at ON model_source_pins (kind)", id="kind-column"),
+        pytest.param(
+            "CREATE UNIQUE INDEX ix_model_source_pins_purge_at ON model_source_pins (purge_at)", id="unique-purge-at"
+        ),
+    ],
+)
+async def test_model_source_pins_index_migration_replaces_valid_decoy_index(tmp_path, decoy_index_ddl):
+    """A pre-existing, valid index that merely shares the purge-at index name is rebuilt.
+
+    The table guard skips ``CREATE TABLE`` for a pre-existing table, so the
+    index step must inspect the reflected definition instead of accepting the
+    name: a same-named index on ``kind`` (or a unique one on ``purge_at``) would
+    otherwise leave the revision marked applied without the index this
+    revision promises.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'model-source-pins-decoy.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    overflow_revision = "20260908_000000_add_subscription_overflow"
+
+    def _indexes(sync_conn) -> dict[str, tuple[tuple[str, ...], bool]]:
+        return {
+            index["name"]: (tuple(index["column_names"]), bool(index["unique"]))
+            for index in sa_inspect(sync_conn).get_indexes("model_source_pins")
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE model_source_pins (
+                        pin_key VARCHAR NOT NULL PRIMARY KEY,
+                        kind VARCHAR NOT NULL,
+                        source_id VARCHAR NOT NULL,
+                        api_key_id VARCHAR,
+                        created_at DATETIME NOT NULL,
+                        last_seen_at DATETIME NOT NULL,
+                        expires_at DATETIME NOT NULL,
+                        purge_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+            await conn.execute(text(decoy_index_ddl))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_indexes) != {"ix_model_source_pins_purge_at": (("purge_at",), False)}
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, overflow_revision, bootstrap_legacy=False))
+        assert result.current_revision == overflow_revision
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_indexes) == {"ix_model_source_pins_purge_at": (("purge_at",), False)}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     not _is_postgresql_database_url(_DATABASE_URL),
     reason="PostgreSQL-only invalid pin-index repair test",
 )
-async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql(db_setup):
-    """A pre-existing ``model_source_pins`` table whose purge-at index is invalid is repaired.
+@pytest.mark.parametrize("mark_invalid", [pytest.param(True, id="invalid"), pytest.param(False, id="valid-decoy")])
+async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql(db_setup, mark_invalid):
+    """A pre-existing ``model_source_pins`` table whose purge-at index is wrong is repaired.
 
     The table guard skips ``CREATE TABLE`` when the table already exists, so the
-    index step must not accept an invalid same-named index by name (what an
-    interrupted out-of-band ``CREATE INDEX CONCURRENTLY`` leaves behind). Step
-    the schema back below the overflow revision, plant a decoy key-only index
-    marked invalid, and assert the re-applied migration replaces it with a
-    valid index on ``purge_at``.
+    index step must not accept a same-named index by name: neither one left
+    invalid by an interrupted out-of-band ``CREATE INDEX CONCURRENTLY`` nor a
+    valid one on the wrong column. Step the schema back below the overflow
+    revision, plant a decoy key-only index (optionally marked invalid), and
+    assert the re-applied migration replaces it with a valid index on
+    ``purge_at``.
     """
     from alembic import command
 
@@ -2366,10 +2431,11 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
             )
         )
         await session.execute(text(f"CREATE INDEX {index_name} ON model_source_pins (kind)"))
-        await session.execute(
-            text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = CAST(:name AS regclass)"),
-            {"name": index_name},
-        )
+        if mark_invalid:
+            await session.execute(
+                text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = CAST(:name AS regclass)"),
+                {"name": index_name},
+            )
         await session.commit()
 
     result = await run_startup_migrations(_DATABASE_URL)
@@ -2394,3 +2460,4 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
 
     assert indisvalid is True
     assert indexdef.endswith("(purge_at)")  # rebuilt on purge_at, not the accepted decoy on kind
+    assert indexdef.startswith("CREATE INDEX ")  # non-unique, as the ORM declares it

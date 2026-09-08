@@ -17,6 +17,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
+from sqlalchemy.engine.interfaces import ReflectedIndex
 
 revision = "20260908_000000_add_subscription_overflow"
 down_revision = "20260830_000000_add_quota_warmup_claim_expiry"
@@ -48,11 +49,20 @@ def _column_names(connection: Connection, table_name: str) -> set[str]:
     return {str(column["name"]) for column in inspector.get_columns(table_name) if column.get("name") is not None}
 
 
-def _index_names(connection: Connection, table_name: str) -> set[str]:
+def _reflected_index(connection: Connection, table_name: str, index_name: str) -> ReflectedIndex | None:
     inspector = sa.inspect(connection)
     if not inspector.has_table(table_name):
-        return set()
-    return {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name") is not None}
+        return None
+    for index in inspector.get_indexes(table_name):
+        if index.get("name") == index_name:
+            return index
+    return None
+
+
+def _index_targets_purge_at(index: ReflectedIndex) -> bool:
+    # A same-named index on other columns (or a unique one) is a decoy: it must
+    # be replaced, not accepted by name.
+    return tuple(index.get("column_names") or ()) == ("purge_at",) and not index.get("unique")
 
 
 def _postgresql_index_is_invalid(connection: Connection, index_name: str) -> bool:
@@ -100,11 +110,15 @@ def upgrade() -> None:
     # already exists (partial dump, out-of-band creation) still needs the
     # purge-at index. The table is created empty by this same revision, so a
     # plain in-transaction index suffices; CONCURRENTLY would buy nothing.
-    # On PostgreSQL an existing same-named index left invalid by an
-    # interrupted out-of-band CONCURRENTLY build would otherwise be accepted
-    # by name, so drop it and rebuild.
-    if _PINS_INDEX in _index_names(bind, _PINS_TABLE):
-        if bind.dialect.name != "postgresql" or not _postgresql_index_is_invalid(bind, _PINS_INDEX):
+    # An existing same-named index is only accepted when it is the index this
+    # revision would create: one on exactly ``purge_at`` that is, on
+    # PostgreSQL, not left invalid by an interrupted out-of-band CONCURRENTLY
+    # build. Anything else is dropped and rebuilt.
+    existing_index = _reflected_index(bind, _PINS_TABLE, _PINS_INDEX)
+    if existing_index is not None:
+        if _index_targets_purge_at(existing_index) and (
+            bind.dialect.name != "postgresql" or not _postgresql_index_is_invalid(bind, _PINS_INDEX)
+        ):
             return
         op.drop_index(_PINS_INDEX, table_name=_PINS_TABLE)
     op.create_index(_PINS_INDEX, _PINS_TABLE, ["purge_at"], unique=False)
@@ -114,7 +128,7 @@ def downgrade() -> None:
     bind = op.get_bind()
 
     if sa.inspect(bind).has_table(_PINS_TABLE):
-        if _PINS_INDEX in _index_names(bind, _PINS_TABLE):
+        if _reflected_index(bind, _PINS_TABLE, _PINS_INDEX) is not None:
             op.drop_index(_PINS_INDEX, table_name=_PINS_TABLE)
         op.drop_table(_PINS_TABLE)
 

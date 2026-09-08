@@ -865,6 +865,31 @@ async def test_settlement_stream_forwarding_error_records_the_source_code_and_ti
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_kind", ["failed", "error"])
+async def test_settlement_stream_failure_terminal_releases_a_limited_key_instead_of_estimating(
+    recorder: _Recorder, terminal_kind: str
+) -> None:
+    """A relayed ``response.failed``/``error`` ends the stream normally; it is an error, never a charged success."""
+
+    owner = _owner(recorder, reservation=_reservation(limited=True))
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "data: created\n\n"
+        holder.terminal_kind = cast(Any, terminal_kind)
+        yield "data: failed\n\n"
+
+    chunks = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert chunks == ["data: created\n\n", "data: failed\n\n"]
+    assert recorder.settle_calls == []
+    assert recorder.release_calls == [owner.reservation]
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.rows[0]["error_code"] == "model_source_response_failed"
+
+
+@pytest.mark.asyncio
 async def test_settlement_stream_unexpected_exception_is_a_stream_error(recorder: _Recorder) -> None:
     owner = _owner(recorder, reservation=_reservation())
     _attach_stream(owner)

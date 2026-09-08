@@ -847,6 +847,46 @@ async def test_source_429_passes_through_with_its_retry_after_and_releases(async
 
 
 @pytest.mark.asyncio
+async def test_source_failure_terminal_releases_the_limited_key(async_client, source_upstream) -> None:
+    """A source that answers ``response.failed`` without usage produced no answer: release, never estimate."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    failed = _sse(
+        {
+            "type": "response.failed",
+            "sequence_number": 1,
+            "response": {
+                "id": "resp_dispatch_failed",
+                "object": "response",
+                "status": "failed",
+                "error": {"code": "server_error", "message": "upstream exploded"},
+            },
+        }
+    )
+    base_url = await source_upstream(_sse_handler(state, before_hold=[_created("resp_dispatch_failed"), failed]))
+    model = "dispatch-failure-terminal"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    async with async_client.stream(
+        "POST", "/v1/responses", headers={"Authorization": f"Bearer {key}"}, json=_request_body(model)
+    ) as response:
+        assert response.status_code == 200
+        text = "".join([chunk async for chunk in response.aiter_text()])
+
+    assert "response.failed" in text
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["released"]
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("error", "model_source_response_failed")]
+    assert rows[0].request_id == "resp_dispatch_failed"
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
 async def test_unlimited_key_streams_live_without_a_settlement(async_client, source_upstream) -> None:
     await _enable_api_key_auth(async_client)
     state = _StubState()

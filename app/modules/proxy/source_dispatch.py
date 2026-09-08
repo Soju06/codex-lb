@@ -118,6 +118,10 @@ ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY = "client_disconnected_before_body"
 ABANDON_DISPATCH_INTERRUPTED = "dispatch_interrupted"
 ERROR_USAGE_SETTLEMENT_FAILED = "usage_settlement_failed"
 ERROR_MODEL_SOURCE_STREAM = "model_source_stream_error"
+# The source ended the stream with ``response.failed`` / ``error``: no answer was
+# delivered, so the attempt is an error and the reservation is released.
+ERROR_MODEL_SOURCE_RESPONSE_FAILED = "model_source_response_failed"
+_FAILURE_TERMINAL_KINDS = frozenset({"failed", "error"})
 CANCELLED_CLIENT_DISCONNECTED = "client_disconnected"
 # The overflow decision (WP-C2) overrides these with its own codes; a pin
 # intent is never armed by direct routing, so they are unreachable in
@@ -801,6 +805,14 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
         async for chunk in wrapped:
             yield chunk
         completed_normally = True
+        holder = owner.observe_stream()
+        if holder is not None and holder.terminal_kind in _FAILURE_TERMINAL_KINDS:
+            # The public wrapper relays a failure terminal and ends the stream
+            # normally; a limited key must not be charged (not even at the
+            # estimate) for an answer the source never produced.
+            status = "error"
+            error_code = ERROR_MODEL_SOURCE_RESPONSE_FAILED
+            error_message = f"source terminated the stream with response.{holder.terminal_kind}"
     except (asyncio.CancelledError, GeneratorExit):
         status = "cancelled"
         error_code = CANCELLED_CLIENT_DISCONNECTED

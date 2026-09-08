@@ -38,6 +38,12 @@ SOURCE_FIRST_FRAME_DEADLINE_SECONDS = 30.0
 # with ``settings.stream_idle_timeout_seconds`` so a source never inherits the
 # 7200 s subscription idle window.
 SOURCE_STREAM_IDLE_CAP_SECONDS = 300.0
+# Aggregate bytes a stream may withhold while a pre-content hook is armed
+# (``_source_stream_body``): twice the parser's single-frame cap, so one
+# oversized frame always reaches the parser's content classification before
+# this bound trips, while a source that only ever produces bookkeeping frames
+# cannot grow the withheld buffer for its whole total budget.
+SOURCE_STREAM_WITHHELD_CAP_BYTES = 2 * 1_048_576
 
 TimeoutPhase = Literal["connect", "header", "first_frame", "idle"]
 FrameKind = Literal["non_content", "content", "success_terminal", "failure_terminal"]
@@ -542,11 +548,17 @@ async def _source_stream_body(
     there is nothing to pin. A frame that outgrows the parser's buffer cap
     counts as content (it cannot be a bookkeeping envelope and its truncated
     remainder never parses), so an oversized terminal never reaches the client
-    unpinned. A hook exception propagates and the withheld bytes are dropped
-    -- the client must not receive content whose continuity was not secured.
+    unpinned. The withheld bytes are bounded by
+    ``SOURCE_STREAM_WITHHELD_CAP_BYTES``: a source that keeps producing
+    complete bookkeeping frames past that bound fails closed with
+    ``502 invalid_upstream_response`` instead of growing the buffer for its
+    whole total budget. A hook exception propagates and the withheld bytes are
+    dropped -- the client must not receive content whose continuity was not
+    secured.
     """
 
     withheld: list[bytes] | None = [] if on_first_content is not None else None
+    withheld_bytes = 0
     chunks = response.content.iter_chunked(_SOURCE_STREAM_CHUNK_BYTES)
     chunk: bytes | None = first_chunk or None
     try:
@@ -567,6 +579,7 @@ async def _source_stream_body(
                 yield chunk
             else:
                 withheld.append(chunk)
+                withheld_bytes += len(chunk)
                 if usage_holder.first_content_seen:
                     assert on_first_content is not None
                     await on_first_content(usage_holder)
@@ -577,6 +590,8 @@ async def _source_stream_body(
                     released, withheld = withheld, None
                     for pending in released:
                         yield pending
+                elif withheld_bytes > SOURCE_STREAM_WITHHELD_CAP_BYTES:
+                    raise _withheld_cap_error(withheld_bytes)
             chunk = None
         if withheld:
             if usage_holder.first_content_seen:
@@ -794,6 +809,25 @@ def _empty_stream_error(response_status: int) -> ModelSourceForwardingError:
             }
         },
         upstream_status_code=response_status,
+    )
+
+
+def _withheld_cap_error(withheld_bytes: int) -> ModelSourceForwardingError:
+    """A hook is armed and the source produced only bookkeeping past the withheld-bytes cap (fail closed, I11)."""
+
+    return ModelSourceForwardingError(
+        status_code=502,
+        payload={
+            "error": {
+                "message": (
+                    "OpenAI-compatible model source sent "
+                    f"{withheld_bytes} bytes without a content frame (limit {SOURCE_STREAM_WITHHELD_CAP_BYTES})"
+                ),
+                "type": "upstream_error",
+                "code": "invalid_upstream_response",
+            }
+        },
+        upstream_status_code=None,
     )
 
 

@@ -1645,3 +1645,80 @@ async def test_stream_body_eof_tail_observations_reach_the_holder_without_a_hook
     assert await _collect(stream.body) == [created, completed_tail]
     assert stream.usage_holder.terminal_kind == "completed"
     assert stream.usage_holder.usage == SourceUsage(input_tokens=3, output_tokens=5)
+
+
+@pytest.mark.asyncio
+async def test_stream_body_withheld_bytes_are_capped_while_the_hook_is_armed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Decision 31: complete bookkeeping frames clear the parser buffer, so the withheld buffer needs its own bound."""
+
+    monkeypatch.setattr(forwarding_module, "SOURCE_STREAM_WITHHELD_CAP_BYTES", 2048)
+    created = _sse({"type": "response.created", "response": {"id": "resp_spam"}})
+    in_progress = _sse({"type": "response.in_progress", "response": {"id": "resp_spam"}})
+    rest = cast(list[bytes | BaseException], [in_progress] * 64)
+    response = _FakeResponse(content=_FakeContent(created, rest, stall_after_rest=True))
+    _session, context, lease = _install_session(monkeypatch, response)
+    hook_calls = 0
+
+    async def hook(_holder: SourceUsageHolder) -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+    delivered: list[bytes] = []
+    with pytest.raises(ModelSourceForwardingError) as excinfo:
+        async for chunk in stream.body:
+            delivered.append(chunk)
+
+    assert delivered == []
+    assert hook_calls == 0
+    assert excinfo.value.status_code == 502
+    assert cast(dict[str, object], excinfo.value.payload["error"])["code"] == "invalid_upstream_response"
+    assert context.exited == 1
+    assert lease.released == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_body_without_a_hook_is_never_bounded_by_the_withheld_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(forwarding_module, "SOURCE_STREAM_WITHHELD_CAP_BYTES", 256)
+    created = _sse({"type": "response.created", "response": {"id": "resp_live"}})
+    in_progress = _sse({"type": "response.in_progress", "response": {"id": "resp_live"}})
+    rest = cast(list[bytes | BaseException], [in_progress] * 64)
+    response = _FakeResponse(content=_FakeContent(created, rest))
+    _install_session(monkeypatch, response)
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"})
+
+    assert await _collect(stream.body) == [created, *([in_progress] * 64)]
+
+
+@pytest.mark.asyncio
+async def test_stream_body_oversized_content_frame_wins_over_the_withheld_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The withheld cap is twice the parser cap: an oversized frame is classified as content before it trips."""
+
+    monkeypatch.setattr(SourceStreamUsageParser, "_MAX_BUFFER_CHARS", 4096)
+    monkeypatch.setattr(forwarding_module, "SOURCE_STREAM_WITHHELD_CAP_BYTES", 8192)
+    created = _sse({"type": "response.created", "response": {"id": "resp_big"}})
+    completed = _sse(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_big",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "x" * 20_000}]}],
+            },
+        }
+    )
+    rest = cast(list[bytes | BaseException], _chunked(completed, 1024))
+    response = _FakeResponse(content=_FakeContent(created, rest))
+    _session, _context, lease = _install_session(monkeypatch, response)
+    hook_calls = 0
+
+    async def hook(holder: SourceUsageHolder) -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+        assert holder.first_content_seen is True
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+
+    assert b"".join(await _collect(stream.body)) == created + completed
+    assert hook_calls == 1
+    assert lease.released == 1

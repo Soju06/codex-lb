@@ -64,12 +64,11 @@ The registration loop keeps its existing exponential retry. Periodic workers do 
 
 The health query will return active members plus the probed replica's own row even when that row is stale. `BridgeRingInfo` gains nullable `heartbeat_age_seconds`, computed from one captured UTC instant and clamped to zero for future-skewed timestamps. The active-ring fingerprint and size continue to use only fresh rows.
 
-Once bridge registration is complete and the bridge is enabled, readiness requires `is_member=true` regardless of ring size. Thus the single-replica stale case becomes 503 instead of the current false success. Registration-incomplete and ring-metadata-error precedence remains unchanged; bridge-disabled readiness and `/health/live` remain unchanged.
+Readiness retains the existing empty-ring exemption after registration. A stale single replica therefore remains routable while its heartbeat age and inactive membership remain visible. Tightening that policy is deferred to a separate owner-approved change, as requested in PR #2133. Registration-incomplete and ring-metadata-error precedence, bridge-disabled readiness, and `/health/live` remain unchanged.
 
 Alternatives rejected:
 
 - Process-local heartbeat success as the readiness authority: it can disagree with the committed row siblings route against.
-- Preserving the empty-ring exception: after registration it masks exactly the stale single-member failure readiness must expose.
 - Making liveness fail: kubelet restarts based on ring/database transients would conflate process death with routing readiness.
 
 ### D5. Observability uses an age field, timestamp gauge, and bounded labels
@@ -86,13 +85,13 @@ Failure logs include consecutive failure count and last-success age; the first s
 
 ### D6. Shutdown cancels periodic owners before stale-marking
 
-The registration/periodic coordinator remains rooted by lifespan. Shutdown cancels the coordinator, which stops all supervisors and their owned phase tasks under the existing drain deadline. Only after that cleanup does lifespan call `mark_stale()`. This preserves the current rule that no successful local renewal races after shutdown deliberately ages the row.
+The registration/periodic coordinator remains rooted by lifespan. Shutdown cancels registration and starts periodic cleanup immediately under one monotonic deadline, with no additive grace period. Once registration and heartbeat have stopped, lifespan attempts `mark_stale()` even if maintenance remains active: those maintenance owners cannot write the ring row. Full drainage is still required for the SQLite clean marker. Process-level ring supervisors use their own lifecycle primitives rather than request-scoped timing seams; their allowances remain explicit in the architecture guard.
 
 Partial startup is handled explicitly: shutdown may cancel registration before any periodic owner exists. All cleanup paths are idempotent, and no phase shares an `AsyncSession` with another task. A registration or periodic owner that does not settle inside the shutdown bound suppresses the SQLite clean-shutdown marker, so the next startup does not trust a teardown that raced live database work.
 
 ## Risks / Trade-offs
 
-- **[Stricter readiness can temporarily remove a serving single replica]** → This is intentional fail-closed routing behavior after a stale committed heartbeat; liveness remains green and recovery is automatic after the next successful upsert.
+- **[Stale single-replica readiness remains successful]** → Preserve the existing routing policy; expose heartbeat age and metrics without silently removing the only replica from traffic.
 - **[A timed-out phase can remain alive beyond its diagnostic bound]** → Keep exactly one tracked owner, prohibit overlap, log late completion, and cancel/drain it before database teardown.
 - **[Four supervisors add lifecycle complexity]** → Use one shared periodic-owner implementation with table-driven phase definitions and focused ownership/shutdown tests rather than four copied loops.
 - **[A maintenance timeout may be normal on an unusually large local registry]** → The timeout is diagnostic, not abandonment; work continues under the same owner and later completion is recorded.

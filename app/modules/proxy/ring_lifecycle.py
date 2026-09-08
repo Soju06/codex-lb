@@ -45,18 +45,21 @@ async def stop_bridge_periodic_work(
 ) -> BridgePeriodicShutdownResult:
     """Cancel registration and periodic owners within one shutdown bound."""
 
-    timeout_seconds = max(timeout_seconds, 0.0)
-    registration_stopped = True
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
     if registration_task is not None and not registration_task.done():
         registration_task.cancel()
-        done, _ = await asyncio.wait({registration_task}, timeout=timeout_seconds)
-        registration_stopped = registration_task in done
-    if registration_task is not None and registration_task.done() and not registration_task.cancelled():
-        registration_task.exception()
 
+    # Stop renewal immediately, rather than waiting out a blocked registration
+    # before cancellation reaches the periodic owners.
     periodic_result = BridgePeriodicStopResult(heartbeat_stopped=True, all_stopped=True)
     if lifecycle is not None:
-        periodic_result = await lifecycle.stop(timeout_seconds=timeout_seconds)
+        periodic_result = await lifecycle.stop(timeout_seconds=max(deadline - time.monotonic(), 0.0))
+
+    if registration_task is not None and not registration_task.done():
+        await asyncio.wait({registration_task}, timeout=max(deadline - time.monotonic(), 0.0))
+    registration_stopped = registration_task is None or registration_task.done()
+    if registration_task is not None and registration_task.done() and not registration_task.cancelled():
+        registration_task.exception()
 
     return BridgePeriodicShutdownResult(
         registration_stopped=registration_stopped,
@@ -124,7 +127,7 @@ class BridgeRingPeriodicLifecycle:
         for task in stop_tasks.values():
             task.add_done_callback(self._stop_tasks.discard)
 
-        done, _ = await asyncio.wait(set(stop_tasks.values()), timeout=timeout_seconds + 0.1)
+        done, _ = await asyncio.wait(set(stop_tasks.values()), timeout=timeout_seconds)
         results: dict[str, bool] = {}
         for name, task in stop_tasks.items():
             if task not in done or task.cancelled():

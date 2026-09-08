@@ -93,7 +93,7 @@ _wait_for_websocket_continuity_gap = ["scheduler", "clock"]
 "app/modules/proxy/images_service.py" = 2
 "app/modules/proxy/load_balancer.py" = 3
 "app/modules/proxy/rate_limit_cache.py" = 2
-"app/modules/proxy/ring_lifecycle.py" = 3
+"app/modules/proxy/ring_lifecycle.py" = 6
 ```
 <!-- proxy-timing-seams:end -->
 

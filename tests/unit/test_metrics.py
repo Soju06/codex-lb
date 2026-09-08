@@ -169,6 +169,8 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
     assert (
         prometheus_module.bridge_ring_heartbeat_failures_total.name == "codex_lb_bridge_ring_heartbeat_failures_total"
     )
+    assert prometheus_module.bridge_ring_heartbeat_last_success_timestamp_seconds.labelnames == ()
+    assert prometheus_module.bridge_ring_heartbeat_failures_total.labelnames == ()
     assert prometheus_module.bridge_ring_maintenance_total.name == "codex_lb_bridge_ring_maintenance_total"
     assert prometheus_module.bridge_ring_maintenance_total.labelnames == ("phase", "outcome")
 

@@ -275,6 +275,7 @@ async def test_periodic_lifecycle_records_bounded_metrics_and_structured_recover
     lifecycle.start()
     try:
         await _wait_until(lambda: heartbeat_calls >= 2)
+        await _wait_until(lambda: len(gauge.values) >= 2)
         await _wait_until(lambda: maintenance.values.get(("durable_ownership", "failure"), 0) >= 1)
     finally:
         assert (await lifecycle.stop(timeout_seconds=1)).all_stopped
@@ -388,8 +389,8 @@ async def test_stop_bridge_periodic_work_cancels_registration_before_periodic_ow
 
     class FakeLifecycle:
         async def stop(self, *, timeout_seconds: float) -> BridgePeriodicStopResult:
-            assert registration_cancelled.is_set()
-            assert timeout_seconds == 1
+            assert registration_task.cancelling() > 0
+            assert 0 < timeout_seconds <= 1
             stop_called.set()
             return BridgePeriodicStopResult(heartbeat_stopped=True, all_stopped=True)
 
@@ -406,6 +407,39 @@ async def test_stop_bridge_periodic_work_cancels_registration_before_periodic_ow
     assert result.heartbeat_stopped is True
     assert result.all_stopped is True
     assert stop_called.is_set()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_shares_one_deadline_with_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = 100.0
+    registration = asyncio.create_task(asyncio.sleep(60))
+    await asyncio.sleep(0)
+    waits: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def record_wait(tasks, *, timeout=None):
+        waits.append(timeout)
+        return await real_wait(tasks, timeout=timeout)
+
+    class FakeLifecycle:
+        async def stop(self, *, timeout_seconds: float) -> BridgePeriodicStopResult:
+            nonlocal now
+            assert registration.cancelling() > 0
+            assert timeout_seconds == 2.0
+            now += 1.5
+            return BridgePeriodicStopResult(heartbeat_stopped=True, all_stopped=True)
+
+    monkeypatch.setattr(ring_lifecycle_module, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(asyncio, "wait", record_wait)
+    try:
+        result = await stop_bridge_periodic_work(
+            registration, cast(BridgeRingPeriodicLifecycle, FakeLifecycle()), timeout_seconds=2.0
+        )
+        assert result.all_stopped
+        assert waits == [0.5]
+    finally:
+        registration.cancel()
+        await asyncio.gather(registration, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -480,8 +514,10 @@ async def test_owned_lifespan_shutdown_defers_direct_task_cancellation() -> None
 
 
 @pytest.mark.asyncio
-async def test_shutdown_marks_ring_stale_only_after_periodic_owners_stop(
+@pytest.mark.parametrize("maintenance_stopped", [True, False])
+async def test_shutdown_marks_ring_stale_after_ring_writers_stop(
     monkeypatch: pytest.MonkeyPatch,
+    maintenance_stopped: bool,
 ) -> None:
     import app.main as main
 
@@ -492,7 +528,7 @@ async def test_shutdown_marks_ring_stale_only_after_periodic_owners_stop(
         return BridgePeriodicShutdownResult(
             registration_stopped=True,
             heartbeat_stopped=True,
-            all_stopped=True,
+            all_stopped=maintenance_stopped,
         )
 
     async def mark_stale(*args, **kwargs) -> None:
@@ -509,7 +545,7 @@ async def test_shutdown_marks_ring_stale_only_after_periodic_owners_stop(
         instance_id="pod-a",
     )
 
-    assert marked is True
+    assert marked is maintenance_stopped  # Still withhold CLEAN for an active database owner.
     assert cancellation is None
     assert order == ["stop_periodic", "mark_stale"]
 
@@ -558,8 +594,11 @@ async def test_shutdown_defers_cancellation_until_after_stale_mark(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_skips_stale_mark_when_periodic_owner_remains(
+@pytest.mark.parametrize(("registration_stopped", "heartbeat_stopped"), [(True, False), (False, True), (False, False)])
+async def test_shutdown_skips_stale_mark_when_ring_writer_remains(
     monkeypatch: pytest.MonkeyPatch,
+    registration_stopped: bool,
+    heartbeat_stopped: bool,
 ) -> None:
     import app.main as main
 
@@ -568,8 +607,8 @@ async def test_shutdown_skips_stale_mark_when_periodic_owner_remains(
         "stop_bridge_periodic_work",
         AsyncMock(
             return_value=BridgePeriodicShutdownResult(
-                registration_stopped=True,
-                heartbeat_stopped=False,
+                registration_stopped=registration_stopped,
+                heartbeat_stopped=heartbeat_stopped,
                 all_stopped=False,
             )
         ),

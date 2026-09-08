@@ -10,12 +10,12 @@
 - [x] 2.2 Make heartbeat success, failure, timeout, late completion, and recovery flow through the supervised owner without overlapping heartbeat attempts; verify a blocked attempt ages the row out while a later successful upsert restores membership.
 - [x] 2.3 Move durable-ownership reconciliation (including stale-operation abandonment) and idle-session sweeping to separate bounded owners while preserving existing eligibility, fencing, and close behavior; verify a blocked or failed reconciliation neither delays heartbeat nor skips stale-operation cleanup or idle sweeping.
 - [x] 2.4 Move cap-partition refresh to its own bounded owner while preserving initial refresh, self-counting, last-known partition fallback, and hysteresis; verify blocked refresh does not delay heartbeat and is not invoked concurrently.
-- [x] 2.5 Update lifespan shutdown to cancel and drain every supervisor and phase child before `mark_stale()`, including shutdown during registration and during overdue maintenance; verify no periodic task remains untracked, no renewal occurs after stale-marking, and an unsettled owner suppresses the SQLite clean-shutdown marker.
+- [x] 2.5 Update lifespan shutdown to attempt bounded drainage of every supervisor and phase child, requiring registration and heartbeat to stop before `mark_stale()` even if maintenance remains active; verify no periodic task remains untracked, no renewal occurs after stale-marking, and an unsettled owner suppresses the SQLite clean-shutdown marker.
 
 ## 3. Readiness and Heartbeat-Age Reporting
 
 - [x] 3.1 Extend the bridge-ring health query and schema with nullable, nonnegative `heartbeat_age_seconds` derived from the probed replica's own row while keeping fingerprint and ring size limited to fresh members; verify fresh, stale, missing, future-skewed, and lookup-error cases.
-- [x] 3.2 Remove the post-registration empty-ring readiness exception so a bridge-enabled local replica that is not active returns HTTP 503; verify registration-incomplete precedence, active-member readiness, bridge-disabled readiness, and `/health/live` behavior remain correct.
+- [x] 3.2 Preserve the post-registration empty-ring readiness exemption per maintainer review; verify stale/missing single-member diagnostics, nonempty-ring exclusion, registration-incomplete precedence, bridge-disabled readiness, and liveness.
 - [x] 3.3 Add the heartbeat last-success timestamp gauge, heartbeat failure counter, and bounded phase/outcome maintenance counter with multiprocess-safe aggregation; verify metric names, allowed labels, increments, and Prometheus-unavailable no-op behavior.
 - [x] 3.4 Add structured diagnostics for heartbeat failure/recovery, unexpected supervisor exit, maintenance failure/timeout, and late completion without sensitive or high-cardinality fields; verify logs contain phase, outcome, elapsed/age, and consecutive-failure data where applicable.
 

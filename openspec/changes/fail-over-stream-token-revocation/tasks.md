@@ -5,6 +5,8 @@
 - [x] 1.2 Add a two-account product-path regression with sticky affinity,
   encrypted reasoning state, and the canonical terminal event shape.
 - [x] 1.3 Preserve hard-owner and refresh-token-only routing controls.
+- [x] 1.4 Cover a hard previous-response owner's first-event revocation through
+  the routed Responses stream, including the unchanged authentication error.
 
 ## 2. Implementation
 

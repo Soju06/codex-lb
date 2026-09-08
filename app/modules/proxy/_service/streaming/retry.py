@@ -2741,11 +2741,7 @@ class _StreamingRetryMixin:
                             account_id=account.id,
                             outcome="owner_previsible_permanent_account_rejection",
                         )
-                    if (
-                        exc.code == "token_revoked"
-                        and not replay_moved
-                        and payload_replay_required_account_id == account.id
-                    ):
+                    if exc.code == "token_revoked" and not replay_moved:
                         # The account is now retired, but this body could not be
                         # proven safe to move. Preserve the real authentication
                         # failure instead of replacing it with the misleading
@@ -2754,6 +2750,7 @@ class _StreamingRetryMixin:
                             response_failed_event(
                                 exc.code,
                                 str(exc.error.get("message") or "Upstream account is unavailable"),
+                                error_type="authentication_error",
                                 response_id=request_id,
                             )
                         )

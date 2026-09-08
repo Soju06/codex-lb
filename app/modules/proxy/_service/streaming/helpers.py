@@ -657,7 +657,11 @@ def _rewrite_previous_response_stream_error(
             None,
         )
     normalized_code = _normalize_error_code(error_code, error_type)
-    if preferred_account_id is not None and normalized_code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES:
+    if (
+        preferred_account_id is not None
+        and normalized_code != "token_revoked"
+        and normalized_code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES
+    ):
         _record_continuity_fail_closed(
             surface="http_stream",
             reason="owner_account_unavailable",

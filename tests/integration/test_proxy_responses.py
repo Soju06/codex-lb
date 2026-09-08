@@ -757,6 +757,68 @@ async def test_proxy_responses_revoked_token_event_retires_account_and_fails_ove
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_hard_owner_token_revoked_preserves_auth_error(async_client, monkeypatch):
+    raw_account_id = "acc_stream_token_revoked_owner"
+    email = "stream-token-revoked-owner@example.com"
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth-owner.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    internal_account_id = generate_unique_account_id(raw_account_id, email)
+    captured_account_ids: list[str | None] = []
+
+    async def resolve_owner(self, *, previous_response_id, api_key, session_id, surface):
+        del self, api_key, session_id, surface
+        assert previous_response_id == "resp_revoked_hard_owner"
+        return internal_account_id
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        captured_account_ids.append(account_id)
+        yield (
+            'data: {"type":"response.failed","sequence_number":2,'
+            '"response":{"id":"resp_revoked_hard_owner_failure","status":"failed",'
+            '"error":{"code":"token_revoked","type":"authentication_error",'
+            '"message":"Encountered invalidated oauth token for user, failing request"}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", resolve_owner)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "continue",
+            "input": [],
+            "previous_response_id": "resp_revoked_hard_owner",
+            "stream": True,
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"] == {
+        "code": "token_revoked",
+        "message": "Encountered invalidated oauth token for user, failing request",
+        "type": "authentication_error",
+    }
+    assert captured_account_ids == [raw_account_id]
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, internal_account_id)
+    assert account is not None
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert account.deactivation_reason == "Authentication token revoked - re-login required"
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_compaction_trigger_elides_required_tool_image_and_streams_item(
     async_client,
     monkeypatch,

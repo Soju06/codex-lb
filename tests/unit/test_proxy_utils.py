@@ -14064,6 +14064,20 @@ def test_raw_error_fields_preserve_param_for_later_frame_policy() -> None:
     )
 
 
+def test_previous_response_token_revoked_error_is_not_rewritten() -> None:
+    assert (
+        proxy_service._rewrite_previous_response_stream_error(
+            previous_response_id="resp_revoked_owner",
+            preferred_account_id="acc_revoked_owner",
+            error_code="token_revoked",
+            error_type="authentication_error",
+            error_message="Encountered invalidated oauth token for user, failing request",
+            error_param=None,
+        )
+        is None
+    )
+
+
 def test_public_websocket_error_sanitizes_nested_and_top_level_params() -> None:
     payload: dict[str, JsonValue] = {
         "type": "error",

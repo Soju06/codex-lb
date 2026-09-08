@@ -309,6 +309,42 @@ async def test_native_proxy_frames_large_non_utf8_sse_without_python_scanning(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ready_count", [1, 257])
+async def test_native_proxy_flushes_ready_event_before_reading_quiet_upstream(
+    native_worker: SubprocessNativeEgressClient,
+    routed: bool,
+    ready_count: int,
+) -> None:
+    ready = [
+        f'data: {{"type":"response.output_text.delta","delta":"{index}"}}\n\n'.encode() for index in range(ready_count)
+    ]
+    completed = b'data: {"type":"response.completed","response":{"id":"resp_ready"}}\n\n'
+    release_upstream = asyncio.Event()
+
+    async def handler(
+        _reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        _head: bytes,
+        _body: bytes,
+    ) -> None:
+        await _start_chunked_response(writer)
+        await _write_chunk(writer, b"".join(ready))
+        await release_upstream.wait()
+        await _write_chunk(writer, completed)
+        await _finish_chunks(writer)
+
+    async with _serve_http(handler) as base_url:
+        events = _stream(base_url, native_worker, "ready-before-read", routed=routed)
+        try:
+            for block in ready:
+                assert await asyncio.wait_for(anext(events), timeout=2.0) == block.decode()
+            release_upstream.set()
+            assert await asyncio.wait_for(_collect(events), timeout=2.0) == [completed.decode()]
+        finally:
+            await cast(AsyncGenerator[str, None], events).aclose()
+
+
+@pytest.mark.asyncio
 async def test_native_proxy_reports_public_event_size_failure(
     monkeypatch: pytest.MonkeyPatch,
     native_worker: SubprocessNativeEgressClient,

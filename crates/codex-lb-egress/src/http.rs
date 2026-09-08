@@ -7,6 +7,7 @@ use codex_lb_responses::compact::{CompactCollector, CompactResult};
 use codex_lb_responses::stream::interpret;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
+use crate::output::EventBatch;
 use crate::runtime::{Output, RequestError, emit};
 use crate::sse::{SseEventTooLarge, SseFramer, text_fragments};
 
@@ -155,6 +156,7 @@ async fn execute_sse_body(
     let idle_timeout = Duration::from_millis(options.idle_timeout_ms);
     let mut framer = SseFramer::new(options.max_event_bytes);
     let mut collector = options.collect_compact.then(CompactCollector::default);
+    let mut batch = EventBatch::default();
     loop {
         let chunk = tokio::time::timeout(idle_timeout, response.chunk())
             .await
@@ -173,16 +175,22 @@ async fn execute_sse_body(
                             &text,
                             &mut collector,
                             options.interpret_responses,
+                            &mut batch,
                         )
                         .await?
                         {
+                            batch.flush(output).await?;
                             return Ok(None);
                         }
                     }
                     Ok(None) => break,
-                    Err(error) => return Ok(Some(error)),
+                    Err(error) => {
+                        batch.flush(output).await?;
+                        return Ok(Some(error));
+                    }
                 }
             }
+            batch.flush(output).await?;
         }
     }
     match framer.finish() {
@@ -193,15 +201,18 @@ async fn execute_sse_body(
                 &text,
                 &mut collector,
                 options.interpret_responses,
+                &mut batch,
             )
             .await?
             {
+                batch.flush(output).await?;
                 return Ok(None);
             }
         }
         Ok(None) => {}
         Err(error) => return Ok(Some(error)),
     }
+    batch.flush(output).await?;
     if let Some(collector) = collector {
         emit_compact(output, request_id, collector.finish()).await?;
     }
@@ -214,6 +225,7 @@ async fn consume_sse(
     text: &str,
     collector: &mut Option<CompactCollector>,
     interpret_responses: bool,
+    batch: &mut EventBatch,
 ) -> Result<bool, std::io::Error> {
     if let Some(collector) = collector {
         if let Some(result) = collector.push(text) {
@@ -232,20 +244,21 @@ async fn consume_sse(
             event.python_normalization = true;
         }
         for (fragment, more) in text_fragments(&event.text, SSE_IPC_TEXT_FRAGMENT_SIZE) {
-            emit(
-                output,
-                &NativeEvent::ResponsesEvent {
-                    request_id: request_id.to_owned(),
-                    text: fragment.to_owned(),
-                    more,
-                    event_type: if more { None } else { event.event_type.clone() },
-                    python_normalization: !more && event.python_normalization,
-                },
-            )
-            .await?;
+            batch
+                .push(
+                    output,
+                    &NativeEvent::ResponsesEvent {
+                        request_id: request_id.to_owned(),
+                        text: fragment.to_owned(),
+                        more,
+                        event_type: if more { None } else { event.event_type.clone() },
+                        python_normalization: !more && event.python_normalization,
+                    },
+                )
+                .await?;
         }
     } else {
-        emit_sse(output, request_id, text).await?;
+        emit_sse(output, request_id, text, batch).await?;
     }
     Ok(false)
 }
@@ -270,17 +283,23 @@ async fn emit_compact(
     Ok(())
 }
 
-async fn emit_sse(output: &Output, request_id: &str, text: &str) -> Result<(), std::io::Error> {
+async fn emit_sse(
+    output: &Output,
+    request_id: &str,
+    text: &str,
+    batch: &mut EventBatch,
+) -> Result<(), std::io::Error> {
     for (fragment, more) in text_fragments(text, SSE_IPC_TEXT_FRAGMENT_SIZE) {
-        emit(
-            output,
-            &NativeEvent::Sse {
-                request_id: request_id.to_owned(),
-                text: fragment.to_owned(),
-                more,
-            },
-        )
-        .await?;
+        batch
+            .push(
+                output,
+                &NativeEvent::Sse {
+                    request_id: request_id.to_owned(),
+                    text: fragment.to_owned(),
+                    more,
+                },
+            )
+            .await?;
     }
     Ok(())
 }

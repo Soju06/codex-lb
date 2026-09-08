@@ -71,3 +71,22 @@ legacy representation. Neither handoff starts a second HTTP request. Unchanged
 mixed-line-ending events preserve their text; JSON arrays never become objects.
 The Python transport remains the missing-helper implementation, and WebSocket
 event interpretation is deferred to the next transport slice.
+
+## Native SSE output writes
+
+The helper coalesces already framed SSE records into writes of at most 32 records
+and 64 KiB of encoded JSON lines, flushing each existing 16 KiB body-read slice
+before processing more input. A single protocol record that expands beyond the
+byte budget through JSON escaping is emitted alone. There is no batching timer:
+one ready event reaches the consumer even if upstream waits indefinitely for the
+consumer's next action. Valid records also precede a framing failure from the
+same read.
+
+Accepted output bytes and their write offset live in the shared writer. If a
+producer is cancelled during a partial write or buffered flush, the next writer
+finishes those bytes before emitting its own record. For example, cancellation
+of a large SSE event cannot splice a sibling request's JSON line into that event.
+Compact, raw HTTP and WebSocket messages keep immediate writes through this same
+cancellation-safe owner. Python queue fairness, bounds and replay policy are
+unchanged. Benchmark methodology and limitations are recorded in the archived
+`batch-ready-native-sse-output` change.

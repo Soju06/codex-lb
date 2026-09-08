@@ -71,9 +71,9 @@ Steering configuration snapshots SHALL be retained only for downstream Astra Web
 - **THEN** the proxy keeps the reservation ledger intact for terminal reconciliation
 - **AND** other in-flight responses and the remaining steering continuation can complete on the connection
 
-#### Scenario: A new successor after rejected steering reserves input once
-- **GIVEN** an earlier steering continuation was rejected and its parent retains migrated steering configuration
-- **WHEN** a new steering submission creates a new successor reservation
+#### Scenario: A first steer on a retained parent reserves input once
+- **GIVEN** an owned parent retains migrated steering configuration and has not retired a steering lifecycle
+- **WHEN** its first steering submission creates a successor reservation
 - **THEN** that submission is reserved once without immediately extending the new reservation for the same input
 
 #### Scenario: Disconnect does not replay accepted steering
@@ -184,7 +184,7 @@ Steering configuration snapshots SHALL be retained only for downstream Astra Web
 - **WHEN** a late response.created names that steering parent while unrelated creates are pending
 - **THEN** the proxy SHALL suppress that late lifecycle without assigning or settling an unrelated request
 - **AND** the parent correlation SHALL survive the failed reservation release and remain valid for the upstream connection lifetime
-- **AND** an explicit create or newly admitted steering continuation for the same parent SHALL retain priority over suppression
+- **AND** an explicit create or already admitted steering continuation for the same parent SHALL retain priority over suppression
 
 #### Scenario: Automatic successor arrives before explicit dispatch
 - **GIVEN** an explicit continuation has replaced its placeholder but has not reached upstream dispatch
@@ -217,13 +217,21 @@ The proxy SHALL stop starting new steering admissions when retained rejected-par
 
 When expiry removes a steering continuation's owned request from pending work, the proxy SHALL discard that continuation and its submissions and retain a parent-ID tombstone within the existing history limit. Cleanup SHALL preserve any newer replacement owner and SHALL leave reservation finalization to the existing expiry path.
 
+A parent-ID tombstone SHALL reject new response.steer admissions for that parent on the same upstream connection with response_not_found before reserving usage or dispatching upstream. This restriction SHALL apply after expiry or final rejection and SHALL NOT prevent explicit response.create requests, already admitted work, or steering against other owned parents. The tombstone SHALL remain until its upstream connection closes.
+
 #### Scenario: Expired steering releases input while retaining late-response correlation
 - **GIVEN** accepted steers expire without creating their successors
 - **WHEN** the proxy expires their pending requests
 - **THEN** their continuation input SHALL no longer be retained by connection history
 - **AND** late steering notifications SHALL NOT recreate ownership, and late created/terminal events SHALL follow the existing tombstone suppression policy
-- **AND** a new steer for a still-owned completed parent MAY proceed before retirement begins
+- **AND** a new steer for the retired parent SHALL be rejected locally while an explicit create or a steer for another owned parent MAY proceed before connection retirement begins
 - **AND** accumulated expiry tombstones SHALL trigger rotation after admitted work drains, preserving unrelated responses and exactly-once reservation cleanup
+
+#### Scenario: Late acknowledgment cannot claim a same-parent retry
+- **GIVEN** a steering lifecycle retires before its acknowledgment arrives
+- **WHEN** the client retries response.steer for the same parent before the delayed acceptance, pending and failure notifications arrive
+- **THEN** the retry SHALL fail with response_not_found without acquiring or releasing a new reservation or reaching upstream
+- **AND** the delayed notifications SHALL NOT recreate a steering owner or affect later explicit and unrelated responses
 
 #### Scenario: Repeated rejections exhaust retained history
 - **GIVEN** distinct rejected steering parents or suppressed responses with ID-less terminals have reached the history limit

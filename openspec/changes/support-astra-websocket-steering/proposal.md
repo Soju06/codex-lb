@@ -21,6 +21,8 @@ This is protocol-forward.
   their responses during flow-control waits across Python and native transports.
 - Retire steering connections after their correlation-history limit is reached,
   preserving admitted tool-input continuations and rotating after they drain.
+- Reject new steers for a retired steering parent on the same upstream
+  connection; retain explicit creates and work for other parents.
 - Out of scope: configuration_update/Ultra (#2097), async tools (#2099),
   catalog (#2085), global input fingerprint rewrite, FOR UPDATE on
   finalize/release.

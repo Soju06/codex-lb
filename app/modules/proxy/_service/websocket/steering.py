@@ -134,6 +134,8 @@ def steering_parent(
     pending_requests: deque[_WebSocketRequestState],
     control: _WebSocketUpstreamControl,
 ) -> _WebSocketRequestState:
+    if parent_id in control.rejected_steering_parent_ids:
+        raise steering_error("response_not_found", "This steering lifecycle is retired; continue with response.create.")
     continuation = control.steering_continuations.get(parent_id)
     if continuation is not None:
         if continuation.request_state not in pending_requests:

@@ -94,6 +94,17 @@ existing reader-done path to discard the control state and reconnect on demand.
 For example, exhausting history while a steer awaits tool output must still
 let that output reach the same upstream and settle before rotation.
 
+A retired steering parent's tombstone also blocks new `response.steer`
+admission for that parent on this connection. The wire format has no
+client-controlled generation ID: a delayed acceptance can otherwise bind
+to a retry's first unassigned submission, and a later failure can release
+the retry's reservation. Check the existing tombstone in `steering_parent`,
+including its post-await revalidations, before admitting any replacement.
+Return `response_not_found`; clients can continue with `response.create`.
+Already admitted work and other parents keep their existing lifecycles.
+Retiring the entire connection after every expired or rejected steer was
+rejected because it unnecessarily blocks unrelated work.
+
 Do not evict individual IDs on a live connection: a late automatic response
 could otherwise consume an unrelated reservation. ID-less terminals cannot
 identify which suppressed ID is safe to discard. Do not set

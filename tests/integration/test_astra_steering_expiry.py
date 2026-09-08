@@ -23,8 +23,9 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("anonymous_terminal", [False, True], ids=["identified", "anonymous"])
+@pytest.mark.parametrize("ack_before_expiry", [False, True], ids=["unacknowledged", "acknowledged"])
 async def test_expired_steering_discards_submissions_and_rotates_with_late_event_protection(
-    app_instance: FastAPI, monkeypatch: pytest.MonkeyPatch, anonymous_terminal: bool
+    app_instance: FastAPI, monkeypatch: pytest.MonkeyPatch, anonymous_terminal: bool, ack_before_expiry: bool
 ) -> None:
     monkeypatch.setattr(steering, "_MAX_STEERING_HISTORY_IDS", 3)
     monkeypatch.setattr(get_settings(), "stream_idle_timeout_seconds", 300.0)
@@ -52,20 +53,25 @@ async def test_expired_steering_discards_submissions_and_rotates_with_late_event
                 failures.append(parent_id)
                 assert upstream.control is not None
                 retained_on_expiry.append(set(upstream.control.steering_continuations))
-                if parent_id == "p1":
-                    late_steer = {"id": "expired-p1", "previous_response_id": "p1"}
-                    for value in [
-                        {"type": "response.steer.accepted", "steer": late_steer},
-                        {
-                            "type": "response.steer.pending",
-                            "steer": late_steer,
-                            "reason": "waiting_for_required_input",
-                            "required_input": [{"type": "function_call_output", "call_id": "late-tool"}],
-                        },
-                        response("response.created", "late-first", parent="p1"),
-                        late_terminal,
-                    ]:
-                        upstream.messages.put_nowait(UpstreamWebSocketMessage(kind="text", text=json.dumps(value)))
+            elif event["type"] == "response.steer.failed" and event["steer"].get("input") == "Retry correction":
+                late_steer = {"id": "expired-p1", "previous_response_id": "p1"}
+                for value in [
+                    {"type": "response.steer.accepted", "steer": late_steer},
+                    {
+                        "type": "response.steer.pending",
+                        "steer": late_steer,
+                        "reason": "waiting_for_required_input",
+                        "required_input": [{"type": "function_call_output", "call_id": "late-tool"}],
+                    },
+                    {
+                        "type": "response.steer.failed",
+                        "steer": late_steer,
+                        "error": {"code": "successor_creation_failed", "message": "Delayed rejection"},
+                    },
+                    response("response.created", "late-first", parent="p1"),
+                    late_terminal,
+                ]:
+                    upstream.messages.put_nowait(UpstreamWebSocketMessage(kind="text", text=json.dumps(value)))
             await super().send_text(text)
 
     socket = Socket([])
@@ -99,19 +105,23 @@ async def test_expired_steering_discards_submissions_and_rotates_with_late_event
                         "type": "response.steer.accepted",
                         "steer": {"id": f"expired-{parent_id}", "previous_response_id": parent_id},
                     }
+                    if ack_before_expiry
+                    else {"type": "rate_limits.updated", "rate_limits": []}
                 ],
             ]
         )
         if index == 0:
-            socket.scripts.append(
-                (
-                    {"type": "response.steer", "previous_response_id": "p1", "input": "Retry correction"},
-                    lambda _: late_processed.is_set(),
-                )
+            socket.scripts.extend(
+                [
+                    (
+                        {"type": "response.steer", "previous_response_id": "p1", "input": "Retry correction"},
+                        lambda _: "p1" in failures,
+                    ),
+                    (create(parent="p1"), lambda _: late_processed.is_set()),
+                ]
             )
             events.append(
                 [
-                    {"type": "response.steer.accepted", "steer": {"id": "retry-p1", "previous_response_id": "p1"}},
                     response("response.created", "retry-success", parent="p1"),
                     response("response.completed", "retry-success", parent="p1"),
                 ]
@@ -149,8 +159,8 @@ async def test_expired_steering_discards_submissions_and_rotates_with_late_event
         if event["type"] == "response.steer.accepted":
             accepted.add(event["steer"]["previous_response_id"])
         if (
-            event["type"] in {"response.steer.accepted", "response.steer.pending"}
-            and event["steer"]["id"] == "expired-p1"
+            event["type"] in {"response.steer.accepted", "response.steer.pending", "response.steer.failed"}
+            and event["steer"].get("id") == "expired-p1"
             and "p1" in failures
         ):
             late_notification_owners.append(set(kwargs["upstream_control"].steering_continuations))
@@ -160,10 +170,15 @@ async def test_expired_steering_discards_submissions_and_rotates_with_late_event
         return result
 
     async def next_timeout(pending_requests, **kwargs):
+        dispatched = {frame["previous_response_id"] for frame in upstream.sent if frame["type"] == "response.steer"}
         async with kwargs["pending_lock"]:
             for state in pending_requests:
                 parent_id = state.steering_parent_response_id
-                if parent_id is not None and parent_id in accepted and parent_id not in expired_parents:
+                if (
+                    parent_id in dispatched
+                    and (not ack_before_expiry or parent_id in accepted)
+                    and parent_id not in expired_parents
+                ):
                     state.started_at = clock_for(service).monotonic() - kwargs["proxy_request_budget_seconds"] - 1
                     expired[state.request_id] = parent_id
                     expired_parents.add(parent_id)
@@ -183,7 +198,7 @@ async def test_expired_steering_discards_submissions_and_rotates_with_late_event
     assert await service.drain_persistence_tasks(timeout_seconds=2)
     assert failures == parent_ids
     assert retained_on_expiry == [set() for _ in parent_ids]
-    assert late_notification_owners == [set(), set()]
+    assert late_notification_owners == [set(), set(), set()]
     assert initial_histories == [(frozenset(), frozenset(), 0)] * 2
     assert upstream.history_at_close == (
         frozenset(parent_ids),
@@ -192,7 +207,12 @@ async def test_expired_steering_discards_submissions_and_rotates_with_late_event
     )
     assert upstream.pending_at_close == []
     assert len(fresh.sent) == 1 and fresh.sent[0]["input"][-1]["content"][0]["text"] == "Fresh connection"
-    assert not [event for event in socket.sent if event["type"] in {"error", "response.steer.failed"}]
+    assert not [event for event in socket.sent if event["type"] == "error"]
+    steer_failures = [event for event in socket.sent if event["type"] == "response.steer.failed"]
+    assert len(steer_failures) == 2
+    assert steer_failures[0]["error"]["code"] == "response_not_found"
+    assert steer_failures[0]["steer"]["input"] == "Retry correction"
+    assert steer_failures[1]["steer"]["id"] == "expired-p1"
     assert [event["response"]["id"] for event in socket.sent if event["type"] == "response.created"] == [
         "p1",
         "retry-success",

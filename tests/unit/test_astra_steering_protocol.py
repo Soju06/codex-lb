@@ -1360,7 +1360,7 @@ async def test_final_steer_failure_keeps_late_successor_off_unrelated_create(mon
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retry_kind", ["explicit", "steering"])
-async def test_rejected_steering_parent_allows_owned_retry(monkeypatch, retry_kind):
+async def test_rejected_steering_parent_only_allows_explicit_retry(monkeypatch, retry_kind):
     steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
     retry = create(parent="r1") if retry_kind == "explicit" else {**steer, "input": "Retry"}
     socket = ScriptedSocket(
@@ -1370,7 +1370,11 @@ async def test_rejected_steering_parent_allows_owned_retry(monkeypatch, retry_ki
             (retry, saw("response.steer.failed")),
         ]
     )
-    socket.finish_when = lambda event: saw("response.completed", "r-retry")([event])
+    socket.finish_when = (
+        (lambda event: saw("response.completed", "r-retry")([event]))
+        if retry_kind == "explicit"
+        else (lambda event: saw("response.steer.failed")([event]))
+    )
     upstream = ScriptedUpstream(
         [
             [response("response.created", "r1")],
@@ -1390,9 +1394,14 @@ async def test_rejected_steering_parent_allows_owned_retry(monkeypatch, retry_ki
         ]
     )
     _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream)
-    assert len(upstream.sent) == len(reservations) == 3
-    assert saw("response.completed", "r-retry")(socket.sent)
-    assert [(entry[0], entry[3]) for entry in settled] == [("res_0", "r1"), ("res_2", "r-retry")]
+    if retry_kind == "explicit":
+        assert len(upstream.sent) == len(reservations) == 3
+        assert saw("response.completed", "r-retry")(socket.sent)
+        assert [(entry[0], entry[3]) for entry in settled] == [("res_0", "r1"), ("res_2", "r-retry")]
+    else:
+        assert socket.sent[-1]["error"]["code"] == "response_not_found"
+        assert len(upstream.sent) == len(reservations) == 2
+        assert [(entry[0], entry[3]) for entry in settled] == [("res_0", "r1")]
     assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1"]
 
 

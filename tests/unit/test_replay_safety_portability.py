@@ -37,6 +37,7 @@ from app.modules.proxy.replay_safety import (
     _PORTABILITY_VIEW_ONLY_FIELDS,
     _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION,
     _STATELESS_DECLARABLE_TOOL_TYPES,
+    _STATELESS_TOOL_DECLARATION_FIELDS,
     PortabilityVerdict,
     _classification_view,
     is_binding_turn_state,
@@ -546,6 +547,8 @@ _tools: st.SearchStrategy[JsonValue] = st.lists(
                 {"type": "apply_patch"},
                 {"type": "shell", "file_ids": ["file_1"]},
                 {"type": "code_interpreter", "container": "cntr_previous_account"},
+                {"type": "apply_patch", "container": "cntr_previous_account"},
+                {"type": "apply_patch", "description": "Edit files."},
             ],
         )
     ),
@@ -627,8 +630,12 @@ def tool_type_ok(tool: JsonValue, supported_tool_types: frozenset[str]) -> bool:
     tool_type = tool.get("type")
     if tool_type == "function":
         return True
-    portable_declarable = _ACCOUNT_NEUTRAL_TOOL_TYPES | _STATELESS_DECLARABLE_TOOL_TYPES
-    return isinstance(tool_type, str) and tool_type in supported_tool_types and tool_type in portable_declarable
+    if not isinstance(tool_type, str) or tool_type not in supported_tool_types:
+        return False
+    if tool_type in _STATELESS_DECLARABLE_TOOL_TYPES:
+        description = tool.get("description")
+        return set(tool) <= _STATELESS_TOOL_DECLARATION_FIELDS and (description is None or isinstance(description, str))
+    return tool_type in _ACCOUNT_NEUTRAL_TOOL_TYPES
 
 
 def _items(view: PortabilityView) -> list[JsonValue]:
@@ -697,17 +704,44 @@ def test_hosted_tool_declarations_are_never_portable_even_when_declared(case: st
     assert transcript_is_source_free(_view(body), supported_tool_types=frozenset({tool_type})) is False
 
 
-def test_stateless_declaration_carrying_account_scoped_state_is_history() -> None:
-    body = _portable_body(tools=[{"type": "apply_patch", "file_ids": ["file_1"]}])
+_NON_STATELESS_SHAPES: dict[str, dict[str, JsonValue]] = {
+    "account-bound container": {"type": "apply_patch", "container": "cntr_previous_account"},
+    "container id": {"type": "shell", "container_id": "cntr_previous_account"},
+    "file ids": {"type": "apply_patch", "file_ids": ["file_1"]},
+    "unknown field": {"type": "tool_search", "execution": {"mode": "auto"}},
+    "non-string description": {"type": "local_shell", "description": 5},
+}
 
-    assert _verdict(body, supported_tool_types=frozenset({"apply_patch"})) == PortabilityVerdict(
-        False, "not_portable_history"
+
+@pytest.mark.parametrize("case", sorted(_NON_STATELESS_SHAPES))
+def test_stateless_declaration_outside_its_shape_is_never_set_aside(case: str) -> None:
+    """Only ``type`` plus a string ``description`` is set aside; any other field declines as tools (review P1)."""
+
+    tool = _NON_STATELESS_SHAPES[case]
+    tool_type = cast(str, tool["type"])
+    body = _portable_body(tools=[tool])
+    declared = frozenset({tool_type})
+
+    assert _verdict(body, supported_tool_types=declared) == PortabilityVerdict(False, "not_portable_tools", tool_type)
+    assert transcript_is_source_free(_view(body), supported_tool_types=declared) is False
+    classification = _classification_view(_view(body), supported_tool_types=declared)
+    assert classification is not None and classification["tools"] == [tool]
+
+
+def test_stateless_declaration_with_a_string_description_is_set_aside() -> None:
+    body = _portable_body(
+        tools=[{"type": "apply_patch", "description": "Edit files with patches."}],
+        tool_choice={"type": "apply_patch"},
     )
-    assert _classification_view(_view(body), supported_tool_types=frozenset({"apply_patch"})) is None
+
+    assert _verdict(body, supported_tool_types=frozenset({"apply_patch"})) == PortabilityVerdict(True)
+    classification = _classification_view(_view(body), supported_tool_types=frozenset({"apply_patch"}))
+    assert classification is not None and classification["tools"] == [] and "tool_choice" not in classification
 
 
 def test_stateless_declarable_allowlist_is_closed_and_disjoint_from_the_predicate_vocabulary() -> None:
     assert _STATELESS_DECLARABLE_TOOL_TYPES == frozenset({"apply_patch", "local_shell", "shell", "tool_search"})
+    assert _STATELESS_TOOL_DECLARATION_FIELDS == frozenset({"description", "type"})
     assert not _STATELESS_DECLARABLE_TOOL_TYPES & _ACCOUNT_NEUTRAL_TOOL_TYPES
     assert "namespace" not in _STATELESS_DECLARABLE_TOOL_TYPES | _ACCOUNT_NEUTRAL_TOOL_TYPES
 

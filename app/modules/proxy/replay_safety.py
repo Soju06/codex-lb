@@ -1117,6 +1117,11 @@ _DECLARED_TOOL_TYPE_BY_ITEM_TYPE = {
 # or account-side state -- containers, vector stores, connectors -- and are never
 # portable in v1, declared or not.
 _STATELESS_DECLARABLE_TOOL_TYPES = frozenset({"apply_patch", "local_shell", "shell", "tool_search"})
+# The only shape a stateless declaration may take to be set aside: ``type`` plus
+# an optional string ``description``. A positive allowlist, not a scan for known
+# account-scoped keys, so an unknown field (an account-bound ``container``, a
+# future reference) can never ride along.
+_STATELESS_TOOL_DECLARATION_FIELDS = frozenset({"description", "type"})
 # Every tool type a portable body may declare besides ``function``.
 _PORTABLE_DECLARABLE_TOOL_TYPES = _ACCOUNT_NEUTRAL_TOOL_TYPES | _STATELESS_DECLARABLE_TOOL_TYPES
 # Response-owned history the account-neutral predicate declines (``history``):
@@ -1215,10 +1220,10 @@ def _classification_view(
     Declarations of a stateless Codex tool type the source model declares
     (``_STATELESS_DECLARABLE_TOOL_TYPES``; the predicate's own vocabulary stops
     at custom, function and web search) are removed from ``tools`` -- and a
-    ``tool_choice`` naming one is dropped -- after each is proven free of
-    account-scoped references (``file_ids``, ``vector_store_ids``, containers,
-    hosted URLs); one that carries such a reference makes the whole view
-    non-neutral. Hosted declarations are never set aside.
+    ``tool_choice`` naming one is dropped -- only in exactly their stateless
+    shape (``_STATELESS_TOOL_DECLARATION_FIELDS``); a declaration with any
+    other field stays in the view, where the predicate rejects it. Hosted
+    declarations are never set aside.
     """
 
     body = {key: value for key, value in view.body.items() if key not in _PORTABILITY_VIEW_ONLY_FIELDS}
@@ -1229,7 +1234,12 @@ def _classification_view(
     if isinstance(tools, list):
         kept: list[JsonValue] = []
         for tool in tools:
-            if isinstance(tool, dict) and _is_one_of(tool.get("type"), stateless_types):
+            if (
+                isinstance(tool, dict)
+                and _is_one_of(tool.get("type"), stateless_types)
+                and _is_portable_stateless_declaration(tool)
+            ):
+                # Defense in depth: the shape admits no reference-bearing field.
                 if _contains_account_scoped_tool_state(tool):
                     return None
                 continue
@@ -1262,7 +1272,8 @@ def _undeclared_tool_type(tools: JsonValue | None, supported_tool_types: frozens
 
     Acceptable: ``function``; a type the source model declares that is either
     account-neutral by the replay predicate's vocabulary (custom, web search)
-    or a stateless Codex tool type (``_STATELESS_DECLARABLE_TOOL_TYPES``).
+    or a stateless Codex tool type (``_STATELESS_DECLARABLE_TOOL_TYPES``) in
+    exactly its stateless shape.
     """
 
     if tools is None:
@@ -1281,7 +1292,16 @@ def _undeclared_tool_type(tools: JsonValue | None, supported_tool_types: frozens
         # hosted types are declarable for direct routing only, never portable.
         if tool_type not in supported_tool_types or tool_type not in _PORTABLE_DECLARABLE_TOOL_TYPES:
             return tool_type
+        if tool_type in _STATELESS_DECLARABLE_TOOL_TYPES and not _is_portable_stateless_declaration(tool):
+            return tool_type
     return None
+
+
+def _is_portable_stateless_declaration(tool: Mapping[str, JsonValue]) -> bool:
+    """Exactly ``{"type": <stateless type>}`` plus an optional string ``description``."""
+
+    description = tool.get("description")
+    return set(tool) <= _STATELESS_TOOL_DECLARATION_FIELDS and (description is None or isinstance(description, str))
 
 
 def _unportable_item_type(input_items: list[JsonValue], supported_tool_types: frozenset[str]) -> str | None:

@@ -91,7 +91,7 @@ def test_astra_ultra_continuation_keeps_client_identity_across_owner_hops():
             "input": [{"role": "user", "content": "Continue"}],
         }
     )
-    key = _key(allowed=["ultra"])
+    key = _key(enforced="ultra")
     _apply_subscription_policy(request, key)
     assert request.reasoning is not None
     assert request.reasoning.effort == "ultra"
@@ -112,10 +112,19 @@ def test_astra_ultra_continuation_keeps_client_identity_across_owner_hops():
     assert forwarded_input[0] == {"type": "configuration_update", "reasoning": {"effort": "max"}}
 
 
-@pytest.mark.parametrize("effort", ["none", "minimal", "invalid"])
-def test_astra_rejects_unsupported_configuration_effort(effort):
-    with pytest.raises(ProxyInvalidRequestError):
-        _apply_subscription_policy(_request(effort), None)
+@pytest.mark.parametrize("effort", ["disabled", "none", "invalid"])
+def test_astra_accepts_unenumerated_configuration_effort_strings(effort):
+    request = _request(effort)
+    _apply_subscription_policy(request, None)
+    assert _configuration_effort(request.input) == effort
+
+
+@pytest.mark.parametrize("effort", ["disabled", "none"])
+def test_astra_accepts_unenumerated_request_level_effort_strings(effort):
+    request = _request(reasoning={"effort": effort})
+    _apply_subscription_policy(request, None)
+    assert request.reasoning is not None
+    assert request.reasoning.effort == effort
 
 
 def test_astra_keeps_top_level_minimal_compatibility():
@@ -126,7 +135,7 @@ def test_astra_keeps_top_level_minimal_compatibility():
 
 
 @pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
-def test_astra_rejects_none_after_enforced_model_selection(request_type):
+def test_astra_accepts_none_after_enforced_model_selection(request_type):
     request = request_type.model_validate(
         {
             "model": "gpt-5.6-terra",
@@ -136,8 +145,10 @@ def test_astra_rejects_none_after_enforced_model_selection(request_type):
         }
     )
     key = _key(model="gpt-6-astra")
-    with pytest.raises(ProxyInvalidRequestError):
-        _apply_subscription_policy(request, key)
+    _apply_subscription_policy(request, key)
+    assert request.model == "gpt-6-astra"
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "none"
 
 
 def test_astra_history_update_obeys_allowed_efforts():

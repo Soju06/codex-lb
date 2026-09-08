@@ -14,6 +14,21 @@ emits these items (`core/src/session/input_queue.rs`).
   string `gpt-6-astra`.
 - Do not relocate `resolve_wire_reasoning_effort`; #2085 edits the
   neighboring suffix list.
+- Maintainer review at `ad588f61`: drop `_ASTRA_REASONING_EFFORTS`. The
+  reference client sends `disabled` (persistent reasoning) and `none` on
+  the wire; a local `{low, medium, high, xhigh, max}` set 400s those
+  values even without an API key. Keep the string-type check and
+  Ultra→Max aliasing; let upstream own the value set.
+- Do not synthesize `medium` on allowed-list continuations. Limit
+  `prepare_astra_reasoning_policy_continuation` to keys with
+  `enforced_reasoning_effort`. Allowed-list keys rely on per-request
+  validation so an omitted request-level effort matches the
+  fresh-request path (no 403 from a fake medium, and no reset of a
+  persisted in-history effort).
+- Gate non-bridge HTTP `previous_response` trim on `gpt-6-astra` at the
+  stream and collect sites and in `_prepare_http_fallback_payload`.
+  HTTP-bridge internal trim may stay. Non-Astra direct HTTP bodies must
+  remain untrimmed.
 
 ## Constraints
 
@@ -24,9 +39,10 @@ emits these items (`core/src/session/input_queue.rs`).
 
 ## Failure modes
 
-- A missing leading update on an anchored restricted-key continuation
-  would inherit an unseen prior effort. Preparation prepends one allowed
-  update; repeated preparation is idempotent.
+- A missing leading update on an anchored enforced-effort continuation
+  would inherit an unseen prior effort. Preparation prepends one update
+  for the enforced effort; repeated preparation is idempotent.
+  Allowed-list continuations do not get a synthesized default.
 - Mapping Ultra to Max during policy would let a Max-only key accept
   Ultra. Policy compares client-plane values.
 - A source claiming Astra does not own a recorded subscription response.

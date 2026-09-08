@@ -7,11 +7,14 @@ The proxy SHALL apply allowed and enforced reasoning controls to
 SHALL reject an update that violates those controls before forwarding it.
 Historical supported updates SHALL preserve their order and request-level
 cache prefix. A subscription Astra continuation using a response or
-conversation anchor and a reasoning-restricted API key SHALL explicitly
-establish an allowed effective configuration before processing new input,
-so an unseen inherited configuration cannot bypass the current policy.
-This requirement also applies to proxy-injected anchors; repeated
-preparation SHALL be idempotent.
+conversation anchor and an API key with `enforced_reasoning_effort` SHALL
+explicitly establish that enforced configuration before processing new
+input, so an unseen inherited configuration cannot bypass the current
+policy. Allowed-list keys SHALL rely on per-request validation and SHALL
+NOT synthesize a default effort on continuations. An omitted
+request-level effort on an allowed-list continuation SHALL match the
+fresh-request path. This requirement also applies to proxy-injected
+anchors; repeated preparation SHALL be idempotent.
 
 #### Scenario: An in-history update cannot evade allowed efforts
 
@@ -28,14 +31,22 @@ preparation SHALL be idempotent.
 
 #### Scenario: An anchored continuation cannot inherit an unauthorized effort
 
-- **GIVEN** a previous response has retained high reasoning and the current API key allows or enforces low
-- **WHEN** a subscription Astra continuation supplies low request-level reasoning and an anchor without a leading configuration update
+- **GIVEN** a previous response has retained high reasoning and the current API key enforces low
+- **WHEN** a subscription Astra continuation supplies an anchor without a leading configuration update
 - **THEN** the proxy establishes low using a leading configuration update before the new input
 - **AND** request-level reasoning and existing input order are preserved
 
+#### Scenario: An allowed-list continuation with omitted effort matches a fresh request
+
+- **GIVEN** an API key allows only high reasoning and does not enforce an effort
+- **WHEN** a subscription Astra continuation omits request-level reasoning.effort
+- **THEN** the proxy does not prepend a configuration_update
+- **AND** the request is not rejected for a synthesized medium
+- **AND** the same omitted-effort request without an anchor is also accepted
+
 #### Scenario: Owner forwarding preserves client reasoning identity
 
-- **WHEN** a restricted-key continuation selects ultra and is prepared and forwarded through an owner instance more than once
+- **WHEN** an enforced-ultra continuation selects ultra and is prepared and forwarded through an owner instance more than once
 - **THEN** preparation retains exactly one leading configuration update selecting ultra and request-level ultra, without treating either value as max during API-key policy checks
 - **AND** only final subscription wire serialization maps both ultra values to max
 
@@ -48,14 +59,14 @@ preparation SHALL be idempotent.
 #### Scenario: HTTP-bridge full resend trims before the Astra reset
 
 - **GIVEN** a previous_response_id full resend that starts with stored assistant or reasoning output followed by a tool output
-- **WHEN** a restricted key requires a continuation reset
+- **WHEN** an enforced-effort key requires a continuation reset
 - **THEN** the proxy trims that stored prefix before inserting the reset
 - **AND** streaming and collected HTTP routes preserve the original full-resend item count and fingerprint for bridge completion bookkeeping
 - **AND** a subsequent full resend matching that stored prefix remains eligible for continuation anchoring and fresh-replay recovery
 
 #### Scenario: A pre-submit HTTP fallback retains continuation policy
 
-- **GIVEN** an anchored subscription Astra request uses a reasoning-restricted key without an applicable usage reservation
+- **GIVEN** an anchored subscription Astra request uses an enforced-effort key without an applicable usage reservation
 - **WHEN** the HTTP bridge encounters an eligible pre-submit WebSocket transport failure and retries over raw HTTP
 - **THEN** the fallback SHALL trim stored replay input before applying the same continuation policy as the other HTTP paths
 - **AND** the forwarded body SHALL retain exactly one required leading update and the client-supplied anchor
@@ -64,7 +75,7 @@ preparation SHALL be idempotent.
 
 #### Scenario: Injected Ultra resets survive repeated anchor advances
 
-- **GIVEN** a proxy-injected HTTP-bridge anchor for an Ultra-only key
+- **GIVEN** a proxy-injected HTTP-bridge anchor for an enforced-ultra key
 - **WHEN** the same reconstructed request is prepared again after the first injection serialized as max
 - **THEN** the client-plane Ultra identity is restored for policy checks
 - **AND** the continuation is not rejected as max

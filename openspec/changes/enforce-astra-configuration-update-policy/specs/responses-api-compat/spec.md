@@ -4,8 +4,10 @@
 
 For subscription-backed Astra, the proxy SHALL preserve supported
 `configuration_update` input items and normalize client-plane ultra to max
-at subscription wire serialization. It SHALL reject unsupported reasoning
-values and invalid adjacent updates before upstream work. Histories with
+at subscription wire serialization. It SHALL reject non-string reasoning
+efforts and invalid adjacent updates before upstream work. It SHALL NOT
+enumerate permitted Astra effort strings locally; `disabled`, `none`, and
+other string efforts SHALL be accepted and forwarded. Histories with
 configuration updates SHALL reject automatic compaction, automatic
 truncation, and the standalone compact endpoint. Normal request-level
 reasoning SHALL remain unchanged by a valid input update. Explicit
@@ -63,12 +65,25 @@ validated before upstream connection or send, using client-plane values.
 
 #### Scenario: Malformed subscription updates have a consistent schema error
 
-- **GIVEN** a subscription Astra request contains an unsupported configuration-update effort or malformed update shape
+- **GIVEN** a subscription Astra request contains a non-string configuration-update effort or malformed update shape
 - **AND** its existing request-level and continuation reasoning policy checks permit processing the explicit updates
 - **WHEN** the request is checked with an unrestricted, allowed-effort or enforced-effort API key
 - **THEN** it SHALL return the subscription invalid-request 400 before upstream work
 - **AND** a schema-valid effort forbidden by the key SHALL still return reasoning_effort_not_allowed
 - **AND** source-owned update schemas and request-level effort policy SHALL retain their existing behavior
+
+#### Scenario: Persistent and none efforts are accepted locally
+
+- **WHEN** a subscription Astra request uses request-level or configuration_update reasoning.effort `disabled` or `none`
+- **THEN** the proxy SHALL NOT return a local invalid-request 400 for those strings
+- **AND** unknown string efforts SHALL likewise be forwarded rather than rejected as an unenumerated local schema
+
+#### Scenario: Non-Astra direct HTTP previous_response bodies remain untrimmed
+
+- **GIVEN** a non-Astra Responses request with `previous_response_id` whose input starts with stored assistant or reasoning output followed by a tool output
+- **WHEN** the request is forwarded on a non-bridge HTTP stream or collect path, or as HTTP-bridge raw fallback
+- **THEN** the forwarded input SHALL remain untrimmed
+- **AND** HTTP-bridge internal trim for Astra continuations SHALL remain unchanged
 
 #### Scenario: A subscription anchor overrides a source model contract
 

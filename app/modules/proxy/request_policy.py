@@ -381,20 +381,10 @@ def apply_api_key_enforcement(
     return ApiKeyEnforcementResult(service_tier_was_enforced, pre_normalization_effort)
 
 
-_ASTRA_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
-_ASTRA_DEFAULT_REASONING_EFFORT = "medium"
-
-
 def _astra_wire_effort(value: JsonValue, *, param: str) -> str:
     if not isinstance(value, str):
         raise ProxyInvalidRequestError("Astra reasoning effort must be a string.", param=param)
-    normalized = value.strip().lower()
-    wire_effort = resolve_wire_reasoning_effort(normalized)
-    if wire_effort not in _ASTRA_REASONING_EFFORTS:
-        raise ProxyInvalidRequestError(
-            "Astra supports reasoning efforts low, medium, high, xhigh and max.", param=param
-        )
-    return wire_effort
+    return resolve_wire_reasoning_effort(value.strip().lower())
 
 
 def _astra_subscription_client_effort(effort: str) -> str:
@@ -428,12 +418,12 @@ def prepare_astra_reasoning_policy_continuation(
     payload: ResponsesRequest,
     api_key: ApiKeyData | None,
 ) -> bool:
-    """Reset inherited Astra effort before input governed by a restricted key."""
+    """Reset inherited Astra effort before input governed by an enforced key."""
     if api_key is None or payload.model.strip().lower() != "gpt-6-astra":
         return False
     if payload.previous_response_id is None and payload.conversation is None:
         return False
-    if api_key.allowed_reasoning_efforts is None and api_key.enforced_reasoning_effort is None:
+    if api_key.enforced_reasoning_effort is None:
         return False
     if not is_json_list(payload.input):
         return False
@@ -442,12 +432,7 @@ def prepare_astra_reasoning_policy_continuation(
     if input_items and is_json_mapping(input_items[0]) and input_items[0].get("type") == "configuration_update":
         return False
 
-    selected_effort = api_key.enforced_reasoning_effort
-    if selected_effort is None:
-        selected_effort = payload._codex_lb_client_reasoning_effort or _client_reasoning_effort(payload)
-    if selected_effort is None:
-        selected_effort = _ASTRA_DEFAULT_REASONING_EFFORT
-    selected_effort = selected_effort.strip().lower()
+    selected_effort = api_key.enforced_reasoning_effort.strip().lower()
     _validate_astra_configuration_update_effort_access(api_key, selected_effort, subscription=True)
     wire_effort = _astra_subscription_client_effort(selected_effort)
     _astra_wire_effort(wire_effort, param="input.0.reasoning.effort")
@@ -523,8 +508,7 @@ def validate_astra_request(
     if prepare_continuation and isinstance(payload, ResponsesRequest):
         prepare_astra_reasoning_policy_continuation(payload, api_key)
     if payload.reasoning is not None and payload.reasoning.effort is not None:
-        if payload.reasoning.effort.strip().lower() != "minimal":
-            _astra_wire_effort(payload.reasoning.effort, param="reasoning.effort")
+        _astra_wire_effort(payload.reasoning.effort, param="reasoning.effort")
     extra = payload.model_extra or {}
     for name in ("top_logprobs", "logprobs"):
         if extra.get(name) is not None:

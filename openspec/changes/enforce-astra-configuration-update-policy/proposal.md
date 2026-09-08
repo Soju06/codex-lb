@@ -10,8 +10,16 @@ in-input update can bypass the key. Codex-rs already emits these items.
 - Apply allowed and enforced reasoning controls to `configuration_update`
   items on subscription Astra requests.
 - Reject unsupported Astra update shapes before upstream work.
-- On anchored continuations with a restricted key, prepend an allowed
-  leading update so inherited effort cannot bypass policy.
+- On anchored continuations with `enforced_reasoning_effort`, prepend a
+  leading update for that enforced effort so inherited effort cannot
+  bypass policy. Allowed-list keys rely on per-request validation and
+  MUST NOT synthesize a default effort.
+- Do not enumerate permitted Astra reasoning efforts locally. Keep a
+  string-type check and Ultra→Max aliasing via
+  `resolve_wire_reasoning_effort`; let upstream own the value set.
+  `disabled` and `none` MUST be accepted.
+- Gate non-bridge HTTP `previous_response` trimming on `gpt-6-astra`.
+  HTTP-bridge internal trim may stay.
 - Keep client-plane Ultra distinct from Max during policy checks; map
   Ultra to Max only at subscription wire serialization.
 - Do not apply subscription Astra schema restrictions to externally
@@ -30,7 +38,8 @@ None.
 ### Modified Capabilities
 
 - `api-keys`: reasoning controls cover `configuration_update` items and
-  anchored Astra continuations.
+  enforced-effort Astra continuations. Allowed-list keys keep per-request
+  validation without a synthesized default.
 - `responses-api-compat`: subscription Astra preserves compatible
   configuration-update history and rejects incompatible combinations.
 

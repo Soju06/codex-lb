@@ -6058,7 +6058,11 @@ async def _stream_responses(
         )
     apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
     untrimmed_payload = payload
-    if payload.previous_response_id is not None and isinstance(payload.input, list):
+    if (
+        payload.previous_response_id is not None
+        and isinstance(payload.input, list)
+        and payload.model.strip().lower() == "gpt-6-astra"
+    ):
         payload = payload.model_copy(update={"input": _trim_http_bridge_previous_response_input_items(payload.input)})
     validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
@@ -6581,7 +6585,11 @@ async def _collect_responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
     untrimmed_payload = payload
-    if payload.previous_response_id is not None and isinstance(payload.input, list):
+    if (
+        payload.previous_response_id is not None
+        and isinstance(payload.input, list)
+        and payload.model.strip().lower() == "gpt-6-astra"
+    ):
         payload = payload.model_copy(update={"input": _trim_http_bridge_previous_response_input_items(payload.input)})
     validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)

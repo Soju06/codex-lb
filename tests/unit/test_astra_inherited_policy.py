@@ -17,6 +17,7 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items,
 )
+from app.modules.proxy._service.http_bridge.streaming import _prepare_http_fallback_payload
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     prepare_astra_reasoning_policy_continuation,
@@ -78,37 +79,38 @@ def test_enforced_effort_resets_previous_response_before_current_input() -> None
     ]
 
 
-def test_allowed_explicit_effort_resets_conversation_anchor() -> None:
+def test_allowed_explicit_effort_does_not_prepend_on_conversation_anchor() -> None:
     request = _request(effort="high", previous_response_id=None, conversation="conv_inherited")
 
     _apply_and_validate(request, _key(allowed=["high"]))
 
-    assert isinstance(request.input, list)
-    assert request.input[0] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
+    assert request.input == [{"role": "user", "content": "Continue"}]
 
 
-def test_omitted_effort_uses_astra_default_and_obeys_allowlist() -> None:
-    accepted = _request()
-    _apply_and_validate(accepted, _key(allowed=["medium"]))
-    assert isinstance(accepted.input, list)
-    assert accepted.input[0] == {"type": "configuration_update", "reasoning": {"effort": "medium"}}
+def test_omitted_effort_allowed_list_continuation_matches_fresh_request() -> None:
+    continuation = _request()
+    _apply_and_validate(continuation, _key(allowed=["high"]))
+    assert continuation.input == [{"role": "user", "content": "Continue"}]
 
-    rejected = _request()
-    with pytest.raises(ProxyReasoningEffortNotAllowed):
-        _apply_and_validate(rejected, _key(allowed=["low"]))
-    assert rejected.input == [{"role": "user", "content": "Continue"}]
+    fresh = _request(previous_response_id=None)
+    _apply_and_validate(fresh, _key(allowed=["high"]))
+    assert fresh.input == [{"role": "user", "content": "Continue"}]
+
+    previously_rejected = _request()
+    _apply_and_validate(previously_rejected, _key(allowed=["low"]))
+    assert previously_rejected.input == [{"role": "user", "content": "Continue"}]
 
 
 @pytest.mark.parametrize(
-    ("client_effort", "allowed", "wire_effort"), [("ultra", "ultra", "ultra"), ("minimal", "minimal", "low")]
+    ("client_effort", "enforced", "wire_effort"), [("ultra", "ultra", "ultra"), ("minimal", "minimal", "low")]
 )
 def test_client_plane_alias_reset_is_canonical_and_idempotent(
     client_effort: str,
-    allowed: str,
+    enforced: str,
     wire_effort: str,
 ) -> None:
     request = _request(effort=client_effort)
-    key = _key(allowed=[allowed])
+    key = _key(enforced=enforced)
 
     _apply_and_validate(request, key)
     validate_astra_request(request, key)
@@ -176,7 +178,7 @@ def test_no_anchor_preserves_full_history() -> None:
 
 def test_late_proxy_anchor_can_prepare_before_derived_request_state() -> None:
     request = _request(effort="high", previous_response_id=None)
-    key = _key(allowed=["high"])
+    key = _key(enforced="high")
     _apply_and_validate(request, key)
     assert request.input == [{"role": "user", "content": "Continue"}]
 
@@ -213,7 +215,7 @@ def test_http_bridge_preparation_resets_late_anchor_before_derived_state() -> No
 
     request_state, text_data = service._prepare_response_bridge_request_state(
         request,
-        api_key=_key(allowed=["ultra"]),
+        api_key=_key(enforced="ultra"),
         api_key_reservation=None,
         include_type_field=True,
         attach_event_queue=False,
@@ -256,7 +258,7 @@ def test_http_bridge_trims_full_resend_before_astra_reset() -> None:
     original_input = request.input
     assert isinstance(original_input, list)
     request.input = _trim_http_bridge_previous_response_input_items(original_input)
-    validate_astra_request(request, _key(allowed=["high"]))
+    validate_astra_request(request, _key(enforced="high"))
     prepared_input = request.input
     assert isinstance(prepared_input, list)
     assert prepared_input[0] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
@@ -308,7 +310,7 @@ def test_http_bridge_injected_anchor_preserves_client_prefix_and_updates_budget(
     updated_text = request_submit_module._text_with_previous_response_id(
         text_data,
         "resp_injected",
-        api_key=_key(allowed=["high"]),
+        api_key=_key(enforced="high"),
         request_state=cast(Any, request_state),
     )
 
@@ -326,7 +328,7 @@ def test_http_bridge_injected_anchor_preserves_client_prefix_and_updates_budget(
     repeated_text = request_submit_module._text_with_previous_response_id(
         updated_text,
         "resp_injected",
-        api_key=_key(allowed=["high"]),
+        api_key=_key(enforced="high"),
         request_state=cast(Any, request_state),
     )
     assert json.loads(repeated_text) == wire_payload
@@ -354,7 +356,7 @@ def test_http_bridge_injected_anchor_preserves_ultra_from_request_state() -> Non
     updated_text = request_submit_module._text_with_previous_response_id(
         text_data,
         "resp_injected",
-        api_key=_key(allowed=["ultra"]),
+        api_key=_key(enforced="ultra"),
         request_state=cast(Any, request_state),
     )
 
@@ -369,7 +371,7 @@ def test_http_bridge_injected_anchor_preserves_ultra_from_request_state() -> Non
     repeated_text = request_submit_module._text_with_previous_response_id(
         updated_text,
         "resp_injected_again",
-        api_key=_key(allowed=["ultra"]),
+        api_key=_key(enforced="ultra"),
         request_state=cast(Any, request_state),
     )
     repeated_payload = json.loads(repeated_text)
@@ -379,6 +381,7 @@ def test_http_bridge_injected_anchor_preserves_ultra_from_request_state() -> Non
     }
     assert repeated_payload["input"] == wire_payload["input"]
     assert repeated_payload["reasoning"] == {"effort": "max"}
+    assert request_state.astra_client_update_efforts == ("ultra",)
     assert sum(1 for item in repeated_payload["input"] if item.get("type") == "configuration_update") == 1
 
 
@@ -443,7 +446,7 @@ def test_http_bridge_repeated_anchor_preserves_nonleading_ultra_update() -> None
     first_text = request_submit_module._text_with_previous_response_id(
         text_data,
         "resp_first",
-        api_key=_key(allowed=["ultra"]),
+        api_key=_key(enforced="ultra"),
         request_state=cast(Any, request_state),
     )
     first_payload = json.loads(first_text)
@@ -461,13 +464,14 @@ def test_http_bridge_repeated_anchor_preserves_nonleading_ultra_update() -> None
     second_text = request_submit_module._text_with_previous_response_id(
         first_text,
         "resp_second",
-        api_key=_key(allowed=["ultra"]),
+        api_key=_key(enforced="ultra"),
         request_state=cast(Any, request_state),
     )
     second_payload = json.loads(second_text)
     second_updates = _updates(second_payload)
     assert len(second_updates) == len(updates)
     assert all(item["reasoning"]["effort"] == "max" for item in second_updates)
+    assert request_state.astra_client_update_efforts == tuple("ultra" for _ in second_updates)
 
 
 @pytest.mark.asyncio
@@ -530,7 +534,7 @@ async def test_websocket_source_owned_skips_astra_schema(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_websocket_trims_full_resend_before_astra_reset(monkeypatch) -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
-    key = _key(allowed=["high"])
+    key = _key(enforced="high")
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=key))
     prepared = await service._prepare_websocket_response_create_request(
@@ -563,7 +567,7 @@ async def test_websocket_trims_full_resend_before_astra_reset(monkeypatch) -> No
 @pytest.mark.asyncio
 async def test_websocket_session_anchor_releases_reservation_on_astra_policy_error(monkeypatch) -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
-    key = _key(allowed=["low"])
+    key = _key(enforced="low")
     reservation = ApiKeyUsageReservationData(
         reservation_id="res_ws_policy",
         key_id="astra-inherited-policy",
@@ -580,12 +584,13 @@ async def test_websocket_session_anchor_releases_reservation_on_astra_policy_err
     release = AsyncMock()
     monkeypatch.setattr(service, "_release_websocket_reservation", release)
 
-    with pytest.raises(ProxyReasoningEffortNotAllowed):
+    with pytest.raises(ProxyInvalidRequestError, match="automatic compaction"):
         await service._prepare_websocket_response_create_request(
             {
                 "type": "response.create",
                 "model": "gpt-6-astra",
                 "instructions": "",
+                "context_management": [{"type": "compaction", "compact_threshold": 200_000}],
                 "input": [*historical, {"role": "user", "content": "Continue"}],
             },
             headers={"session_id": "sid-astra-policy"},
@@ -597,3 +602,49 @@ async def test_websocket_session_anchor_releases_reservation_on_astra_policy_err
             continuity_state=continuity,
         )
     release.assert_awaited_once_with(reservation)
+
+
+def _marked_replay_input() -> list[dict[str, object]]:
+    return [
+        {"type": "message", "role": "assistant", "id": "msg_1", "status": "completed", "content": "done"},
+        {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "slow", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        {"role": "user", "content": "Continue"},
+    ]
+
+
+def test_http_fallback_skips_trim_for_non_astra_models() -> None:
+    items = _marked_replay_input()
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "",
+            "previous_response_id": "resp_history",
+            "input": items,
+        }
+    )
+    original_input = request.input
+    prepared = _prepare_http_fallback_payload(request, _key())
+    assert prepared.input == original_input
+    assert isinstance(prepared.input, list)
+    assert any(isinstance(item, dict) and item.get("id") == "msg_1" for item in prepared.input)
+
+
+def test_http_fallback_trims_astra_before_enforced_reset() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-6-astra",
+            "instructions": "",
+            "previous_response_id": "resp_history",
+            "reasoning": {"effort": "high"},
+            "input": _marked_replay_input(),
+        }
+    )
+    prepared = _prepare_http_fallback_payload(request, _key(enforced="high"))
+    prepared_input = prepared.input
+    assert isinstance(prepared_input, list)
+    assert prepared_input[0] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
+    second = prepared_input[1]
+    assert isinstance(second, dict)
+    assert second.get("type") == "function_call_output"
+    assert not any(isinstance(item, dict) and item.get("id") == "msg_1" for item in prepared_input)

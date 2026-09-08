@@ -563,7 +563,11 @@ def _http_bridge_durable_owner_is_dead(
 
 
 def _prepare_http_fallback_payload(payload: ResponsesRequest, api_key: ApiKeyData | None) -> ResponsesRequest:
-    if payload.previous_response_id is not None and isinstance(payload.input, list):
+    if (
+        payload.previous_response_id is not None
+        and isinstance(payload.input, list)
+        and payload.model.strip().lower() == "gpt-6-astra"
+    ):
         payload = payload.model_copy(update={"input": _trim_http_bridge_previous_response_input_items(payload.input)})
     validate_astra_request(payload, api_key)
     return payload

@@ -29,3 +29,4 @@
 - [x] 3.13 Use the source-bound body for the existing reservation estimate and cover padded effort values with overlapping real-route requests
 - [x] 3.14 Validate subscription update shape before update key policy and preserve source/request-level policy behavior
 - [x] 3.15 Apply the existing HTTP continuation preparation to eligible pre-submit raw fallback and verify stream/collect, replay trimming and Ultra identity
+- [x] 3.16 Drop the local Astra effort enumeration, accept `disabled`/`none`, prepend only for enforced keys, and gate non-bridge HTTP trim on `gpt-6-astra`

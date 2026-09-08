@@ -57,15 +57,16 @@ async def test_previous_response_enforced_effort_is_reset_before_upstream(async_
     }
 
 
-async def test_previous_response_omitted_effort_must_allow_astra_default(async_client, monkeypatch) -> None:
-    await _import_account(async_client, "astra-inherited-denied", "astra-inherited-denied@example.com")
+async def test_previous_response_omitted_effort_allowed_list_matches_fresh_request(async_client, monkeypatch) -> None:
+    await _import_account(async_client, "astra-inherited-omitted", "astra-inherited-omitted@example.com")
     key = await _reasoning_key(async_client, allowed=["low"])
+    forwarded = []
 
-    async def fail_upstream(*args, **kwargs):
-        raise AssertionError("Disallowed inherited-effort reset reached upstream")
-        yield ""
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        forwarded.append(payload.to_payload())
+        yield _completed_event("resp_astra_inherited_omitted")
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_upstream)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
     response = await async_client.post(
         "/v1/responses",
         json={
@@ -77,5 +78,51 @@ async def test_previous_response_omitted_effort_must_allow_astra_default(async_c
         headers={"Authorization": f"Bearer {key}"},
     )
 
-    assert response.status_code == 403
-    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+    assert response.status_code == 200, response.text
+    assert len(forwarded) == 1
+    assert forwarded[0]["input"] == [{"role": "user", "content": "Continue"}]
+
+
+async def test_non_astra_direct_http_previous_response_body_is_not_trimmed(async_client, monkeypatch) -> None:
+    await _import_account(async_client, "non-astra-trim", "non-astra-trim@example.com")
+    input_items = [
+        {"id": "rs_replay", "type": "reasoning", "summary": []},
+        {
+            "id": "msg_replay",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior"}],
+        },
+        {
+            "id": "fc_replay",
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+    ]
+    forwarded = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        forwarded.append(payload.to_payload())
+        yield _completed_event("resp_non_astra_trim")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    for extra in ({}, {"stream": False}):
+        forwarded.clear()
+        response = await async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.6-terra",
+                "instructions": "",
+                "previous_response_id": "resp_prior",
+                "input": input_items,
+                **extra,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert len(forwarded) == 1
+        assert forwarded[0]["input"] == input_items

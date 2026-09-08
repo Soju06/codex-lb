@@ -26,18 +26,30 @@ client already writes `configuration_update` items. It does not emit
 Keep `_REASONING_EFFORT_WIRE_ALIASES` and `resolve_wire_reasoning_effort`
 in `request_policy.py`. `requests.py` maps Ultra on configuration-update
 items at `to_payload` with the same Ultra→Max rule, without importing
-`request_policy` (cycle).
+`request_policy` (cycle). Do not keep a local Astra effort enumeration:
+`_astra_wire_effort` checks string type and aliases Ultra→Max, then
+forwards the value. `disabled` and `none` are real wire values from the
+reference client and MUST be accepted locally.
+
+Prepend a leading `configuration_update` only when the key has
+`enforced_reasoning_effort`. Allowed-list keys rely on per-request
+validation. An omitted request-level effort on an allowed-list
+continuation MUST match the fresh-request path: do not synthesize
+`medium` and do not 403 from that fake default.
 
 Fingerprint HTTP-bridge input from `payload.input` after Astra
 preparation mutates that list, so Astra prepends are counted without a
 global rewrite of non-Astra requests.
 
-For anchored HTTP full resends, validate a trimmed copy before admission,
-but retain the original payload for the bridge trim detector. Its existing
-count and fingerprint override must describe client history, not the
-delta plus injected reset. Non-bridge forwarding keeps the validated copy.
-Bridge preparation also uses a copy so a late injected reset cannot shift
-the client prefix before the subsequent stored-context comparison.
+For anchored HTTP full resends of `gpt-6-astra`, validate a trimmed copy
+before admission, but retain the original payload for the bridge trim
+detector. Its existing count and fingerprint override must describe
+client history, not the delta plus injected reset. Non-bridge forwarding
+keeps the validated Astra copy. Non-Astra direct HTTP bodies MUST remain
+untrimmed; `_prepare_http_fallback_payload` uses the same model gate.
+HTTP-bridge internal trim may stay. Bridge preparation also uses a copy
+so a late injected reset cannot shift the client prefix before the
+subsequent stored-context comparison.
 
 Rejected: landing the full #2089 branch. Maintainer required a split.
 

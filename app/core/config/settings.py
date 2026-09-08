@@ -116,6 +116,9 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT",
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS",
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_DENY_API_KEY_IDS",
+    # Dashboard-authoritative settings (remove-upstream-stream-transport-env):
+    # the dashboard row is the only source of the upstream stream transport.
+    "CODEX_LB_UPSTREAM_STREAM_TRANSPORT",
 )
 
 
@@ -277,7 +280,6 @@ class Settings(BaseSettings):
     database_alembic_auto_remap_enabled: bool = True
     database_migration_lock_timeout_seconds: float = Field(default=300.0, gt=0)
     upstream_base_url: str = "https://chatgpt.com/backend-api"
-    upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
     http_downstream_transport_policy: Literal["smart", "always_http", "always_websocket", "pinned"] = "smart"
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
@@ -430,7 +432,7 @@ class Settings(BaseSettings):
     # Must stay >= the highest ``minimal_client_version`` in the bootstrap
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
     # receive an upstream catalog without those models.
-    model_registry_client_version: str = "0.144.0"
+    model_registry_client_version: str = "0.153.4"
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
@@ -490,6 +492,18 @@ class Settings(BaseSettings):
     # fair-share throttling engages; 0 disables the gate entirely.
     proxy_api_key_fair_share_congestion_threshold_pct: int = Field(default=0, ge=0, le=100)
     proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
+    # Upstream overload (``server_is_overloaded``) handling. Soft backoff and
+    # the isolation trip level are fixed constants in
+    # ``app/modules/proxy/_load_balancer/overload_backoff.py``; this is how long
+    # a sustained-overload account is isolated (fresh selection avoids it and
+    # soft sticky owners are rerouted while another candidate exists). ``0``
+    # disables the isolation stage and keeps the soft backoff only.
+    proxy_overload_isolation_seconds: int = Field(default=1800, ge=0)
+    # Weighted routing strategies (``capacity_weighted``, ``relative_availability``)
+    # discount each candidate's draw weight by its recent upstream error rate
+    # (window, sample floor and weight floor are fixed constants in
+    # ``app/modules/proxy/_load_balancer/error_rate.py``).
+    proxy_account_error_rate_weighting_enabled: bool = True
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
     proxy_account_caps_scope: Literal["partitioned", "replica"] = "partitioned"

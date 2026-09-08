@@ -2,13 +2,14 @@
 
 ### Requirement: Wedged SQLite session teardown is bounded and reclaimed
 
-Session teardown (rollback and close) on file-backed SQLite MUST complete within a hard deadline derived from the busy timeout while remaining shielded from the caller's cancellation. A teardown that misses the deadline MUST NOT be merely abandoned — the aiosqlite worker thread would keep holding the writer slot — it MUST be reclaimed: the driver connection is interrupted to abort the call the worker is stuck in, and the connection is invalidated so the worker is disposed, the underlying `sqlite3` connection is hard-closed releasing the writer slot, and the connection can never be handed out again. The reclaim MUST be reported with the long-write watchdog's identifiers where available (held duration, owning task, first and last write statements), including identifiers the watchdog already deferred into its pending report. A session whose teardown was abandoned MUST be fenced from further teardown attempts, the abandoned work finishing late MUST NOT surface unretrieved errors, and the deferred bookkeeping close MUST be owned until completion (drained at database shutdown, never fire-and-forget). PostgreSQL teardown semantics MUST remain unchanged, and in-memory SQLite — whose single shared connection is the entire database and cannot starve other writers — MUST keep the unbounded teardown and never be reclaimed.
+File-backed SQLite session teardown (rollback and close) MUST use an initial bounded wait derived from the busy timeout, shielded from caller cancellation, followed by a bounded completion grace for observing successful teardown. Successful completion observed within grace MUST avoid reclamation. A task still pending, cancelled or failed after that observation MUST retain session fencing, interruption/invalidation attempts for captured open connections, and owned late-cleanup bookkeeping. Already-closed handles MUST not be reclaimed again. Cleanup diagnostics MUST preserve available watchdog identifiers, including deferred held duration, owning task and first/last writes. Failed cleanup MUST be reported without claiming guaranteed writer-slot release or a proven permanent hold. Late completion MUST not produce unretrieved errors; deferred bookkeeping close MUST remain tracked and drained at database shutdown. PostgreSQL teardown semantics MUST remain unchanged. In-memory SQLite MUST retain unbounded teardown without reclamation.
 
 #### Scenario: A wedged rollback no longer starves every other writer
 
 - **GIVEN** a session holding an open SQLite write transaction whose rollback wedges during teardown
-- **WHEN** the teardown deadline passes
-- **THEN** teardown returns, the connection is interrupted and invalidated, and another writer — such as the leader-election `scheduler_leader` INSERT — acquires the writer slot immediately instead of surfacing `database is locked`
+- **WHEN** the initial deadline and completion grace pass without successful completion
+- **THEN** the service interrupts and invalidates the captured open connection through the existing reclaim owner
+- **AND** when that cleanup releases the native connection, another writer can acquire the writer slot
 
 #### Scenario: The reclaim is attributed with the watchdog's identifiers
 

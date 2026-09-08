@@ -135,8 +135,6 @@ config:
   upstreamBaseUrl: ""
   # @param config.upstreamConnectTimeout Upstream connection timeout seconds
   upstreamConnectTimeout: 10
-  # @param config.upstreamStreamTransport Upstream streaming transport (auto|websocket|http)
-  upstreamStreamTransport: auto
   # @param config.logFormat Log output format (json|text)
   logFormat: json
   # @param config.leaderElectionEnabled Enable DB-based leader election

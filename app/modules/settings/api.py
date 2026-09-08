@@ -8,7 +8,7 @@ import time
 import aiohttp
 import httpx
 from aiohttp_socks import ProxyConnector
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
 from python_socks import ProxyType
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -23,11 +23,13 @@ from app.core.clients.http import _shared_ssl_context
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.exceptions import DashboardBadRequestError, DashboardSettingsConflictError
+from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError, DashboardSettingsConflictError
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint, sends_plaintext_credentials
 from app.core.upstream_proxy.cache import get_upstream_route_cache
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
+from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.proxy.account_cache import (
     clear_account_routing_unavailable,
     get_account_selection_cache,
@@ -40,6 +42,7 @@ from app.modules.settings.schemas import (
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
     RuntimeConnectAddressResponse,
+    SubscriptionOverflowPreflightResponse,
     UpstreamProxyAdminResponse,
     UpstreamProxyEndpointCreateRequest,
     UpstreamProxyEndpointResponse,
@@ -49,6 +52,12 @@ from app.modules.settings.schemas import (
     UpstreamProxyPoolResponse,
 )
 from app.modules.settings.service import DashboardSettingsUpdateData
+from app.modules.settings.subscription_overflow import (
+    load_subscription_overflow_preflight,
+    resolve_drain_until,
+    resolve_pins_expire_by,
+    validate_overflow_source,
+)
 from app.modules.usage.additional_quota_keys import (
     get_additional_quota_routing_policy,
     list_additional_quota_definitions,
@@ -176,6 +185,9 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         relative_availability_power=settings.relative_availability_power,
         relative_availability_top_k=settings.relative_availability_top_k,
         single_account_id=settings.single_account_id,
+        subscription_overflow_source_id=settings.subscription_overflow_source_id,
+        subscription_overflow_drain_until=settings.subscription_overflow_drain_until,
+        subscription_overflow_pins_expire_by=resolve_pins_expire_by(settings.subscription_overflow_drain_until),
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
@@ -218,6 +230,25 @@ async def get_settings(
 ) -> DashboardSettingsResponse:
     settings = await context.service.get_settings()
     return _dashboard_settings_response(settings)
+
+
+@router.get("/subscription-overflow/preflight", response_model=SubscriptionOverflowPreflightResponse)
+async def get_subscription_overflow_preflight(
+    source_id: str = Query(min_length=1, max_length=255),
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> SubscriptionOverflowPreflightResponse:
+    # Write access rather than session-only: the report enumerates the source
+    # catalog and key scoping, which a read-only guest must not see.
+    settings = await context.repository.get_or_create()
+    preflight = await load_subscription_overflow_preflight(
+        context.session,
+        source_id,
+        drain_until=settings.subscription_overflow_drain_until,
+    )
+    if preflight is None:
+        raise DashboardNotFoundError("Model source not found")
+    return preflight
 
 
 @router.get("/runtime/connect-address", response_model=RuntimeConnectAddressResponse)
@@ -609,6 +640,22 @@ async def update_settings(
         and payload.upstream_proxy_default_pool_id is not None
     ):
         await _validate_proxy_pool_id(context, payload.upstream_proxy_default_pool_id)
+    overflow_provided = "subscription_overflow_source_id" in payload.model_fields_set
+    overflow_source_id = (
+        payload.subscription_overflow_source_id if overflow_provided else current.subscription_overflow_source_id
+    )
+    if (
+        overflow_provided
+        and overflow_source_id is not None
+        and overflow_source_id != current.subscription_overflow_source_id
+    ):
+        validate_overflow_source(await ModelSourcesRepository(context.session).get_by_id(overflow_source_id))
+    overflow_drain_until = resolve_drain_until(
+        current.subscription_overflow_source_id,
+        overflow_source_id,
+        current.subscription_overflow_drain_until,
+        utcnow(),
+    )
     if (
         payload.auto_redeem_reset_credits_before_expiry
         and not current.auto_redeem_reset_credits_before_expiry
@@ -780,6 +827,12 @@ async def update_settings(
                     else current.relative_availability_top_k
                 ),
                 single_account_id=single_account_id,
+                subscription_overflow_source_id=overflow_source_id,
+                clear_subscription_overflow_source=overflow_provided and overflow_source_id is None,
+                subscription_overflow_drain_until=overflow_drain_until,
+                set_subscription_overflow_drain_until=(
+                    overflow_drain_until != current.subscription_overflow_drain_until
+                ),
                 openai_cache_affinity_max_age_seconds=(
                     payload.openai_cache_affinity_max_age_seconds
                     if payload.openai_cache_affinity_max_age_seconds is not None
@@ -941,6 +994,8 @@ async def update_settings(
             "relative_availability_power",
             "relative_availability_top_k",
             "single_account_id",
+            "subscription_overflow_source_id",
+            "subscription_overflow_drain_until",
             "openai_cache_affinity_max_age_seconds",
             "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",

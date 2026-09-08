@@ -1,0 +1,3 @@
+- [x] Configure generated summaries in the CodeRabbit walkthrough.
+- [x] Validate configuration against the vendor schema and check CI invariants.
+- [x] Sync the requirement, record verification, and archive.

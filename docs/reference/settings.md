@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 133 settings. Every setting is an environment
+codex-lb currently exposes 134 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -67,7 +67,6 @@ the env-file locations have to be known before env files are read.
 | `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | `float` | `8.0` |
 | `CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES` | `int` | `15728640` |
 | `CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS` | `float` | `60.0` |
-| `CODEX_LB_UPSTREAM_STREAM_TRANSPORT` | `'http' \| 'websocket' \| 'auto'` | `'auto'` |
 | `CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV` | `bool` | auto-detected from outbound proxy env vars |
 
 ## HTTP & streaming
@@ -121,6 +120,7 @@ the env-file locations have to be known before env files are read.
 | --- | --- | --- |
 | `CODEX_LB_PROXY_ACCOUNT_CAP_PARTITION_SCALE_DOWN_SECONDS` | `int` | `60` |
 | `CODEX_LB_PROXY_ACCOUNT_CAPS_SCOPE` | `'partitioned' \| 'replica'` | `'partitioned'` |
+| `CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED` | `bool` | `True` |
 | `CODEX_LB_PROXY_ACCOUNT_INFLIGHT_PENALTY_PCT` | `float` | `2.5` |
 | `CODEX_LB_PROXY_ACCOUNT_LEASE_TOKEN_WEIGHT` | `float` | `1.0` |
 | `CODEX_LB_PROXY_ACCOUNT_LEASE_TTL_SECONDS` | `float` | `900.0` |
@@ -131,6 +131,7 @@ the env-file locations have to be known before env files are read.
 | `CODEX_LB_PROXY_API_KEY_FAIR_SHARE_CONGESTION_THRESHOLD_PCT` | `int` | `0` |
 | `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT` | `int` | `64` |
 | `CODEX_LB_PROXY_DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT_SECONDS` | `float` | `120.0` |
+| `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` | `int` | `1800` |
 | `CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS` | `float` | `5.0` |
 | `CODEX_LB_PROXY_REQUEST_BUDGET_SECONDS` | `float` | `600.0` |
 | `CODEX_LB_PROXY_RESPONSE_CREATE_LIMIT` | `int` | `256` |
@@ -189,7 +190,7 @@ the env-file locations have to be known before env files are read.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` | `dict[str, int]` | `{}` |
-| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | `str` | `'0.144.0'` |
+| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | `str` | `'0.153.4'` |
 | `CODEX_LB_MODEL_REGISTRY_ENABLED` | `bool` | `True` |
 | `CODEX_LB_MODEL_REGISTRY_SNAPSHOT_MAX_AGE_SECONDS` | `int` | `86400` |
 
@@ -331,6 +332,7 @@ issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT`
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS`
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_DENY_API_KEY_IDS`
+- `CODEX_LB_UPSTREAM_STREAM_TRANSPORT`
 
 ---
 

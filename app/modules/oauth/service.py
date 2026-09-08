@@ -143,6 +143,8 @@ class OAuthStateStore:
         self._state_token_index: dict[str, str] = {}
         self._callback_server: OAuthCallbackServer | None = None
         self._callback_server_stop_task: asyncio.Task[None] | None = None
+        self._browser_flow_expiry_task: asyncio.Task[None] | None = None
+        self._browser_flow_expiry_changed = asyncio.Event()
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -203,11 +205,27 @@ class OAuthStateStore:
         self.prune_expired_pending_browser_flows_locked()
         return any(flow.method == "browser" and flow.status == "pending" for flow in self._flows.values())
 
+    def next_pending_browser_flow_expiry_locked(self) -> float | None:
+        return min(
+            (
+                flow.expires_at
+                for flow in self._flows.values()
+                if flow.method == "browser" and flow.status == "pending" and flow.expires_at is not None
+            ),
+            default=None,
+        )
+
     async def reset(self) -> None:
         server: OAuthCallbackServer | None = None
         async with self._lock:
+            expiry_task = self._browser_flow_expiry_task
+            self._browser_flow_expiry_task = None
+            if expiry_task is not None:
+                expiry_task.cancel()
             server = self._cleanup_locked()
             self._state = OAuthState(status="idle")
+        if expiry_task is not None:
+            await asyncio.gather(expiry_task, return_exceptions=True)
         if server is not None:
             await server.stop()
 
@@ -221,6 +239,7 @@ class OAuthStateStore:
             self._callback_server = None
         self._flows.clear()
         self._state_token_index.clear()
+        self._browser_flow_expiry_changed.set()
         return server
 
     def prune_terminal_flows_locked(self) -> None:
@@ -445,6 +464,8 @@ class OauthService:
             # Durable pending: hydrate a flow this replica never saw.
             if local is None:
                 self._store.remember_flow_locked(self._record_to_state(record))
+            if record.method == "browser":
+                self._ensure_browser_flow_expiry_task_locked()
         return record
 
     async def start_oauth(self, request: OauthStartRequest) -> OauthStartResponse:
@@ -585,12 +606,45 @@ class OauthService:
                     if self._store._callback_server is callback_server:
                         self._store._callback_server = None
 
+        async with self._store.lock:
+            self._ensure_browser_flow_expiry_task_locked()
+
         return OauthStartResponse(
             flow_id=flow_id,
             method="browser",
             authorization_url=authorization_url,
             callback_url=OAUTH_REDIRECT_URI,
         )
+
+    def _ensure_browser_flow_expiry_task_locked(self) -> None:
+        """Wake the store's single timer, including for an earlier hydrated TTL."""
+        self._store._browser_flow_expiry_changed.set()
+        task = self._store._browser_flow_expiry_task
+        if task is None or task.done():
+            self._store._browser_flow_expiry_task = asyncio.create_task(self._expire_browser_flows())
+
+    async def _expire_browser_flows(self) -> None:
+        """Run existing idle-listener cleanup at pending browser deadlines."""
+        current = asyncio.current_task()
+        changed = self._store._browser_flow_expiry_changed
+        try:
+            while True:
+                async with self._store.lock:
+                    expires_at = self._store.next_pending_browser_flow_expiry_locked()
+                    if expires_at is None:
+                        self._store._browser_flow_expiry_task = None
+                        return
+                    changed.clear()
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=max(0, expires_at - time.time()))
+                except TimeoutError:
+                    await self._stop_callback_server_if_idle()
+        except Exception:
+            logger.exception("Browser OAuth expiry cleanup failed")
+        finally:
+            async with self._store.lock:
+                if self._store._browser_flow_expiry_task is current:
+                    self._store._browser_flow_expiry_task = None
 
     async def manual_callback(self, callback_url: str, flow_id: str | None = None) -> ManualCallbackResponse:
         """Process an OAuth callback URL pasted manually by the user.

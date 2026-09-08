@@ -59,7 +59,7 @@ def is_account_neutral_safety_policy_rejection(
         code == "misalignment_policy_violation"
         and http_status in (None, 400)
         and isinstance(message, str)
-        and message.strip().startswith(_SAFETY_BLOCK_MESSAGE_PREFIX)
+        and message.startswith(_SAFETY_BLOCK_MESSAGE_PREFIX)
     )
 
 

@@ -782,6 +782,9 @@ async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_c
 
 
 _MODEL_ENTITLEMENT_REJECTION_MESSAGE = "The 'gpt-5.1' model is not supported when using Codex with a ChatGPT account."
+_SAFETY_POLICY_REJECTION_MESSAGE = (
+    "This request was blocked by our safety systems. Reason: Potentially unintended activity."
+)
 
 
 @pytest.mark.asyncio
@@ -833,6 +836,54 @@ async def test_stream_model_entitlement_rejection_keeps_account_health_after_fai
         assert runtime is None or runtime.last_error_at is None, (
             f"model-scoped rejection must not arm error backoff for {imported_account_id}"
         )
+
+
+@pytest.mark.asyncio
+async def test_stream_safety_policy_rejection_keeps_account_health_and_original_failure(async_client, monkeypatch):
+    """A routed policy block is request-scoped and must not poison its account."""
+    imported_account_id = await _import_account(
+        async_client,
+        "acc_safety_policy",
+        "safety-policy@example.com",
+    )
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        yield _sse_event(
+            {
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "code": "misalignment_policy_violation",
+                        "message": _SAFETY_POLICY_REJECTION_MESSAGE,
+                    }
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"] == {
+        "code": "misalignment_policy_violation",
+        "message": _SAFETY_POLICY_REJECTION_MESSAGE,
+    }
+    assert len(seen_account_ids) == 1, "a non-retryable policy block must not fan out"
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    runtime = service._load_balancer._runtime.get(imported_account_id)
+    assert runtime is None or runtime.error_count == 0
+    assert runtime is None or runtime.last_error_at is None
 
 
 @pytest.mark.asyncio

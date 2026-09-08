@@ -305,6 +305,12 @@ async def test_process_network_failure_does_not_update_account_health() -> None:
         ),
         (
             "misalignment_policy_violation",
+            400,
+            " This request was blocked by our safety systems.",
+            False,
+        ),
+        (
+            "misalignment_policy_violation",
             500,
             "This request was blocked by our safety systems.",
             False,

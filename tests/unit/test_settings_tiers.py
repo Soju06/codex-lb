@@ -1,9 +1,10 @@
 """Tests for the configuration-tier guard (``scripts/check_settings_tiers.py``).
 
 Live-tree assertions keep ``app/core/config/tiers.py`` in step with
-``Settings``; the fixture-based tests pin the checker's error/warning
-semantics so field removals (stale entries warn) and env-read cleanups
-(stale allowlist entries warn) can land in either order.
+``Settings`` and only assert on errors (stale entries are warnings, so a field
+removal landing first keeps this suite green); the fixture-based tests pin the
+checker's error/warning semantics so field removals (stale entries warn) and
+env-read cleanups (stale allowlist entries warn) can land in either order.
 """
 
 from __future__ import annotations
@@ -30,13 +31,11 @@ def _dashboard_columns() -> list[str]:
 def test_every_live_settings_field_has_a_tier() -> None:
     report = checker.check_tier_coverage(Settings.model_fields, SETTING_TIERS, TIERS)
     assert report.errors == []
-    assert report.warnings == [], "SETTING_TIERS carries entries for removed fields"
 
 
 def test_every_live_t3_field_has_a_dashboard_home_or_migrating_entry() -> None:
     report = checker.check_t3_dashboard_home(Settings.model_fields, SETTING_TIERS, MIGRATING, _dashboard_columns())
     assert report.errors == []
-    assert report.warnings == [], "MIGRATING carries redundant entries"
 
 
 def test_live_tree_passes_all_checks() -> None:
@@ -108,12 +107,30 @@ def test_env_read_detection_flags_every_form_and_skips_settings_module(tmp_path:
 def test_env_read_allowlist_suppresses_errors_and_stale_entry_warns(tmp_path: Path) -> None:
     _write(tmp_path, "app/legacy.py", "import os\n\nvalue = os.getenv('A')\n")
     _write(tmp_path, "app/fixed.py", "value = 1\n")
-    allowlist = {"app/legacy.py": "pending B6", "app/fixed.py": "already migrated"}
+    allowlist = {"app/legacy.py": (1, "pending B6"), "app/fixed.py": (1, "already migrated")}
     report = checker.check_env_reads(tmp_path / "app", tmp_path, allowlist)
     assert report.errors == []
     assert report.warnings == [
         "ENV_READ_ALLOWLIST entry 'app/fixed.py' no longer reads the environment; drop the entry"
     ]
+
+
+def test_env_read_allowlist_cap_is_per_site_not_per_file(tmp_path: Path) -> None:
+    _write(tmp_path, "app/legacy.py", "import os\n\nvalue = os.getenv('A')\nnew = os.getenv('B')\n")
+    _write(tmp_path, "app/shrunk.py", "import os\n\nvalue = os.getenv('A')\n")
+    allowlist = {"app/legacy.py": (1, "one read"), "app/shrunk.py": (2, "was two reads")}
+    report = checker.check_env_reads(tmp_path / "app", tmp_path, allowlist)
+    assert len(report.errors) == 1
+    assert report.errors[0].startswith("app/legacy.py: 2 lines read the process environment (lines 3, 4), over")
+    assert report.warnings == [
+        "ENV_READ_ALLOWLIST caps 'app/shrunk.py' at 2 but only 1 lines read the environment; lower the cap to 1"
+    ]
+
+
+def test_live_env_read_allowlist_caps_match_the_tree() -> None:
+    report = checker.check_env_reads(checker.APP_DIR, checker.ROOT, checker.ENV_READ_ALLOWLIST)
+    assert report.errors == []
+    assert report.warnings == [], "ENV_READ_ALLOWLIST caps are above the live read counts; lower them"
 
 
 def test_env_read_syntax_error_is_reported_not_raised(tmp_path: Path) -> None:

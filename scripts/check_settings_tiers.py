@@ -13,8 +13,10 @@ Checks:
    ``MIGRATING`` entry (error). A ``MIGRATING`` entry that is redundant (the
    column exists, or the field is not T3) only warns.
 3. No ``os.environ`` / ``os.getenv`` / ``dotenv_values`` use under ``app/``
-   outside ``app/core/config/settings.py``, except the allowlisted files
-   (error). An allowlisted file with no remaining use only warns.
+   outside ``app/core/config/settings.py``, except the allowlisted files, each
+   capped at its recorded number of reading lines (error when a file exceeds
+   its cap, so new reads in allowlisted files are caught). An allowlisted file
+   with fewer reads than its cap only warns (lower the cap).
 4. ``.env.example`` mentions no T2/T3/T4 field (error) — only bootstrap and
    topology settings belong in the operator-facing template.
 5. ``len(Settings.model_fields)`` stays within ``[settings_fields].max`` in
@@ -43,25 +45,29 @@ ENV_PREFIX = "CODEX_LB_"
 ENV_ONLY_TIERS = frozenset({"T0", "T1"})
 
 # TODO(b6): PR B6 promotes these direct reads to ``Settings`` fields (05-config-policy §6.5)
-# and drops the corresponding entries. Paths are repo-relative; the checker warns when an
-# allowlisted file no longer reads the environment so stale entries are visible.
-ENV_READ_ALLOWLIST: Mapping[str, str] = {
-    "app/main.py": "PORT (host runs)",
-    "app/cli.py": "HOST/PORT/SSL_*/UVICORN_* uvicorn launch knobs",
-    "app/core/metrics/prometheus.py": "PROMETHEUS_MULTIPROC_DIR",
-    "app/core/middleware/trusted_proxy_headers.py": "FORWARDED_ALLOW_IPS (S9: fourth trust list)",
-    "app/core/utils/proxy_env.py": "HTTP(S)_PROXY/ALL_PROXY/WS_PROXY/NO_PROXY outbound proxy",
-    "app/core/clients/http.py": "outbound proxy env fallback",
-    "app/core/clients/proxy_websocket.py": "outbound proxy env fallback",
-    "app/modules/settings/api.py": "CODEX_LB_CONNECT_ADDRESS (S14)",
-    "app/modules/usage/additional_quota_keys.py": "CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE",
-    "app/modules/runtime/service.py": "GITHUB_TOKEN release-version lookup",
-    "app/modules/telemetry/snapshot.py": "KUBERNETES_SERVICE_HOST deployment detection",
-    "app/modules/automations/service.py": "TZ default schedule timezone (S13)",
-    "app/db/session.py": "CODEX_LB_TEST_DATABASE_URL (CI only)",
-    "app/db/alembic/versions/20260312_000000_add_additional_usage_quota_key.py": "migration-time registry path",
-    "app/db/alembic/versions/20260310_120000_add_sticky_session_kinds_and_affinity_ttl.py": "migration-time seed",
-    "app/codex_sessions_retag.py": "CODEX_HOME/USERPROFILE/WSL_DISTRO_NAME (standalone CLI tool)",
+# and drops the corresponding entries. Paths are repo-relative; the value is the number of
+# lines in that file that reference the environment today (the per-file ratchet: more lines
+# fail, fewer lines warn so the cap gets lowered) plus a note on what is read.
+ENV_READ_ALLOWLIST: Mapping[str, tuple[int, str]] = {
+    "app/main.py": (1, "PORT (host runs)"),
+    "app/cli.py": (7, "HOST/PORT/SSL_*/UVICORN_* uvicorn launch knobs"),
+    "app/core/metrics/prometheus.py": (1, "PROMETHEUS_MULTIPROC_DIR"),
+    "app/core/middleware/trusted_proxy_headers.py": (1, "FORWARDED_ALLOW_IPS (S9: fourth trust list)"),
+    "app/core/utils/proxy_env.py": (4, "HTTP(S)_PROXY/ALL_PROXY/WS_PROXY/NO_PROXY outbound proxy"),
+    "app/core/clients/http.py": (3, "outbound proxy env fallback"),
+    "app/core/clients/proxy_websocket.py": (2, "outbound proxy env fallback"),
+    "app/modules/settings/api.py": (1, "CODEX_LB_CONNECT_ADDRESS (S14)"),
+    "app/modules/usage/additional_quota_keys.py": (1, "CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE"),
+    "app/modules/runtime/service.py": (1, "GITHUB_TOKEN release-version lookup"),
+    "app/modules/telemetry/snapshot.py": (1, "KUBERNETES_SERVICE_HOST deployment detection"),
+    "app/modules/automations/service.py": (1, "TZ default schedule timezone (S13)"),
+    "app/db/session.py": (2, "CODEX_LB_TEST_DATABASE_URL (CI only)"),
+    "app/db/alembic/versions/20260312_000000_add_additional_usage_quota_key.py": (1, "migration-time registry path"),
+    "app/db/alembic/versions/20260310_120000_add_sticky_session_kinds_and_affinity_ttl.py": (
+        1,
+        "migration-time seed",
+    ),
+    "app/codex_sessions_retag.py": (3, "CODEX_HOME/USERPROFILE/WSL_DISTRO_NAME (standalone CLI tool)"),
 }
 
 _ENV_VAR_RE = re.compile(rf"\b{ENV_PREFIX}([A-Z0-9_]+)\b")
@@ -145,7 +151,7 @@ def _env_read_lines(source: str, filename: str) -> list[int]:
     return sorted(lines)
 
 
-def check_env_reads(app_dir: Path, root: Path, allowlist: Mapping[str, str]) -> Report:
+def check_env_reads(app_dir: Path, root: Path, allowlist: Mapping[str, tuple[int, str]]) -> Report:
     report = Report()
     seen_allowlisted: set[str] = set()
     for path in sorted(app_dir.rglob("*.py")):
@@ -161,6 +167,18 @@ def check_env_reads(app_dir: Path, root: Path, allowlist: Mapping[str, str]) -> 
             continue
         if rel in allowlist:
             seen_allowlisted.add(rel)
+            cap = allowlist[rel][0]
+            if len(lines) > cap:
+                report.error(
+                    f"{rel}: {len(lines)} lines read the process environment (lines {', '.join(map(str, lines))}), "
+                    f"over the ENV_READ_ALLOWLIST cap of {cap}; add a Settings field in {SETTINGS_MODULE} "
+                    "instead of a new direct read (configuration-tiers)"
+                )
+            elif len(lines) < cap:
+                report.warn(
+                    f"ENV_READ_ALLOWLIST caps {rel!r} at {cap} but only {len(lines)} lines read the environment; "
+                    f"lower the cap to {len(lines)}"
+                )
             continue
         for lineno in lines:
             report.error(

@@ -21,12 +21,17 @@
 
 ### Requirement: Direct environment reads are confined to the settings module
 
-Under `app/`, `os.environ`, `os.getenv`, and `dotenv_values` SHALL be referenced only in `app/core/config/settings.py`. `scripts/check_settings_tiers.py` SHALL fail on any other reference, except in files named in its explicit allowlist of pre-existing sites (each entry recording the variable it reads), and SHALL warn when an allowlisted file no longer reads the environment.
+Under `app/`, `os.environ`, `os.getenv`, and `dotenv_values` SHALL be referenced only in `app/core/config/settings.py`. `scripts/check_settings_tiers.py` SHALL fail on any other reference, except in files named in its explicit allowlist of pre-existing sites (each entry recording the variable it reads and the number of lines that read the environment today). It SHALL fail when an allowlisted file exceeds its recorded number of reading lines and SHALL warn when an allowlisted file has fewer reads than recorded or no longer reads the environment.
 
 #### Scenario: New direct environment read
 
 - **WHEN** a PR adds `os.getenv("X")` to a module under `app/` that is not `app/core/config/settings.py` and not allowlisted
 - **THEN** `make lint` fails with the file and line, pointing to a `Settings` field as the replacement
+
+#### Scenario: New read added to an allowlisted file
+
+- **WHEN** a PR adds a second `os.getenv("Y")` to an allowlisted file whose entry records one reading line
+- **THEN** `make lint` fails naming the file, its reading lines, and the recorded cap
 
 #### Scenario: Allowlisted site is migrated
 

@@ -32,8 +32,10 @@ max_items = 5
 # Enforced by scripts/check_settings_tiers.py via `make lint` (counting the
 # fields needs the app importable, which the stdlib-only budgets script above
 # cannot do), and read by tests/unit/test_settings_reference.py. Lower it when
-# removing fields; raising it requires the simplicity-budget-approved label
-# plus a why-not-a-default justification in the PR body.
+# removing fields; raising it must happen in the same diff that adds the field,
+# with a why-not-a-default justification in the PR body (the
+# simplicity-budget-approved label override does not apply to this section;
+# `make lint` enforces the number as written).
 # History (pre-toml, from tests/unit/test_settings_reference.py):
 # 115 -> 116 clean_close_retry_jitter (#1394); 116 -> 117 fair-share gate
 # (#1535); 117 -> 126 durable bridge continuity controls (#1657);

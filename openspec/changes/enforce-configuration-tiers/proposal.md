@@ -5,7 +5,7 @@ The configuration policy (dashboard first, env only for bootstrap and instance t
 ## What Changes
 
 - Add `app/core/config/tiers.py`: a `SETTING_TIERS` map assigning every `Settings` field a tier (`T0`–`T4`) and a `MIGRATING` map for T3 fields that still have no `dashboard_settings` home (initially every env-only tunable/flag from the inventory, value `backlog`).
-- Add `scripts/check_settings_tiers.py`, run by `make lint` (architecture-check): fails on fields without a tier, on T3 fields with neither a same-name `dashboard_settings` column nor a `MIGRATING` entry, on `os.environ` / `os.getenv` / `dotenv_values` use under `app/` outside `app/core/config/settings.py` (an explicit allowlist covers the current sites until they are promoted to `Settings` fields), on `.env.example` mentioning a T2/T3/T4 setting, and on `len(Settings.model_fields)` exceeding the new `[settings_fields]` budget. Entries for fields that no longer exist and allowlist entries that no longer match only warn, so removals and this map can land in either order.
+- Add `scripts/check_settings_tiers.py`, run by `make lint` (architecture-check): fails on fields without a tier, on T3 fields with neither a same-name `dashboard_settings` column nor a `MIGRATING` entry, on `os.environ` / `os.getenv` / `dotenv_values` use under `app/` outside `app/core/config/settings.py` (an explicit allowlist covers the current sites, capped per file at today's number of reading lines, until they are promoted to `Settings` fields), on `.env.example` mentioning a T2/T3/T4 setting, and on `len(Settings.model_fields)` exceeding the new `[settings_fields]` budget. Entries for fields that no longer exist and allowlist entries that no longer match only warn, so removals and this map can land in either order.
 - Add `[settings_fields] max = 135` to `.github/simplicity-budgets.toml`; `tests/unit/test_settings_reference.py` reads its ratchet from the same key instead of a duplicated constant.
 - `scripts/generate_settings_reference.py` renders a **Tier** column and a tier legend in `docs/reference/settings.md`.
 
@@ -17,7 +17,7 @@ None. (`configuration-tiers` is introduced by the sibling `codify-configuration-
 
 ### Modified Capabilities
 
-- `configuration-tiers`: ADDED requirements for the tier map, the mechanical checks, the settings-field ratchet, and the tier column in the generated reference.
+- `configuration-tiers`: adds requirements (ADDED only, no base requirement is modified) to the capability introduced by `codify-configuration-tiers` — the tier map, the mechanical checks, the settings-field ratchet, and the tier column in the generated reference. If this change archives first, the capability is seeded from these requirements and `codify-configuration-tiers` adds the policy text on top.
 
 ## Impact
 

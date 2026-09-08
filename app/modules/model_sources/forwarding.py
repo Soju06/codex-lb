@@ -536,9 +536,12 @@ async def _source_stream_body(
     (a ``content`` frame or a success terminal); the hook is awaited once and
     the withheld bytes are flushed in order behind it. A failure terminal with
     no prior content flushes without the hook, as does EOF: nothing was
-    delivered, so there is nothing to pin. A hook exception propagates and the
-    withheld bytes are dropped -- the client must not receive content whose
-    continuity was not secured.
+    delivered, so there is nothing to pin. A frame that outgrows the parser's
+    buffer cap counts as content (it cannot be a bookkeeping envelope and its
+    truncated remainder never parses), so an oversized terminal never reaches
+    the client unpinned. A hook exception propagates and the withheld bytes
+    are dropped -- the client must not receive content whose continuity was
+    not secured.
     """
 
     withheld: list[bytes] | None = [] if on_first_content is not None else None
@@ -1128,6 +1131,15 @@ class SourceStreamUsageParser:
             frame, self._buffer = self._buffer.split("\n\n", 1)
             self._capture_frame(frame)
         if len(self._buffer) > self._MAX_BUFFER_CHARS:
+            # The frame under construction outgrew the cap: its truncated
+            # remainder will never parse, so it can no longer be classified by
+            # its event type. No bookkeeping envelope (``response.created`` /
+            # ``in_progress`` / ``queued``) is this large, so it is treated as
+            # content (I11: delivered => pinned) -- a pre-content hook must run
+            # before any byte of it reaches the client, and the withheld buffer
+            # stays bounded by the cap instead of the whole stream.
+            if self._response_shape == "responses":
+                self._usage_holder.first_content_seen = True
             self._buffer = self._buffer[-self._MAX_BUFFER_CHARS :]
 
     def _capture_frame(self, frame: str) -> None:

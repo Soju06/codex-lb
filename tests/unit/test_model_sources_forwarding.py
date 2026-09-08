@@ -1443,3 +1443,87 @@ async def test_forward_chat_completion_keeps_401_passthrough_and_retry_after(mon
     assert excinfo.value.status_code == 401
     assert excinfo.value.retry_after == "2"
     assert excinfo.value.payload == payload
+
+
+# -- oversized frames (buffer cap) and the pre-content hook ----------------------------------------------------
+
+_OVERSIZED_CHUNK_BYTES = 65536
+
+
+def _oversized_completed_frame(response_id: str) -> bytes:
+    """A single ``response.completed`` frame larger than the parser's buffer cap (its remainder never parses).
+
+    Several read chunks larger than the cap: the parser truncates the buffer at
+    the end of a feed that leaves the frame incomplete, so the frame boundary
+    eventually closes a remainder that no longer starts with ``data:``.
+    """
+
+    text = "x" * (SourceStreamUsageParser._MAX_BUFFER_CHARS + 4 * _OVERSIZED_CHUNK_BYTES)
+    return _sse(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}],
+                "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+            },
+        }
+    )
+
+
+def _chunked(data: bytes, size: int = _OVERSIZED_CHUNK_BYTES) -> list[bytes]:
+    return [data[offset : offset + size] for offset in range(0, len(data), size)]
+
+
+def test_stream_usage_parser_counts_an_oversized_responses_frame_as_content() -> None:
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+    parser.feed(_sse({"type": "response.created", "response": {"id": "resp_big"}}))
+    assert holder.first_content_seen is False
+
+    for chunk in _chunked(_oversized_completed_frame("resp_big")):
+        parser.feed(chunk)
+
+    # The truncated remainder cannot be classified by its event type, so the
+    # frame is content by construction (no bookkeeping envelope is this large).
+    assert holder.first_content_seen is True
+    assert len(parser._buffer) <= SourceStreamUsageParser._MAX_BUFFER_CHARS
+
+
+def test_stream_usage_parser_oversized_chat_frames_do_not_touch_responses_observations() -> None:
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="chat")
+
+    for _ in range(300):
+        parser.feed(b"y" * 4096)
+
+    assert holder.first_content_seen is False
+
+
+@pytest.mark.asyncio
+async def test_stream_body_oversized_terminal_frame_runs_the_hook_before_flushing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = _sse({"type": "response.created", "response": {"id": "resp_big"}})
+    completed = _oversized_completed_frame("resp_big")
+    rest = cast(list[bytes | BaseException], _chunked(completed))
+    response = _FakeResponse(content=_FakeContent(created, rest))
+    _session, _context, lease = _install_session(monkeypatch, response)
+    order: list[str] = []
+
+    async def hook(holder: SourceUsageHolder) -> None:
+        order.append(f"hook:first_content_seen={holder.first_content_seen}")
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+    delivered: list[bytes] = []
+    async for chunk in stream.body:
+        if not order or not order[-1].startswith("yield"):
+            order.append("yield")
+        delivered.append(chunk)
+
+    # Delivered => pinned (I11): the hook ran before the first byte of the
+    # oversized frame was released, and the withheld bytes were flushed in order.
+    assert order == ["hook:first_content_seen=True", "yield"]
+    assert b"".join(delivered) == created + completed
+    assert stream.usage_holder.first_content_seen is True
+    assert lease.released == 1

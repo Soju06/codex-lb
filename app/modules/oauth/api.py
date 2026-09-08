@@ -5,7 +5,9 @@ import logging
 from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
 
+from app.core.auth.dashboard_access import Permission
 from app.core.auth.dependencies import (
+    require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
@@ -52,7 +54,11 @@ async def start_oauth(
         )
 
 
-@router.get("/status", response_model=OauthStatusResponse)
+@router.get(
+    "/status",
+    response_model=OauthStatusResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE))],
+)
 async def oauth_status(
     flow_id: str | None = Query(default=None, alias="flowId"),
     context: OauthContext = Depends(get_oauth_context),

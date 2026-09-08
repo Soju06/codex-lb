@@ -143,6 +143,7 @@ async def test_login_password_uses_configured_dashboard_session_ttl_for_cookie()
             totp_verified=False,
             role=DashboardRole.ADMIN,
             guest_verified=False,
+            guest_session_generation=None,
         ),
     )
     context = cast(
@@ -183,6 +184,7 @@ async def test_login_password_uses_configured_dashboard_session_ttl_for_cookie()
         ttl_seconds=7200,
         role=DashboardRole.ADMIN,
         guest_verified=False,
+        guest_session_generation=None,
     )
     limiter.check_and_increment.assert_awaited_once()
     limiter.clear_for_key.assert_awaited_once()
@@ -201,6 +203,7 @@ async def test_login_password_uses_one_year_ttl_for_direct_loopback_dashboard_re
             totp_verified=False,
             role=DashboardRole.ADMIN,
             guest_verified=False,
+            guest_session_generation=None,
         ),
     )
     context = cast(
@@ -252,6 +255,7 @@ async def test_login_password_uses_one_year_ttl_for_direct_loopback_dashboard_re
         ttl_seconds=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
         role=DashboardRole.ADMIN,
         guest_verified=False,
+        guest_session_generation=None,
     )
     limiter.check_and_increment.assert_awaited_once()
     limiter.clear_for_key.assert_awaited_once()
@@ -270,6 +274,7 @@ async def test_login_password_caps_non_loopback_dashboard_session_ttl():
             totp_verified=False,
             role=DashboardRole.ADMIN,
             guest_verified=False,
+            guest_session_generation=None,
         ),
     )
     context = cast(
@@ -314,6 +319,7 @@ async def test_login_password_caps_non_loopback_dashboard_session_ttl():
         ttl_seconds=REMOTE_DASHBOARD_SESSION_TTL_SECONDS,
         role=DashboardRole.ADMIN,
         guest_verified=False,
+        guest_session_generation=None,
     )
     limiter.check_and_increment.assert_awaited_once()
     limiter.clear_for_key.assert_awaited_once()
@@ -332,6 +338,7 @@ async def test_login_password_caps_later_duplicate_forwarded_identity_from_loopb
             totp_verified=False,
             role=DashboardRole.ADMIN,
             guest_verified=False,
+            guest_session_generation=None,
         ),
     )
     context = cast(
@@ -385,6 +392,7 @@ async def test_login_password_caps_later_duplicate_forwarded_identity_from_loopb
         ttl_seconds=REMOTE_DASHBOARD_SESSION_TTL_SECONDS,
         role=DashboardRole.ADMIN,
         guest_verified=False,
+        guest_session_generation=None,
     )
     limiter.check_and_increment.assert_awaited_once()
     limiter.clear_for_key.assert_awaited_once()

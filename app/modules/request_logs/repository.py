@@ -1265,6 +1265,8 @@ class RequestLogsRepository:
         cache_mode: str = "since",
         timeframe: str | None = None,
         include_sensitive_metadata: bool = True,
+        include_account_identity: bool = True,
+        include_api_key_identity: bool = True,
     ) -> RequestLogsResult:
         since = _naive_utc(since) if since is not None else None
         until = _naive_utc(until) if until is not None else None
@@ -1285,6 +1287,8 @@ class RequestLogsRepository:
             error_codes_excluding=error_codes_excluding,
             exclude_soft_deleted=True,
             include_sensitive_metadata=include_sensitive_metadata,
+            include_account_identity=include_account_identity,
+            include_api_key_identity=include_api_key_identity,
         )
 
         stmt = select(RequestLog).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
@@ -1337,6 +1341,8 @@ class RequestLogsRepository:
             tuple(sorted(error_codes_in)) if error_codes_in else None,
             tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
             include_sensitive_metadata,
+            include_account_identity,
+            include_api_key_identity,
         )
         total = _cached_recent_count(cache_key)
         if total is None:
@@ -1648,6 +1654,8 @@ class RequestLogsRepository:
         error_codes_excluding: list[str] | None = None,
         exclude_soft_deleted: bool = False,
         include_sensitive_metadata: bool = True,
+        include_account_identity: bool = True,
+        include_api_key_identity: bool = True,
     ) -> _RequestLogFilters:
         conditions = []
         if exclude_soft_deleted:
@@ -1704,7 +1712,6 @@ class RequestLogsRepository:
             search_pattern = f"%{search}%"
             search_conditions = [
                 RequestLog.account_id.ilike(search_pattern),
-                Account.email.ilike(search_pattern),
                 RequestLog.request_id.ilike(search_pattern),
                 RequestLog.model.ilike(search_pattern),
                 RequestLog.reasoning_effort.ilike(search_pattern),
@@ -1712,8 +1719,6 @@ class RequestLogsRepository:
                 RequestLog.status.ilike(search_pattern),
                 RequestLog.error_code.ilike(search_pattern),
                 RequestLog.error_message.ilike(search_pattern),
-                RequestLog.api_key_id.ilike(search_pattern),
-                ApiKey.name.ilike(search_pattern),
                 cast(RequestLog.requested_at, String).ilike(search_pattern),
                 cast(RequestLog.input_tokens, String).ilike(search_pattern),
                 cast(RequestLog.output_tokens, String).ilike(search_pattern),
@@ -1721,8 +1726,17 @@ class RequestLogsRepository:
                 cast(RequestLog.reasoning_tokens, String).ilike(search_pattern),
                 cast(RequestLog.latency_ms, String).ilike(search_pattern),
             ]
+            if include_api_key_identity:
+                # API-key ids and names are an api_keys:read surface; matching on
+                # them would let a guest enumerate the key inventory.
+                search_conditions.append(RequestLog.api_key_id.ilike(search_pattern))
+                search_conditions.append(ApiKey.name.ilike(search_pattern))
             if include_sensitive_metadata:
                 search_conditions.append(RequestLog.client_ip.ilike(search_pattern))
+            if include_account_identity:
+                # Account emails are redacted for principals without account
+                # write access; matching on them would be a membership oracle.
+                search_conditions.append(Account.email.ilike(search_pattern))
             conditions.append(or_(*search_conditions))
             return _RequestLogFilters(conditions=conditions, needs_related_search_joins=True)
         return _RequestLogFilters(conditions=conditions, needs_related_search_joins=False)

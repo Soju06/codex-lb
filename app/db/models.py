@@ -1029,6 +1029,16 @@ class DashboardSettings(Base):
         nullable=False,
     )
     guest_password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Bumped whenever guest credentials or guest access change so every
+    # outstanding guest session cookie (which carries the generation it was
+    # issued under) stops validating. Sessions are stateless Fernet cookies, so
+    # this counter is the only server-side revocation handle for guests.
+    guest_session_generation: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
     bootstrap_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     bootstrap_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     api_key_auth_enabled: Mapped[bool] = mapped_column(

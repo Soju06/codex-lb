@@ -201,6 +201,7 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
         state is not None
         and state.role == DashboardRole.GUEST
         and guest_access_enabled
+        and state.guest_session_generation == settings.guest_session_generation
         and ((not guest_password_required and passwordless_guest_fallback_allowed) or state.guest_verified)
     ):
         return _set_dashboard_principal(request, guest_principal())

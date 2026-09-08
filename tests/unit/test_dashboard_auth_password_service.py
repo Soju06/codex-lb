@@ -42,6 +42,7 @@ class _FakeSettings:
     password_hash: str | None = None
     guest_access_enabled: bool = False
     guest_password_hash: str | None = None
+    guest_session_generation: int = 0
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
     totp_required_on_login: bool = False
     totp_secret_encrypted: bytes | None = None
@@ -64,10 +65,16 @@ class _FakeRepository:
 
     async def set_guest_password_hash(self, password_hash: str) -> _FakeSettings:
         self.settings.guest_password_hash = password_hash
+        self.settings.guest_session_generation += 1
         return self.settings
 
     async def clear_guest_password_hash(self) -> _FakeSettings:
         self.settings.guest_password_hash = None
+        self.settings.guest_session_generation += 1
+        return self.settings
+
+    async def bump_guest_session_generation(self) -> _FakeSettings:
+        self.settings.guest_session_generation += 1
         return self.settings
 
     async def try_set_password_hash(self, password_hash: str) -> bool:

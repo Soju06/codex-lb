@@ -59,12 +59,21 @@ class DashboardAuthRepository:
     async def set_guest_password_hash(self, password_hash: str) -> DashboardSettings:
         def _mutate(row: DashboardSettings) -> None:
             row.guest_password_hash = password_hash
+            # Changing the guest credential must log every current guest out.
+            row.guest_session_generation += 1
 
         return await self._mutate_settings_with_retry(_mutate)
 
     async def clear_guest_password_hash(self) -> DashboardSettings:
         def _mutate(row: DashboardSettings) -> None:
             row.guest_password_hash = None
+            row.guest_session_generation += 1
+
+        return await self._mutate_settings_with_retry(_mutate)
+
+    async def bump_guest_session_generation(self) -> DashboardSettings:
+        def _mutate(row: DashboardSettings) -> None:
+            row.guest_session_generation += 1
 
         return await self._mutate_settings_with_retry(_mutate)
 

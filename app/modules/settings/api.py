@@ -365,12 +365,20 @@ async def get_subscription_overflow_preflight(
     return preflight
 
 
-@router.get("/runtime/connect-address", response_model=RuntimeConnectAddressResponse)
+@router.get(
+    "/runtime/connect-address",
+    response_model=RuntimeConnectAddressResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def get_runtime_connect_address(request: Request) -> RuntimeConnectAddressResponse:
     return RuntimeConnectAddressResponse(connect_address=_resolve_runtime_connect_address(request))
 
 
-@router.get("/upstream-proxy", response_model=UpstreamProxyAdminResponse)
+@router.get(
+    "/upstream-proxy",
+    response_model=UpstreamProxyAdminResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def get_upstream_proxy_admin(
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyAdminResponse:

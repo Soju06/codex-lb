@@ -24,7 +24,7 @@ Ready-to-run Docker commands for both non-default modes are in [Docker deploymen
 
 ## Roles and permissions
 
-The dashboard has two built-in roles. **Admin** (the password, trusted-header, disabled-auth, or local-bootstrap principal) holds every permission. **Guest** (the optional read-only role) holds only `dashboard:read` and `accounts:read`: it can read dashboard overview and usage data and account status, but cannot read conversations, conversation archives, or the audit log, cannot export account credentials, and cannot change state.
+The dashboard has two built-in roles. **Admin** (the password, trusted-header, disabled-auth, or local-bootstrap principal) holds every permission. **Guest** (the optional read-only role) holds only `dashboard:read` and `accounts:read`: it can read dashboard overview and usage data, reports, redacted request logs, and account status. It cannot read conversations, conversation archives, the audit log, the API-key inventory, egress-proxy or sticky-session configuration, cannot export account credentials, and cannot change state. Account e-mails are masked for guests (`a***@example.com`) and upstream account identifiers are hidden. Changing or removing the guest password, turning guest access off, or calling `POST /api/dashboard-auth/guest/logout-all` logs every guest out immediately.
 
 Internally, authorization is expressed as fine-grained permissions such as `accounts:export`, `security:write`, `conversations:read`, and `audit:read`, each granted with an `all` or `own` scope. The session API still reports only the coarse `read` / `write` values. When a request lacks a specific permission the API answers `403` with error code `permission_required` and names the missing permission in `param`:
 

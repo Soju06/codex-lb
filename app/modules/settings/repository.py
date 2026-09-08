@@ -389,6 +389,10 @@ class SettingsRepository:
         if weekly_pace_smoothing_minutes is not None:
             settings.weekly_pace_smoothing_minutes = weekly_pace_smoothing_minutes
         if guest_access_enabled is not None:
+            if settings.guest_access_enabled and not guest_access_enabled:
+                # Disabling guest access must not leave already-issued guest
+                # cookies valid for when it is re-enabled later.
+                settings.guest_session_generation += 1
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled

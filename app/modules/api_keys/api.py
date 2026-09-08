@@ -3,7 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, Request, Response
 
 from app.core.audit.service import AuditService
+from app.core.auth.dashboard_access import Permission
 from app.core.auth.dependencies import (
+    require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
@@ -33,7 +35,13 @@ from app.modules.api_keys.service import (
 router = APIRouter(
     prefix="/api/api-keys",
     tags=["dashboard"],
-    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+    dependencies=[
+        Depends(validate_dashboard_session),
+        # The key inventory (policies, assignments, limits, usage) is not a
+        # guest-safe read; every route here needs api_keys:read at minimum.
+        Depends(require_dashboard_permission(Permission.API_KEYS_READ)),
+        Depends(set_dashboard_error_format),
+    ],
 )
 
 

@@ -32,6 +32,7 @@ class DashboardAuthSettingsProtocol(Protocol):
     password_hash: str | None
     guest_access_enabled: bool
     guest_password_hash: str | None
+    guest_session_generation: int
     totp_required_on_login: bool
     totp_secret_encrypted: bytes | None
     totp_last_verified_step: int | None
@@ -49,6 +50,8 @@ class DashboardAuthRepositoryProtocol(Protocol):
     async def set_guest_password_hash(self, password_hash: str) -> DashboardAuthSettingsProtocol: ...
 
     async def clear_guest_password_hash(self) -> DashboardAuthSettingsProtocol: ...
+
+    async def bump_guest_session_generation(self) -> DashboardAuthSettingsProtocol: ...
 
     async def clear_password_and_totp(self) -> DashboardAuthSettingsProtocol: ...
 
@@ -100,6 +103,10 @@ class DashboardSessionState:
     totp_verified: bool
     role: DashboardRole = DashboardRole.ADMIN
     guest_verified: bool = False
+    #: Generation the guest cookie was issued under; ``None`` for admin
+    #: sessions and for guest cookies minted before generations existed (which
+    #: therefore never match and are rejected).
+    guest_session_generation: int | None = None
 
 
 class DashboardSessionStore:
@@ -119,18 +126,21 @@ class DashboardSessionStore:
         ttl_seconds: int,
         role: DashboardRole = DashboardRole.ADMIN,
         guest_verified: bool = False,
+        guest_session_generation: int | None = None,
     ) -> str:
+        if role == DashboardRole.GUEST and guest_session_generation is None:
+            raise ValueError("guest sessions must carry the current guest session generation")
         expires_at = int(time()) + ttl_seconds
-        payload = json.dumps(
-            {
-                "exp": expires_at,
-                "pw": password_verified,
-                "tv": totp_verified,
-                "role": role.value,
-                "gv": guest_verified,
-            },
-            separators=(",", ":"),
-        )
+        data: dict[str, object] = {
+            "exp": expires_at,
+            "pw": password_verified,
+            "tv": totp_verified,
+            "role": role.value,
+            "gv": guest_verified,
+        }
+        if role == DashboardRole.GUEST:
+            data["gg"] = guest_session_generation
+        payload = json.dumps(data, separators=(",", ":"))
         return self._get_encryptor().encrypt(payload).decode("ascii")
 
     def get(self, session_id: str | None) -> DashboardSessionState | None:
@@ -164,12 +174,16 @@ class DashboardSessionStore:
             return None
         if exp < int(time()):
             return None
+        gg = data.get("gg")
+        if gg is not None and (not isinstance(gg, int) or isinstance(gg, bool)):
+            return None
         return DashboardSessionState(
             expires_at=exp,
             password_verified=pw,
             totp_verified=tv,
             role=role,
             guest_verified=gv,
+            guest_session_generation=gg if role == DashboardRole.GUEST else None,
         )
 
     def is_password_verified(self, session_id: str | None) -> bool:
@@ -207,6 +221,7 @@ class DashboardAuthService:
             state is not None
             and state.role == DashboardRole.GUEST
             and guest_access_enabled
+            and state.guest_session_generation == settings.guest_session_generation
             and (not guest_password_required or state.guest_verified)
         ):
             authenticated = True
@@ -287,6 +302,11 @@ class DashboardAuthService:
 
     async def clear_guest_password(self) -> None:
         await self._repository.clear_guest_password_hash()
+
+    async def revoke_guest_sessions(self) -> None:
+        """Invalidate every outstanding guest session cookie."""
+
+        await self._repository.bump_guest_session_generation()
 
     async def remove_password(self, password: str) -> None:
         await self.verify_password(password)

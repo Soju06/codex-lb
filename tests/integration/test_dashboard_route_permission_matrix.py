@@ -44,6 +44,7 @@ SESSION_EXEMPT_PREFIXES: tuple[str, ...] = (
 DASHBOARD_AUTH_GATED: dict[tuple[str, str], PermissionRequirement] = {
     ("POST", "/api/dashboard-auth/guest/password"): PermissionRequirement(Permission.SECURITY_WRITE),
     ("DELETE", "/api/dashboard-auth/guest/password"): PermissionRequirement(Permission.SECURITY_WRITE),
+    ("POST", "/api/dashboard-auth/guest/logout-all"): PermissionRequirement(Permission.SECURITY_WRITE),
 }
 
 #: Routes whose permission requirement is part of the security contract.
@@ -63,6 +64,15 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("POST", "/api/firewall/ips"): PermissionRequirement(Permission.SECURITY_WRITE),
     ("DELETE", "/api/firewall/ips/{ip_address}"): PermissionRequirement(Permission.SECURITY_WRITE),
     ("POST", "/api/settings/upstream-proxy/endpoints"): PermissionRequirement(Permission.SECURITY_WRITE),
+    # Guest-restricted reads (PR-0a-2): inventories and topology are not guest-safe.
+    ("GET", "/api/api-keys"): PermissionRequirement(Permission.API_KEYS_READ),
+    ("GET", "/api/api-keys/"): PermissionRequirement(Permission.API_KEYS_READ),
+    ("GET", "/api/api-keys/{key_id}/trends"): PermissionRequirement(Permission.API_KEYS_READ),
+    ("GET", "/api/api-keys/{key_id}/usage-7d"): PermissionRequirement(Permission.API_KEYS_READ),
+    ("GET", "/api/settings/upstream-proxy"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/settings/runtime/connect-address"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/sticky-sessions"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/oauth/status"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
     **DASHBOARD_AUTH_GATED,
 }
 

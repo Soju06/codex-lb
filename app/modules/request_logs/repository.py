@@ -792,11 +792,7 @@ class RequestLogsRepository:
                     label = str(row.label)
                     counts[label] = counts.get(label, 0) + int(row.request_count)
 
-        return [
-            RequestActivityDay(date=label, requests=count)
-            for label, count in sorted(counts.items())
-            if count > 0
-        ]
+        return [RequestActivityDay(date=label, requests=count) for label, count in sorted(counts.items()) if count > 0]
 
     async def _aggregate_activity(self, since: datetime, until: datetime | None) -> RequestActivityAggregate:
         rollup_rows, raw_windows = await read_hourly_window(

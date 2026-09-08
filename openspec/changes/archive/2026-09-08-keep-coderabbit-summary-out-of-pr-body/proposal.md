@@ -16,5 +16,6 @@ required check names, and release-evidence validation.
 ## Impact
 
 - Configuration: `.coderabbit.yaml`.
+- Register the vendor-required root configuration in the root-entry allowlist.
 - Owning capability: `github-automation`.
 - No application behavior, dependencies, operator settings, or UI changes.

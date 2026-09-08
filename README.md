@@ -122,6 +122,7 @@ for access guidance):
 
 - [Codex LB Status Bar](https://github.com/sm1ee/codex-lb-statusbar) — native macOS app: account status, quota details, account controls
 - [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — read-only SwiftBar/Bun monitor for pool status and quota headroom
+- [Codex LB for Omarchy](https://github.com/janaki-sasidhar/omarchy-codex-lb) — read-only Linux/Omarchy Quattro bar plugin for account quotas, usage totals, reset times, and optional desktop alerts
 
 ## Development
 

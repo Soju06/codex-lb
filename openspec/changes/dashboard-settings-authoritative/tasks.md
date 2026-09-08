@@ -9,6 +9,7 @@
 - [x] Seed `NULL` for the four account-capacity overrides in `SettingsRepository.get_or_create`.
 - [x] Update settings API integration assertions for a fresh row (override `null`, effective = env).
 - [x] Add a unit test proving a later environment change is honoured by a fresh row.
+- [x] Update `docs/deployment/kubernetes.md` and the `proxy-admission-control` spec context to the NULL-seed semantics.
 
 ## Step 3: Telemetry precedence (S6)
 

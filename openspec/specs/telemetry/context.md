@@ -5,7 +5,8 @@
 Give the project visibility into its install base (version distribution, deployment shapes,
 client ecosystem, feature usage) without collecting anything that identifies an operator,
 an account, or request content. Consent model is informed opt-out: active by default,
-one-time dialog with the exact payload, settings toggle, env kill switch.
+one-time dialog with the exact payload, settings toggle, env fallback for headless opt-out
+before the first dashboard decision.
 
 Decision record (2026-08-06, maintainer): default-on with first-run confirmation dialog for
 both new and existing users; settings toggle; expanded field set over the minimal version.

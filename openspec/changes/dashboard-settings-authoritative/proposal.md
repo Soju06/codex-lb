@@ -45,10 +45,31 @@ persisted dashboard decision.
   dashboard-driven opt-out and sends the single opt-out notice like any other
   dashboard-driven active-to-inactive transition.
 
+## Relationship to other changes
+
 This change supersedes the "A settings row created for the first time MUST
 persist the process environment values" sentence in `proxy-admission-control`
-that the `codify-configuration-tiers` change also rewrites as part of the
-general configuration-tier policy.
+wherever it appears:
+
+- in the main spec,
+- in the pending `clear-dashboard-capacity-overrides` change (its delta for
+  `Dashboard-configurable account concurrency caps` is otherwise kept in full:
+  the tri-state update paragraph and all of its scenarios are carried into
+  this change's delta so archive order cannot regress either side), and
+- in the `codify-configuration-tiers` change, which rewrites the same sentence
+  as part of the general configuration-tier policy.
+
+It also supersedes, in the pending `add-telemetry-optout-signal` change, the
+clause "MUST NOT be sent for an environment-controlled consent path" and the
+"Environment kill switch stays silent" scenario of `Dashboard opt-out
+notification`. Under this change the environment only controls consent while
+no decision is persisted, so persisting a decision ends environment control
+and an environment-active to dashboard-disabled transition is a dashboard-driven
+opt-out that sends the single notice. The environment-only opt-out path
+(`CODEX_LB_TELEMETRY_ENABLED=false`, nothing persisted) stays completely
+silent. This change's telemetry delta carries the full rewritten requirement;
+it MUST be archived after `add-telemetry-optout-signal` (or together with it)
+so the MODIFIED block has a requirement to replace.
 
 ## Impact
 
@@ -59,7 +80,9 @@ general configuration-tier policy.
   means "no decision saved yet, the environment decides".
 - Frontend: telemetry toggle no longer disabled for `source === "env"`;
   notice copy updated (en, ko, zh-CN).
-- Docs: `docs/telemetry.md` consent section, telemetry spec context.
+- Docs: `docs/telemetry.md` consent section, telemetry spec context,
+  `docs/deployment/kubernetes.md` cap bullet, `proxy-admission-control`
+  spec context.
 
 ## Non-goals
 

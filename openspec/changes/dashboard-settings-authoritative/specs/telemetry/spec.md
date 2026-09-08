@@ -24,3 +24,40 @@ The dashboard settings MUST expose a telemetry toggle reflecting the resolved co
 
 - **WHEN** the operator disables telemetry in settings without an environment value set
 - **THEN** consent persists as `disabled` and transmission stops without restart
+
+### Requirement: Dashboard opt-out notification
+
+The service MUST send one final signed `POST /v1/optout` notification for each dashboard-driven effective consent transition from active to inactive, and MUST complete any required instance registration and activation before sending that notification. The notification MUST use the telemetry instance identity and snapshot signing scheme, MUST be isolated from the settings API response, and MUST NOT be sent when the environment alone makes telemetry inactive (no dashboard decision persisted). Persisting a dashboard decision ends environment control: a persisted decision that flips the effective state from active to inactive MUST send exactly one notice even while `CODEX_LB_TELEMETRY_ENABLED` is set.
+
+#### Scenario: Opt-out fires exactly once per transition
+
+- **WHEN** dashboard consent transitions from undecided or enabled active telemetry to disabled
+  inactive telemetry
+- **THEN** exactly one opt-out notification is attempted for that transition before telemetry
+  becomes silent
+
+#### Scenario: Environment opt-out stays silent
+
+- **WHEN** `CODEX_LB_TELEMETRY_ENABLED=false` makes telemetry inactive while no dashboard decision
+  is persisted
+- **THEN** no opt-out notification or other telemetry network request is attempted
+
+#### Scenario: Dashboard decision ends environment control
+
+- **GIVEN** `CODEX_LB_TELEMETRY_ENABLED=true` keeps telemetry active while no decision is persisted
+- **WHEN** the operator disables telemetry in settings
+- **THEN** exactly one opt-out notification is attempted and telemetry becomes silent
+- **AND** enabling telemetry in settings while `CODEX_LB_TELEMETRY_ENABLED=false` kept it inactive
+  attempts no opt-out notification because the transition is inactive to active
+
+#### Scenario: Opt-out failure is isolated
+
+- **WHEN** registration, activation, or opt-out transmission fails
+- **THEN** the failure uses a total timeout of no more than five seconds, retries no more than
+  once, is logged only at debug level, does not raise to the caller, and does not delay or alter
+  the successful settings API response
+
+#### Scenario: A later transition may notify again
+
+- **WHEN** an operator re-enables telemetry and later disables it again through the dashboard
+- **THEN** the later active-to-inactive transition attempts exactly one new opt-out notification

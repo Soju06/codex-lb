@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 137 settings. Every setting is an environment
+codex-lb currently exposes 130 settings. Every setting is an environment
 variable, normally with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process); aliased settings list every accepted name.
 All defaults work with zero configuration —
@@ -30,6 +30,15 @@ of paths — overrides that discovery for installs whose module root cannot
 contain env files (the Nix package wrapper points it at the launch
 directory). It must be set in the process environment, not in an env file:
 the env-file locations have to be known before env files are read.
+
+## `CODEX_LB_WORKERS_PER_INSTANCE` (special case, startup guard)
+
+Not a setting: the only supported value is `1` (one worker process per
+instance), so there is nothing to configure. If it is set to anything else,
+startup fails with a settings validation error — per-account concurrency caps
+are partitioned per replica via the bridge ring, and multiple worker processes
+inside one instance would silently multiply them. Scale horizontally via
+replicas instead.
 
 ## Process-level environment variables (not settings)
 
@@ -98,7 +107,6 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_COMPACT_REQUEST_BUDGET_SECONDS` | `float` | `180.0` |
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT` | `int` | `100` |
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT_PER_HOST` | `int` | `50` |
-| `CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY` | `'smart' \| 'always_http' \| 'always_websocket' \| 'pinned'` | `'smart'` |
 | `CODEX_LB_HTTP_RESPONSES_STREAM_REQUEST_BUDGET_SECONDS` | `float` | `7200.0` |
 | `CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES` | `int` | `33554432` |
 | `CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES` | `int` | `134217728` |
@@ -118,7 +126,6 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS` | `float` | `900.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` | `bool` | `False` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED` | `bool` | `True` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_GATEWAY_SAFE_MODE` | `bool` | `False` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS` | `float` | `120.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID` | `str` | process hostname |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING` | `list[str]` | `[]` |
@@ -177,7 +184,7 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS` | `int` | `8` |
 | `CODEX_LB_TOKEN_REFRESH_TIMEOUT_SECONDS` | `float` | `8.0` |
 
-## Usage & retention
+## Usage
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
@@ -185,10 +192,8 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` | `bool` | `True` |
 | `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` | `bool` | `True` |
 | `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS` | `int` | `60` |
-| `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` | `int` | `0` |
 | `CODEX_LB_USAGE_FETCH_MAX_RETRIES` | `int` | `2` |
 | `CODEX_LB_USAGE_FETCH_TIMEOUT_SECONDS` | `float` | `10.0` |
-| `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` | `int` | `0` |
 | `CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS` | `float` | `300.0` |
 | `CODEX_LB_USAGE_REFRESH_ENABLED` | `bool` | `True` |
 | `CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS` | `int` | `60` |
@@ -197,7 +202,6 @@ anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
-| `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS` | `int` | `1800` |
 | `CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED` | `bool` | `True` |
 
 ## Images
@@ -258,7 +262,6 @@ anything else belongs in `app/core/config/settings.py`.
 | --- | --- | --- |
 | `CODEX_LB_LEADER_ELECTION_ENABLED` | `bool` | `True` |
 | `CODEX_LB_LEADER_ELECTION_TTL_SECONDS` | `int` | `60` |
-| `CODEX_LB_WORKERS_PER_INSTANCE` | `int` | `1` |
 
 ## Observability
 
@@ -292,71 +295,19 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_TELEMETRY_ENABLED` | `bool \| None` | `None` |
 | `CODEX_LB_TELEMETRY_ENDPOINT` | `str` | `'https://telemetry.tokmaxxing.com'` |
 | `CODEX_LB_TIMEOUT_INVARIANT_VALIDATION_STRICT` | `bool` | `False` |
-| `CODEX_LB_WARMUP_MODEL` | `str` | `'gpt-5.4-mini'` |
 
-## Removed / deprecated
+## Removed
 
-Deprecated env aliases (still functional for one release; the dashboard
-runtime value wins when set):
+Removed settings (ignored with a one-release startup warning; each is now a
+fixed default or a dashboard runtime setting — see PRINCIPLES.md P2 /
+issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
 
 - `CODEX_LB_REQUEST_LOG_RETENTION_DAYS`
 - `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS`
-
-Removed settings (ignored; values are now fixed — see PRINCIPLES.md P2 /
-issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
-
-- `CODEX_LB_AUTH_BASE_URL`
-- `CODEX_LB_OAUTH_CLIENT_ID`
-- `CODEX_LB_OAUTH_ORIGINATOR`
-- `CODEX_LB_OAUTH_SCOPE`
-- `CODEX_LB_OAUTH_REDIRECT_URI`
-- `CODEX_LB_OAUTH_CALLBACK_PORT`
-- `CODEX_LB_AUTH_GUARDIAN_INTERVAL_SECONDS`
-- `CODEX_LB_AUTH_GUARDIAN_MAX_REFRESH_AGE_SECONDS`
-- `CODEX_LB_AUTH_GUARDIAN_BATCH_SIZE`
-- `CODEX_LB_AUTH_GUARDIAN_CONCURRENCY`
-- `CODEX_LB_AUTH_GUARDIAN_JITTER_SECONDS`
-- `CODEX_LB_AUTH_GUARDIAN_FAILURE_BACKOFF_BASE_SECONDS`
-- `CODEX_LB_AUTH_GUARDIAN_FAILURE_BACKOFF_MAX_SECONDS`
-- `CODEX_LB_LOG_PROXY_REQUEST_SHAPE`
-- `CODEX_LB_LOG_PROXY_REQUEST_SHAPE_RAW_CACHE_KEY`
-- `CODEX_LB_LOG_PROXY_REQUEST_PAYLOAD`
-- `CODEX_LB_LOG_PROXY_SERVICE_TIER_TRACE`
-- `CODEX_LB_LOG_UPSTREAM_REQUEST_SUMMARY`
-- `CODEX_LB_LOG_UPSTREAM_REQUEST_PAYLOAD`
-- `CODEX_LB_BULKHEAD_PROXY_HTTP_LIMIT`
-- `CODEX_LB_BULKHEAD_PROXY_WEBSOCKET_LIMIT`
-- `CODEX_LB_BULKHEAD_PROXY_COMPACT_LIMIT`
-- `CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS`
-- `CODEX_LB_TOKEN_REFRESH_CLAIM_POLL_SECONDS`
-- `CODEX_LB_QUOTA_PLANNER_TICK_SECONDS`
-- `CODEX_LB_AUTOMATIONS_SCHEDULER_INTERVAL_SECONDS`
-- `CODEX_LB_MODEL_REGISTRY_REFRESH_INTERVAL_SECONDS`
-- `CODEX_LB_STICKY_SESSION_CLEANUP_INTERVAL_SECONDS`
-- `CODEX_LB_CODEX_FINGERPRINT_OS`
-- `CODEX_LB_CODEX_FINGERPRINT_ARCH`
-- `CODEX_LB_CODEX_FINGERPRINT_TERMINAL`
-- `CODEX_LB_LIVE_USAGE_WRITE_MIN_INTERVAL_SECONDS`
-- `CODEX_LB_LIVE_USAGE_QUEUE_SIZE`
-- `CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS`
-- `CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD`
-- `CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS`
-- `CODEX_LB_MEMORY_WARNING_THRESHOLD_MB`
-- `CODEX_LB_IMAGES_HOST_MODEL`
-- `CODEX_LB_IMAGES_MAX_PARTIAL_IMAGES`
-- `CODEX_LB_DATABASE_BACKGROUND_POOL_SIZE`
-- `CODEX_LB_DATABASE_BACKGROUND_MAX_OVERFLOW`
-- `CODEX_LB_DATABASE_POOL_TIMEOUT_SECONDS`
-- `CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS`
-- `CODEX_LB_DRAIN_PRIMARY_THRESHOLD_PCT`
-- `CODEX_LB_DRAIN_SECONDARY_THRESHOLD_PCT`
-- `CODEX_LB_DRAIN_ERROR_WINDOW_SECONDS`
-- `CODEX_LB_DRAIN_ERROR_COUNT_THRESHOLD`
-- `CODEX_LB_PROBE_QUIET_SECONDS`
-- `CODEX_LB_PROBE_SUCCESS_STREAK_REQUIRED`
-- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT`
-- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS`
-- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_DENY_API_KEY_IDS`
+- `CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY`
+- `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS`
+- `CODEX_LB_WARMUP_MODEL`
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_GATEWAY_SAFE_MODE`
 - `CODEX_LB_UPSTREAM_STREAM_TRANSPORT`
 
 ---

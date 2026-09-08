@@ -1301,7 +1301,7 @@ async def test_settings_api_rejects_unsafe_retention_values(async_client, payloa
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
 
-    # The stored settings are unchanged (NULL = inherit the env alias).
+    # The stored settings are unchanged (NULL = never configured = disabled).
     async with SessionLocal() as session:
         settings = await session.get(DashboardSettings, 1)
         if settings is not None:
@@ -1310,35 +1310,27 @@ async def test_settings_api_rejects_unsafe_retention_values(async_client, payloa
 
 
 @pytest.mark.asyncio
-async def test_settings_api_retention_get_falls_back_to_env_alias(async_client, monkeypatch):
-    response = await async_client.get("/api/settings")
-    assert response.status_code == 200
-
-    from app.modules.settings import service as settings_service
-
-    inherited = settings_service.get_settings().model_copy(
-        update={
-            "request_log_retention_days": 90,
-            "usage_history_retention_days": 45,
-        }
-    )
-    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
-
+async def test_settings_api_retention_null_reads_as_disabled(async_client):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
     body = response.json()
-    assert body["requestLogRetentionDays"] == 90
-    assert body["usageHistoryRetentionDays"] == 45
+    # NULL (never configured) is reported as the effective value 0 = disabled
+    # with the raw override exposed as null.
+    assert body["requestLogRetentionDays"] == 0
+    assert body["usageHistoryRetentionDays"] == 0
     assert body["requestLogRetentionOverrideDays"] is None
     assert body["usageHistoryRetentionOverrideDays"] is None
 
-    # A dashboard override wins over the alias, including 0 (explicit disable).
-    response = await async_client.put("/api/settings", json={"usageHistoryRetentionOverrideDays": 0})
+    # A stored value is the effective value, including an explicit 0.
+    response = await async_client.put(
+        "/api/settings",
+        json={"requestLogRetentionOverrideDays": 90, "usageHistoryRetentionOverrideDays": 0},
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["requestLogRetentionDays"] == 90
     assert body["usageHistoryRetentionDays"] == 0
-    assert body["requestLogRetentionOverrideDays"] is None
+    assert body["requestLogRetentionOverrideDays"] == 90
     assert body["usageHistoryRetentionOverrideDays"] == 0
 
 
@@ -1358,23 +1350,13 @@ async def test_unrelated_settings_update_preserves_inherited_retention_nulls(asy
 
 
 @pytest.mark.asyncio
-async def test_retention_override_tri_state_echo_capture_and_clear(async_client, monkeypatch):
-    """Override semantics: null echoes round-trip, an explicit override equal to
-    the env alias IS stored, and present-null clears back to inherit."""
-    from app.modules.settings import service as settings_service
-
-    inherited = settings_service.get_settings().model_copy(
-        update={
-            "request_log_retention_days": 90,
-            "usage_history_retention_days": 45,
-        }
-    )
-    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
-
+async def test_retention_override_tri_state_echo_capture_and_clear(async_client):
+    """Override semantics: null echoes round-trip, a present value is stored,
+    and present-null clears back to NULL (= disabled)."""
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
     body = response.json()
-    assert body["requestLogRetentionDays"] == 90
+    assert body["requestLogRetentionDays"] == 0
     assert body["requestLogRetentionOverrideDays"] is None
 
     # A full-save client echoes the override fields verbatim: null stays null.
@@ -1392,8 +1374,6 @@ async def test_retention_override_tri_state_echo_capture_and_clear(async_client,
         assert settings.request_log_retention_days is None
         assert settings.usage_history_retention_days is None
 
-    # Deliberately PUTting the env-alias value as an override stores it: the
-    # effective value is unchanged (90) but no longer tracks the env alias.
     response = await async_client.put("/api/settings", json={"requestLogRetentionOverrideDays": 90})
     assert response.status_code == 200
     body = response.json()
@@ -1404,12 +1384,11 @@ async def test_retention_override_tri_state_echo_capture_and_clear(async_client,
         assert settings is not None
         assert settings.request_log_retention_days == 90
 
-    # Present-null clears the override back to inherit; effective falls back
-    # to the env alias.
+    # Present-null clears the stored value; the effective value is disabled again.
     response = await async_client.put("/api/settings", json={"requestLogRetentionOverrideDays": None})
     assert response.status_code == 200
     body = response.json()
-    assert body["requestLogRetentionDays"] == 90  # from the env alias again
+    assert body["requestLogRetentionDays"] == 0
     assert body["requestLogRetentionOverrideDays"] is None
     async with SessionLocal() as session:
         settings = await session.get(DashboardSettings, 1)

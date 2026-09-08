@@ -59,63 +59,19 @@ OAUTH_CALLBACK_PORT = 1455  # Do not change the port. OpenAI dislikes changes.
 # Env names of settings removed from the Settings surface (issue #1340,
 # PRINCIPLES.md P2). ``extra="ignore"`` already makes them harmless; startup
 # emits one WARN for one release as a courtesy to operators who still set them.
+# Names whose warning release has shipped are pruned from this tuple (the
+# July 2026 phases 1-4 shipped in v1.22-v1.24 and were dropped in v1.26).
 _REMOVED_SETTINGS: tuple[str, ...] = (
-    # Phase 1 (reduce-settings-surface-phase-1)
-    "CODEX_LB_AUTH_BASE_URL",
-    "CODEX_LB_OAUTH_CLIENT_ID",
-    "CODEX_LB_OAUTH_ORIGINATOR",
-    "CODEX_LB_OAUTH_SCOPE",
-    "CODEX_LB_OAUTH_REDIRECT_URI",
-    "CODEX_LB_OAUTH_CALLBACK_PORT",
-    "CODEX_LB_AUTH_GUARDIAN_INTERVAL_SECONDS",
-    "CODEX_LB_AUTH_GUARDIAN_MAX_REFRESH_AGE_SECONDS",
-    "CODEX_LB_AUTH_GUARDIAN_BATCH_SIZE",
-    "CODEX_LB_AUTH_GUARDIAN_CONCURRENCY",
-    "CODEX_LB_AUTH_GUARDIAN_JITTER_SECONDS",
-    "CODEX_LB_AUTH_GUARDIAN_FAILURE_BACKOFF_BASE_SECONDS",
-    "CODEX_LB_AUTH_GUARDIAN_FAILURE_BACKOFF_MAX_SECONDS",
-    "CODEX_LB_LOG_PROXY_REQUEST_SHAPE",
-    "CODEX_LB_LOG_PROXY_REQUEST_SHAPE_RAW_CACHE_KEY",
-    "CODEX_LB_LOG_PROXY_REQUEST_PAYLOAD",
-    "CODEX_LB_LOG_PROXY_SERVICE_TIER_TRACE",
-    "CODEX_LB_LOG_UPSTREAM_REQUEST_SUMMARY",
-    "CODEX_LB_LOG_UPSTREAM_REQUEST_PAYLOAD",
-    "CODEX_LB_BULKHEAD_PROXY_HTTP_LIMIT",
-    "CODEX_LB_BULKHEAD_PROXY_WEBSOCKET_LIMIT",
-    "CODEX_LB_BULKHEAD_PROXY_COMPACT_LIMIT",
-    "CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS",
-    "CODEX_LB_TOKEN_REFRESH_CLAIM_POLL_SECONDS",
-    # Phase 2 (reduce-settings-surface-phase-2)
-    "CODEX_LB_QUOTA_PLANNER_TICK_SECONDS",
-    "CODEX_LB_AUTOMATIONS_SCHEDULER_INTERVAL_SECONDS",
-    "CODEX_LB_MODEL_REGISTRY_REFRESH_INTERVAL_SECONDS",
-    "CODEX_LB_STICKY_SESSION_CLEANUP_INTERVAL_SECONDS",
-    "CODEX_LB_CODEX_FINGERPRINT_OS",
-    "CODEX_LB_CODEX_FINGERPRINT_ARCH",
-    "CODEX_LB_CODEX_FINGERPRINT_TERMINAL",
-    "CODEX_LB_LIVE_USAGE_WRITE_MIN_INTERVAL_SECONDS",
-    "CODEX_LB_LIVE_USAGE_QUEUE_SIZE",
-    "CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS",
-    "CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
-    "CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS",
-    "CODEX_LB_MEMORY_WARNING_THRESHOLD_MB",
-    "CODEX_LB_IMAGES_HOST_MODEL",
-    "CODEX_LB_IMAGES_MAX_PARTIAL_IMAGES",
-    # Phase 3 (reduce-settings-surface-phase-3)
-    "CODEX_LB_DATABASE_BACKGROUND_POOL_SIZE",
-    "CODEX_LB_DATABASE_BACKGROUND_MAX_OVERFLOW",
-    "CODEX_LB_DATABASE_POOL_TIMEOUT_SECONDS",
-    "CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS",
-    "CODEX_LB_DRAIN_PRIMARY_THRESHOLD_PCT",
-    "CODEX_LB_DRAIN_SECONDARY_THRESHOLD_PCT",
-    "CODEX_LB_DRAIN_ERROR_WINDOW_SECONDS",
-    "CODEX_LB_DRAIN_ERROR_COUNT_THRESHOLD",
-    "CODEX_LB_PROBE_QUIET_SECONDS",
-    "CODEX_LB_PROBE_SUCCESS_STREAK_REQUIRED",
-    # Phase 4 (reduce-settings-surface-phase-4)
-    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT",
-    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS",
-    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_DENY_API_KEY_IDS",
+    # remove-dead-env-settings (v1.26): retention is a dashboard runtime
+    # setting (Settings -> Advanced -> Data retention); NULL now means disabled.
+    "CODEX_LB_REQUEST_LOG_RETENTION_DAYS",
+    "CODEX_LB_USAGE_HISTORY_RETENTION_DAYS",
+    # remove-dead-env-settings (v1.26): dashboard-owned columns that the env
+    # value only seeded on first boot (or never read at all).
+    "CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY",
+    "CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS",
+    "CODEX_LB_WARMUP_MODEL",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_GATEWAY_SAFE_MODE",
     # Dashboard-authoritative settings (remove-upstream-stream-transport-env):
     # the dashboard row is the only source of the upstream stream transport.
     "CODEX_LB_UPSTREAM_STREAM_TRANSPORT",
@@ -137,7 +93,8 @@ def warn_removed_settings(environ: Mapping[str, str] | None = None) -> list[str]
     found = [name for name in _REMOVED_SETTINGS if name in source]
     if found:
         logger.warning(
-            "removed setting(s) ignored: %s — values are now fixed; see PRINCIPLES.md P2 / issue #1340",
+            "removed setting(s) ignored: %s — each is now a fixed default or a dashboard runtime setting; "
+            "see PRINCIPLES.md P2 / issue #1340",
             ", ".join(found),
         )
     return found
@@ -176,6 +133,11 @@ def _default_http_bridge_instance_id() -> str:
 
 def _default_upstream_websocket_trust_env() -> bool:
     return outbound_proxy_env_configured(_effective_environ())
+
+
+# Startup guard, not a setting: the only supported value is 1 (see
+# ``Settings._reject_multiple_workers_per_instance``).
+_WORKERS_PER_INSTANCE_ENV = "CODEX_LB_WORKERS_PER_INSTANCE"
 
 
 def _effective_environ() -> dict[str, str | None]:
@@ -280,7 +242,6 @@ class Settings(BaseSettings):
     database_alembic_auto_remap_enabled: bool = True
     database_migration_lock_timeout_seconds: float = Field(default=300.0, gt=0)
     upstream_base_url: str = "https://chatgpt.com/backend-api"
-    http_downstream_transport_policy: Literal["smart", "always_http", "always_websocket", "pinned"] = "smart"
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
@@ -322,8 +283,6 @@ class Settings(BaseSettings):
     live_usage_ingestion_enabled: bool = True
     rate_limit_reset_credits_refresh_enabled: bool = True
     rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
-    openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
-    warmup_model: str = "gpt-5.4-mini"
     openai_prompt_cache_key_derivation_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
@@ -343,7 +302,6 @@ class Settings(BaseSettings):
         ge=0,
         le=30.0,
     )
-    http_responses_session_bridge_gateway_safe_mode: bool = False
     # Attach the durable operation identity to response.create client metadata.
     # The upstream must explicitly support/deduplicate this value before any
     # automatic replay is enabled; metadata-only propagation is safe by default.
@@ -388,15 +346,6 @@ class Settings(BaseSettings):
     # disables caching. Admin mutations invalidate durably through the
     # cache-invalidation bus, so this only bounds out-of-band database edits.
     upstream_route_cache_ttl_seconds: float = Field(default=60.0, ge=0)
-    # Data retention (0 = disabled). Non-zero values have safety floors so
-    # every in-product consumer window stays inside retained data.
-    # DEPRECATED: retention is managed from the dashboard runtime settings
-    # (`dashboard_settings.request_log_retention_days` /
-    # `usage_history_retention_days`); a non-NULL dashboard value wins. These
-    # env fields remain one release as aliases for unset dashboard values and
-    # will be removed in a later phase.
-    request_log_retention_days: int = Field(default=0, ge=0, le=3650)
-    usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True
     automations_scheduler_enabled: bool = True
     telemetry_enabled: bool | None = None
@@ -531,16 +480,6 @@ class Settings(BaseSettings):
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
     proxy_account_caps_scope: Literal["partitioned", "replica"] = "partitioned"
     proxy_account_cap_partition_scale_down_seconds: int = Field(default=60, ge=30)
-    # Explicit operator declaration of how many worker processes
-    # (uvicorn/gunicorn) this instance runs behind a single bridge-ring instance
-    # id. Only ``1`` (the default) is supported: per-account concurrency caps are
-    # partitioned per REPLICA via the bridge ring, and intra-pod multi-worker
-    # cap partitioning cannot be made reliable (there is no portable per-worker
-    # index — standard multi-worker launches inherit the same environment into
-    # every child). A declared value greater than 1 is rejected at startup by
-    # ``_validate_workers_per_instance``; operators scale horizontally via
-    # replicas instead. Default 1 is a no-op requiring zero operator action.
-    workers_per_instance: int = Field(default=1, ge=1)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
     timeout_invariant_validation_strict: bool = False
@@ -567,20 +506,6 @@ class Settings(BaseSettings):
     # HTTP connector limits
     http_connector_limit: int = 100
     http_connector_limit_per_host: int = 50
-
-    @field_validator("request_log_retention_days")
-    @classmethod
-    def _validate_request_log_retention(cls, value: int) -> int:
-        if value != 0 and value < 30:
-            raise ValueError("request_log_retention_days must be 0 (disabled) or >= 30")
-        return value
-
-    @field_validator("usage_history_retention_days")
-    @classmethod
-    def _validate_usage_history_retention(cls, value: int) -> int:
-        if value != 0 and value < 45:
-            raise ValueError("usage_history_retention_days must be 0 (disabled) or >= 45")
-        return value
 
     @field_validator("data_dir", mode="before")
     @classmethod
@@ -727,16 +652,6 @@ class Settings(BaseSettings):
             raise ValueError("upstream_compact_timeout_seconds must be greater than zero")
         return value
 
-    @field_validator("warmup_model", mode="before")
-    @classmethod
-    def _normalize_warmup_model(cls, value: object) -> str:
-        if not isinstance(value, str):
-            raise TypeError("warmup_model must be a string")
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("warmup_model must not be blank")
-        return normalized
-
     @model_validator(mode="after")
     def _apply_data_dir_defaults(self) -> "Settings":
         if self.data_dir == DEFAULT_HOME_DIR:
@@ -831,24 +746,39 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_workers_per_instance(self) -> "Settings":
+    def _reject_multiple_workers_per_instance(self) -> "Settings":
         # Only one worker process per instance is supported. Per-account
         # concurrency caps are partitioned per REPLICA via the bridge ring, which
         # is correct only when a single process runs behind each ring instance
         # id. Running multiple worker processes per instance cannot be made
         # reliable for shared caps: there is no portable per-worker index, and a
         # standard uvicorn/gunicorn multi-worker launch inherits the SAME
-        # environment into every child, so the workers cannot self-partition. Fail
-        # fast on the explicit declaration rather than silently over-admitting.
-        if self.workers_per_instance > 1:
+        # environment into every child, so the workers cannot self-partition.
+        # ``CODEX_LB_WORKERS_PER_INSTANCE`` is therefore not a setting (the only
+        # accepted value is the default, 1) but a startup guard: an explicit
+        # declaration of anything else fails fast rather than silently
+        # over-admitting.
+        raw = _effective_environ().get(_WORKERS_PER_INSTANCE_ENV)
+        if raw is None or not raw.strip():
+            return self
+        try:
+            declared = int(raw.strip())
+        except ValueError:
+            declared = 0
+        if declared < 1:
             raise ValueError(
-                "workers_per_instance (CODEX_LB_WORKERS_PER_INSTANCE="
-                f"{self.workers_per_instance}) is not supported: running more than one worker "
+                f"{_WORKERS_PER_INSTANCE_ENV}={raw.strip()!r} is not a positive integer; "
+                f"only {_WORKERS_PER_INSTANCE_ENV}=1 (the default) is supported."
+            )
+        if declared > 1:
+            raise ValueError(
+                f"workers_per_instance ({_WORKERS_PER_INSTANCE_ENV}="
+                f"{declared}) is not supported: running more than one worker "
                 "process per instance would multiply per-account concurrency caps, because those "
                 "caps are partitioned per replica via the bridge ring and intra-pod worker "
                 "partitioning cannot be made reliable. Run ONE worker per pod/container and scale "
                 "horizontally via replicas (the bridge ring partitions caps per replica); set "
-                "CODEX_LB_WORKERS_PER_INSTANCE=1 (the default)."
+                f"{_WORKERS_PER_INSTANCE_ENV}=1 (the default)."
             )
         return self
 

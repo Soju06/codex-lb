@@ -52,7 +52,6 @@ _PREFIX_SECTIONS: tuple[tuple[str, str], ...] = (
     ("upstream_", "Upstream transport"),
     ("http_responses_session_bridge_", "HTTP Responses session bridge"),
     ("http_responses_", "HTTP & streaming"),
-    ("http_downstream_", "HTTP & streaming"),
     ("http_connector_", "HTTP & streaming"),
     ("compact_", "HTTP & streaming"),
     ("stream_", "HTTP & streaming"),
@@ -63,10 +62,9 @@ _PREFIX_SECTIONS: tuple[tuple[str, str], ...] = (
     ("oauth_", "OAuth"),
     ("token_refresh_", "Token refresh"),
     ("auth_guardian_", "Token refresh"),
-    ("usage_", "Usage & retention"),
-    ("live_usage_", "Usage & retention"),
-    ("rate_limit_", "Usage & retention"),
-    ("request_log_", "Usage & retention"),
+    ("usage_", "Usage"),
+    ("live_usage_", "Usage"),
+    ("rate_limit_", "Usage"),
     ("openai_", "Prompt caching & affinity"),
     ("image_", "Images"),
     ("images_", "Images"),
@@ -94,9 +92,8 @@ _PREFIX_SECTIONS: tuple[tuple[str, str], ...] = (
 _EXACT_SECTIONS: dict[str, str] = {
     "data_dir": "Core",
     "trace": "Observability",
-    "workers_per_instance": "Multi-replica",
     "connect_address": "Dashboard",
-    "additional_quota_registry_file": "Usage & retention",
+    "additional_quota_registry_file": "Usage",
     "forwarded_allow_ips": "Firewall",
 }
 
@@ -160,7 +157,7 @@ _SECTION_ORDER: tuple[str, ...] = (
     "Proxy admission & account caps",
     "OAuth",
     "Token refresh",
-    "Usage & retention",
+    "Usage",
     "Prompt caching & affinity",
     "Images",
     "Model registry",
@@ -266,10 +263,6 @@ def render_settings_reference() -> str:
     if unknown:
         raise RuntimeError(f"sections missing from _SECTION_ORDER: {sorted(unknown)}")
 
-    deprecated_env_aliases = [
-        f"{ENV_PREFIX}{name.upper()}" for name in sorted(fields) if name.endswith("_retention_days")
-    ]
-
     lines: list[str] = [
         "<!-- GENERATED — edit scripts/generate_settings_reference.py, not this file. -->",
         "",
@@ -304,6 +297,15 @@ def render_settings_reference() -> str:
         "directory). It must be set in the process environment, not in an env file:",
         "the env-file locations have to be known before env files are read.",
         "",
+        f"## `{ENV_PREFIX}WORKERS_PER_INSTANCE` (special case, startup guard)",
+        "",
+        "Not a setting: the only supported value is `1` (one worker process per",
+        "instance), so there is nothing to configure. If it is set to anything else,",
+        "startup fails with a settings validation error — per-account concurrency caps",
+        "are partitioned per replica via the bridge ring, and multiple worker processes",
+        "inside one instance would silently multiply them. Scale horizontally via",
+        "replicas instead.",
+        "",
         "## Process-level environment variables (not settings)",
         "",
         "These are third-party or POSIX conventions codex-lb honors without",
@@ -329,18 +331,10 @@ def render_settings_reference() -> str:
     lines.extend(
         [
             "",
-            "## Removed / deprecated",
+            "## Removed",
             "",
-            "Deprecated env aliases (still functional for one release; the dashboard",
-            "runtime value wins when set):",
-            "",
-        ]
-    )
-    lines.extend(f"- `{alias}`" for alias in deprecated_env_aliases)
-    lines.extend(
-        [
-            "",
-            "Removed settings (ignored; values are now fixed — see PRINCIPLES.md P2 /",
+            "Removed settings (ignored with a one-release startup warning; each is now a",
+            "fixed default or a dashboard runtime setting — see PRINCIPLES.md P2 /",
             "issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):",
             "",
         ]

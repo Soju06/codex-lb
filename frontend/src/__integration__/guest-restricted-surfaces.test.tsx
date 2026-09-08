@@ -49,6 +49,18 @@ function spyRequestPaths(): string[] {
   return paths;
 }
 
+function spyRequestUrls(): URL[] {
+  const urls: URL[] = [];
+  server.events.on("request:start", ({ request }) => {
+    urls.push(new URL(request.url));
+  });
+  return urls;
+}
+
+function requestLogUrls(urls: URL[]): URL[] {
+  return urls.filter((url) => url.pathname === "/api/request-logs" || url.pathname === "/api/request-logs/options");
+}
+
 function restrictedRequests(paths: string[]): string[] {
   return paths.filter((path) => RESTRICTED_PATHS.includes(path) || path.startsWith("/api/api-keys/"));
 }
@@ -137,6 +149,53 @@ describe("guest restricted surfaces integration", () => {
     expect(screen.queryByRole("button", { name: "Need help?" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add account" })).toBeDisabled();
     expect(restrictedRequests(paths)).toEqual([]);
+  });
+
+  it("drops a URL-carried API-key filter and hides its control on /dashboard", async () => {
+    useGuestSession();
+    const urls = spyRequestUrls();
+    window.history.pushState({}, "", "/dashboard?apiKeyId=key_1&status=success");
+
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    await waitFor(() => {
+      const logUrls = requestLogUrls(urls);
+      expect(logUrls.some((url) => url.pathname === "/api/request-logs")).toBe(true);
+      expect(logUrls.some((url) => url.pathname === "/api/request-logs/options")).toBe(true);
+    });
+    expect(await screen.findByRole("button", { name: "Accounts" })).toBeInTheDocument();
+
+    // No log or facet request carries the hidden filter; other filters survive.
+    for (const url of requestLogUrls(urls)) {
+      expect(url.searchParams.getAll("apiKeyId")).toEqual([]);
+    }
+    expect(requestLogUrls(urls).some((url) => url.searchParams.getAll("status").includes("success"))).toBe(true);
+    expect(screen.queryByRole("button", { name: "API Keys" })).not.toBeInTheDocument();
+    // The stale parameter is removed from the address so it cannot be re-applied.
+    await waitFor(() => expect(new URL(window.location.href).searchParams.has("apiKeyId")).toBe(false));
+    expect(new URL(window.location.href).searchParams.getAll("status")).toEqual(["success"]);
+  });
+
+  it("honours a URL-carried API-key filter and shows its control for writers (regression)", async () => {
+    const urls = spyRequestUrls();
+    window.history.pushState({}, "", "/dashboard?apiKeyId=key_1");
+
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    await waitFor(() => {
+      const logUrls = requestLogUrls(urls);
+      expect(logUrls.some((url) => url.pathname === "/api/request-logs")).toBe(true);
+      expect(logUrls.some((url) => url.pathname === "/api/request-logs/options")).toBe(true);
+    });
+
+    for (const url of requestLogUrls(urls)) {
+      expect(url.searchParams.getAll("apiKeyId")).toEqual(["key_1"]);
+    }
+    // With one key selected the filter control is labelled by that key.
+    expect(await screen.findByRole("button", { name: "Default key · sk-test" })).toBeInTheDocument();
+    expect(new URL(window.location.href).searchParams.getAll("apiKeyId")).toEqual(["key_1"]);
   });
 
   it("keeps requesting the restricted reads for writers (regression)", async () => {

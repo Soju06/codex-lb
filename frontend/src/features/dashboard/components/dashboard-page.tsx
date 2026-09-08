@@ -120,8 +120,11 @@ export function DashboardPage() {
     enabled: isAdmin && dashboardView === "conversations",
   });
   const { conversationsQuery } = conversationsState;
+  // Read-only sessions never see the API-key filter control, so they must not
+  // query with one either (URL-carried `apiKeyId` is dropped).
   const { filters, emptyStateFiltersApplied, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
     enabled: dashboardView === "request-logs",
+    allowApiKeyFilters: canWrite,
   });
   const { resumeMutation, limitWarmupMutation } = useAccountMutations();
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
@@ -600,7 +603,7 @@ export function DashboardPage() {
                       apiKeyOptions={apiKeyOptions}
                       modelOptions={modelOptions}
                       statusOptions={statusOptions}
-                      showApiKeyFilter={canWrite || apiKeyOptions.length > 0}
+                      showApiKeyFilter={canWrite}
                       onSearchChange={(search) => updateFilters({ search, offset: 0 })}
                       onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
                       onAccountChange={(accountIds) => updateFilters({ accountIds, offset: 0 })}

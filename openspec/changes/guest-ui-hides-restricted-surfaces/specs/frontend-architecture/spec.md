@@ -114,10 +114,12 @@ manage API keys.", localized) in place of the API key list, without an error
 card or retry control. The Accounts page SHALL hide the Windows OAuth help
 toggle for such principals and SHALL render account summaries whose `email` is
 masked and whose ChatGPT account id and workspace id are null using the
-existing display fallbacks. The request-log API key filter SHALL be hidden when
-the filter options contain no API keys and the session lacks the `write`
-permission. Principals whose session holds the `write` permission SHALL
-observe no change in the requests issued or controls rendered.
+existing display fallbacks. For such principals the request-log API key filter
+control SHALL be hidden, and any `apiKeyId` carried by the URL SHALL be ignored
+and removed from the address rather than sent with the request-log or
+filter-option requests, so a hidden filter never restricts the results.
+Principals whose session holds the `write` permission SHALL observe no change
+in the requests issued or controls rendered.
 
 #### Scenario: Guest opens the APIs page
 
@@ -136,9 +138,22 @@ observe no change in the requests issued or controls rendered.
 
 #### Scenario: Guest request-log filters omit API keys
 
-- **WHEN** a principal without the `write` permission views the request-log dashboard and the filter options response contains no API keys
+- **WHEN** a principal without the `write` permission views the request-log dashboard
 - **THEN** the API key filter control is not rendered
 - **AND** the account, model, and status filters remain available
+
+#### Scenario: Guest URL-carried API-key filter is dropped
+
+- **WHEN** a principal without the `write` permission opens `/dashboard?apiKeyId=key_1` (a bookmark, or an administrator's selection retained across logout)
+- **THEN** the request-log and filter-option requests carry no `apiKeyId`
+- **AND** the `apiKeyId` parameter is removed from the address while other filter parameters are preserved
+- **AND** the API key filter control is not rendered
+
+#### Scenario: Writer URL-carried API-key filter is honoured
+
+- **WHEN** a principal with the `write` permission opens `/dashboard?apiKeyId=key_1`
+- **THEN** the request-log and filter-option requests carry `apiKeyId=key_1`
+- **AND** the API key filter control is rendered
 
 #### Scenario: Writer surfaces are unchanged
 

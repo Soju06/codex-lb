@@ -37,7 +37,7 @@ The Windows OAuth help only matters to someone who can start an OAuth flow, and 
 
 ### Request-log API key filter
 
-`GET /api/request-logs/options` still succeeds for guests with `apiKeys: []`. An empty multi-select is harmless but pointless, so `RequestFilters` takes `showApiKeyFilter` and the dashboard passes `canWrite || apiKeyOptions.length > 0`. Writers with zero keys keep the filter (it doubles as discoverability); guests never see it.
+`GET /api/request-logs/options` still succeeds for guests with `apiKeys: []`, so a guest can never pick a key; `RequestFilters` takes `showApiKeyFilter` and the dashboard passes `canWrite`. Hiding the control is not enough on its own: the filter state lives in the URL, so `/dashboard?apiKeyId=key_1` (a bookmark, or an admin's selection retained across logout) would still be sent to `/api/request-logs` and `/api/request-logs/options`, and the backend honours it for guests, silently narrowing the results with no visible chip to clear. `useRequestLogs` therefore takes `allowApiKeyFilters`; when false, `apiKeyIds` is forced to `[]` in the effective filters (requests, `filtersApplied`, conversation summary) and the stale `apiKeyId` parameters are rewritten out of the address with `replace: true` so they cannot be re-applied. Other parameters are untouched. Writers keep the previous behaviour, including the control with zero keys.
 
 ## Risks / Trade-offs
 

@@ -7,7 +7,7 @@ The backend hardening in `restrict-guest-sensitive-surfaces` answers API-key rea
 - **APIs page**: for principals without write access the API-key list, trends, and 7-day usage queries stay idle and the page renders a compact administrator-only notice ("API keys are managed by administrators / Sign in as an administrator to view and manage API keys.") in place of the key list. The nav item stays; the page explains.
 - **Settings page**: the API key section and the sticky-session section are mounted only for principals with write access; the page-level upstream-proxy administration query is enabled only for them, so the Upstream Proxy card is absent and no error banner appears for guests. The existing read-only notice is unchanged.
 - **Accounts page**: the upstream-proxy administration query is enabled only with write access; the "Need help?" Windows OAuth help toggle (which fetches the connect address) is hidden for read-only sessions. Masked account identities (redacted email, null ChatGPT account and workspace ids) render with the existing fallbacks.
-- **Request-log filters**: the API key filter is hidden when the options list is empty and the session lacks write access.
+- **Request-log filters**: the API key filter control is hidden for sessions without write access, and any `apiKeyId` carried by the URL is dropped from the request-log and filter-option requests (and removed from the address) so a hidden filter never silently restricts results.
 - The gate signal is the existing `canWrite` store flag; fine-grained `can(permission)` selectors are a later change.
 
 No new nav items, routes, settings, or env vars. `CORE_NAV_ITEMS` is unchanged.

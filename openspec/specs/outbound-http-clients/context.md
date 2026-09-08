@@ -19,3 +19,35 @@ Before the `perf-shared-ssl-context` change each of those call sites built a fre
 The one operational consequence: updates to the certifi bundle or system CA store on disk are picked up only after a process restart. Per-call sessions previously re-read the bundle on every upstream call; the shared client had always behaved this way per generation, and there is no supported flow that swaps CA bundles under a running codex-lb, so no requirement changes. `close_http_client()` clears the cache during shutdown, and `_reset_shared_ssl_context()` exists for test isolation (tests that patch `_build_ssl_context` rely on the cache being empty when they start).
 
 Deferred on purpose: sharing one routed `TCPConnector`/`ClientSession` across per-call Codex clients (connection reuse through the proxy) is a separate change with connection-lifetime semantics of its own; on Docker deployments the native egress helper already pools routed connections.
+
+## Native Responses SSE ownership (2026-09-08)
+
+The `http_sse_v1` capability moves byte framing for direct and account-routed streaming Responses
+into the existing Rust egress library. Python supplies the configured idle
+interval and event byte limit; Rust applies them while reading the body.
+For example, an event split over several active body reads must not time out
+just because Python has not yet received a complete event. Python retains
+normalization, terminal detection, archives, selection, health, and replay.
+
+Complete events cross IPC as UTF-8 text fragments of at most 16 KiB, with a
+`more` flag. This bounds line/queue expansion for control characters and invalid
+UTF-8 while avoiding Python byte scanning and base64 decoding. Shared fixtures
+pin the legacy framing behavior, including CR/LF splits, whitespace, EOF
+residue, and limits measured in original body bytes. The adapter only joins
+text fragments. An incomplete IPC event at clean EOF fails the protocol.
+
+HTTP error bodies and requests without SSE options retain raw body delivery.
+Compact framing remains a separate future cutover. Missing helpers
+keep the pre-dispatch Python fallback; installed helpers without the capability
+fail before dispatch. No dispatched request is replayed through that fallback.
+Response close finishes its owned cancellation handshake even inside an already
+cancelled Starlette/AnyIO scope, then propagates cancellation. Other requests
+sharing the helper continue normally.
+
+Routed streaming uses typed `native_sse` options with unbuffered consumption
+through `CodexClient`. Each endpoint attempt receives the same options; the
+options never reach aiohttp keyword arguments. Keeping the native response
+type avoids the raw-body wrapper hiding its framed-event interface. Endpoint
+fallback and trace metadata remain Python-owned. The locally created client
+finishes asynchronous session close before propagating cancellation; borrowed
+clients retain their caller's lifecycle ownership.

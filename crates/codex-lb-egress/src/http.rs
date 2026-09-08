@@ -2,15 +2,29 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use base64::Engine as _;
-use codex_lb_protocol::{NativeEvent, NativeRequest};
+use codex_lb_protocol::{NativeEvent, NativeRequest, NativeSseOptions};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::runtime::{Output, RequestError, emit};
+use crate::sse::{SseEventTooLarge, SseFramer, text_fragments};
 
 pub(crate) const CODEX_H2_INITIAL_STREAM_WINDOW_SIZE: u32 = 2 * 1024 * 1024;
 pub(crate) const CODEX_H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 5 * 1024 * 1024;
 pub(crate) const CODEX_H2_MAX_FRAME_SIZE: u32 = 16 * 1024;
 pub(crate) const CODEX_H2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
+const SSE_READ_CHUNK_SIZE: usize = 16 * 1024;
+const SSE_IPC_TEXT_FRAGMENT_SIZE: usize = 16 * 1024;
+
+#[derive(Debug)]
+struct StreamIdleTimeout;
+
+impl std::fmt::Display for StreamIdleTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native upstream SSE body read timed out")
+    }
+}
+
+impl std::error::Error for StreamIdleTimeout {}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ClientKey {
@@ -57,6 +71,7 @@ pub(crate) async fn execute_request(
     client: reqwest::Client,
     output: &Output,
 ) -> Result<(), RequestError> {
+    let sse = request.sse;
     let method = reqwest::Method::from_bytes(request.method.as_bytes())?;
     let headers = forwarded_headers(request.headers)?;
     let mut builder = client
@@ -68,6 +83,7 @@ pub(crate) async fn execute_request(
     }
 
     let mut response = builder.send().await?;
+    let status = response.status().as_u16();
     let response_headers = response
         .headers()
         .iter()
@@ -82,22 +98,28 @@ pub(crate) async fn execute_request(
         output,
         &NativeEvent::Head {
             request_id: request.request_id.clone(),
-            status: response.status().as_u16(),
+            status,
             http_version: format!("{:?}", response.version()),
             headers: response_headers,
         },
     )
     .await?;
 
-    while let Some(chunk) = response.chunk().await? {
-        emit(
-            output,
-            &NativeEvent::Chunk {
-                request_id: request.request_id.clone(),
-                data: base64::engine::general_purpose::STANDARD.encode(chunk),
-            },
-        )
-        .await?;
+    if let Some(options) = sse.filter(|_| status < 400) {
+        if !execute_sse_body(&mut response, &request.request_id, options, output).await? {
+            return Ok(());
+        }
+    } else {
+        while let Some(chunk) = response.chunk().await? {
+            emit(
+                output,
+                &NativeEvent::Chunk {
+                    request_id: request.request_id.clone(),
+                    data: base64::engine::general_purpose::STANDARD.encode(chunk),
+                },
+            )
+            .await?;
+        }
     }
     emit(
         output,
@@ -107,6 +129,87 @@ pub(crate) async fn execute_request(
     )
     .await?;
     Ok(())
+}
+
+async fn execute_sse_body(
+    response: &mut reqwest::Response,
+    request_id: &str,
+    options: NativeSseOptions,
+    output: &Output,
+) -> Result<bool, RequestError> {
+    let idle_timeout = Duration::from_millis(options.idle_timeout_ms);
+    let mut framer = SseFramer::new(options.max_event_bytes);
+    loop {
+        let chunk = tokio::time::timeout(idle_timeout, response.chunk())
+            .await
+            .map_err(|_| StreamIdleTimeout)??;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        for read in chunk.chunks(SSE_READ_CHUNK_SIZE) {
+            framer.push(read);
+            if !emit_available_sse_events(&mut framer, request_id, output).await? {
+                return Ok(false);
+            }
+        }
+    }
+    match framer.finish() {
+        Ok(Some(text)) => emit_sse(output, request_id, &text).await?,
+        Ok(None) => {}
+        Err(error) => {
+            emit_sse_too_large(output, request_id, error).await?;
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn emit_available_sse_events(
+    framer: &mut SseFramer,
+    request_id: &str,
+    output: &Output,
+) -> Result<bool, std::io::Error> {
+    loop {
+        match framer.next_event() {
+            Ok(Some(text)) => emit_sse(output, request_id, &text).await?,
+            Ok(None) => return Ok(true),
+            Err(error) => {
+                emit_sse_too_large(output, request_id, error).await?;
+                return Ok(false);
+            }
+        }
+    }
+}
+
+async fn emit_sse(output: &Output, request_id: &str, text: &str) -> Result<(), std::io::Error> {
+    for (fragment, more) in text_fragments(text, SSE_IPC_TEXT_FRAGMENT_SIZE) {
+        emit(
+            output,
+            &NativeEvent::Sse {
+                request_id: request_id.to_owned(),
+                text: fragment.to_owned(),
+                more,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn emit_sse_too_large(
+    output: &Output,
+    request_id: &str,
+    error: SseEventTooLarge,
+) -> Result<(), std::io::Error> {
+    emit(
+        output,
+        &NativeEvent::SseEventTooLarge {
+            request_id: request_id.to_owned(),
+            size_bytes: error.size_bytes,
+            limit_bytes: error.limit_bytes,
+        },
+    )
+    .await
 }
 
 fn forwarded_headers(request_headers: Vec<(String, String)>) -> Result<HeaderMap, RequestError> {
@@ -121,6 +224,14 @@ fn forwarded_headers(request_headers: Vec<(String, String)>) -> Result<HeaderMap
 pub(crate) fn classify_error(
     error: &(dyn std::error::Error + 'static),
 ) -> (&'static str, &'static str, bool, bool) {
+    if error.downcast_ref::<StreamIdleTimeout>().is_some() {
+        return (
+            "native upstream SSE body read timed out",
+            "stream_idle_timeout",
+            false,
+            false,
+        );
+    }
     let Some(request_error) = error.downcast_ref::<reqwest::Error>() else {
         return ("native helper rejected the request", "setup", false, false);
     };

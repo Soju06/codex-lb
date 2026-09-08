@@ -58,8 +58,10 @@ from app.core.clients.native_egress import (
     NativeEgressResponse,
     NativeEgressTransportError,
     NativeEgressUnavailable,
+    NativeSseOptions,
     discover_native_egress_client,
 )
+from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
 from app.core.errors import (
@@ -104,7 +106,7 @@ from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_t
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.proxy_env import resolve_http_proxy_from_env
 from app.core.utils.request_id import get_request_id
-from app.core.utils.shared_future import _await_task_deferring_cancellation
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation, _await_task_deferring_cancellation
 from app.core.utils.sse import format_sse_event, parse_sse_data_json, sse_event_type_from_block
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
@@ -466,17 +468,6 @@ async def _release_bound_half_open_probe(websocket: aiohttp.ClientWebSocketRespo
     setattr(websocket, _HELD_HALF_OPEN_PROBE_BREAKER, None)
     if circuit_breaker is not None:
         await circuit_breaker.release_half_open_probe()
-
-
-class StreamIdleTimeoutError(Exception):
-    pass
-
-
-class StreamEventTooLargeError(Exception):
-    def __init__(self, size_bytes: int, limit_bytes: int) -> None:
-        super().__init__(f"SSE event exceeded {limit_bytes} bytes (received {size_bytes} bytes)")
-        self.size_bytes = size_bytes
-        self.limit_bytes = limit_bytes
 
 
 class ErrorResponseProtocol(Protocol):
@@ -1434,6 +1425,15 @@ async def _iter_sse_events(
     idle_timeout_seconds: float,
     max_event_bytes: int,
 ) -> AsyncGenerator[str, None]:
+    if isinstance(resp, NativeEgressResponse) and resp.sse_framed:
+        # Rust owns byte framing and upstream activity deadlines for this
+        # attempt; waiting for an entire event here would time out active
+        # streams that deliver a large event across many partial body reads.
+        async with contextlib.aclosing(resp.iter_sse_events()) as events:
+            async for event in events:
+                yield event
+        return
+
     async def _next_chunk() -> bytes:
         return await iterator.__anext__()
 
@@ -3796,7 +3796,9 @@ async def _stream_responses_with_session(
 
         if route is not None:
             owns_codex_client = codex_client is None
-            active_codex_client = codex_client or CodexClient(create_codex_session())
+            active_codex_client = codex_client or CodexClient(
+                create_codex_session(), native_egress_client=native_egress_client
+            )
             raw_resp: Any = None
             try:
                 request_kwargs: dict[str, Any] = {
@@ -3806,6 +3808,10 @@ async def _stream_responses_with_session(
                     "timeout": remaining_request_timeout or request_total_timeout,
                     "buffer_response": False,
                 }
+                if not non_streaming_http:
+                    request_kwargs["native_sse"] = NativeSseOptions(
+                        effective_idle_timeout, settings.max_sse_event_bytes
+                    )
                 request_with_metadata = getattr(active_codex_client, "request_with_route_metadata", None)
                 if callable(request_with_metadata):
                     result = await request_with_metadata("POST", url, route=route, **request_kwargs)
@@ -3816,7 +3822,9 @@ async def _stream_responses_with_session(
                     raw_resp = await active_codex_client.request("POST", url, route=route, **request_kwargs)
                     if route_trace is not None:
                         route_trace.record(route=route, fallback_used=False)
-                resp = _CodexSSEResponse(raw_resp)
+                # Preserve the native response's framed-event interface. The
+                # raw-content adapter is only needed for Python transports.
+                resp = raw_resp if isinstance(raw_resp, NativeEgressResponse) else _CodexSSEResponse(raw_resp)
                 status_code = resp.status
                 last_stream_activity_at = time.monotonic()
                 # Error responses (429/403) carry the saturated-window
@@ -3933,7 +3941,9 @@ async def _stream_responses_with_session(
                         await release_codex_response(raw_resp)
                 finally:
                     if owns_codex_client:
-                        await active_codex_client.close()
+                        cancellation = await _await_cleanup_deferring_cancellation(active_codex_client.close())
+                        if cancellation is not None:
+                            raise cancellation
 
         @asynccontextmanager
         async def _direct_response_context() -> AsyncIterator[aiohttp.ClientResponse | NativeEgressResponse]:
@@ -3949,6 +3959,11 @@ async def _stream_responses_with_session(
                             connect_timeout_seconds=current_timeout.sock_connect,
                             response_head_timeout_seconds=current_timeout.sock_read,
                             proxy_url=resolve_http_proxy_from_env(url),
+                            sse=(
+                                NativeSseOptions(effective_idle_timeout, settings.max_sse_event_bytes)
+                                if not non_streaming_http
+                                else None
+                            ),
                         )
                     )
                 except NativeEgressUnavailable:

@@ -85,7 +85,12 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                             ).await?;
                             continue;
                         }
-                        if request.timeout_ms == 0 || request.connect_timeout_ms == Some(0) {
+                        if request.timeout_ms == 0
+                            || request.connect_timeout_ms == Some(0)
+                            || request.sse.is_some_and(|options| {
+                                options.idle_timeout_ms == 0 || options.max_event_bytes == 0
+                            })
+                        {
                             emit_error(
                                 &output,
                                 &request.request_id,

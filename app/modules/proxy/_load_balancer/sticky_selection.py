@@ -27,7 +27,11 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.proxy._load_balancer.overload_backoff import filter_overload_backoff_candidates
+from app.modules.proxy._load_balancer.overload_backoff import (
+    filter_overload_backoff_candidates,
+    overload_backoff_active,
+    sticky_owner_isolation_reroute_pool,
+)
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
     AccountConcurrencyCaps,
@@ -1246,13 +1250,44 @@ async def _select_with_stickiness(
     # reassignment.
     persist_fallback = not preserve_existing_mapping_on_fallback
     apply_sticky_secondary_budget_threshold = False
+    # Set when an isolated soft owner is released: the replacement pick and the
+    # overload-free pool it came from (probe reservation must see that pool).
+    overload_reroute: SelectionResult | None = None
+    overload_reroute_pool: list[AccountState] | None = None
+
+    def _choose_from(candidates: list[AccountState]) -> SelectionResult:
+        return _select_account_preferring_budget_safe(
+            candidates,
+            prefer_earlier_reset=prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs_by_account_id=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
+        )
 
     if not existing and initial_preferred_account_id is not None:
         initial_preferred = next(
             (state for state in states if state.account_id == initial_preferred_account_id),
             None,
         )
-        if initial_preferred is not None:
+        # The process-session preference is a fresh upstream admission on that
+        # account: do not honor it while the account is in overload backoff and
+        # the pool still offers an overload-free candidate.
+        initial_preferred_backed_off = (
+            initial_preferred is not None
+            and overload_backoff_runtime is not None
+            and overload_backoff_active(overload_backoff_runtime.get(initial_preferred.account_id), clock.time())
+            and filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time()) is not states
+        )
+        if initial_preferred is not None and not initial_preferred_backed_off:
             initial_result = select_account(
                 [initial_preferred],
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1333,7 +1368,39 @@ async def _select_with_stickiness(
                     )
                     burn_first_reallocate = burn_first.account is not None
 
-            if not ((budget_pressured or rate_limit_far_away) and burn_first_reallocate):
+            # Isolation stage of the overload backoff: the pinned owner is a
+            # *soft* mapping (hard continuity owners never reach this path)
+            # and every request re-entering it is a fresh admission upstream
+            # keeps rejecting, so release it while the strategy can still pick
+            # an overload-free sibling. Soft backoff levels below isolation
+            # keep the owner, so a short burst never churns warm sessions.
+            if sticky_kind in (
+                StickySessionKind.PROMPT_CACHE,
+                StickySessionKind.STICKY_THREAD,
+                StickySessionKind.CODEX_SESSION,
+            ):
+                overload_reroute_pool = sticky_owner_isolation_reroute_pool(
+                    states,
+                    overload_backoff_runtime,
+                    owner_account_id=pinned.account_id,
+                    now=now,
+                )
+            if overload_reroute_pool is not None:
+                candidate = _choose_from(overload_reroute_pool)
+                if candidate.account is not None and candidate.account.account_id != pinned.account_id:
+                    overload_reroute = candidate
+                    logger.info(
+                        "sticky_owner_overload_isolation_reroute old_account_id=%s new_account_id=%s sticky_kind=%s",
+                        pinned.account_id,
+                        candidate.account.account_id,
+                        sticky_kind.value,
+                    )
+                else:
+                    overload_reroute_pool = None
+
+            if overload_reroute is not None:
+                reallocate_sticky = True
+            elif not ((budget_pressured or rate_limit_far_away) and burn_first_reallocate):
                 pinned_result = select_account(
                     [pinned],
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1454,24 +1521,6 @@ async def _select_with_stickiness(
             if not preserve_existing_mapping_on_fallback:
                 pending_mutation = _StickyMutation(account_id=None)
 
-    def _choose_from(candidates: list[AccountState]) -> SelectionResult:
-        return _select_account_preferring_budget_safe(
-            candidates,
-            prefer_earlier_reset=prefer_earlier_reset_accounts,
-            prefer_earlier_reset_window=prefer_earlier_reset_window,
-            routing_strategy=routing_strategy,
-            relative_availability_power=relative_availability_power,
-            relative_availability_top_k=relative_availability_top_k,
-            budget_threshold_pct=budget_threshold_pct,
-            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-            apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
-            traffic_class=traffic_class,
-            ignore_standard_quota=ignore_standard_quota,
-            routing_costs_by_account_id=routing_costs_by_account_id,
-            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-            usage_exhaustion_states=usage_exhaustion_states,
-        )
-
     # Reaching here means a NEW account is being chosen for this key (no
     # owner, an unusable owner, or a reallocation): a fresh upstream
     # admission, not warm-session reuse. Prefer accounts upstream is not
@@ -1480,12 +1529,16 @@ async def _select_with_stickiness(
     # above never consult the overload window, so an established owner keeps
     # serving its session even while backed off.
     fallback_candidates = states
-    if overload_backoff_runtime is not None:
-        fallback_candidates = filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time())
-    chosen = _choose_from(fallback_candidates)
-    if chosen.account is None and fallback_candidates is not states:
-        fallback_candidates = states
-        chosen = _choose_from(states)
+    if overload_reroute is not None and overload_reroute_pool is not None:
+        fallback_candidates = overload_reroute_pool
+        chosen = overload_reroute
+    else:
+        if overload_backoff_runtime is not None:
+            fallback_candidates = filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time())
+        chosen = _choose_from(fallback_candidates)
+        if chosen.account is None and fallback_candidates is not states:
+            fallback_candidates = states
+            chosen = _choose_from(states)
     chosen_pool = fallback_candidates if fallback_candidates is not states else None
     if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
         return finish_selection(chosen, persist_account_id=chosen.account.account_id, effective_states=chosen_pool)

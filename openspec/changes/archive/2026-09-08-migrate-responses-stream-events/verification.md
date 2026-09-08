@@ -1,6 +1,6 @@
 # Verification
 
-- Shared Python/Rust corpus: 46 cases, including aliases, all SSE newline forms,
+- Shared Python/Rust corpus: 48 cases, including aliases, all SSE newline forms,
   errors in SDK/native modes, malformed input, unknown fields, escaped JSON,
   duplicate keys, mixed line endings, arrays and serialization handoffs.
 - Python/native adapter, fixtures, packaging contract, Codex client, direct/routed
@@ -38,3 +38,13 @@ showed no elapsed-time improvement (canonical/data-only/alias medians changed
 414.5→420.1, 390.0→429.2, 403.2→450.6 ms). The result supports ownership migration,
 not a speed claim. IPC overhead and full application benchmarks remain follow-up
 work before claiming improved throughput.
+
+## Review parity check
+
+CodeRabbit questioned escaped `error` keys on canonical blocks. Python's existing
+canonical fast path also checks the literal `"error"` substring and returns these
+blocks unchanged in both SDK modes. Parsing first only in Rust would diverge.
+Added shared canonical and data-only escaped-key cases: the canonical case stays
+unchanged; the data-only case uses Python error conversion. Rust fixture parity
+and all 10 Python direct/routed/SDK checks passed. After merging current main,
+481 native/public Responses contract tests and all 58 strict specs passed.

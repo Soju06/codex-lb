@@ -872,5 +872,43 @@
         "event_type": "vendor.event"
       }
     ]
+  },
+  {
+    "name": "canonical_escaped_error_key",
+    "block": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "data_only_escaped_error_key",
+    "block": "data: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"object\":\"response\",\"status\":\"failed\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"upstream_error\"},\"incomplete_details\":null,\"created_at\":1700000000}}\n\n",
+        "event_type": "response.failed"
+      }
+    ]
   }
 ]

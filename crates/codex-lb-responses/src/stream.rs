@@ -42,6 +42,8 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
             python_normalization: true,
         };
     };
+    // Mirror Python's literal-key fast path, including escaped error keys.
+    // Noncanonical frames still decode keys before selecting the error handoff.
     if let Some(kind) = canonical_type(&text)
         && kind != "error"
         && alias(kind).is_none()

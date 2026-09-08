@@ -490,6 +490,18 @@ class Settings(BaseSettings):
     # fair-share throttling engages; 0 disables the gate entirely.
     proxy_api_key_fair_share_congestion_threshold_pct: int = Field(default=0, ge=0, le=100)
     proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
+    # Upstream overload (``server_is_overloaded``) handling. Soft backoff and
+    # the isolation trip level are fixed constants in
+    # ``app/modules/proxy/_load_balancer/overload_backoff.py``; this is how long
+    # a sustained-overload account is isolated (fresh selection avoids it and
+    # soft sticky owners are rerouted while another candidate exists). ``0``
+    # disables the isolation stage and keeps the soft backoff only.
+    proxy_overload_isolation_seconds: int = Field(default=1800, ge=0)
+    # Weighted routing strategies (``capacity_weighted``, ``relative_availability``)
+    # discount each candidate's draw weight by its recent upstream error rate
+    # (window, sample floor and weight floor are fixed constants in
+    # ``app/modules/proxy/_load_balancer/error_rate.py``).
+    proxy_account_error_rate_weighting_enabled: bool = True
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
     proxy_account_caps_scope: Literal["partitioned", "replica"] = "partitioned"

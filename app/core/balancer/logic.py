@@ -146,6 +146,11 @@ class AccountState:
     leased_tokens: float = 0.0
     routing_policy: str = ROUTING_POLICY_NORMAL
     ignore_standard_quota: bool = False
+    # Multiplier applied to this candidate's draw weight by the weighted
+    # strategies (``capacity_weighted``, ``relative_availability``); ``1.0`` is
+    # neutral. The balancer derives it from the account's recent upstream
+    # error rate. Deterministic strategies ignore it.
+    selection_weight_multiplier: float = 1.0
 
 
 @dataclass
@@ -1012,7 +1017,9 @@ def _select_relative_availability(
         _log_relative_availability_winner(winner, current=current, weight=weight, raw_score=raw_score)
         return winner
     states = [state for state, _, _ in weighted_candidates]
-    weights = [weight for _, weight, _ in weighted_candidates]
+    # Top-k membership is decided by availability alone (above); the recent
+    # error rate only discounts the draw so a penalized account still competes.
+    weights = [weight * _selection_weight_multiplier(state) for state, weight, _ in weighted_candidates]
     total = sum(weights)
     if total <= 0.0:
         winner = min(available, key=_usage_sort_key)
@@ -1172,12 +1179,21 @@ def _lowest_planner_cost_candidates(
 
 def _select_capacity_weighted(available: list[AccountState]) -> AccountState:
     """Select an account with probability proportional to remaining secondary credits."""
-    weights = [_remaining_secondary_credits(s) for s in available]
+    weights = [_remaining_secondary_credits(s) * _selection_weight_multiplier(s) for s in available]
     total = sum(weights)
     if total <= 0.0:
         # All accounts exhausted — fall back to deterministic usage-weighted
         return min(available, key=_usage_sort_key)
     return random.choices(available, weights=weights, k=1)[0]
+
+
+def _selection_weight_multiplier(state: AccountState) -> float:
+    """Clamp the balancer-supplied draw multiplier so a bad value can never
+    negate or unbound a weight."""
+    multiplier = state.selection_weight_multiplier
+    if multiplier != multiplier or multiplier < 0.0:  # NaN or negative
+        return 1.0
+    return min(multiplier, 1.0)
 
 
 def _fill_first_sort_key(state: AccountState) -> tuple[float, float, str]:

@@ -63,6 +63,7 @@ from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
+from app.modules.proxy._load_balancer.error_rate import error_rate_weight_multiplier, record_outcome_locked
 from app.modules.proxy._load_balancer.model_eligibility import (
     _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES,
     CatalogOmissionQuotaAdmission,
@@ -1811,6 +1812,7 @@ class LoadBalancer:
             state.last_error_at = self._clock.time()
             self._sync_runtime_state(account, state)
             runtime = self._runtime.get(account.id)
+            record_outcome_locked(self._runtime[account.id], state.last_error_at, success=False, count=count)
             if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
                 runtime.probe_success_streak = 0
             async with self._repo_factory() as repos:
@@ -1820,7 +1822,8 @@ class LoadBalancer:
         """Clear transient error state after a successful upstream request."""
         lock = await self._get_account_lock(account.id)
         async with lock:
-            runtime = self._runtime.get(account.id)
+            runtime = self._runtime.setdefault(account.id, RuntimeState())
+            record_outcome_locked(runtime, self._clock.time(), success=True)
             if runtime and runtime.error_count > 0:
                 runtime.error_count = 0
                 runtime.last_error_at = None
@@ -2610,6 +2613,7 @@ def _state_from_account(
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
         routing_policy=routing_policy,
+        selection_weight_multiplier=error_rate_weight_multiplier(runtime, now),
     )
 
 

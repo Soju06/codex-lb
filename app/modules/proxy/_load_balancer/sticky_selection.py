@@ -27,7 +27,12 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.proxy._load_balancer.overload_backoff import filter_overload_backoff_candidates
+from app.modules.proxy._load_balancer.overload_backoff import (
+    filter_overload_backoff_candidates,
+    overload_backoff_active,
+    overload_isolation_active,
+    sticky_owner_isolation_reroute_pool,
+)
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
     AccountConcurrencyCaps,
@@ -91,6 +96,7 @@ SelectionInputsT = TypeVar("SelectionInputsT", bound=SelectionInputsProtocol)
 
 class StickySelectionOwner(Protocol):
     _clock: Clock
+    _runtime: dict[str, RuntimeState]
     _runtime_lock: asyncio.Lock
     _repo_factory: ProxyRepoFactory
 
@@ -503,6 +509,11 @@ async def run_sticky_selection_path(
                 threshold_pct=fair_share_threshold_pct,
                 redact_sensitive_details=redact_sensitive_details,
             )
+            # An isolated soft owner may be released to a sibling by the
+            # overload isolation stage (see ``_run_select_with_stickiness``).
+            owner_overload_isolated = isinstance(sticky_existing_account_id, str) and overload_isolation_active(
+                owner._runtime.get(sticky_existing_account_id), owner._clock.time()
+            )
             if hard_sticky:
                 # A resolved hard Codex mapping is an ownership
                 # constraint, not a preference. Scope, exclusions,
@@ -515,6 +526,25 @@ async def run_sticky_selection_path(
                 # soft hint; the authoritative preferred-owner path
                 # normally bypasses it.
                 selection_states = states
+                if owner_overload_isolated:
+                    # The owner keeps its cap exemption, but a sibling it
+                    # may be released to must pass the caps: otherwise the
+                    # reroute could pick a saturated sibling that lease
+                    # admission then rejects while the owner had capacity.
+                    cap_eligible_ids = {
+                        state.account_id
+                        for state in _filter_states_for_account_caps(
+                            states,
+                            lease_kind=lease_kind,
+                            caps=caps,
+                            stream_reserve_slots=stream_reserve_slots,
+                        )
+                    }
+                    selection_states = [
+                        state
+                        for state in states
+                        if state.account_id == sticky_existing_account_id or state.account_id in cap_eligible_ids
+                    ]
             else:
                 selection_states = _filter_states_for_account_caps(
                     states,
@@ -534,12 +564,18 @@ async def run_sticky_selection_path(
                     stream_reserve_slots=0,
                 )
                 selection_states = response_create_states or selection_states
+            # Cap spillover is request-local (the mapping is preserved so the
+            # session returns to its owner once the cap clears) -- unless the
+            # owner is also isolated for overload, in which case the fallback
+            # is rebound like any isolation reroute instead of bouncing the
+            # session across siblings turn after turn.
             preserve_existing_mapping = (
                 bare_session_key
                 and isinstance(sticky_existing_account_id, str)
                 and (
                     (
                         cap_spillover_allowed
+                        and not owner_overload_isolated
                         and any(state.account_id == sticky_existing_account_id for state in states)
                         and not any(state.account_id == sticky_existing_account_id for state in selection_states)
                     )
@@ -1246,13 +1282,54 @@ async def _select_with_stickiness(
     # reassignment.
     persist_fallback = not preserve_existing_mapping_on_fallback
     apply_sticky_secondary_budget_threshold = False
+    # Set when an isolated soft owner is released: the replacement pick and the
+    # overload-free pool it came from (probe reservation must see that pool).
+    overload_reroute: SelectionResult | None = None
+    overload_reroute_pool: list[AccountState] | None = None
+
+    def _choose_from(candidates: list[AccountState]) -> SelectionResult:
+        return _select_account_preferring_budget_safe(
+            candidates,
+            prefer_earlier_reset=prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs_by_account_id=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
+        )
 
     if not existing and initial_preferred_account_id is not None:
         initial_preferred = next(
             (state for state in states if state.account_id == initial_preferred_account_id),
             None,
         )
-        if initial_preferred is not None:
+        # The process-session preference is a fresh upstream admission on that
+        # account: do not honor it while the account is in overload backoff and
+        # the strategy can actually select an overload-free candidate. A pool
+        # whose only alternatives are unselectable (cooldown, exhausted) keeps
+        # the preference, so the bypass can never fail a request the
+        # preferred account would have served.
+        if (
+            initial_preferred is not None
+            and overload_backoff_runtime is not None
+            and overload_backoff_active(overload_backoff_runtime.get(initial_preferred.account_id), clock.time())
+        ):
+            preference_free_pool = filter_overload_backoff_candidates(
+                states, overload_backoff_runtime, now=clock.time()
+            )
+            if preference_free_pool is not states:
+                alternative = _choose_from(preference_free_pool)
+                if alternative.account is not None and alternative.account.account_id != initial_preferred.account_id:
+                    overload_reroute = alternative
+                    overload_reroute_pool = preference_free_pool
+        if initial_preferred is not None and overload_reroute is None:
             initial_result = select_account(
                 [initial_preferred],
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1333,7 +1410,48 @@ async def _select_with_stickiness(
                     )
                     burn_first_reallocate = burn_first.account is not None
 
-            if not ((budget_pressured or rate_limit_far_away) and burn_first_reallocate):
+            # Isolation stage of the overload backoff: the pinned owner is a
+            # *soft* mapping (hard continuity owners never reach this path)
+            # and every request re-entering it is a fresh admission upstream
+            # keeps rejecting, so release it while the strategy can still pick
+            # an overload-free sibling. Soft backoff levels below isolation
+            # keep the owner, so a short burst never churns warm sessions.
+            if sticky_kind in (
+                StickySessionKind.PROMPT_CACHE,
+                StickySessionKind.STICKY_THREAD,
+                StickySessionKind.CODEX_SESSION,
+            ):
+                overload_reroute_pool = sticky_owner_isolation_reroute_pool(
+                    states,
+                    overload_backoff_runtime,
+                    owner_account_id=pinned.account_id,
+                    now=now,
+                )
+            if overload_reroute_pool is not None:
+                # A budget-pressured owner's replacement honors the same
+                # secondary-budget filter the budget reallocation applies, so
+                # the rebind does not land on an equally pressured sibling
+                # that the next turn would reallocate again.
+                if budget_pressured:
+                    apply_sticky_secondary_budget_threshold = True
+                candidate = _choose_from(overload_reroute_pool)
+                if candidate.account is not None and candidate.account.account_id != pinned.account_id:
+                    overload_reroute = candidate
+                    # Account identifiers are deliberately omitted: this path
+                    # has no privacy flag and private realtime diagnostics
+                    # must not expose them. The isolation-engaged warning
+                    # already names the account under the redaction policy.
+                    logger.info(
+                        "sticky_owner_overload_isolation_reroute sticky_kind=%s overload_free_candidates=%d",
+                        sticky_kind.value,
+                        len(overload_reroute_pool),
+                    )
+                else:
+                    overload_reroute_pool = None
+
+            if overload_reroute is not None:
+                reallocate_sticky = True
+            elif not ((budget_pressured or rate_limit_far_away) and burn_first_reallocate):
                 pinned_result = select_account(
                     [pinned],
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1454,24 +1572,6 @@ async def _select_with_stickiness(
             if not preserve_existing_mapping_on_fallback:
                 pending_mutation = _StickyMutation(account_id=None)
 
-    def _choose_from(candidates: list[AccountState]) -> SelectionResult:
-        return _select_account_preferring_budget_safe(
-            candidates,
-            prefer_earlier_reset=prefer_earlier_reset_accounts,
-            prefer_earlier_reset_window=prefer_earlier_reset_window,
-            routing_strategy=routing_strategy,
-            relative_availability_power=relative_availability_power,
-            relative_availability_top_k=relative_availability_top_k,
-            budget_threshold_pct=budget_threshold_pct,
-            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-            apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
-            traffic_class=traffic_class,
-            ignore_standard_quota=ignore_standard_quota,
-            routing_costs_by_account_id=routing_costs_by_account_id,
-            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-            usage_exhaustion_states=usage_exhaustion_states,
-        )
-
     # Reaching here means a NEW account is being chosen for this key (no
     # owner, an unusable owner, or a reallocation): a fresh upstream
     # admission, not warm-session reuse. Prefer accounts upstream is not
@@ -1480,12 +1580,16 @@ async def _select_with_stickiness(
     # above never consult the overload window, so an established owner keeps
     # serving its session even while backed off.
     fallback_candidates = states
-    if overload_backoff_runtime is not None:
-        fallback_candidates = filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time())
-    chosen = _choose_from(fallback_candidates)
-    if chosen.account is None and fallback_candidates is not states:
-        fallback_candidates = states
-        chosen = _choose_from(states)
+    if overload_reroute is not None and overload_reroute_pool is not None:
+        fallback_candidates = overload_reroute_pool
+        chosen = overload_reroute
+    else:
+        if overload_backoff_runtime is not None:
+            fallback_candidates = filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time())
+        chosen = _choose_from(fallback_candidates)
+        if chosen.account is None and fallback_candidates is not states:
+            fallback_candidates = states
+            chosen = _choose_from(states)
     chosen_pool = fallback_candidates if fallback_candidates is not states else None
     if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
         return finish_selection(chosen, persist_account_id=chosen.account.account_id, effective_states=chosen_pool)

@@ -5011,8 +5011,11 @@ async def _source_responses_response(
             _model_source_busy_error(),
             headers={**rate_limit_headers, "Retry-After": "1"},
         )
-    admission_budget = estimate_api_key_request_usage(payload)
     try:
+        # Inside the route-helper latch (I13): the budget serializer can raise
+        # (a lone surrogate in the body) and a claimed slot must never outlive
+        # the request that claimed it.
+        admission_budget = estimate_api_key_request_usage(payload)
         reservation = await _enforce_request_limits(
             api_key,
             request_model=payload.model,

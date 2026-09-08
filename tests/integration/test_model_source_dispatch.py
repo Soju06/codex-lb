@@ -23,8 +23,9 @@ from typing import Any
 import pytest
 from aiohttp import web
 from sqlalchemy import select
+from starlette.requests import Request
 
-from app.db.models import ApiKeyUsageReservation, RequestLog
+from app.db.models import ApiKeyUsageReservation, ModelSource, RequestLog
 from app.db.session import SessionLocal
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import source_dispatch as dispatch_module
@@ -808,6 +809,117 @@ async def test_second_concurrent_request_over_max_concurrency_is_busy(async_clie
         "/v1/responses", headers={"Authorization": f"Bearer {key}"}, json=_request_body(model)
     )
     assert third.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_admission_estimate_failure_after_the_claim_releases_the_bulkhead_slot(
+    async_client, source_upstream
+) -> None:
+    """I13: a budget estimate that raises after the slot was claimed must leave nothing owned.
+
+    A lone surrogate inside the first ~8 KiB of the body survives JSON parsing
+    and request validation but makes the budget serializer raise
+    ``UnicodeEncodeError``. The request is a 500 either way; the slot, the
+    reservation and the row must not exist afterwards, or a ``max_concurrency``
+    source answers ``503 model_source_busy`` forever on this worker.
+    """
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    base_url = await source_upstream(
+        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _completed(_USAGE)])
+    )
+    model = "dispatch-estimate-raises"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    patched = await async_client.patch(f"/api/model-sources/{source_id}", json={"maxConcurrency": 1})
+    assert patched.status_code == 200, patched.text
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    body = _request_body(model)
+    body["input"] = [{"role": "user", "content": [{"type": "input_text", "text": "\ud800"}]}]
+    # ``ensure_ascii`` keeps the surrogate as the six-character JSON escape, so
+    # the bytes are valid JSON and the client-side encode cannot be what raises.
+    raw = json.dumps(body).encode("ascii")
+    try:
+        response = await async_client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            content=raw,
+        )
+    except UnicodeEncodeError:
+        # httpx's ASGI transport re-raises the app exception after the 500 was sent.
+        pass
+    else:
+        assert response.status_code == 500, response.text
+    await _drain(async_client)
+
+    assert get_source_bulkhead().in_flight(source_id) == 0
+    assert await _reservations(key_id) == []
+    assert await _source_rows(source_id) == []
+    assert state.requests == []
+
+    follow_up = await async_client.post(
+        "/v1/responses", headers={"Authorization": f"Bearer {key}"}, json=_request_body(model)
+    )
+    assert follow_up.status_code == 200, follow_up.text
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_admission_estimate_exception_is_covered_by_the_route_helper_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct call: whatever the estimate raises, the claim is released before the exception leaves the helper."""
+
+    source = ModelSource(
+        id="src_estimate_raises",
+        name="estimate-raises",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+        max_concurrency=1,
+    )
+
+    def exploding_estimate(_payload: object) -> object:
+        raise RuntimeError("estimate exploded")
+
+    async def never_opened(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the source must not be opened when admission fails")
+
+    monkeypatch.setattr(proxy_api, "estimate_api_key_request_usage", exploding_estimate)
+    monkeypatch.setattr(proxy_api, "stream_source_responses", never_opened)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.9", 54321),
+        }
+    )
+    payload = proxy_api.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    with pytest.raises(RuntimeError, match="estimate exploded"):
+        await proxy_api._source_responses_response(
+            request,
+            payload,
+            source=source,
+            api_key=None,
+            rate_limit_headers={},
+            pre_normalization_effort=None,
+        )
+
+    assert get_source_bulkhead().in_flight(source.id) == 0
+    # The next claim for the same source succeeds: nothing stayed owned.
+    claims = proxy_api.try_claim_source_admission(source)
+    assert claims is not None
+    claims.release_if_unowned()
 
 
 # -- honest source errors ----------------------------------------------------------------------------

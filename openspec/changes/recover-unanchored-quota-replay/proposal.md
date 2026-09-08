@@ -20,6 +20,10 @@ another pool account is healthy.
 - Keep previous-response, conversation, turn-state, file, single-account, incomplete-history,
   non-neutral, and post-visible requests fail-closed.
 
+Compaction items containing `encrypted_content` remain fail-closed and are not projected
+across accounts; this recovery applies only when the resulting replay passes the existing
+account-neutral validation.
+
 ## Impact
 
 The change is limited to raw Responses streaming failover and route-level regression tests.

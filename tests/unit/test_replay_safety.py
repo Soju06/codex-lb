@@ -2119,6 +2119,38 @@ def test_host_automation_heartbeat_is_account_neutral_fresh_input() -> None:
     )
 
 
+@pytest.mark.parametrize("heartbeat_before_tool_pair", [True, False])
+def test_full_resend_tool_loop_manifest_rejects_host_automation_heartbeat(
+    heartbeat_before_tool_pair: bool,
+) -> None:
+    heartbeat: JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+    tool_pair: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call_pending",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_pending", "output": "result"},
+    ]
+    suffix = [heartbeat, *tool_pair] if heartbeat_before_tool_pair else [*tool_pair, heartbeat]
+
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        [{"role": "user", "content": "look that up"}, *suffix],
+        stored_count=1,
+        pending_tool_calls={"call_pending": "function_call"},
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

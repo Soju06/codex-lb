@@ -14156,6 +14156,60 @@ def test_verified_durable_full_resend_accepts_response_bound_pending_tool_calls(
     )
 
 
+@pytest.mark.parametrize("heartbeat_before_tool_pair", [True, False])
+def test_verified_durable_full_resend_rejects_host_automation_heartbeat_with_pending_tool_calls(
+    heartbeat_before_tool_pair: bool,
+) -> None:
+    stored_input_items: list[proxy_service.JsonValue] = [
+        {"role": "user", "content": "look that up"},
+    ]
+    heartbeat: proxy_service.JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+    tool_pair: list[proxy_service.JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": "result"},
+    ]
+    full_input = [
+        *stored_input_items,
+        *([heartbeat, *tool_pair] if heartbeat_before_tool_pair else [*tool_pair, heartbeat]),
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": full_input}
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="sess-tool-heartbeat",
+        canonical_kind="session_header",
+        canonical_key="sid-tool-heartbeat",
+        api_key_scope="__anonymous__",
+        account_id="acc-heartbeat",
+        owner_instance_id=None,
+        owner_epoch=3,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.CLOSED,
+        latest_turn_state="http_turn_tool_heartbeat",
+        latest_response_id="resp-tool-heartbeat",
+        latest_input_item_count=len(stored_input_items),
+        latest_input_full_fingerprint=proxy_service._fingerprint_input_items(stored_input_items),
+        model="gpt-5.4",
+        latest_pending_tool_calls={"call-1": "function_call"},
+    )
+
+    assert http_bridge_streaming_module._verify_durable_full_resend(payload, durable_lookup) is None
+
+
 @pytest.mark.asyncio
 async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_anchor_for_explicit_prompt_cache_key(
     monkeypatch: pytest.MonkeyPatch,

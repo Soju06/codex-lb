@@ -445,6 +445,8 @@ def responses_input_suffix_matches_pending_tool_calls(
         for item in suffix
     ):
         return False
+    if any(_is_host_automation_heartbeat_input(item) for item in suffix if isinstance(item, dict)):
+        return False
     if not responses_input_items_are_self_contained_fresh_replay(suffix):
         return False
     suffix_calls: dict[str, str] = {}

@@ -36,3 +36,4 @@ None.
 - Isolation and the outcome window are per replica; peers converge on their own observations (existing "replica-local health signals" requirement).
 - The error-rate discount only affects strategies that draw randomly by weight. `round_robin`, `usage_weighted`, `fill_first`, `sequential_drain`, `reset_drain` and `single_account` are unchanged.
 - An isolated account still serves hard continuity owners and warm bridge sessions; only fresh admissions and soft owners move.
+- A released owner's replacement is chosen with the eligibility every fresh sticky binding already has (strategy, budget gates, stream cap; the response-create pre-filter applies only to bare-session cap spillover, as on `main`). A replacement whose response-create slots are full is handled by the existing pre-dispatch cap wait/failover, exactly like a fresh binding.

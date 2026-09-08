@@ -763,3 +763,43 @@ async def test_isolated_and_capped_bare_session_owner_is_rebound_instead_of_requ
     assert any(account_id == alternate.id for _, account_id, _ in sticky_repo.upserts)
     for lease in [*saturated, rebound.lease]:
         await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_budget_pressured_isolated_owner_is_released_with_the_secondary_budget_filter() -> None:
+    """Round-robin would otherwise take the least-recently-selected sibling
+    (the equally pressured one), which the next turn's budget reallocation
+    would move again; the reroute must honor the secondary-budget filter."""
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["owner"] = _isolated_runtime(clock.time())
+
+    def _st(account_id: str, secondary_used: float, last_selected: float | None) -> AccountState:
+        return AccountState(
+            account_id=account_id,
+            status=AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=secondary_used,
+            last_selected_at=last_selected,
+            plan_type="plus",
+        )
+
+    states = [_st("owner", 85.0, None), _st("pressured", 85.0, None), _st("safe", 20.0, clock.time())]
+    account_map = {state.account_id: cast(Account, AsyncMock()) for state in states}
+    outcome = await balancer._select_with_stickiness(
+        states=states,
+        account_map=account_map,
+        sticky_key="budget-key",
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=600,
+        budget_threshold_pct=80.0,
+        secondary_budget_threshold_pct=80.0,
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="round_robin",
+        sticky_repo=_sticky_repo("owner"),
+    )
+    assert outcome.selection.account is not None
+    assert outcome.selection.account.account_id == "safe"
+    assert outcome.mutation is not None and outcome.mutation.account_id == "safe"

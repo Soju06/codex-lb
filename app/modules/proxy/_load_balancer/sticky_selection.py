@@ -1428,6 +1428,12 @@ async def _select_with_stickiness(
                     now=now,
                 )
             if overload_reroute_pool is not None:
+                # A budget-pressured owner's replacement honors the same
+                # secondary-budget filter the budget reallocation applies, so
+                # the rebind does not land on an equally pressured sibling
+                # that the next turn would reallocate again.
+                if budget_pressured:
+                    apply_sticky_secondary_budget_threshold = True
                 candidate = _choose_from(overload_reroute_pool)
                 if candidate.account is not None and candidate.account.account_id != pinned.account_id:
                     overload_reroute = candidate

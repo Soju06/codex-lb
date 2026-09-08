@@ -27,3 +27,8 @@
 
 - [x] 5.1 Bare `codex_session` owner with cap spillover disabled: the owner keeps its cap exemption, but the isolation reroute may only release it to a sibling that passes the account caps (a saturated sibling would be rejected at lease admission while the owner had capacity). Request-path regression through `LoadBalancer.select_account` with a saturated sibling.
 - [x] 5.2 Bare `codex_session` owner that is both at cap (spillover enabled) and isolated: the fallback is rebound to the sibling instead of the request-local spillover that preserves the mapping, so later turns do not bounce across siblings. Request-path regression contrasting capped-only (mapping preserved) with capped-and-isolated (rebound).
+
+## 6. Review follow-ups (local codex round 3)
+
+- [x] 6.1 An isolated owner that is also budget-pressured is released with the secondary-budget filter applied (same filter the budget reallocation uses), so the rebind does not land on an equally pressured sibling. Deterministic `round_robin` regression through the sticky selector.
+- [ ] 6.2 (declined, documented) Pre-checking response-create capacity for a streaming `prompt_cache` / `sticky_thread` replacement: the replacement is chosen with exactly the eligibility every fresh sticky binding already has on `main` (stream cap only; the response-create pre-filter exists solely for bare-session cap spillover). Widening it here would change fresh-binding behavior outside this change's scope; tracked as a known limitation in the proposal.

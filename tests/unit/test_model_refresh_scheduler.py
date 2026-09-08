@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import logging
@@ -582,3 +583,46 @@ async def test_refresh_once_clears_registry_when_no_active_accounts(
 
     clear.assert_awaited_once_with()
     invalidate.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_run_loop_warms_the_codex_version_cache_on_every_replica(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-leader replica never runs the leader refresh (the only place the
+    Codex client version used to be fetched), so it presented the configured
+    fallback version indefinitely. The loop tick warms the cache before the
+    leader-gated refresh, on every replica, and a warm-up failure never stops
+    the tick."""
+    get_version = AsyncMock(return_value="0.153.4")
+    monkeypatch.setattr(scheduler_module, "get_codex_version_cache", lambda: SimpleNamespace(get_version=get_version))
+
+    class _Follower:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object | None:
+            return None
+
+    reconcile = AsyncMock()
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Follower())
+    monkeypatch.setattr(scheduler_module, "reconcile_model_registry_from_store", reconcile)
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=3600, enabled=True)
+    await scheduler.start()
+    for _ in range(50):
+        if get_version.await_count and reconcile.await_count:
+            break
+        await asyncio.sleep(0.01)
+    await scheduler.stop()
+    get_version.assert_awaited_once_with()
+    reconcile.assert_awaited_once_with()
+
+    # A failing warm-up is logged and the leader-gated refresh still runs.
+    failing = AsyncMock(side_effect=RuntimeError("github down"))
+    monkeypatch.setattr(scheduler_module, "get_codex_version_cache", lambda: SimpleNamespace(get_version=failing))
+    reconcile.reset_mock()
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=3600, enabled=True)
+    await scheduler.start()
+    for _ in range(50):
+        if reconcile.await_count:
+            break
+        await asyncio.sleep(0.01)
+    await scheduler.stop()
+    failing.assert_awaited_once_with()
+    reconcile.assert_awaited_once_with()

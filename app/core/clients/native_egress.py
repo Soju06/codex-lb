@@ -34,6 +34,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "http_sse_v1",
         "http_responses_events_v1",
         "websocket",
+        "websocket_close_frame_provenance_v1",
         "websocket_send_ack",
     }
 )
@@ -185,6 +186,7 @@ class NativeWebSocketMessage:
     data: bytes | None = None
     close_code: int | None = None
     close_reason: str | None = None
+    close_frame_received: bool = False
 
 
 class NativeEgressClient(Protocol):
@@ -572,16 +574,20 @@ class NativeEgressWebSocket:
                 if event_type == "websocket_close":
                     code = item.get("code")
                     reason = item.get("reason")
+                    close_frame_received = item.get("close_frame_received")
                     if code is not None and not isinstance(code, int):
                         raise NativeEgressProtocolError("native websocket close code is invalid")
                     if reason is not None and not isinstance(reason, str):
                         raise NativeEgressProtocolError("native websocket close reason is invalid")
+                    if not isinstance(close_frame_received, bool):
+                        raise NativeEgressProtocolError("native websocket close frame provenance is invalid")
                     self._remote_closed = True
                     self._queue_message(
                         NativeWebSocketMessage(
                             kind="close",
                             close_code=code,
                             close_reason=reason,
+                            close_frame_received=close_frame_received,
                         )
                     )
                     terminal_failure = NativeEgressTransportError(
@@ -1185,7 +1191,7 @@ def _transport_error_from_event(event: Mapping[str, object]) -> NativeEgressTran
     )
 
 
-def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressTransportError:
+def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressError:
     message = event.get("message")
     failure_phase = event.get("failure_phase")
     retryable_same_contract = event.get("retryable_same_contract")
@@ -1202,6 +1208,8 @@ def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressTran
             body = base64.b64decode(encoded_body, validate=True)
         except ValueError as exc:
             raise NativeEgressProtocolError("native websocket error body is not base64") from exc
+    if failure_phase == "protocol":
+        return NativeEgressProtocolError(message if isinstance(message, str) else "native websocket protocol failed")
     return NativeEgressTransportError(
         message if isinstance(message, str) else "native websocket failed",
         failure_phase=failure_phase if isinstance(failure_phase, str) else "websocket",

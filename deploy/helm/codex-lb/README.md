@@ -649,12 +649,19 @@ section covers the upgrade paths that need operator attention.
 ### From chart versions older than 1.13.0
 
 Chart 1.13.0 (codex-lb v1.13.0, April 2026, #363) moved the application from a
-`Deployment` named `<release>-codex-lb` to a `StatefulSet` named
-`<release>-codex-lb-workload` so `/responses` owner handoff can address pods by
-stable name. Helm cannot change a resource's kind in place, so the chart carries
-a three-piece shim that cuts the public Service over without dropping traffic:
+`Deployment` named `<fullname>` to a `StatefulSet` named `<fullname>-workload`
+so `/responses` owner handoff can address pods by stable name. Helm cannot
+change a resource's kind in place, so the chart carries a three-piece shim that
+keeps the public Service pointed at the legacy pods while the StatefulSet
+starts and then cuts it over:
 
-1. **`pre-upgrade` hook `<release>-codex-lb-legacy-prepare`**
+`<fullname>` below is the chart fullname (`codex-lb.fullname`): the release
+name itself when it contains `codex-lb` (release `codex-lb` -> `codex-lb`,
+the name used by the install commands in this README), otherwise
+`<release>-codex-lb`; `fullnameOverride` replaces both. The hook Job names
+truncate the fullname to fit the 63-character limit.
+
+1. **`pre-upgrade` hook `<fullname>-legacy-prepare`**
    (`templates/legacy-deployment-prepare-hook.yaml`): a Job that patches the
    legacy Deployment's pod template with the traffic-lane label
    `codex-lb.soju.dev/traffic: legacy` and waits (up to 10 minutes) for that
@@ -666,7 +673,7 @@ a three-piece shim that cuts the public Service over without dropping traffic:
    release) or still says `legacy`, the Service is rendered with the legacy
    selector so the old pods keep serving while the StatefulSet starts. Once the
    lane is `workload`, it stays `workload`.
-3. **`post-upgrade` hook `<release>-codex-lb-legacy-cleanup`**
+3. **`post-upgrade` hook `<fullname>-legacy-cleanup`**
    (`templates/legacy-deployment-cleanup-hook.yaml`): a Job that waits for the
    StatefulSet to reach its desired ready replicas, patches the Service
    selector to `codex-lb.soju.dev/traffic: workload`, then deletes the legacy
@@ -682,27 +689,41 @@ failed hook leaves its Job and logs behind for inspection.
 | Value | Effect |
 | --- | --- |
 | `auto` (default) | Lookup-based behaviour described above. |
-| `legacy` | Always select the legacy Deployment pods. Only useful to hold traffic on the old Deployment while debugging a stalled cutover. |
+| `legacy` | Render the legacy selector unconditionally. This only controls what the chart renders: the cleanup hook still patches the live Service to `workload` once the StatefulSet is ready, so `legacy` does not suspend the cutover. It only keeps the rendered selector on the legacy pods for as long as the StatefulSet is not ready (a stalled cutover), which `auto` does as well. |
 | `workload` | Always select the StatefulSet pods and skip the lookup. Safe once the cutover has completed. |
 
 Verify after the first upgrade from a pre-1.13 release:
 
 ```bash
 # the Service selects the StatefulSet pods
-kubectl get svc <release>-codex-lb -n <namespace> -o jsonpath='{.spec.selector}'
+kubectl get svc <fullname> -n <namespace> -o jsonpath='{.spec.selector}'
 # expected to contain "codex-lb.soju.dev/traffic":"workload"
 
 # the legacy Deployment is gone and the StatefulSet is ready
-kubectl get deploy <release>-codex-lb -n <namespace>   # NotFound
-kubectl get sts <release>-codex-lb-workload -n <namespace>
+kubectl get deploy <fullname> -n <namespace>   # NotFound
+kubectl get sts <fullname>-workload -n <namespace>
 
 # a failed hook keeps its Job for inspection
-kubectl logs job/<release>-codex-lb-legacy-prepare -n <namespace>
-kubectl logs job/<release>-codex-lb-legacy-cleanup -n <namespace>
+kubectl logs job/<fullname>-legacy-prepare -n <namespace>
+kubectl logs job/<fullname>-legacy-cleanup -n <namespace>
 ```
+
+For the `codex-lb` release from the install commands above, `<fullname>` is
+`codex-lb`: `kubectl get sts codex-lb-workload`, `job/codex-lb-legacy-cleanup`.
+A `NotFound` for the Deployment is only meaningful when the StatefulSet exists
+and the Service selector already says `workload`.
 
 Notes and opt-out:
 
+- **Plan the first upgrade from a pre-1.13 release as a maintenance window,
+  not a zero-downtime rollout.** The chart no longer renders the legacy
+  Deployment and nothing marks it `helm.sh/resource-policy: keep`, so Helm
+  itself removes it from the release during the upgrade's resource sync, which
+  runs before the `post-upgrade` cleanup hook. Its pods can therefore start
+  terminating while the Service still selects them and before the StatefulSet
+  is ready. The shim bounds the gap (the Service is never pointed at an
+  unready StatefulSet, and the cleanup hook waits for readiness before it
+  flips the selector); it does not eliminate it.
 - The hooks render on every `helm upgrade`, including releases first
   installed on 1.13.0 or later. There they are no-ops (the prepare Job finds no
   Deployment and exits 0; the cleanup Job re-applies the `workload` selector
@@ -743,11 +764,12 @@ the dashboard (PRINCIPLES.md P2 / P6). Visible to Helm users:
 
 **Removed environment variables.** `templates/configmap.yaml` no longer
 templates these; the application ignores them and logs one
-`removed setting(s) ignored` WARN at startup for one release.
+`removed setting(s) ignored` WARN at startup for at least one release (the
+names are pruned from the warning list afterwards and stay inert).
 
 | Removed variable | Former chart value | Replacement |
 | --- | --- | --- |
-| `CODEX_LB_UPSTREAM_STREAM_TRANSPORT` (#2192) | `config.upstreamStreamTransport` | Settings -> Routing -> Upstream stream transport (`auto` / `http` / `websocket`). Operators who pinned `http` or `websocket` must pin it again in the dashboard after upgrading; persisted `default` rows are migrated to `auto`. |
+| `CODEX_LB_UPSTREAM_STREAM_TRANSPORT` (#2192) | `config.upstreamStreamTransport` | Settings -> Advanced -> Routing -> Upstream stream transport (`auto` / `http` / `websocket`). Operators who pinned `http` or `websocket` must pin it again in the dashboard after upgrading; persisted `default` rows are migrated to `auto`. |
 | `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS` (#2190) | `config.cacheAffinityMaxAgeSeconds` | The dashboard cache-affinity TTL, which was already the effective source: the env value only seeded the first-created settings row. |
 | `CODEX_LB_REQUEST_LOG_RETENTION_DAYS`, `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` (#2190) | `extraEnv` only | Settings -> Advanced -> Data retention. An empty dashboard value means retention is disabled; set the window once after upgrading. |
 | `CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY`, `CODEX_LB_WARMUP_MODEL`, `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_GATEWAY_SAFE_MODE` (#2190) | `extraEnv` only | Dashboard settings of the same name (first-boot seeds or never read). |
@@ -769,15 +791,23 @@ references them). Drop them at your convenience, and drop the raw names from
 Precedence is code default < environment < dashboard: the chart value is the
 effective value only while the dashboard field is left empty (shown as
 inherited). Once an operator saves a dashboard value, changing the chart value
-and rolling the pods has no effect until the dashboard field is cleared, and
-startup logs one `environment value(s) ignored because the dashboard owns the
-setting` WARN naming the shadowed variables. The same applies to every setting
-marked `T3 (dashboard)` in the
+and rolling the pods has no effect until the dashboard field is cleared. The
+same precedence applies to every setting marked `T3 (dashboard)` in the
 [settings reference](https://soju06.github.io/codex-lb/reference/settings/) when
 it is passed through `extraEnv` (request budgets, stream idle timeout, SSE
 keepalive, soft drain, deterministic failover, routing weights, overload
-isolation, per-account caps). These aliases are slated for removal in a later
-minor; move persistent overrides into the dashboard.
+isolation, per-account caps).
+
+Whether the shadowing is announced depends on the setting. For
+`config.upstreamConnectTimeout` and the other timeout/budget, per-account cap,
+routing-weight and overload-isolation aliases, startup logs one
+`environment value(s) ignored because the dashboard owns the setting` WARN
+naming the shadowed variables. The three resilience toggles
+(`config.circuitBreakerEnabled` / `CODEX_LB_CIRCUIT_BREAKER_ENABLED`, soft
+drain, deterministic failover) are overridden by a saved dashboard value
+without a startup WARN; check the toggle's provenance in Settings -> Advanced
+-> Resilience instead. These aliases are slated for removal in a later minor;
+move persistent overrides into the dashboard.
 
 ## Validation
 

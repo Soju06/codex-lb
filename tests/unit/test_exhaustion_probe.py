@@ -266,7 +266,8 @@ def test_detached_runtime_snapshot_keeps_fresh_leases_and_never_goes_negative() 
     assert snapshot["acc_drifted"].leased_tokens == 0.0
     assert runtime["acc_drifted"] is drifted
     assert runtime["acc_drifted"] == live_drifted_before
-    assert runtime["acc_drifted"].leases == {"stale": live_drifted_before.leases["stale"]}
+    assert live_drifted_before.leases is not None and set(live_drifted_before.leases) == {"stale"}
+    assert runtime["acc_drifted"].leases == live_drifted_before.leases
 
 
 # --- account scope ------------------------------------------------------------

@@ -1228,6 +1228,7 @@
   "settings.inherit.environment": "继承自环境 ({{value}})",
   "settings.inherit.default": "默认值 ({{value}})",
   "settings.inherit.reset": "恢复为继承",
+  "settings.inherit.resetBlockedByReserve": "无法恢复：流恢复预留将超过流上限。请先调整另一项上限。",
   "settings.routing.accountCapacity.save": "保存容量限制",
   "settings.routing.stickyThresholds.primaryLabel": "粘性主阈值",
   "settings.routing.stickyThresholds.primaryDescription": "当账户 5 小时（主）窗口的已用量超过此百分比时，将粘性会话迁移到其他账户。",

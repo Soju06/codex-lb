@@ -46,6 +46,37 @@ describe("InheritBadge", () => {
     expect(onSave).toHaveBeenCalledWith(buildSettingsUpdateRequest(settings, { proxyAccountStreamLimit: null }));
   });
 
+  it("disables the reset with the reason when clearing would be rejected", () => {
+    render(
+      <InheritBadge
+        settings={createDashboardSettings({
+          provenance: { proxy_account_stream_limit: { source: "dashboard", envValue: 8, default: 8 } },
+        })}
+        name="proxy_account_stream_limit"
+        field="proxyAccountStreamLimit"
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+        resetBlockedReason="reserve would exceed the limit"
+      />,
+    );
+    const reset = screen.getByRole("button", { name: "Reset to inherited" });
+    expect(reset).toBeDisabled();
+    expect(reset).toHaveAttribute("title", "reserve would exceed the limit");
+  });
+
+  it("renders nothing without provenance when no fallback value is given", () => {
+    const { container } = render(
+      <InheritBadge
+        settings={createDashboardSettings()}
+        name="proxy_account_stream_limit"
+        field="proxyAccountStreamLimit"
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it("falls back to the effective-value hint when the backend reports no provenance", () => {
     render(
       <InheritBadge

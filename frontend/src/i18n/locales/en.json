@@ -1228,6 +1228,7 @@
   "settings.inherit.environment": "Inherited from environment ({{value}})",
   "settings.inherit.default": "Default ({{value}})",
   "settings.inherit.reset": "Reset to inherited",
+  "settings.inherit.resetBlockedByReserve": "Reset is blocked: the stream recovery reserve would exceed the stream limit. Adjust the other cap first.",
   "settings.routing.accountCapacity.save": "Save capacity limits",
   "settings.routing.stickyThresholds.primaryLabel": "Sticky primary threshold",
   "settings.routing.stickyThresholds.primaryDescription": "Move sticky sessions off an account once more than this percent of its 5-hour (primary) window has been used.",

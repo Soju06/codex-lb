@@ -9,7 +9,7 @@
 ## 2. Dashboard
 
 - [x] 2.1 `SettingProvenanceSchema` + optional `provenance` on the settings response schema.
-- [x] 2.2 `InheritBadge` + `useInheritableSetting`; wired to the four capacity inputs; legacy hint fallback when `provenance` is absent.
+- [x] 2.2 `InheritBadge` + `useInheritableSetting`; wired to the four capacity inputs; legacy hint fallback (only under an empty input) when `provenance` is absent; reset disabled with a reason when clearing would put the reserve above the stream limit.
 - [x] 2.3 `settings.inherit.*` strings in `en`, `ko`, `zh-CN`; locale key-parity test.
 - [x] 2.4 Before/after screenshots of the capacity section (light and dark) in the PR.
 

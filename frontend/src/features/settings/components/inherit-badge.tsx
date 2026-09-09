@@ -25,12 +25,27 @@ type InheritBadgeProps = {
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
   /**
    * Effective inherited value shown as a plain hint when the backend does not
-   * report provenance yet (older releases).
+   * report provenance yet (older releases). Callers pass it only while the
+   * input is empty, so a typed override never sits next to an "inherited" hint.
    */
   fallbackValue?: number;
+  /**
+   * When set, the reset action is disabled and explains why: clearing this
+   * value would make the settings API reject the request (for example a
+   * recovery reserve that would exceed the inherited stream limit).
+   */
+  resetBlockedReason?: string;
 };
 
-export function InheritBadge({ settings, name, field, busy, onSave, fallbackValue }: InheritBadgeProps) {
+export function InheritBadge({
+  settings,
+  name,
+  field,
+  busy,
+  onSave,
+  fallbackValue,
+  resetBlockedReason,
+}: InheritBadgeProps) {
   const { t } = useTranslation();
   const { provenance, resetToInherited } = useInheritableSetting(settings, name, field, onSave);
 
@@ -51,7 +66,8 @@ export function InheritBadge({ settings, name, field, busy, onSave, fallbackValu
         variant="ghost"
         size="xs"
         className="h-6 px-1.5 text-[11px] text-muted-foreground"
-        disabled={busy}
+        disabled={busy || resetBlockedReason !== undefined}
+        title={resetBlockedReason}
         onClick={() => void resetToInherited()}
       >
         {t("settings.inherit.reset")}

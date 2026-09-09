@@ -236,6 +236,19 @@ export function RoutingSettings({
     parsedProxyAccountStreamLimit.value ?? settings.proxyAccountStreamLimitEnvironmentValue;
   const effectiveProxyAccountStreamRecoveryReserve =
     parsedProxyAccountStreamRecoveryReserve.value ?? settings.proxyAccountStreamRecoveryReserveEnvironmentValue;
+  // Clearing one of the two dependent caps is rejected by the API when the
+  // recovery reserve would end up above a bounded stream limit; the reset
+  // action for that cap is disabled with the reason instead of failing.
+  const inheritedStreamLimit = settings.proxyAccountStreamLimitEnvironmentValue;
+  const streamLimitResetBlockedReason =
+    inheritedStreamLimit > 0 && settings.proxyAccountStreamRecoveryReserve > inheritedStreamLimit
+      ? t("settings.inherit.resetBlockedByReserve")
+      : undefined;
+  const streamRecoveryReserveResetBlockedReason =
+    settings.proxyAccountStreamLimit > 0 &&
+    settings.proxyAccountStreamRecoveryReserveEnvironmentValue > settings.proxyAccountStreamLimit
+      ? t("settings.inherit.resetBlockedByReserve")
+      : undefined;
   const accountCapacityLimitsValid =
     parsedProxyAccountResponseCreateLimit.valid &&
     parsedProxyAccountStreamLimit.valid &&
@@ -800,7 +813,7 @@ export function RoutingSettings({
                   field="proxyAccountResponseCreateLimit"
                   busy={busy}
                   onSave={onSave}
-                  fallbackValue={settings.proxyAccountResponseCreateLimitEnvironmentValue}
+                  fallbackValue={draft.proxyAccountResponseCreateLimit.trim() === "" ? settings.proxyAccountResponseCreateLimitEnvironmentValue : undefined}
                 />
               </label>
               <label className="block space-y-1">
@@ -828,7 +841,8 @@ export function RoutingSettings({
                   field="proxyAccountStreamLimit"
                   busy={busy}
                   onSave={onSave}
-                  fallbackValue={settings.proxyAccountStreamLimitEnvironmentValue}
+                  resetBlockedReason={streamLimitResetBlockedReason}
+                  fallbackValue={draft.proxyAccountStreamLimit.trim() === "" ? settings.proxyAccountStreamLimitEnvironmentValue : undefined}
                 />
               </label>
               <label className="block space-y-1">
@@ -856,7 +870,8 @@ export function RoutingSettings({
                   field="proxyAccountStreamRecoveryReserve"
                   busy={busy}
                   onSave={onSave}
-                  fallbackValue={settings.proxyAccountStreamRecoveryReserveEnvironmentValue}
+                  resetBlockedReason={streamRecoveryReserveResetBlockedReason}
+                  fallbackValue={draft.proxyAccountStreamRecoveryReserve.trim() === "" ? settings.proxyAccountStreamRecoveryReserveEnvironmentValue : undefined}
                 />
               </label>
               <label className="block space-y-1">
@@ -887,7 +902,7 @@ export function RoutingSettings({
                   field="proxyApiKeyFairShareCongestionThresholdPct"
                   busy={busy}
                   onSave={onSave}
-                  fallbackValue={settings.proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue}
+                  fallbackValue={draft.proxyApiKeyFairShareCongestionThresholdPct.trim() === "" ? settings.proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue : undefined}
                 />
               </label>
             </div>

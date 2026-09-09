@@ -829,14 +829,6 @@ The system MUST aggregate `accountCosts[]` from request-log rows whose `api_key_
 - **WHEN** the same API key has both soft-deleted request-log cost and unknown non-deleted request-log cost inside the 7-day window
 - **THEN** the response returns separate `accountCosts[]` items for the deleted and non-deleted buckets
 
-### Requirement: API key 7-day account-cost queries use a composite request-log index
-
-The database SHALL provide an index that supports filtering request logs by API key and 7-day requested-at range before grouping by account for the API-key account-cost breakdown.
-
-#### Scenario: Composite account-cost index exists after migration
-- **WHEN** database migrations are applied
-- **THEN** the `request_logs` table includes an index covering `api_key_id`, descending `requested_at`, and `account_id`
-
 ### Requirement: Request-aware API-key usage reservations
 
 API-key usage reservation admission MUST reserve a bounded request-aware budget instead of an unconditional fixed 8192 input-token plus 8192 output-token pre-charge for every request. The reservation budget MUST be used only for admission and in-flight accounting; final usage accounting MUST continue to settle to the authoritative completed request usage and service-tier pricing.
@@ -1950,4 +1942,13 @@ authorization, errors, or logging; plain keys MUST remain absent from logs.
 - **WHEN** a read-only principal attempts create or regenerate
 - **THEN** existing 403 behavior remains
 - **AND** no plain key or secret-response headers are returned
+
+### Requirement: API key 7-day account-cost queries use an index-supported filter phase
+
+The database SHALL provide an index that supports filtering request logs by API key and 7-day requested-at range for the API-key account-cost breakdown. The filter columns (`api_key_id`, `requested_at`) MUST be the leading key columns of a maintained index; the `account_id` grouping column MAY be fetched from the heap, since the per-key 7-day window bounds the row count and production plan evidence showed the wider `(api_key_id, requested_at, account_id)` variant was never selected by the planner (`pg_stat_user_indexes.idx_scan = 0`).
+
+#### Scenario: Account-cost filter is index-supported after migration
+- **WHEN** database migrations are applied
+- **THEN** the `request_logs` table includes an index whose leading key columns are `api_key_id` and descending `requested_at`
+- **AND** the 7-day account-cost breakdown query for an API key is satisfiable by that index for its filter phase
 

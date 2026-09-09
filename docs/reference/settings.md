@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 103 settings. Every setting is an environment
+codex-lb currently exposes 96 settings. Every setting is an environment
 variable, normally with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process); aliased settings list every accepted name.
 All defaults work with zero configuration —
@@ -131,12 +131,8 @@ anything else belongs in `app/core/config/settings.py`.
 | --- | --- | --- | --- |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL` | T1 | `str \| None` | `None` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_AMBIGUOUS_CONTINUATION_RECOVERY_MODE` | T3 | `'fail_closed' \| 'client_full_history_once' \| 'server_anchored_replay_once' \| 'server_indefinite_recovery'` | `'fail_closed'` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ANCHOR_POISON_FAILURE_THRESHOLD` | T3 | `int` | `7` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS` | T3 | `float` | `2.0` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS` | T3 | `float` | `900.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` | T3 | `bool` | `False` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED` | T3 | `bool` | `True` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS` | T3 | `float` | `120.0` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED` | T4 | `bool` | `True` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID` | T1 | `str` | process hostname |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING` | T1 | `list[str]` | `[]` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_MAX_SESSIONS` | T1 | `int` | `256` |
@@ -145,13 +141,10 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_EVENT_SPOOL_MAX_BYTES` | T1 | `int` | `2097152` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_EVENT_SPOOL_MAX_PENDING_BYTES` | T1 | `int` | `33554432` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_EVENT_SPOOL_MAX_PENDING_EVENTS` | T1 | `int` | `2048` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED` | T3 | `bool` | `True` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_FORMAT` | T1 | `'rows_v1' \| 'chunks_v2'` | `'rows_v1'` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_RETENTION_SECONDS` | T3 | `float` | `604800` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUEUE_LIMIT` | T1 | `int` | `8` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_REQUEST_BUDGET_SECONDS` | T3 | `float` | `7200.0` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS` | T3 | `int` | `6` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS` | T3 | `float` | `300.0` |
 
 ## Proxy admission & account caps
 
@@ -314,6 +307,13 @@ issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
 - `CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT`
 - `CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT`
 - `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT`
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS`
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS`
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS`
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ANCHOR_POISON_FAILURE_THRESHOLD`
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS`
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS`
+- `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED`
 
 ---
 

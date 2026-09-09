@@ -106,6 +106,18 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     "CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT",
     "CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT",
     "CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT",
+    # K2 bridge (constantize-session-bridge-tunables): never-tuned HTTP session
+    # bridge tunables are fixed module constants now (see
+    # app/modules/proxy/_service/http_bridge/helpers.py, retry_circuit.py,
+    # request_submit.py and app/modules/proxy/api.py).
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ANCHOR_POISON_FAILURE_THRESHOLD",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED",
+    # end K2 bridge
 )
 
 
@@ -318,26 +330,9 @@ class Settings(BaseSettings):
     rate_limit_reset_credits_refresh_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
-    http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
-    http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
-    http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
-    http_responses_session_bridge_anchor_poison_failure_threshold: int = Field(default=7, ge=1, le=100)
-    # Cap on server-owned recovery attempts while the client stream is held
-    # open after an eligible eventless terminal (`server_indefinite_recovery`
-    # mode). Once exhausted, the bridge emits one terminal `response.failed`.
-    http_responses_session_bridge_server_recovery_max_attempts: int = Field(default=6, ge=1, le=100)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
-    http_responses_session_bridge_clean_close_retry_jitter_max_seconds: float = Field(
-        default=2.0,
-        ge=0,
-        le=30.0,
-    )
-    # Attach the durable operation identity to response.create client metadata.
-    # The upstream must explicitly support/deduplicate this value before any
-    # automatic replay is enabled; metadata-only propagation is safe by default.
-    http_responses_session_bridge_operation_ledger_enabled: bool = True
     # Bound durable replay storage per operation so a long response cannot
     # exhaust the database. An incomplete spool is never replayed.
     http_responses_session_bridge_operation_event_spool_max_bytes: int = Field(default=2 * 1024 * 1024, gt=0)

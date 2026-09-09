@@ -108,8 +108,6 @@ def _install_proxy_settings_cache(
         trace_channels=frozenset(),
         http_responses_session_bridge_enabled=False,
         http_responses_session_bridge_instance_id="sticky-session-test",
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
         http_responses_session_bridge_max_sessions=128,
         http_responses_session_bridge_queue_limit=8,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,

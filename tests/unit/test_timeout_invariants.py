@@ -15,6 +15,7 @@ from app.core.timeout_invariants import (
     validate_timeout_invariants,
 )
 from app.modules.proxy import durable_bridge_repository
+from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
 from app.modules.proxy._service.http_bridge import retry_circuit
 
 pytestmark = pytest.mark.unit
@@ -39,10 +40,6 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
             "stream_idle_timeout_seconds",
             "sse_keepalive_interval_seconds",
             "http_responses_session_bridge_request_budget_seconds",
-            "http_responses_session_bridge_idle_ttl_seconds",
-            "http_responses_session_bridge_codex_idle_ttl_seconds",
-            "http_responses_session_bridge_stuck_gate_retire_after_seconds",
-            "http_responses_session_bridge_clean_close_retry_jitter_max_seconds",
             "proxy_account_lease_ttl_seconds",
             "model_registry_snapshot_max_age_seconds",
             "timeout_invariant_validation_strict",
@@ -81,6 +78,25 @@ def test_each_settings_backed_rule_names_violation(rule_id: str, overrides: dict
     assert any(violation.rule.id == rule_id for violation in violations)
     formatted = "\n".join(violation.format() for violation in violations)
     assert rule_id in formatted
+
+
+def test_bridge_stuck_gate_rule_evaluates_the_module_constant(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stuck gate is a fixed module constant, not a Settings field; the
+    # `2x stuck gate < bridge budget` rule must still read it at evaluation time.
+    rule_id = "bridge-stuck-gate-retire-within-bridge-budget"
+    assert all(violation.rule.id != rule_id for violation in find_timeout_invariant_violations(Settings()))
+
+    monkeypatch.setattr(
+        http_bridge_helpers,
+        "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
+        Settings().http_responses_session_bridge_request_budget_seconds / 2.0,
+    )
+
+    violations = find_timeout_invariant_violations(Settings())
+
+    assert any(violation.rule.id == rule_id for violation in violations)
+    formatted = "\n".join(violation.format() for violation in violations)
+    assert "2 * HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS" in formatted
 
 
 def test_durable_bridge_retry_circuit_rule_names_violation(monkeypatch: pytest.MonkeyPatch) -> None:

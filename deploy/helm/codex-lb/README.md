@@ -499,7 +499,7 @@ The `stabilizationWindowSeconds: 600` (10 minutes) in `values-prod.yaml` is inte
 
 **Why?**
 
-- Session bridge connections have idle TTLs (`sessionBridgeIdleTtlSeconds=120` for API, `sessionBridgeCodexIdleTtlSeconds=900` for Codex)
+- Session bridge connections have fixed idle TTLs (120s for API sessions, 900s for Codex sessions; application constants, not chart values)
 - When a pod scales down, its in-memory sessions are lost
 - Clients reconnecting to a different pod must re-establish upstream connections
 - A 10-minute cooldown prevents rapid scale-down/up cycles that would thrash session state

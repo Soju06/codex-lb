@@ -93,8 +93,9 @@ def test_removed_settings_tuple_covers_the_current_warning_batch():
     # whose one-release warning window has passed are pruned. Six names from
     # remove-dead-env-settings + CODEX_LB_UPSTREAM_STREAM_TRANSPORT
     # (remove-upstream-stream-transport-env: the dashboard owns the value)
-    # + 27 never-tuned core tunables (constantize-core-tunables).
-    assert len(_REMOVED_SETTINGS) == 34
+    # + 27 never-tuned core tunables (constantize-core-tunables)
+    # + seven K2 bridge names (constantize-session-bridge-tunables).
+    assert len(_REMOVED_SETTINGS) == 34 + 7
     assert all(name.startswith("CODEX_LB_") for name in _REMOVED_SETTINGS)
     assert len(set(_REMOVED_SETTINGS)) == len(_REMOVED_SETTINGS)
 
@@ -213,3 +214,33 @@ def test_constantized_core_tunables_are_listed_and_ignored(monkeypatch):
     assert settings.token_refresh_interval_days == 8
     assert settings.rate_limit_reset_credits_refresh_enabled is True
     assert settings.proxy_response_create_limit == 256
+
+
+# K2 bridge (constantize-session-bridge-tunables)
+_K2_BRIDGE_REMOVED_NAMES = (
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ANCHOR_POISON_FAILURE_THRESHOLD",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED",
+)
+
+
+def test_constantized_bridge_tunables_are_listed_and_ignored(monkeypatch, caplog):
+    for name in _K2_BRIDGE_REMOVED_NAMES:
+        assert name in _REMOVED_SETTINGS
+        monkeypatch.setenv(name, "1")
+
+    settings = Settings()
+    for name in _K2_BRIDGE_REMOVED_NAMES:
+        assert not hasattr(settings, name.removeprefix("CODEX_LB_").lower())
+
+    with caplog.at_level(logging.WARNING, logger="app.core.config.settings"):
+        found = warn_removed_settings({name: "1" for name in _K2_BRIDGE_REMOVED_NAMES})
+
+    assert found == list(_K2_BRIDGE_REMOVED_NAMES)
+
+
+# end K2 bridge

@@ -657,6 +657,10 @@ _CAPACITY_WAIT_MARKER_GRACE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
+# Cap on server-owned recovery attempts while the client stream is held open
+# after an eligible eventless terminal (`server_indefinite_recovery` mode).
+# Once exhausted, the bridge emits one terminal `response.failed`.
+HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS: Final = 6
 _CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS = _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
 _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 2.0
 _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 15.0
@@ -8296,7 +8300,7 @@ async def _stream_response_error_events(
             # fingerprint; each new upstream attempt is still at-least-once.
             retry_delay = max(1.0, min(30.0, float(exc.retry_after_seconds or 5.0)))
             recovery_attempts = 0
-            server_recovery_max_attempts = settings.http_responses_session_bridge_server_recovery_max_attempts
+            server_recovery_max_attempts = HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS
             while recovery_attempts < server_recovery_max_attempts:
                 yield ": codex-lb recovery in progress\n\n"
                 await scheduler.sleep(retry_delay)
@@ -10324,8 +10328,6 @@ def _http_bridge_recovery_request_eligible(
     if not bridge_active or (payload.previous_response_id is None and turn_state_anchor is None):
         return False
     settings = proxy_service_module.get_settings()
-    if not getattr(settings, "http_responses_session_bridge_operation_ledger_enabled", True):
-        return False
     # Turn-state-only requests are admitted to the recovery-capable stream so
     # the submit path can first prove a durable predecessor by advancing its
     # operation anchor. The streaming layer marks an exception recovery-safe

@@ -155,11 +155,8 @@ config:
   # @param config.httpConnectorLimitPerHost Per-host HTTP connection pool limit
   httpConnectorLimitPerHost: 50
   # @param config.sessionBridgeEnabled Enable in-memory upstream WebSocket session reuse
+  # (idle TTLs are fixed application constants: 120s for API sessions, 900s for Codex sessions)
   sessionBridgeEnabled: true
-  # @param config.sessionBridgeIdleTtlSeconds Idle TTL for general API session bridge sessions
-  sessionBridgeIdleTtlSeconds: 120
-  # @param config.sessionBridgeCodexIdleTtlSeconds Idle TTL for Codex session bridge sessions
-  sessionBridgeCodexIdleTtlSeconds: 900
   # @param config.sessionBridgeCodexPrewarmEnabled Proactively open upstream WebSocket for Codex sessions (off by default; matches Settings / OpenSpec)
   sessionBridgeCodexPrewarmEnabled: false
   # @param config.sessionBridgeMaxSessions Max in-memory bridge sessions per pod

@@ -510,9 +510,7 @@ async def lifespan(app: FastAPI):
     if bridge_durable_schema_ready is True:
         startup_module.mark_bridge_durable_schema_ready()
         dashboard_settings = await get_settings_cache().get()
-        ownerless_cutoff = utcnow() - timedelta(
-            seconds=_abandoned_bridge_retention_seconds(dashboard_settings, settings)
-        )
+        ownerless_cutoff = utcnow() - timedelta(seconds=_abandoned_bridge_retention_seconds(dashboard_settings))
         deleted_bridge_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_owned_sessions_on_startup(
             instance_id=settings.http_responses_session_bridge_instance_id,
             owner_process_epoch=http_bridge_owner_process_epoch(),

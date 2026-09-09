@@ -605,7 +605,6 @@ class _HTTPBridgeMixin(
                             self._promote_http_bridge_session_to_codex_affinity(
                                 alias_session,
                                 turn_state=incoming_turn_state,
-                                settings=settings,
                             )
                             _register_http_bridge_turn_state_aliases_locked(self, alias_session)
                             key = alias_session.key
@@ -635,7 +634,6 @@ class _HTTPBridgeMixin(
                                 self._promote_http_bridge_session_to_codex_affinity(
                                     previous_session,
                                     turn_state=incoming_turn_state,
-                                    settings=settings,
                                 )
                                 previous_session.downstream_turn_state_aliases.add(incoming_turn_state)
                                 for alias in previous_session.downstream_turn_state_aliases:
@@ -1178,7 +1176,6 @@ class _HTTPBridgeMixin(
                                     self._promote_http_bridge_session_to_codex_affinity(
                                         previous_session,
                                         turn_state=incoming_turn_state,
-                                        settings=settings,
                                     )
                                     previous_session.downstream_turn_state_aliases.add(incoming_turn_state)
                                     for alias in previous_session.downstream_turn_state_aliases:

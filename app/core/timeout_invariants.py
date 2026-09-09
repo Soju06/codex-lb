@@ -41,8 +41,6 @@ class TimeoutSettings(Protocol):
     transcription_request_budget_seconds: float
     sse_keepalive_interval_seconds: float
     http_responses_session_bridge_request_budget_seconds: float
-    http_responses_session_bridge_stuck_gate_retire_after_seconds: float
-    http_responses_session_bridge_clean_close_retry_jitter_max_seconds: float
     proxy_account_lease_ttl_seconds: float
 
     @property
@@ -115,9 +113,9 @@ ADMISSION_WAIT = _expr(
 )
 ACCOUNT_LEASE_TTL = _field("proxy_account_lease_ttl_seconds", "app/modules/proxy/load_balancer.py:1993")
 BRIDGE_STUCK_GATE_HARD_ANCHOR_RETIRE = _expr(
-    "2 * http_responses_session_bridge_stuck_gate_retire_after_seconds",
-    "app/modules/proxy/_service/http_bridge/helpers.py:686",
-    lambda settings: 2.0 * settings.http_responses_session_bridge_stuck_gate_retire_after_seconds,
+    "2 * HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
+    "app/modules/proxy/_service/http_bridge/helpers.py:222",
+    lambda settings: 2.0 * _http_bridge_stuck_gate_retire_after_seconds(),
 )
 MODEL_REGISTRY_SNAPSHOT_MAX_AGE = _field(
     "model_registry_snapshot_max_age_seconds",
@@ -138,6 +136,12 @@ DURABLE_BRIDGE_RETRY_CIRCUIT_MIN_TTL = _expr(
     "app/modules/proxy/_service/http_bridge/retry_circuit.py:19-21",
     lambda settings: _durable_bridge_retry_circuit_min_ttl_seconds(),
 )
+
+
+def _http_bridge_stuck_gate_retire_after_seconds() -> float:
+    from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
+
+    return float(http_bridge_helpers.HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS)
 
 
 def _model_registry_refresh_interval_seconds() -> float:
@@ -215,8 +219,8 @@ TIMEOUT_INVARIANT_RULES: tuple[TimeoutInvariantRule, ...] = (
         BRIDGE_STUCK_GATE_HARD_ANCHOR_RETIRE,
         "<",
         BRIDGE_BUDGET,
-        "Hard-continuity stuck gate retirement waits up to 2x the configured threshold and must happen before "
-        "the bridge request budget is exhausted.",
+        "Hard-continuity stuck gate retirement waits up to 2x the fixed stuck-gate threshold and must happen "
+        "before the bridge request budget is exhausted.",
     ),
     TimeoutInvariantRule(
         "account-lease-ttl-covers-proxy-budget",

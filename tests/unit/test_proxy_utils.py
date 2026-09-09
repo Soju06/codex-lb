@@ -6707,7 +6707,6 @@ def _make_proxy_settings(*, trace_channels: frozenset[str] = frozenset()) -> Sim
         proxy_response_create_limit=64,
         http_responses_session_bridge_instance_id="test-instance",
         http_responses_session_bridge_instance_ring=[],
-        http_responses_session_bridge_anchor_poison_failure_threshold=7,
         http_downstream_transport_policy="smart",
     )
 
@@ -43895,7 +43894,7 @@ async def test_response_create_admission_stuck_gate_retire_ignores_draining_pend
     settings = _make_proxy_settings()
     settings.proxy_response_create_limit = 64
     monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
-    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 1.0
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 1.0)
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     blocked_request = proxy_service._WebSocketRequestState(
         request_id="ws_req_gate_timeout_with_draining",
@@ -49135,7 +49134,7 @@ async def test_http_bridge_session_events_retries_silent_pre_response_once(monke
     settings.stream_idle_timeout_seconds = 7200.0
     # The pre-response budget is derived from the owner-side stuck gate, not
     # from stream_idle_timeout_seconds; scale it down for the test clock.
-    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.002
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.002)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_idle_retry",
         model="gpt-5.1",
@@ -49289,8 +49288,7 @@ async def test_http_bridge_eventless_retry_transport_failure_uses_bridge_timeout
     settings = _make_proxy_settings()
     settings.sse_keepalive_interval_seconds = 0.001
     settings.stream_idle_timeout_seconds = 1.0
-    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.002
-    settings.http_responses_session_bridge_anchor_poison_failure_threshold = 7
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.002)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_retry_transport_failure",
         model="gpt-5.1",
@@ -49367,8 +49365,7 @@ async def test_http_bridge_eventless_retry_transport_failure_raises_bridge_timeo
     settings = _make_proxy_settings()
     settings.sse_keepalive_interval_seconds = 0.001
     settings.stream_idle_timeout_seconds = 1.0
-    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.002
-    settings.http_responses_session_bridge_anchor_poison_failure_threshold = 7
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.002)
     settings.http_responses_session_bridge_ambiguous_continuation_recovery_mode = "server_indefinite_recovery"
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_retry_transport_failure_proxy",
@@ -49440,18 +49437,17 @@ async def test_http_bridge_eventless_retry_transport_failure_raises_bridge_timeo
 async def test_http_bridge_retry_transport_failure_abandons_through_the_fenced_consult(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The retry-transport funnel must apply the same capped threshold and
+    # The retry-transport funnel must apply the same circuit threshold and
     # fenced abandonment as the idle-recovery exhaustion: the legacy shape
-    # waited for the raw configured threshold (7) after the circuit opened
-    # at 2 and cleared continuity unfenced, so it could erase an anchor a
-    # sibling registered during the window.
+    # waited for a higher configured threshold after the circuit opened at 2
+    # and cleared continuity unfenced, so it could erase an anchor a sibling
+    # registered during the window.
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings()
     settings.sse_keepalive_interval_seconds = 0.001
     settings.stream_idle_timeout_seconds = 1.0
-    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.002
-    settings.http_responses_session_bridge_anchor_poison_failure_threshold = 7
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.002)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_transport_fenced_abandon",
         model="gpt-5.1",
@@ -49527,9 +49523,6 @@ async def test_http_bridge_retry_transport_failure_abandons_through_the_fenced_c
     consult.assert_awaited_once()
     assert consult.await_args is not None
     assert consult.await_args.kwargs["consecutive_failures"] == 2
-    assert consult.await_args.kwargs["configured_threshold"] == 7, (
-        "the consult receives the raw configured threshold and applies the circuit cap itself"
-    )
     abandon.assert_awaited_once()
     assert abandon.await_args is not None
     assert abandon.await_args.kwargs["expected_continuity"] == ("resp_poisoned", None), (
@@ -49551,8 +49544,7 @@ async def test_http_bridge_transport_terminal_publishes_before_the_settlement(
     settings = _make_proxy_settings()
     settings.sse_keepalive_interval_seconds = 0.001
     settings.stream_idle_timeout_seconds = 1.0
-    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.002
-    settings.http_responses_session_bridge_anchor_poison_failure_threshold = 2
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.002)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_transport_publish_order",
         model="gpt-5.1",
@@ -49645,8 +49637,7 @@ async def test_http_bridge_primary_eventless_timeout_poisons_anchor_after_thresh
     settings = _make_proxy_settings()
     settings.sse_keepalive_interval_seconds = 0.001
     settings.stream_idle_timeout_seconds = 1.0
-    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.002
-    settings.http_responses_session_bridge_anchor_poison_failure_threshold = 2
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.002)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_primary_eventless_poison",
         model="gpt-5.1",

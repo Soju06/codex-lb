@@ -120,7 +120,6 @@ def _make_proxy_settings() -> SimpleNamespace:
         proxy_response_create_limit=64,
         http_responses_session_bridge_instance_id="test-instance",
         http_responses_session_bridge_instance_ring=[],
-        http_responses_session_bridge_anchor_poison_failure_threshold=7,
         http_downstream_transport_policy="smart",
     )
 

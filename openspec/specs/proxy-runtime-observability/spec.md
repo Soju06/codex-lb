@@ -27,7 +27,8 @@ When the proxy resolves or fails closed a continuity-sensitive follow-up request
 - **AND** Prometheus counters record the low-cardinality source or reason labels for that decision
 
 ### Requirement: Full upstream conversation archive
-The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversation traffic. When enabled, the archive MUST write gzip-compressed newline-delimited JSON records for upstream request payloads, streamed Responses events, compact response payloads, and websocket text or binary frames without performing gzip file I/O in the request event loop during normal operation. The archive writer queue MUST be bounded and MUST apply synchronous write backpressure instead of growing without limit when the background writer is saturated. Archive records MUST include request id, timestamp, direction, traffic kind, transport, account id when known, upstream target metadata, redacted headers, and the full payload or frame body. Credential-bearing headers such as authorization, cookies, proxy authorization, token headers, and API key headers MUST be redacted before persistence. JSON records MUST preserve non-ASCII payload text as UTF-8 rather than Unicode escape sequences. When disabled, no archive file MUST be created by the archive writer. Request-log API rows MUST expose an `archiveRequestId` lookup key when the persisted log id can differ from the archive record request id.
+
+The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversation traffic. When enabled, the archive MUST write gzip-compressed newline-delimited JSON records for upstream request payloads, streamed Responses events, compact response payloads, and websocket text or binary frames without performing gzip file I/O in the request event loop during normal operation. The archive writer queue MUST be bounded and MUST apply synchronous write backpressure instead of growing without limit when the background writer is saturated. Archive records MUST include request id, timestamp, direction, traffic kind, transport, account id when known, upstream target metadata, redacted headers, and the full payload or frame body. Credential-bearing headers such as authorization, cookies, proxy authorization, token headers, and API key headers MUST be redacted before persistence. JSON records MUST preserve non-ASCII payload text as UTF-8 rather than Unicode escape sequences. When disabled, no archive file MUST be created by the archive writer. Admin request-log API rows MUST expose an `archiveRequestId` lookup key when the persisted log id can differ from the archive record request id; guest rows MUST redact that key.
 
 #### Scenario: operator enables archive for audit
 - **WHEN** `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED=true`
@@ -41,13 +42,13 @@ The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversati
 
 #### Scenario: operator views archived traffic
 - **GIVEN** conversation archive files exist as `.jsonl.gz` or legacy `.jsonl`
-- **WHEN** an authenticated dashboard operator opens an existing request log detail
+- **WHEN** an authenticated dashboard admin opens an existing request log detail
 - **THEN** the dashboard can find matching archive records by request id across archive files and display payload plus metadata for that request
 
 #### Scenario: response-id request logs keep archive lookup
 - **WHEN** a successful proxied request stores a downstream response id in the request-log `requestId`
 - **AND** the conversation archive stored records under the original request context id
-- **THEN** the request-log API response includes `archiveRequestId` with the original archive lookup id
+- **THEN** the admin request-log API response includes `archiveRequestId` with the original archive lookup id
 - **AND** the persisted `requestId` remains available for response-id continuity lookup
 
 ### Requirement: Optional upstream payload tracing
@@ -223,16 +224,16 @@ User-agent prefix matching MUST ignore surrounding whitespace and case. Header
 name matching MUST be case-insensitive. The helper MUST use the first configured
 header whose value is non-empty after trimming surrounding whitespace, and MUST
 preserve the remaining conversation ID exactly. Detection MUST NOT reject,
-rewrite, route, or otherwise alter the proxied request.
+rewrite, route, or otherwise alter the proxied request. If
+`x-parent-session-id` is blank, detection MUST fall through to the next
+configured header rather than producing a null conversation ID.
 
 #### Scenario: Codex uses thread-id
-
 - **GIVEN** a request has user-agent `codex/1.2` and `thread-id: " conv-a "`
 - **WHEN** request-log client metadata is derived
 - **THEN** the conversation ID is `conv-a`
 
 #### Scenario: OpenCode uses ordered fallback headers
-
 - **GIVEN** a request has user-agent `opencode/1.0`, an empty
   `x-parent-session-id`, an empty `x-opencode-session`, `x-session-id: fallback`,
   and `x-session-affinity: affinity`
@@ -240,7 +241,6 @@ rewrite, route, or otherwise alter the proxied request.
 - **THEN** the conversation ID is `fallback`
 
 #### Scenario: OpenCode parent session takes precedence
-
 - **GIVEN** a request has user-agent `opencode/1.0`,
   `x-parent-session-id: parent`, `x-opencode-session: child`,
   `x-session-id: fallback`, and `x-session-affinity: affinity`
@@ -248,14 +248,12 @@ rewrite, route, or otherwise alter the proxied request.
 - **THEN** the conversation ID is `parent`
 
 #### Scenario: Prefix and header matching ignore case
-
 - **GIVEN** a request has user-agent ` CODEX/1.2 ` and header `Thread-Id:
   conv-b`
 - **WHEN** request-log client metadata is derived
 - **THEN** the conversation ID is `conv-b`
 
 #### Scenario: Unsupported harnesses produce null metadata
-
 - **GIVEN** a request has no user-agent or has an unsupported user-agent and
   includes a configured conversation header
 - **WHEN** request-log client metadata is derived
@@ -270,13 +268,11 @@ MUST remain valid with a null conversation ID. Empty or whitespace-only detected
 values MUST be persisted as null.
 
 #### Scenario: Known conversation ID is persisted
-
 - **GIVEN** request-log metadata contains a non-empty conversation ID
 - **WHEN** the request log is persisted
 - **THEN** the stored `conversation_id` equals the trimmed ID
 
 #### Scenario: Missing conversation ID remains nullable
-
 - **GIVEN** request-log metadata contains no usable conversation ID
 - **WHEN** the request log is persisted
 - **THEN** the stored `conversation_id` is null
@@ -290,70 +286,60 @@ warmup, thread-goal, and model-source paths. WebSocket finalization and HTTP
 logging MUST preserve the same value derived from the inbound request headers.
 
 #### Scenario: Normal HTTP logs retain the inbound conversation
-
 - **GIVEN** a supported Codex or OpenCode request reaches the normal HTTP
   request-log path with a usable conversation header
 - **WHEN** the path writes or finalizes its request log
 - **THEN** the persisted log contains that conversation ID
 
 #### Scenario: WebSocket logs retain the inbound conversation
-
 - **GIVEN** a supported request reaches the WebSocket request-log path with a
   usable conversation header
 - **WHEN** that path persists its request log
 - **THEN** the persisted log contains the detected conversation ID
 
 #### Scenario: Preflight errors retain the inbound conversation
-
 - **GIVEN** a supported request reaches the HTTP preflight-error log path with
   a usable conversation header
 - **WHEN** that path persists its request log
 - **THEN** the persisted log contains the detected conversation ID
 
 #### Scenario: Compact logs retain the inbound conversation
-
 - **GIVEN** a supported request reaches the compact log path with a usable
   conversation header
 - **WHEN** that path persists its request log
 - **THEN** the persisted log contains the detected conversation ID
 
 #### Scenario: Control logs retain the inbound conversation
-
 - **GIVEN** a supported request reaches the control log path with a usable
   conversation header
 - **WHEN** that path persists its request log
 - **THEN** the persisted log contains the detected conversation ID
 
 #### Scenario: Transcription logs retain the inbound conversation
-
 - **GIVEN** a supported request reaches the transcription log path with a
   usable conversation header
 - **WHEN** that path persists its request log
 - **THEN** the persisted log contains the detected conversation ID
 
 #### Scenario: File logs retain the inbound conversation
-
 - **GIVEN** a supported request reaches the file log path with a usable
   conversation header
 - **WHEN** that path persists its request log
 - **THEN** the persisted log contains the detected conversation ID
 
 #### Scenario: Warmup logs retain the inbound conversation
-
 - **GIVEN** a supported request reaches the warmup log path with a usable
   conversation header
 - **WHEN** that path persists its request log
 - **THEN** the persisted log contains the detected conversation ID
 
 #### Scenario: Thread-goal logs retain the inbound conversation
-
 - **GIVEN** a supported request reaches the thread-goal log path with a usable
   conversation header
 - **WHEN** that path persists its request log
 - **THEN** the persisted log contains the detected conversation ID
 
 #### Scenario: Model-source logs retain the inbound conversation
-
 - **GIVEN** a model-source request has a supported conversation header
 - **WHEN** the model-source path persists its request log
 - **THEN** the persisted log contains the detected conversation ID
@@ -385,13 +371,17 @@ The proxy MUST persist the resolved edge client IP on `request_logs.client_ip` f
 
 ### Requirement: Request-log search matches client IP
 
-Request-log search MUST match persisted `client_ip` values.
+Request-log search MUST match persisted `client_ip` values for an admin principal. For a guest principal, request-log search MUST NOT inspect or match persisted `client_ip` values.
 
 #### Scenario: Search by client IP returns matching rows
-
 - **WHEN** a request log row has `client_ip = "203.0.113.7"`
-- **AND** the operator searches request logs for `203.0.113.7`
+- **AND** an admin principal searches request logs for `203.0.113.7`
 - **THEN** the matching request log row is returned
+
+#### Scenario: Guest cannot search by redacted client IP
+- **GIVEN** a request log row has `client_ip = "203.0.113.7"` and no non-sensitive field matching `203.0.113`
+- **WHEN** a guest principal searches request logs for `203.0.113`
+- **THEN** the request log row is not returned
 
 ### Requirement: Drain status exposes HTTP bridge activity
 
@@ -532,6 +522,12 @@ The dashboard request-log table MUST show time to first token and output-token g
 - **THEN** it shows TTFT as 200ms
 - **AND** it shows TPS as `(200 - 40) / 0.8 = 200.0`
 
+#### Scenario: Unknown reasoning usage is treated as zero
+
+- **GIVEN** a request has output tokens, valid total latency and TTFT, but no reasoning-token usage
+- **WHEN** the dashboard calculates TPS
+- **THEN** it uses the full output-token count as non-reasoning output
+
 #### Scenario: missing speed inputs stay blank
 
 - **GIVEN** a request log is missing TTFT, total latency, or output tokens
@@ -580,24 +576,22 @@ The Reports dashboard MUST expose daily median TTFT, daily median TPS, and daily
 The websocket responses proxy path MUST record first-upstream-event, response-created, and first-token latency into the same request-log latency fields the HTTP bridge populates, so websocket request logs expose TTFT and generation speed. First-token latency MUST use the first token-bearing output delta, including text, refusal, reasoning-summary, function-call argument, custom-tool input, and tool-call output deltas, or a custom/apply-patch tool-call `response.output_item.added` or `response.output_item.done` event only when the item contains meaningful tool-call payload content and the tool protocol does not stream argument deltas. Recording MUST NOT change routing, failover, or the bytes returned to the client.
 
 #### Scenario: Websocket text response records latency timings
-
 - **GIVEN** a websocket responses request whose upstream emits a `response.created` event, then a text delta, then completion
 - **WHEN** the proxy persists the request log
 - **THEN** the log has non-null first-upstream-event, response-created, and first-token latency values
 - **AND** first-upstream-event latency is less than or equal to response-created latency, which is less than or equal to first-token latency
 
 #### Scenario: Websocket tool call records first-token latency
-
 - **GIVEN** a websocket responses request whose first token-bearing output is a function-call argument delta, custom-tool input delta, tool-call output delta, or a custom/apply-patch tool-call `response.output_item.added` or `response.output_item.done` event with meaningful tool-call payload content when the tool protocol does not stream argument deltas
 - **WHEN** the proxy persists the request log
 - **THEN** the log has a non-null first-token latency value
 - **AND** the proxy forwards the upstream event unchanged
 
 #### Scenario: Control events do not record first-token latency
-
 - **GIVEN** a responses request whose upstream has emitted only control events such as `response.created`
 - **WHEN** the proxy inspects the request timing
 - **THEN** first-token latency remains null until a token-bearing output delta arrives, unless a meaningful custom/apply-patch completion event anchors TTFT for a completion-only tool protocol
+- **AND** a message, reasoning, or function-call `response.output_item.added` lifecycle event does not record first-token latency
 - **AND** reasoning-summary placeholder deltas that are stripped before delivery do not record first-token latency
 - **AND** metadata-only or empty tool-call delta and completion events do not record first-token latency
 
@@ -1275,4 +1269,35 @@ runtime clamps, or runtime-derived effective values.
 - **THEN** the CRITICAL log includes that rule id and rationale
 - **AND** the log contains no request payload, API key, access token, raw
   affinity key, or account email
+
+### Requirement: Guest request logs redact raw identifying metadata
+
+The dashboard request-log API MUST return request rows and non-identifying operational metrics to a guest principal, but MUST serialize `clientIp`, full `useragent`, `conversationId`, and `archiveRequestId` as null and MUST NOT use those redacted values to match guest text searches. It MUST reject a guest request that supplies the dedicated `conversation_id` filter with HTTP 403 and error code `admin_access_required`. It MUST retain the identifying values and existing conversation filtering and aggregate response for an admin principal. The lower-cardinality `useragentGroup`, status, model, token, latency, and cost fields MAY remain available to guests outside a dedicated conversation filter.
+
+#### Scenario: Guest reads operational request rows without raw identifiers
+
+- **GIVEN** a persisted request log contains a client IP, full User-Agent, conversation ID, archive lookup ID, model, status, tokens, latency, and cost
+- **WHEN** a guest principal requests `GET /api/request-logs`
+- **THEN** the response row has null `clientIp`, `useragent`, `conversationId`, and `archiveRequestId`
+- **AND** the response retains the row's non-identifying operational fields
+
+#### Scenario: Admin retains raw request metadata
+
+- **GIVEN** a persisted request log contains a client IP, full User-Agent, conversation ID, and archive lookup ID
+- **WHEN** an admin principal requests `GET /api/request-logs`
+- **THEN** the response contains the persisted values
+
+#### Scenario: Guest conversation filter fails closed
+
+- **GIVEN** persisted request logs contain a redacted conversation ID
+- **WHEN** a guest principal requests `GET /api/request-logs` with that `conversation_id`
+- **THEN** the response is HTTP 403 with error code `admin_access_required`
+- **AND** no filtered row count or aggregated conversation cost is returned
+
+#### Scenario: Admin retains conversation filtering and aggregates
+
+- **GIVEN** persisted request logs contain a conversation ID
+- **WHEN** an admin principal requests `GET /api/request-logs` with that `conversation_id`
+- **THEN** only matching request rows are returned
+- **AND** the response retains the matching request count and aggregated conversation cost
 

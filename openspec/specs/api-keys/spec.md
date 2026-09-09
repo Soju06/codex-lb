@@ -43,6 +43,8 @@ When `assignedAccountIds` is omitted or empty, the created key SHALL remain unsc
 ### Requirement: API Key update
 The system SHALL allow updating key properties via `PATCH /api/api-keys/{id}`. Updatable fields: `name`, `allowedModels`, `weeklyTokenLimit`, `expiresAt`, `isActive`, `usageSections`, `transportPolicyOverride`. The key hash and prefix MUST NOT be modifiable. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt` and normalize them to UTC naive before persistence. The `transportPolicyOverride` field MUST accept `null` (follow the global policy) or one of `"smart"`, `"always_http"`, `"always_websocket"`; any other value MUST be rejected with HTTP 400.
 
+When a submitted API key limit rule matches an existing rule by `limit_type`, `limit_window`, and `model_filter`, updating the rule's maximum MUST preserve the latest committed `current_value` and `reset_at` unless `resetUsage` is true. A transient SQLite lock or snapshot conflict during the update MUST roll back and retry the complete read/build/write transaction, including rereading existing limits, before returning an error.
+
 When a submitted API key limit rule does not match an existing rule by `limit_type`, `limit_window`, and `model_filter`, the system MUST initialize the new rule's `current_value` from the API key's successful existing request-log usage in that rule's current window. If `resetUsage` is true, the system MUST initialize submitted limits with `current_value: 0`.
 
 #### Scenario: Update key with timezone-aware expiration
@@ -88,6 +90,21 @@ When a submitted API key limit rule does not match an existing rule by `limit_ty
 
 - **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "transportPolicyOverride": "carrier-pigeon" }`
 - **THEN** the system returns 400 and does not modify the key
+
+#### Scenario: Preserve matched limit usage during PATCH
+
+- **GIVEN** an API key has a matched limit with committed `current_value` and `reset_at`
+- **WHEN** admin submits a PATCH that changes the matched limit's maximum without `resetUsage`
+- **THEN** the limit maximum is updated
+- **AND** the latest committed `current_value` and `reset_at` remain unchanged
+
+#### Scenario: Retry API-key PATCH after a transient SQLite snapshot conflict
+
+- **GIVEN** a concurrent reservation or lazy reset commits after the PATCH's initial read
+- **WHEN** the PATCH write encounters a transient SQLite lock or snapshot conflict
+- **THEN** the transaction is rolled back
+- **AND** the PATCH rereads current state and retries the complete update
+- **AND** the PATCH succeeds without clearing the concurrent usage state
 
 ### Requirement: API Key deletion
 
@@ -812,14 +829,6 @@ The system MUST aggregate `accountCosts[]` from request-log rows whose `api_key_
 - **WHEN** the same API key has both soft-deleted request-log cost and unknown non-deleted request-log cost inside the 7-day window
 - **THEN** the response returns separate `accountCosts[]` items for the deleted and non-deleted buckets
 
-### Requirement: API key 7-day account-cost queries use a composite request-log index
-
-The database SHALL provide an index that supports filtering request logs by API key and 7-day requested-at range before grouping by account for the API-key account-cost breakdown.
-
-#### Scenario: Composite account-cost index exists after migration
-- **WHEN** database migrations are applied
-- **THEN** the `request_logs` table includes an index covering `api_key_id`, descending `requested_at`, and `account_id`
-
 ### Requirement: Request-aware API-key usage reservations
 
 API-key usage reservation admission MUST reserve a bounded request-aware budget instead of an unconditional fixed 8192 input-token plus 8192 output-token pre-charge for every request. The reservation budget MUST be used only for admission and in-flight accounting; final usage accounting MUST continue to settle to the authoritative completed request usage and service-tier pricing.
@@ -1169,6 +1178,23 @@ reservation from the upstream OpenAI-compatible `usage` payload when the
 request completes.
 The finalized input, output, cached-input, and cost values MUST update the same
 API-key limit and usage-reporting paths used by subscription-backed requests.
+When cancellation interrupts source-routed `/v1/embeddings` upstream
+forwarding after reservation creation, the request owner MUST finish releasing
+that reservation exactly once despite active cancellation, and MUST then
+propagate the original cancellation. Stale-reservation reclamation MUST remain
+only a backstop and MUST NOT substitute for request-owned cancellation cleanup.
+
+When cancellation interrupts source-routed `/v1/audio/transcriptions` upstream
+forwarding after reservation creation, the request owner MUST finish a
+cancellation-deferring release attempt before propagating the original
+cancellation. If release persistence succeeds, the reservation MUST reach
+`released` state exactly once and its reserved quota MUST be restored. If the
+release attempt still fails after the existing bounded persistence retries,
+the system MUST emit cancellation-neutral cleanup diagnostics, MUST propagate
+the original cancellation, and MUST leave the reservation eligible for
+stale-reservation reclamation to eventually release it and restore its quota.
+Stale reclamation MUST remain only an exceptional backstop and MUST NOT
+substitute for normal request-owned cancellation cleanup.
 
 #### Scenario: Source-routed response finalizes token usage
 
@@ -1187,29 +1213,82 @@ API-key limit and usage-reporting paths used by subscription-backed requests.
 - **AND** the request fails or is marked failed according to the source-routing
   error contract
 
+#### Scenario: Cancelled source embeddings forwarding releases its reservation
+
+- **GIVEN** a limited API key has created an owned reservation for a
+  source-routed `/v1/embeddings` request
+- **WHEN** cancellation interrupts the request while upstream embeddings
+  forwarding is in flight
+- **THEN** the request owner finishes releasing the reservation exactly once
+  despite active cancellation
+- **AND** the original cancellation propagates after cleanup completes
+- **AND** stale-reservation reclamation is not required for that request
+
+#### Scenario: Cancelled source audio forwarding releases its reservation
+
+- **GIVEN** a limited API key has created an owned reservation for a
+  source-routed `/v1/audio/transcriptions` request
+- **WHEN** cancellation interrupts the request while upstream audio forwarding
+  is in flight
+- **THEN** the request owner finishes releasing the reservation exactly once
+  despite active cancellation
+- **AND** the reservation reaches `released` state and its reserved quota is
+  restored
+- **AND** the original cancellation propagates after cleanup completes
+- **AND** stale-reservation reclamation is not required for that request
+
+#### Scenario: Failed cancellation release remains recoverable
+
+- **GIVEN** cancellation interrupts a limited source-routed audio request after
+  its reservation is created
+- **AND** the immediate release attempt exhausts the existing bounded
+  persistence retries
+- **WHEN** release persistence reports failure
+- **THEN** the proxy emits cancellation-neutral cleanup diagnostics
+- **AND** the original cancellation propagates
+- **AND** stale-reservation reclamation eventually releases the reservation and
+  restores its reserved quota
+
 ### Requirement: Stream reservation settlement is detached from the response path
 
 Settling a stream API-key reservation MUST NOT block the response/stream close,
-with one deliberate exception: when a keyed websocket stream terminates with an
-account-health error, the finalizer MUST wait for the settlement to commit
-before the load-balancer health write (the settlement-ordering invariant), so
-that error path intentionally blocks on settlement. If the primary settlement
-fails, the finalizer MUST wait for fallback release to commit before recording
-account health. If neither operation confirms settlement, the account-health
-write MUST remain unapplied. Tracked persistence ownership MUST remain
-registered through an ordering-sensitive fallback release, including
+with deliberate ordering exceptions for account-health writes. When a keyed
+websocket stream terminates with an account-health error, when a keyed HTTP SSE
+failure is rewritten to `previous_response_owner_unavailable`, or when a keyed
+HTTP SSE terminal queue drains empty before terminal health or success is
+recorded, the finalizer MUST wait for settlement to commit before the
+load-balancer health write (the settlement-ordering invariant). If the primary
+settlement fails, the finalizer MUST wait for fallback release to commit before
+recording account health. If neither operation confirms settlement, the
+account-health write MUST remain unapplied. Tracked persistence ownership MUST
+remain registered through an ordering-sensitive fallback release, including
 cancellation before the primary coroutine starts or during that release, so
 graceful shutdown drains both phases. When the existing stream-retry path
 deliberately defers an
 account-health penalty until the same ordering-sensitive settlement, it MUST
 likewise apply neither that penalty nor an immediately following terminal health
 write unless settlement is confirmed, and it MUST NOT start a second settlement
-for the transferred reservation. In all other cases the settlement MUST run as
+for the transferred reservation. The HTTP bridge's pre-created retry handling
+(model-capacity wait, owner-pinned quota, and generic retryable pre-created
+failures) MUST likewise defer a keyed request's classified account-health
+write until that request's reservation settles or its fallback release
+commits, MUST leave the deferred write unapplied when neither confirms, and
+MUST keep the immediate write for unkeyed requests. After a committed
+settlement or fallback release, deferred account-backoff writes and deferred
+stream-health writes MUST drain on independent lanes so a failure in one
+cannot orphan the other, and a deferred health write that itself fails MUST be
+logged and dropped without aborting the remaining terminal finalization. In
+all other cases the settlement MUST run as
 a tracked background task; when it fails or is cancelled, the reservation MUST
 still be released by the tracking fallback, and the request's finalization path
-MUST NOT double-release a transferred settlement. Reservations MUST continue to
-count toward key limits until finalized or released, so deferred settlement can
-never admit usage a synchronous settlement would have rejected.
+MUST NOT double-release a transferred settlement. If the tracking fallback
+itself encounters a persistence failure, it MUST remain tracked and retry the
+idempotent release; no more than four retry-enabled detached fallback repository
+attempts may run concurrently per proxy service instance, waiting fallbacks MUST
+NOT open repository sessions until admitted, and persistence drain MUST NOT
+report completion while any retry remains unfinished. Reservations MUST continue
+to count toward key limits until finalized or released, so deferred settlement
+can never admit usage a synchronous settlement would have rejected.
 
 #### Scenario: Response close precedes settlement completion
 
@@ -1223,6 +1302,21 @@ never admit usage a synchronous settlement would have rejected.
 - **GIVEN** a detached settlement whose finalize raises
 - **WHEN** the settlement task completes
 - **THEN** the tracking fallback releases the reservation
+
+#### Scenario: Failed fallback release remains tracked
+
+- **GIVEN** a detached settlement whose finalize raises
+- **AND** the first tracking-fallback release attempt also raises
+- **WHEN** persistence recovers before the drain deadline
+- **THEN** the tracked fallback retries and releases the reservation exactly once
+- **AND** persistence drain does not report completion before that release
+
+#### Scenario: Concurrent fallback release retries are bounded to four
+
+- **GIVEN** five failed detached settlements in one proxy service instance
+- **WHEN** their tracking fallbacks attempt repository persistence concurrently
+- **THEN** no more than four release attempts open repository sessions
+- **AND** the waiting fallbacks remain tracked until they can retry
 
 #### Scenario: Websocket health-error settlement precedes the health write
 
@@ -1245,6 +1339,25 @@ never admit usage a synchronous settlement would have rejected.
 - **THEN** the finalizer does not record the account-health error
 - **AND** the upstream connection is still scheduled for reconnect and retirement
 
+#### Scenario: Owner-unavailable rewrite settles before health
+
+- **GIVEN** a keyed HTTP SSE stream rewrites an upstream failure to
+  `previous_response_owner_unavailable`
+- **WHEN** the stream records account-health recovery for the original failure
+- **THEN** reservation settlement or fail-safe release confirms first
+
+#### Scenario: Empty terminal queue settles before health or success
+
+- **GIVEN** a keyed HTTP SSE bridge queue drains empty on a terminal path
+- **WHEN** the stream records terminal account health or success
+- **THEN** reservation settlement or fail-safe release confirms first
+
+#### Scenario: Unconfirmed HTTP stream settlement leaves health unapplied
+
+- **GIVEN** a keyed HTTP SSE stream reaches an ordering-sensitive terminal path
+- **WHEN** both primary settlement and fallback release fail
+- **THEN** the stream does not record account health
+
 #### Scenario: Unconfirmed retry settlement drops deferred health
 
 - **GIVEN** a keyed stream retry has deferred an account-health penalty until replacement selection
@@ -1252,11 +1365,35 @@ never admit usage a synchronous settlement would have rejected.
 - **THEN** the deferred penalty and any immediately following terminal health write remain unapplied
 - **AND** the retry path does not start a second settlement for the transferred reservation
 
+#### Scenario: Keyed pre-created retry defers the health write
+
+- **GIVEN** a keyed HTTP-bridge request whose reservation is unsettled
+- **WHEN** a retryable pre-created failure (model capacity, owner-pinned quota, or another retryable error) is handled
+- **THEN** no load-balancer health write occurs before settlement
+- **AND** the classified penalty is queued on the request state
+- **AND** an equivalent unkeyed request keeps the immediate health write
+
+#### Scenario: Deferred pre-created penalty applies after settlement commits
+
+- **GIVEN** a keyed HTTP-bridge request with a queued pre-created health penalty
+- **WHEN** its reservation settlement or fallback release commits
+- **THEN** the queued penalty is applied after the commit
+- **AND** each queued entry is applied exactly once
+
+#### Scenario: Failed deferred health write does not abort finalization
+
+- **GIVEN** a committed settlement with a queued pre-created health penalty
+- **WHEN** the deferred health write fails
+- **THEN** the failure is logged and the penalty is dropped
+- **AND** the remaining terminal finalization continues
+- **AND** a deferred account-backoff failure does not prevent the deferred health drain
+
 #### Scenario: Shutdown drains pending settlements
 
 - **WHEN** the service shuts down gracefully with settlements in flight
 - **THEN** shutdown waits for them up to the configured drain timeout
 - **AND** a pending ordering-sensitive fallback release remains part of that drain despite cancellation before primary startup or during fallback
+- **AND** reports an incomplete drain if a tracked settlement or release remains unfinished at that timeout
 
 ### Requirement: Untrusted forwarded headers do not grant unauthenticated proxy locality
 
@@ -1805,4 +1942,13 @@ authorization, errors, or logging; plain keys MUST remain absent from logs.
 - **WHEN** a read-only principal attempts create or regenerate
 - **THEN** existing 403 behavior remains
 - **AND** no plain key or secret-response headers are returned
+
+### Requirement: API key 7-day account-cost queries use an index-supported filter phase
+
+The database SHALL provide an index that supports filtering request logs by API key and 7-day requested-at range for the API-key account-cost breakdown. The filter columns (`api_key_id`, `requested_at`) MUST be the leading key columns of a maintained index; the `account_id` grouping column MAY be fetched from the heap, since the per-key 7-day window bounds the row count and production plan evidence showed the wider `(api_key_id, requested_at, account_id)` variant was never selected by the planner (`pg_stat_user_indexes.idx_scan = 0`).
+
+#### Scenario: Account-cost filter is index-supported after migration
+- **WHEN** database migrations are applied
+- **THEN** the `request_logs` table includes an index whose leading key columns are `api_key_id` and descending `requested_at`
+- **AND** the 7-day account-cost breakdown query for an API key is satisfiable by that index for its filter phase
 

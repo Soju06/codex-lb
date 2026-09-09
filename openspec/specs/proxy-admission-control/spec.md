@@ -217,19 +217,104 @@ The dashboard SHALL expose the configured routing policy for each known addition
 - **THEN** the proxy MAY select that account
 
 ### Requirement: Stuck HTTP bridge response-create gate sessions are retired
-When a visible HTTP bridge request times out waiting for a per-session response-create gate, the proxy MUST retire the bridge session only if pending visible request age meets or exceeds the configured stuck-gate retirement threshold. The retirement MUST emit a structured low-cardinality log and a Prometheus counter without raw keys or prompt content.
+When a visible HTTP bridge request times out waiting for a per-session response-create gate, the proxy MUST retire the bridge session only if pending visible request age meets or exceeds the configured stuck-gate retirement threshold, and only while that pending visible request has not yet received `response.created` (no response id and no recorded `response.created` latency) and has not produced downstream-visible output. Receiving a non-visible upstream event before `response.created`, including `codex.rate_limits`, MUST NOT by itself suppress retirement because such an event neither assigns the response nor releases the gate. The retirement MUST emit a structured low-cardinality log and a Prometheus counter without raw keys or prompt content. Pre-created `response.*` lifecycle activity MUST count as response progress and re-anchor the stuck-gate silence clock to the most recent upstream response-lifecycle event, so an actively progressing pre-created request is not retired even when it has not yet produced downstream-visible text. If the timing-out waiter has hard affinity and remains definitively unsubmitted, with no upstream response or downstream sequence markers, the proxy MUST acquire a fresh bridge and submit that waiter once within its original request deadline; a non-zero client-visible replay counter MUST NOT by itself disqualify a waiter from this replacement, since the other definitively-unsubmitted markers already establish the upstream acceptance boundary is unambiguous regardless of replay count. When the replacement is not already required to land on a specific account (no previous-response owner resolved, no file-pinned account), the replacement bridge MUST exclude the account whose gate just proved stuck. A waiter whose replacement is pinned to a required account (a previous-response owner or a file-pinned account) MUST remain pinned to that account, and that required account MUST NOT be excluded on its behalf. The proxy MUST NOT reuse the retired session object or transparently retry an ambiguously submitted request.
+
+The proxy MUST retain the waiter-triggered retirement behavior above for stale HTTP bridge response-create gate owners and MUST additionally enforce an owner-side deadline for a visible HTTP request whose current upstream stream does not produce `response.created`, whether the stream remains completely eventless or later emits matched `response.*` lifecycle activity without a response-created milestone. The owner-side deadline MUST be measured from a monotonic timestamp recorded immediately before the current upstream send, MUST use the smaller of the configured stuck-gate retirement threshold and 60 seconds, MUST run without a second gate waiter, and MUST remain active when periodic SSE keepalives are disabled.
+
+The owner-side watchdog MUST apply only while the request owns the response-create gate, awaits `response.created`, has neither a response id nor recorded `response.created` latency, and has produced no downstream-visible output or sequence evidence. Before any matched `response.*` lifecycle event, the deadline MUST remain anchored to the current upstream send; non-response telemetry such as `codex.rate_limits` MUST NOT suppress or extend it. If matched `response.*` lifecycle events arrive without `response.created`, the watchdog MUST remain armed and re-anchor from the most recent upstream response-lifecycle activity instead of the original send. A response-created milestone or downstream-visible evidence MUST suppress this narrow watchdog and leave existing timeout behavior unchanged.
+
+When the owner-side deadline expires, the proxy MUST recheck eligibility and emit a structured low-cardinality log and the existing stuck-retirement Prometheus counter. For requests that are not eligible for the bounded fresh-hard recovery defined by "Fresh hard bridge requests may recover across accounts", it MUST terminally fail and settle every pending request exactly once, retire the whole bridge session, and MUST NOT transparently replay the timed-out request or move it to another account. An eligible fresh hard request MAY take that single bounded recovery path; if recovery is unavailable or fails, it MUST fall back to the same terminal fail-closed retirement. Neither path may write an account-health failure solely because `response.created` was missing.
 
 #### Scenario: Old pending work blocks a visible gate waiter
 - **WHEN** a visible HTTP bridge request receives `response_create_gate_timeout`
 - **AND** at least one visible pending request on the same session is older than the configured stuck-gate retirement threshold
 - **THEN** the proxy retires the bridge session so later requests can create a fresh session
-- **AND** the waiter is rejected cleanly with `response_create_gate_timeout`
+- **AND** the waiter is rejected cleanly with `response_create_gate_timeout`, unless it has hard affinity and is still definitively unsubmitted, in which case the proxy submits it once on a fresh bridge instead
 
 #### Scenario: Healthy active stream is not retired during a normal wait
 - **WHEN** a visible HTTP bridge request times out waiting for the gate
 - **AND** the session has no pending visible request older than the configured stuck-gate retirement threshold
 - **THEN** the proxy rejects only the waiter
 - **AND** the bridge session remains available for the existing in-flight request
+- **AND** a pending request that has already received `response.created` or produced downstream-visible output is never classified as a stuck pre-created gate owner, regardless of its age
+
+#### Scenario: Leading rate-limit telemetry does not mask a stuck pre-created request
+- **GIVEN** a visible HTTP bridge request owns the response-create gate
+- **AND** upstream emits `codex.rate_limits` but never emits `response.created`
+- **AND** the pending request becomes older than the configured stuck-gate retirement threshold
+- **WHEN** another visible request times out waiting for that gate
+- **THEN** the proxy retires the stuck bridge session
+- **AND** if the waiter has hard affinity and is still definitively unsubmitted, the proxy submits it once on a fresh bridge
+- **AND** the waiter keeps its original deadline and any previous-response account pin
+
+#### Scenario: A reconnected waiter is not disqualified from replacement by its own replay count
+- **GIVEN** a gate waiter has already reconnected once (`replay_count` is non-zero)
+- **AND** the waiter otherwise has no response id, response event, downstream sequence number, or visible output
+- **WHEN** its bridge is retired during gate contention
+- **THEN** the proxy still submits that waiter once on a fresh bridge
+
+#### Scenario: Ambiguous waiter is not moved to a replacement bridge
+- **GIVEN** a gate waiter has a response event, downstream sequence, visible output, or pending-queue membership
+- **WHEN** its bridge is retired during gate contention
+- **THEN** the proxy does not transparently submit that waiter on another bridge
+
+#### Scenario: Replacement bridge excludes the account that just proved stuck
+- **GIVEN** an unpinned gate waiter (no previous-response owner, no file-pinned account) is accepted for replacement after its session is retired
+- **WHEN** the proxy builds the replacement bridge session
+- **THEN** account selection for that replacement excludes the retired session's account
+
+#### Scenario: A pinned waiter's replacement keeps its required account, unexcluded
+- **GIVEN** a gate waiter's replacement is required to land on a previous-response owner or a file-pinned account
+- **AND** that required account is the same account whose gate just proved stuck
+- **WHEN** the proxy builds the replacement bridge session
+- **THEN** the replacement remains pinned to that required account
+- **AND** that account is not added to the request's excluded-account set
+
+#### Scenario: Pre-created response lifecycle activity is not retired
+- **GIVEN** a pending HTTP bridge request has not received `response.created`
+- **BUT** upstream is emitting `response.*` lifecycle events for that request
+- **WHEN** another visible request times out waiting for the gate
+- **THEN** the proxy does not retire the actively progressing request
+
+#### Scenario: Lone eventless gate owner is retired before the client timeout
+- **GIVEN** a visible HTTP bridge request owns the response-create gate
+- **AND** its current `response.create` send produced no matched `response.*` event, response id, or downstream-visible output
+- **AND** no second request waits for the gate
+- **WHEN** the smaller of the configured stuck threshold and 60 seconds elapses after the current send
+- **THEN** the proxy emits an explicit terminal failure and retires the bridge session when the request is not eligible for bounded fresh-hard recovery
+- **AND** an eligible fresh hard request instead follows the single bounded recovery defined by "Fresh hard bridge requests may recover across accounts"
+- **AND** recovery occurs before the native client's 300-second parsed-event idle timeout
+
+#### Scenario: Send time rather than request age anchors the deadline
+- **GIVEN** a request spends most of its budget waiting for admission before it sends `response.create`
+- **WHEN** the upstream send succeeds
+- **THEN** the owner-side deadline begins from that current send
+- **AND** earlier queue or admission time does not make the request immediately stale
+
+#### Scenario: Leading telemetry does not mask an eventless owner
+- **GIVEN** a pre-created gate owner receives `codex.rate_limits` but no matched `response.*` lifecycle event
+- **WHEN** the owner-side deadline elapses
+- **THEN** the telemetry does not refresh or suppress the deadline
+- **AND** the proxy fails and retires the session
+
+#### Scenario: Response lifecycle evidence re-anchors the missing-created watchdog
+- **GIVEN** a pre-created request receives matched `response.*` lifecycle events but no response id, recorded `response.created` latency, or downstream-visible output
+- **WHEN** a new response-lifecycle event arrives
+- **THEN** the watchdog deadline is re-anchored from the most recent upstream response-lifecycle activity
+- **AND** the watchdog remains armed until response-created or downstream-visible evidence appears
+
+#### Scenario: Response-created or visible evidence suppresses the narrow watchdog
+- **GIVEN** a pre-created request receives a response id, recorded `response.created` latency, or downstream-visible output
+- **WHEN** the eventless owner-side deadline would otherwise elapse
+- **THEN** this watchdog does not retire the session
+- **AND** existing stream, request-budget, and waiter-triggered timeout behavior remains authoritative
+
+#### Scenario: Timeout is fail-closed and account-neutral
+- **GIVEN** an eventless pre-created owner reaches the owner-side deadline
+- **WHEN** terminal cleanup runs
+- **THEN** every pending request is settled exactly once and the whole session is retired
+- **AND** the proxy does not replay the timed-out request or submit it on another account unless it satisfies the bounded fresh-hard recovery requirement
+- **AND** the selected account is not marked unhealthy solely because `response.created` was missing
 
 ### Requirement: Account stream capacity reserves recovery headroom
 
@@ -249,10 +334,15 @@ The dashboard settings API MUST persist nonnegative per-account
 `proxy_account_response_create_limit`, `proxy_account_stream_limit`, and
 `proxy_account_stream_recovery_reserve` overrides, plus the
 `proxy_api_key_fair_share_congestion_threshold_pct` override in the range
-0-100. A settings row created for the first time MUST persist the process
-environment values for these settings. Existing settings rows MUST use
-nullable stored overrides so a `NULL` value continues to inherit the
-corresponding process environment value.
+0-100. A settings row created for the first time MUST leave these four
+overrides `NULL`; it MUST NOT copy the process environment values into the row.
+Existing settings rows MUST use nullable stored overrides so a `NULL` value
+continues to inherit the corresponding process environment value (or the code
+default when the variable is unset) until an operator explicitly stores an
+override, and an operator MAY clear an override to return to inheritance.
+Precedence follows `configuration-tiers`: code default, then environment, then
+a non-NULL dashboard value. Existing settings rows keep their stored values; a
+stored non-`NULL` value is a dashboard override and MUST be reported as such.
 
 The settings response MUST expose each effective value, its environment
 baseline value, and its nullable stored override. Updates MUST use tri-state semantics for these four override
@@ -333,6 +423,21 @@ from the process environment.
 - **WHEN** only the stream-limit override is explicitly cleared
 - **THEN** the settings API rejects the update before persistence
 - **AND** the stored stream-limit override remains 24
+
+#### Scenario: Environment change after first boot takes effect on a fresh install
+
+- **GIVEN** a fresh install whose settings row was created while `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT=8` was set and no operator has edited the stream cap
+- **WHEN** the process is restarted with `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT=12`
+- **THEN** new stream selection and lease decisions use a cap of 12
+- **AND** the settings API reports the stream cap as inherited from the environment
+
+#### Scenario: Fresh settings row inherits the environment
+
+- **GIVEN** no settings row exists and the process environment stream cap is 13
+- **WHEN** the settings row is created
+- **THEN** the four stored capacity overrides are `NULL`
+- **AND** `GET /api/settings` reports the stream cap effective value 13, the
+  environment value 13, and a `null` override
 
 ### Requirement: Cached caps govern runtime admission
 
@@ -533,20 +638,32 @@ Each replica MUST derive its local share of every configured account concurrency
 
 ### Requirement: Multiple worker processes per instance are rejected for shared per-account caps
 
-Per-account concurrency caps are partitioned per bridge-ring replica and are correct only when a single worker process runs behind each bridge-ring instance id. The system MUST expose `workers_per_instance` (env `CODEX_LB_WORKERS_PER_INSTANCE`, default 1, minimum 1) as an explicit operator declaration of how many worker processes an instance runs behind one instance id. When `workers_per_instance` is greater than 1 the process MUST fail fast at startup with a settings validation error that names `CODEX_LB_WORKERS_PER_INSTANCE` and states that running more than one worker per instance is not supported for shared per-account caps and that operators MUST run one worker per pod/container and scale horizontally via replicas. When `workers_per_instance` is 1 (the default) startup MUST proceed with no operator action required and behavior MUST be identical to a deployment that does not set the variable. The system MUST NOT attempt to auto-detect the worker count and MUST NOT partition per-account caps across intra-pod worker processes.
+Per-account concurrency caps are partitioned per bridge-ring replica and are correct only when a single worker process runs behind each bridge-ring instance id. `CODEX_LB_WORKERS_PER_INSTANCE` MUST be treated as a startup guard on the environment rather than a configurable setting: the only supported value is `1`, so it MUST NOT be a `Settings` field or appear in the settings reference as a tunable. When the environment (process environment or the loaded env files) declares `CODEX_LB_WORKERS_PER_INSTANCE` — matched case-insensitively, as the former `Settings` field was — with any value other than `1` — a larger integer, zero, a negative number, or a non-integer — the process MUST fail fast at startup with a settings validation error that names `CODEX_LB_WORKERS_PER_INSTANCE`; for values greater than 1 the error MUST state that running more than one worker per instance is not supported for shared per-account caps and that operators MUST run one worker per pod/container and scale horizontally via replicas. When the variable is unset or `1`, startup MUST proceed with no operator action required and behavior MUST be identical to a deployment that does not set the variable. The system MUST NOT attempt to auto-detect the worker count and MUST NOT partition per-account caps across intra-pod worker processes.
 
 #### Scenario: A single worker per instance is accepted
 
-- **GIVEN** `workers_per_instance` is 1 (the default, whether unset or explicitly set)
+- **GIVEN** `CODEX_LB_WORKERS_PER_INSTANCE` is unset or explicitly `1`
 - **WHEN** the process loads its settings at startup
 - **THEN** startup succeeds and per-account caps remain partitioned per replica via the bridge ring
 
 #### Scenario: More than one worker per instance fails fast
 
-- **GIVEN** `workers_per_instance` is configured as 2
+- **GIVEN** `CODEX_LB_WORKERS_PER_INSTANCE=2`
 - **WHEN** the process loads its settings at startup
 - **THEN** startup fails with a settings validation error naming `CODEX_LB_WORKERS_PER_INSTANCE`
 - **AND** the error states multi-worker-per-instance is not supported and directs the operator to run one worker per pod/container and scale via replicas
+
+#### Scenario: A lowercase declaration is not a bypass
+
+- **GIVEN** `codex_lb_workers_per_instance=2` declared in lowercase
+- **WHEN** the process loads its settings at startup
+- **THEN** startup fails with the same settings validation error naming `CODEX_LB_WORKERS_PER_INSTANCE`
+
+#### Scenario: A malformed declaration fails fast
+
+- **GIVEN** `CODEX_LB_WORKERS_PER_INSTANCE=0` or `CODEX_LB_WORKERS_PER_INSTANCE=two`
+- **WHEN** the process loads its settings at startup
+- **THEN** startup fails with a settings validation error naming `CODEX_LB_WORKERS_PER_INSTANCE` and stating that only `1` is supported
 
 ### Requirement: Stream leases reflect in-flight turns, not session lifetime
 
@@ -983,4 +1100,26 @@ or explicitly settle the release before propagating the cancellation.
 
 - **WHEN** an opportunistic admission request omits the required-capability carrier
 - **THEN** the existing admission policy remains in effect
+
+### Requirement: Account concurrency cap provenance is reported
+
+The settings API MUST report, for each of `proxy_account_response_create_limit`, `proxy_account_stream_limit`, `proxy_account_stream_recovery_reserve` and `proxy_api_key_fair_share_congestion_threshold_pct`, a `provenance` entry with `source` (`"dashboard"`, `"env"` or `"default"`), `env_value` and `default` as defined by `configuration-tiers`, alongside the existing effective value, `<name>_environment_value` and `<name>_override` fields, which MUST remain unchanged. The effective value in the response and the `source` MUST come from the same resolution, so the cap the admission path enforces is the cap the provenance describes. The routing settings MUST show each cap's provenance next to its input and MUST let the operator clear a dashboard-owned cap back to inheritance without typing the environment value. When clearing the stream limit or the stream recovery reserve would leave the effective reserve above a bounded effective stream limit — the combination `PUT /api/settings` rejects — the dashboard MUST disable that cap's reset action and state the reason instead of sending a request that fails.
+
+#### Scenario: Inherited cap is labelled with its layer
+
+- **GIVEN** the response-create limit column is NULL and `CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT=6` differs from the code default 4
+- **WHEN** an operator opens routing settings
+- **THEN** the response-create input is empty and labelled as inherited from the environment with the value 6, while a cap whose environment value equals the code default is labelled as the default
+
+#### Scenario: Dashboard-owned cap can be cleared in one action
+
+- **GIVEN** the stream limit is stored as 24 in `dashboard_settings`
+- **WHEN** the operator activates "Reset to inherited" next to the stream limit
+- **THEN** the dashboard sends `PUT /api/settings` with `proxyAccountStreamLimit: null`, the column becomes NULL, and the refreshed provenance reports `source` `"env"` or `"default"` with the effective cap that admission now enforces
+
+#### Scenario: Reset that the API would reject is disabled
+
+- **GIVEN** the stream limit is stored as 24 and the recovery reserve as 9 while the inherited stream limit is 8
+- **WHEN** the operator opens routing settings
+- **THEN** the stream limit's "Reset to inherited" action is disabled with the reason that the reserve would exceed the limit, while the reserve's reset (which would clear it to 1) stays enabled
 

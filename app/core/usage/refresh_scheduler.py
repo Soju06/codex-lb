@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Protocol, cast
 from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
 from app.core.config.settings import get_settings
 from app.core.plan_types import normalize_account_plan_type
+from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.usage import capacity_for_plan
 from app.core.utils.time import naive_utc_to_epoch
@@ -26,7 +27,7 @@ from app.modules.limit_warmup.service import (
     usage_reset_confirmed,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
-from app.modules.proxy.load_balancer import background_recovery_state_from_account
+from app.modules.proxy.load_balancer import background_recovery_state_from_account, effective_routing_tunables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
@@ -249,6 +250,7 @@ class UsageRefreshScheduler:
                             usage_repo=UsageRepository(session),
                             accounts=refreshed_selected_accounts,
                             monthly_reset_evidence=monthly_reset_evidence,
+                            dashboard_settings=dashboard_settings,
                         )
                     warmup_service = LimitWarmupService(
                         cast(Any, _BackgroundLimitWarmupRepository()),
@@ -340,10 +342,21 @@ async def reconcile_recoverable_account_statuses(
     usage_repo: _LatestUsageRepository,
     accounts: list[Account],
     monthly_reset_evidence: dict[str, _MonthlyResetEvidence] | None = None,
+    dashboard_settings: object | None = None,
 ) -> int:
+    """Repair recoverable account statuses from the latest usage evidence.
+
+    ``dashboard_settings`` is the dashboard-settings row the refresh cycle
+    already read; the state builds below resolve soft drain and the routing
+    tunables from it once, so the health tier they compute follows the
+    dashboard toggle exactly like a request-path state build (``None`` = the
+    environment layer, for callers without a row).
+    """
     candidates = [account for account in accounts if account.status in _RECOVERABLE_ACCOUNT_STATUSES]
     if not candidates:
         return 0
+    routing_tunables = effective_routing_tunables(dashboard_settings)
+    soft_drain_enabled = resolve_resilience_toggles(dashboard_settings).soft_drain_enabled
 
     candidate_ids = [account.id for account in candidates]
     latest_primary = await usage_repo.latest_by_account(window="primary", account_ids=candidate_ids)
@@ -370,6 +383,8 @@ async def reconcile_recoverable_account_statuses(
                     monthly_entry=monthly_entry,
                     secondary_entry=latest_secondary.get(account.id),
                 ),
+                routing_tunables=routing_tunables,
+                soft_drain_enabled=soft_drain_enabled,
             )
             if state.status != AccountStatus.ACTIVE:
                 continue

@@ -324,6 +324,47 @@ def forwarding_error_trial_result(exc: ModelSourceForwardingError) -> TrialResul
     return "inconclusive"
 
 
+# Row codes of a started stream that broke off: an exception out of the body
+# (a transport drop) or a clean EOF without a terminal (the wrapper synthesized
+# ``response.failed``; the source never finished its answer). Counted by the
+# breaker before and after the first output item alike, like the idle deadline
+# (design §8.3: "after the first frame: idle timeout, transport drop").
+_TRANSPORT_DROP_ERROR_CODES: frozenset[str] = frozenset(
+    {ERROR_MODEL_SOURCE_STREAM, ERROR_MODEL_SOURCE_STREAM_TRUNCATED}
+)
+
+
+def stream_trial_result(
+    status: DispatchStatus,
+    *,
+    error_code: str | None,
+    first_output_item_seen: bool,
+    forwarding_error: ModelSourceForwardingError | None,
+) -> TrialResult:
+    """Breaker classification of a started stream's terminal outcome (design §8.3).
+
+    ``success`` counts only once an output item was produced (an empty
+    completion is inconclusive). A mid-stream ``ModelSourceForwardingError``
+    (the idle deadline, a transport failure, the withheld-bytes cap) and a
+    transport drop are counted before and after the first output item alike.
+    A failure terminal -- the source's ``response.failed``/``error``, or a
+    success terminal the public contract rewrote into one -- is counted only
+    before the first output item: after it the source itself ended the
+    answer. A client cancel is never counted here (``abandon`` classifies the
+    stall evidence of a body that never started).
+    """
+
+    if status == "success":
+        return "success" if first_output_item_seen else "inconclusive"
+    if status != "error":
+        return "inconclusive"
+    if forwarding_error is not None:
+        return forwarding_error_trial_result(forwarding_error)
+    if error_code in _TRANSPORT_DROP_ERROR_CODES:
+        return "failure"
+    return "inconclusive" if first_output_item_seen else "failure"
+
+
 def estimate_settlement_usage(*, admission_budget: ApiKeyRequestUsageBudget | None, delta_chars: int) -> SourceUsage:
     """Settle-at-estimate figures: input = admission estimate or default; output = max(default, delta_chars // 4)."""
 
@@ -1046,6 +1087,7 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     error_message: str | None = None
     completed_normally = False
     timeout_phase: TimeoutPhase | None = None
+    forwarding_error: ModelSourceForwardingError | None = None
     relayed_kind: str | None = None
     holder = owner.usage_holder
     # One attribute read per chunk until the parser reports the first output
@@ -1147,6 +1189,7 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
         error_code = error_code_from_payload(exc.payload)
         error_message = error_message_from_payload(exc.payload)
         timeout_phase = exc.timeout_phase
+        forwarding_error = exc
         raise
     except Exception as exc:
         status = "error"
@@ -1160,19 +1203,17 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
             if timeout_phase is not None:
                 _inc(model_source_timeout_total, phase=timeout_phase)
             owner.observe_stream()
-            trial_result: TrialResult
-            if status == "success":
-                trial_result = "success" if owner.first_output_item_seen else "inconclusive"
-            elif status == "error":
-                trial_result = "inconclusive" if owner.first_output_item_seen else "failure"
-            else:
-                trial_result = "inconclusive"
             cancellation = await _await_cleanup_deferring_cancellation(
                 owner.finish(
                     status=status,
                     error_code=error_code,
                     error_message=error_message,
-                    trial_result=trial_result,
+                    trial_result=stream_trial_result(
+                        status,
+                        error_code=error_code,
+                        first_output_item_seen=owner.first_output_item_seen,
+                        forwarding_error=forwarding_error,
+                    ),
                 ),
                 scheduler=owner.scheduler,
             )

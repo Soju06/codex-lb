@@ -2266,3 +2266,142 @@ async def test_first_output_item_observation_failure_never_breaks_the_stream(rec
     assert trial.events == ["settle:success"]
     assert "source_dispatch_first_output_item_failed" in caplog.text
     assert recorder.rows[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raiser",
+    [
+        ModelSourceForwardingError(
+            status_code=504,
+            payload={"error": {"code": "model_source_idle_timeout", "message": "idle", "type": "upstream_error"}},
+            timeout_phase="idle",
+        ),
+        ValueError("connection reset by peer"),
+    ],
+    ids=["idle-timeout", "transport-drop"],
+)
+async def test_settlement_stream_stream_break_after_the_first_item_is_a_counted_failure(
+    recorder: _Recorder, raiser: Exception
+) -> None:
+    """Spec: after the first frame an idle timeout or a transport drop is counted. Mutant (``inconclusive`` once an
+    item was seen): a source that emits one item and then stalls costs a full idle window per attempt and never
+    opens the breaker; pinned conversations keep paying it."""
+
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(), trial=trial)
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        raise raiser
+
+    with pytest.raises(type(raiser)):
+        _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert trial.events == ["first_output_item", "settle:failure"]
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.release_calls == [owner.reservation]
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_truncation_after_the_first_item_is_a_counted_failure(recorder: _Recorder) -> None:
+    """A clean end of the stream without a terminal is a transport drop for the breaker: the client received the
+    wrapper's synthesized ``response.failed``, the source did not finish its answer."""
+
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(), trial=trial)
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True, delta_chars=400)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        yield _SYNTHESIZED_TRUNCATION
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert recorder.rows[0]["error_code"] == "model_source_stream_truncated"
+    assert trial.events == ["first_output_item", "settle:failure"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_kind", ["failed", "error"])
+async def test_settlement_stream_failure_terminal_after_the_first_item_is_not_counted(
+    recorder: _Recorder, terminal_kind: str
+) -> None:
+    """Spec: a failure terminal is counted before the first output item only (after it the answer was cut by the
+    source's own terminal, not by the transport)."""
+
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(), trial=trial)
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        holder.terminal_kind = cast(Any, terminal_kind)
+        yield (
+            f"event: response.{terminal_kind}\ndata: {{}}\n\n"
+            if terminal_kind == "failed"
+            else ('event: error\ndata: {"type":"error"}\n\n')
+        )
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert recorder.rows[0]["error_code"] == "model_source_response_failed"
+    assert trial.events == ["first_output_item", "settle:inconclusive"]
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_failure_terminal_before_the_first_item_is_counted(recorder: _Recorder) -> None:
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(), trial=trial)
+    _attach_stream(owner, holder=SourceUsageHolder(terminal_kind="failed"))
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.failed\ndata: {}\n\n"
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+    assert trial.events == ["settle:failure"]
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code", "first_item", "forwarding", "expected"),
+    [
+        ("success", None, True, None, "success"),
+        ("success", None, False, None, "inconclusive"),
+        ("cancelled", "client_disconnected", True, None, "inconclusive"),
+        ("cancelled", "client_disconnected", False, None, "inconclusive"),
+        ("error", "model_source_stream_error", True, None, "failure"),
+        ("error", "model_source_stream_truncated", True, None, "failure"),
+        ("error", "model_source_response_failed", True, None, "inconclusive"),
+        ("error", "model_source_response_failed", False, None, "failure"),
+        ("error", "model_source_response_invalid", True, None, "inconclusive"),
+        ("error", "model_source_response_invalid", False, None, "failure"),
+        ("error", "model_source_idle_timeout", True, "idle", "failure"),
+        ("error", "invalid_upstream_response", True, "none", "failure"),
+    ],
+)
+def test_stream_trial_result_table(
+    status: str, error_code: str | None, first_item: bool, forwarding: str | None, expected: str
+) -> None:
+    from app.modules.proxy.source_dispatch import stream_trial_result
+
+    forwarding_error: ModelSourceForwardingError | None = None
+    if forwarding is not None:
+        forwarding_error = ModelSourceForwardingError(
+            status_code=502,
+            payload={"error": {"code": error_code, "message": "x", "type": "upstream_error"}},
+            timeout_phase="idle" if forwarding == "idle" else None,
+        )
+    result = stream_trial_result(
+        cast(Any, status),
+        error_code=error_code,
+        first_output_item_seen=first_item,
+        forwarding_error=forwarding_error,
+    )
+    assert result == expected

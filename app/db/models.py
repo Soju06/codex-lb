@@ -883,6 +883,59 @@ class CapabilityLineageMarker(Base):
     )
 
 
+class DashboardRoleRecord(Base):
+    """A dashboard role: one of the five presets or an operator-defined custom role.
+
+    Preset rows exist so users, invites, mappings and policies can reference a
+    role by foreign key and so listings have one source; their grants are the
+    code table ``PRESET_ROLE_GRANTS`` and are never stored. Only custom roles
+    carry ``dashboard_role_grants`` rows. ``kind`` is a plain string validated
+    by the application (adding a value must not need a database type change).
+    """
+
+    __tablename__ = "dashboard_roles"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    slug: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    assignable_to_users: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    cloned_from_role_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("dashboard_roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    permissions_version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    grants: Mapped[list["DashboardRoleGrant"]] = relationship(
+        "DashboardRoleGrant",
+        back_populates="role",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class DashboardRoleGrant(Base):
+    """One (permission, scope) grant of a custom dashboard role."""
+
+    __tablename__ = "dashboard_role_grants"
+
+    role_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("dashboard_roles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    permission: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(8), nullable=False)
+
+    role: Mapped["DashboardRoleRecord"] = relationship("DashboardRoleRecord", back_populates="grants")
+
+
 class DashboardSettings(Base):
     __tablename__ = "dashboard_settings"
 

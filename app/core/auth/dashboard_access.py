@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -108,13 +109,86 @@ _WRITE_ALIAS_PERMISSIONS: frozenset[Permission] = frozenset(
     }
 )
 
+
+class PresetRoleSlug(StrEnum):
+    """The built-in roles. Their grants live in code, never in the database."""
+
+    ADMIN = "admin"
+    OPERATOR = "operator"
+    MEMBER = "member"
+    VIEWER = "viewer"
+    GUEST = "guest"
+
+
+#: Stable identifiers for the preset role rows (``dashboard_roles``), derived
+#: from the slug so every install and every replica agrees without coordination.
+_PRESET_ROLE_ID_NAMESPACE = uuid.UUID("6f1c0e4e-2b4a-4c1e-9c3b-7a5d2e8f0a11")
+
+
+def preset_role_id(slug: PresetRoleSlug) -> str:
+    """Deterministic id of a preset role row (UUIDv5 of the slug)."""
+
+    return str(uuid.uuid5(_PRESET_ROLE_ID_NAMESPACE, f"codex-lb:dashboard-role:{slug.value}"))
+
+
+PRESET_ROLE_IDS: Mapping[PresetRoleSlug, str] = MappingProxyType(
+    {slug: preset_role_id(slug) for slug in PresetRoleSlug}
+)
+
+PRESET_ROLE_NAMES: Mapping[PresetRoleSlug, str] = MappingProxyType(
+    {
+        PresetRoleSlug.ADMIN: "Admin",
+        PresetRoleSlug.OPERATOR: "Operator",
+        PresetRoleSlug.MEMBER: "Member",
+        PresetRoleSlug.VIEWER: "Viewer",
+        PresetRoleSlug.GUEST: "Guest",
+    }
+)
+
 ADMIN_GRANTS: Grants = _grants({permission: Scope.ALL for permission in Permission})
-GUEST_GRANTS: Grants = _grants(
+OPERATOR_GRANTS: Grants = _grants(
+    {
+        Permission.DASHBOARD_READ: Scope.ALL,
+        Permission.ACCOUNTS_READ: Scope.ALL,
+        Permission.ACCOUNTS_WRITE: Scope.ALL,
+        Permission.API_KEYS_READ: Scope.ALL,
+        Permission.API_KEYS_WRITE: Scope.ALL,
+        Permission.API_KEYS_ASSIGN: Scope.ALL,
+        Permission.OPS_WRITE: Scope.ALL,
+    }
+)
+MEMBER_GRANTS: Grants = _grants(
+    {
+        Permission.DASHBOARD_READ: Scope.OWN,
+        Permission.API_KEYS_READ: Scope.OWN,
+        Permission.API_KEYS_WRITE: Scope.OWN,
+    }
+)
+VIEWER_GRANTS: Grants = _grants(
     {
         Permission.DASHBOARD_READ: Scope.ALL,
         Permission.ACCOUNTS_READ: Scope.ALL,
     }
 )
+GUEST_GRANTS: Grants = VIEWER_GRANTS
+
+#: Grants of every preset role. The database stores preset *rows* (for foreign
+#: keys and listings) but never their grants: this table is the single truth,
+#: so an upgrade that adds a permission updates every preset by definition and
+#: replicas of different versions can never disagree about what ``admin`` means.
+PRESET_ROLE_GRANTS: Mapping[PresetRoleSlug, Grants] = MappingProxyType(
+    {
+        PresetRoleSlug.ADMIN: ADMIN_GRANTS,
+        PresetRoleSlug.OPERATOR: OPERATOR_GRANTS,
+        PresetRoleSlug.MEMBER: MEMBER_GRANTS,
+        PresetRoleSlug.VIEWER: VIEWER_GRANTS,
+        PresetRoleSlug.GUEST: GUEST_GRANTS,
+    }
+)
+
+#: Presets that may be assigned to a user account. Guest is the anonymous
+#: shared read-only session and is never a user's role.
+ASSIGNABLE_PRESET_ROLES: frozenset[PresetRoleSlug] = frozenset(PresetRoleSlug) - {PresetRoleSlug.GUEST}
 
 ROLE_GRANTS: Mapping[DashboardRole, Grants] = MappingProxyType(
     {
@@ -155,7 +229,7 @@ def validate_grants(grants: Grants) -> None:
             raise ValueError(f"{permission.value} requires {', '.join(missing)} at 'all' scope")
 
 
-for _role_grants in ROLE_GRANTS.values():
+for _role_grants in PRESET_ROLE_GRANTS.values():
     validate_grants(_role_grants)
 
 

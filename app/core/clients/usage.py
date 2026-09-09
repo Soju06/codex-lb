@@ -16,11 +16,20 @@ from app.core.clients.codex import (
 )
 from app.core.clients.headers import build_chatgpt_auth_headers
 from app.core.clients.http import _safe_json, lease_retry_client
+from app.core.clients.native_egress import (
+    NativeEgressClient,
+    NativeEgressError,
+    NativeEgressRequest,
+    NativeEgressTransportError,
+    NativeEgressUnavailable,
+    discover_native_egress_client,
+)
 from app.core.clients.proxy import _codex_response_status
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.usage.models import UsagePayload
+from app.core.utils.proxy_env import resolve_http_proxy_from_env
 from app.core.utils.request_id import get_request_id
 
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
@@ -96,6 +105,18 @@ async def fetch_usage(
                 retries=retries,
                 codex_client=codex_client,
             )
+        native_client = discover_native_egress_client()
+        if native_client is not None:
+            try:
+                return await _fetch_usage_via_native(
+                    client=native_client,
+                    url=url,
+                    headers=headers,
+                    timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                    retries=retries,
+                )
+            except NativeEgressUnavailable:
+                pass
         async with lease_retry_client(client) as retry_client:
             async with retry_client.request(
                 "GET",
@@ -124,13 +145,47 @@ async def fetch_usage(
                         get_request_id(),
                     )
                     raise UsageFetchError(502, "Invalid usage payload") from exc
-    except (aiohttp.ClientError, asyncio.TimeoutError, CodexTransportError) as exc:
+    except (aiohttp.ClientError, asyncio.TimeoutError, CodexTransportError, NativeEgressError) as exc:
         logger.warning(
             "Usage fetch error request_id=%s error=%s",
             get_request_id(),
             exc,
         )
         raise UsageFetchError(0, f"Usage fetch failed: {exc}") from exc
+
+
+async def _fetch_usage_via_native(
+    *,
+    client: NativeEgressClient,
+    url: str,
+    headers: dict[str, str],
+    timeout_seconds: float,
+    retries: int,
+) -> UsagePayload:
+    attempts = max(1, retries + 1)
+    request = NativeEgressRequest(
+        method="GET",
+        url=url,
+        headers=headers,
+        timeout_seconds=timeout_seconds,
+        proxy_url=resolve_http_proxy_from_env(url),
+    )
+    for attempt in range(attempts):
+        try:
+            response = await client.request(request)
+        except NativeEgressTransportError:
+            if attempt < attempts - 1:
+                await asyncio.sleep(_retry_delay_seconds(attempt))
+                continue
+            raise
+        async with response:
+            data = await _safe_codex_json(response)
+            status = response.status
+        if status in RETRYABLE_STATUS and attempt < attempts - 1:
+            await asyncio.sleep(_retry_delay_seconds(attempt))
+            continue
+        return _usage_payload_or_raise(data, status)
+    raise RuntimeError("unreachable native usage retry state")
 
 
 async def consume_rate_limit_reset_credit(

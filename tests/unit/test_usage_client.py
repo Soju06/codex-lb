@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 
+from app.core.clients.native_egress import NativeEgressRequest
 from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit, fetch_usage
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
@@ -126,6 +127,31 @@ class StubCodexClient:
         return self._responses[index]
 
 
+class StubNativeResponse:
+    def __init__(self, status: int, payload: dict) -> None:
+        self.status = status
+        self._payload = payload
+
+    async def __aenter__(self) -> StubNativeResponse:
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        return None
+
+    async def json(self) -> dict:
+        return self._payload
+
+
+class StubNativeClient:
+    def __init__(self, responses: list[StubNativeResponse]) -> None:
+        self.responses = responses
+        self.requests: list[NativeEgressRequest] = []
+
+    async def request(self, request: NativeEgressRequest) -> StubNativeResponse:
+        self.requests.append(request)
+        return self.responses[min(len(self.requests) - 1, len(self.responses) - 1)]
+
+
 @pytest.fixture
 def usage_server() -> tuple[str, StubRetryClient, UsageClientState]:
     state = UsageClientState()
@@ -175,6 +201,45 @@ async def test_fetch_usage_retries_and_returns_payload(usage_server):
     assert state.calls == 2
     assert state.auth == "Bearer access-token"
     assert state.account == "acc_test"
+
+
+@pytest.mark.asyncio
+async def test_fetch_usage_prefers_native_direct_egress(monkeypatch: pytest.MonkeyPatch) -> None:
+    native = StubNativeClient(
+        [
+            StubNativeResponse(
+                200,
+                {
+                    "plan_type": "plus",
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 12.5,
+                            "reset_at": 1735689600,
+                            "limit_window_seconds": 60,
+                            "reset_after_seconds": 30,
+                        }
+                    },
+                },
+            )
+        ]
+    )
+    monkeypatch.setattr("app.core.clients.usage.discover_native_egress_client", lambda: native)
+
+    data = await fetch_usage(
+        access_token="access-token",
+        account_id="acc_test",
+        base_url="http://usage.test",
+        max_retries=0,
+        timeout_seconds=2.0,
+        allow_direct_egress=True,
+    )
+
+    assert data.plan_type == "plus"
+    assert len(native.requests) == 1
+    request = native.requests[0]
+    assert request.method == "GET"
+    assert request.url == "http://usage.test/backend-api/wham/usage"
+    assert request.headers["Authorization"] == "Bearer access-token"
 
 
 @pytest.mark.asyncio

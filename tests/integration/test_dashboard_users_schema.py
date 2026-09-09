@@ -12,18 +12,21 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from alembic import command
 from anyio import to_thread
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug
+from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
 from app.core.config.settings import get_settings
 from app.core.exceptions import DashboardSettingsConflictError
 from app.db.migrate import _build_alembic_config, inspect_migration_state, run_upgrade
 from app.db.models import ApiKey, DashboardIdentity, DashboardSettings, DashboardUser
 from app.db.session import SessionLocal
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
+from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store
 from app.modules.dashboard_users.compat import COMPAT_ADMIN_USER_ID, COMPAT_ADMIN_USERNAME
 from app.modules.settings.repository import SettingsRepository
 
@@ -108,34 +111,6 @@ async def test_password_change_and_removal_are_mirrored(async_client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mirrored_writes_create_the_admin_row_when_an_old_replica_left_only_the_legacy_column(db_setup) -> None:
-    # A replica of the previous release configured the password: legacy column
-    # set, no user row. The next mirrored write must self-heal the projection.
-    async with SessionLocal() as session:
-        repository = DashboardAuthRepository(session)
-        await repository.get_settings()
-        await session.execute(text("UPDATE dashboard_settings SET password_hash = '$2b$old-replica' WHERE id = 1"))
-        await session.commit()
-    assert await _compat_user() is None
-
-    async with SessionLocal() as session:
-        await DashboardAuthRepository(session).set_totp_secret(b"secret-from-new-replica")
-    user = await _compat_user()
-    assert user is not None and user.id == COMPAT_ADMIN_USER_ID
-    assert user.password_hash == "$2b$old-replica"
-    assert user.totp_secret_encrypted == b"secret-from-new-replica"
-
-    async with SessionLocal() as session:
-        user_row = (await session.execute(select(DashboardUser))).scalar_one()
-        await session.delete(user_row)
-        await session.commit()
-    async with SessionLocal() as session:
-        await DashboardAuthRepository(session).set_password_hash("$2b$new-replica")
-    user = await _compat_user()
-    assert user is not None and user.password_hash == "$2b$new-replica"
-
-
-@pytest.mark.asyncio
 async def test_mirror_is_reapplied_when_the_settings_commit_conflicts(async_client, monkeypatch) -> None:
     assert (
         await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
@@ -155,8 +130,10 @@ async def test_mirror_is_reapplied_when_the_settings_commit_conflicts(async_clie
         await original_commit_refresh(self, settings, on_committed=on_committed)
 
     monkeypatch.setattr(SettingsRepository, "commit_refresh", _conflict_once)
+    admin = await _compat_user()
+    assert admin is not None
     async with SessionLocal() as session:
-        await DashboardAuthRepository(session).set_password_hash("$2b$retried")
+        await DashboardAuthRepository(session).set_user_password_hash(admin.id, "$2b$retried")
     assert attempts["count"] == 2
 
     user = await _compat_user()
@@ -174,9 +151,11 @@ async def test_totp_secret_and_replay_counter_are_mirrored(async_client) -> None
         await async_client.post("/api/dashboard-auth/password/login", json={"password": "password123"})
     ).status_code == 200
 
+    admin = await _compat_user()
+    assert admin is not None
     async with SessionLocal() as session:
         repository = DashboardAuthRepository(session)
-        await repository.set_totp_secret(b"encrypted-secret")
+        await repository.set_user_totp_secret(admin.id, b"encrypted-secret")
     user = await _compat_user()
     legacy = await _legacy_settings()
     assert user is not None
@@ -185,9 +164,9 @@ async def test_totp_secret_and_replay_counter_are_mirrored(async_client) -> None
 
     async with SessionLocal() as session:
         repository = DashboardAuthRepository(session)
-        assert await repository.try_advance_totp_last_verified_step(100) is True
-        assert await repository.try_advance_totp_last_verified_step(100) is False  # replay
-        assert await repository.try_advance_totp_last_verified_step(101) is True
+        assert await repository.try_advance_user_totp_step(admin.id, 100) is True
+        assert await repository.try_advance_user_totp_step(admin.id, 100) is False  # replay
+        assert await repository.try_advance_user_totp_step(admin.id, 101) is True
     user = await _compat_user()
     legacy = await _legacy_settings()
     assert user is not None and user.totp_last_verified_step == 101 == legacy.totp_last_verified_step
@@ -204,12 +183,22 @@ async def test_replay_counter_refuses_when_only_one_side_would_advance(async_cli
         user.totp_last_verified_step = 200
         await session.commit()
 
+    admin = await _compat_user()
+    assert admin is not None
     async with SessionLocal() as session:
         repository = DashboardAuthRepository(session)
-        assert await repository.try_advance_totp_last_verified_step(200) is False
+        assert await repository.try_advance_user_totp_step(admin.id, 200) is False
+    # Simulate the opposite skew: the legacy column is ahead of the user row.
+    async with SessionLocal() as session:
+        row = (await session.execute(select(DashboardSettings))).scalar_one()
+        row.totp_last_verified_step = 300
+        await session.commit()
+    async with SessionLocal() as session:
+        repository = DashboardAuthRepository(session)
+        assert await repository.try_advance_user_totp_step(admin.id, 300) is False
     legacy = await _legacy_settings()
     user = await _compat_user()
-    assert legacy.totp_last_verified_step is None  # rolled back, not advanced on one side
+    assert legacy.totp_last_verified_step == 300  # untouched: nothing advanced on one side only
     assert user is not None and user.totp_last_verified_step == 200
 
 
@@ -260,8 +249,6 @@ async def test_identity_uniqueness_and_api_key_ownership_columns(db_setup) -> No
 @pytest.mark.parametrize("legacy_password_configured", [True, False])
 @pytest.mark.asyncio
 async def test_dashboard_users_migration_backfills_the_compat_admin(tmp_path, legacy_password_configured: bool):
-    from alembic import command
-
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-users.sqlite'}"
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, PARENT_REVISION, bootstrap_legacy=False))
@@ -330,3 +317,211 @@ async def test_dashboard_users_migration_backfills_the_compat_admin(tmp_path, le
         assert count == (1 if legacy_password_configured else 0)
     finally:
         await engine.dispose()
+
+
+REPROJECT_REVISION = "20260909_020000_reproject_compat_admin_credentials"
+
+
+def test_reproject_revision_is_the_head() -> None:
+    assert _HEAD_REVISION == REPROJECT_REVISION
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "stale_user_row_is_overwritten",
+        "legacy_null_clears_user_credentials",
+        "missing_user_row_is_created",
+        "no_settings_row",
+    ],
+)
+@pytest.mark.asyncio
+async def test_reproject_migration_makes_the_user_row_match_the_legacy_credential(tmp_path, case: str):
+    """The previous release may have written credentials only to ``dashboard_settings``.
+
+    Before the user row becomes authoritative, the legacy credential is copied
+    onto the compat ``admin`` row one last time (or cleared when the legacy
+    password was removed). Nothing else about the row changes.
+    """
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'reproject.sqlite'}"
+    await to_thread.run_sync(lambda: run_upgrade(db_url, PARENT_REVISION, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            if case == "no_settings_row":
+                await conn.execute(text("DELETE FROM dashboard_settings"))
+            else:
+                existing = (await conn.execute(text("SELECT id FROM dashboard_settings"))).first()
+                if existing is None:
+                    await conn.execute(text("INSERT INTO dashboard_settings (id) VALUES (1)"))
+                if case != "missing_user_row_is_created":
+                    await conn.execute(
+                        text("UPDATE dashboard_settings SET password_hash = '$2b$old', totp_last_verified_step = 1"),
+                    )
+        # The previous revision backfills the row from the legacy credential as it stood then.
+        await to_thread.run_sync(lambda: run_upgrade(db_url, TARGET_REVISION, bootstrap_legacy=False))
+
+        async with engine.begin() as conn:
+            if case == "stale_user_row_is_overwritten":
+                await conn.execute(text("UPDATE dashboard_users SET session_generation = 5"))
+                await conn.execute(
+                    text(
+                        "UPDATE dashboard_settings SET password_hash = '$2b$new', totp_secret_encrypted = :s, "
+                        "totp_last_verified_step = 77"
+                    ),
+                    {"s": b"new-secret"},
+                )
+            elif case == "legacy_null_clears_user_credentials":
+                await conn.execute(
+                    text(
+                        "UPDATE dashboard_settings SET password_hash = NULL, totp_secret_encrypted = NULL, "
+                        "totp_last_verified_step = NULL"
+                    )
+                )
+            elif case == "missing_user_row_is_created":
+                await conn.execute(text("UPDATE dashboard_settings SET password_hash = '$2b$late'"))
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, REPROJECT_REVISION, bootstrap_legacy=False))
+
+        async with engine.connect() as conn:
+            users = (
+                await conn.execute(
+                    text(
+                        "SELECT id, username, password_hash, totp_secret_encrypted, totp_last_verified_step, "
+                        "session_generation, is_break_glass, status FROM dashboard_users"
+                    )
+                )
+            ).all()
+        if case == "no_settings_row":
+            assert users == []
+        else:
+            assert len(users) == 1
+            (row,) = users
+            assert row[0] == COMPAT_ADMIN_USER_ID and row[1] == COMPAT_ADMIN_USERNAME
+            assert row[7] == "active" and bool(row[6]) is True
+            if case == "stale_user_row_is_overwritten":
+                assert (row[2], row[3], row[4]) == ("$2b$new", b"new-secret", 77)
+                assert row[5] == 5  # session_generation untouched
+            elif case == "legacy_null_clears_user_credentials":
+                assert (row[2], row[3], row[4]) == (None, None, None)
+            else:
+                assert (row[2], row[3], row[4]) == ("$2b$late", None, None)
+
+        # Data-only: downgrading past it and coming back to head leaves the schema intact.
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, TARGET_REVISION))
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+    finally:
+        await engine.dispose()
+
+
+async def _insert_operator(username: str = "ops") -> DashboardUser:
+    async with SessionLocal() as session:
+        user = DashboardUser(
+            username=username, role_id=PRESET_ROLE_IDS[PresetRoleSlug.OPERATOR], password_hash="$2b$ops"
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+    await get_dashboard_users_cache().invalidate()
+    return user
+
+
+def _legacy_credential(row: DashboardSettings) -> tuple[str | None, bytes | None, int | None, bytes | None]:
+    return (row.password_hash, row.totp_secret_encrypted, row.totp_last_verified_step, row.bootstrap_token_hash)
+
+
+@pytest.mark.asyncio
+async def test_other_accounts_are_never_mirrored_to_the_legacy_columns(async_client) -> None:
+    assert (
+        await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
+    ).status_code == 200
+    ops = await _insert_operator()
+    before = _legacy_credential(await _legacy_settings())
+
+    async with SessionLocal() as session:
+        repository = DashboardAuthRepository(session)
+        await repository.set_user_password_hash(ops.id, "$2b$ops-rotated")
+        await repository.set_user_totp_secret(ops.id, b"ops-secret")
+        assert await repository.try_advance_user_totp_step(ops.id, 500) is True
+        assert await repository.try_advance_user_totp_step(ops.id, 500) is False
+        await repository.rotate_user_password(ops.id, "$2b$ops-rotated-again")
+        await repository.clear_user_credentials(ops.id)
+
+    assert _legacy_credential(await _legacy_settings()) == before
+    async with SessionLocal() as session:
+        stored = await session.get(DashboardUser, ops.id)
+    assert stored is not None
+    assert stored.password_hash is None and stored.totp_secret_encrypted is None
+    assert stored.session_generation == 2  # rotate + clear
+
+
+@pytest.mark.asyncio
+async def test_session_generation_bump_is_atomic_across_stale_sessions(async_client) -> None:
+    """Two repositories holding the same stale row must still advance the counter twice."""
+
+    assert (
+        await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
+    ).status_code == 200
+    admin = await _compat_user()
+    assert admin is not None and admin.session_generation == 0
+
+    async with SessionLocal() as session_a, SessionLocal() as session_b:
+        repo_a, repo_b = DashboardAuthRepository(session_a), DashboardAuthRepository(session_b)
+        assert (await repo_a.get_user_by_id(admin.id)) is not None
+        assert (await repo_b.get_user_by_id(admin.id)) is not None  # both sessions now cache generation 0
+        assert await repo_a.bump_session_generation(admin.id) == 1
+        assert await repo_b.bump_session_generation(admin.id) == 2
+
+    stored = await _compat_user()
+    assert stored is not None and stored.session_generation == 2
+    await get_dashboard_users_cache().invalidate()
+
+    store = get_dashboard_session_store()
+    intermediate = store.create_user_session(admin.id, 1, password_verified=True, totp_verified=False, ttl_seconds=600)
+    async_client.cookies.set(DASHBOARD_SESSION_COOKIE, intermediate)
+    assert (await async_client.get("/api/settings")).status_code == 401
+    current = store.create_user_session(admin.id, 2, password_verified=True, totp_verified=False, ttl_seconds=600)
+    async_client.cookies.set(DASHBOARD_SESSION_COOKIE, current)
+    assert (await async_client.get("/api/settings")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_password_rotation_is_both_or_neither(async_client, monkeypatch) -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    assert (
+        await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
+    ).status_code == 200
+    admin = await _compat_user()
+    assert admin is not None
+    original_hash, original_generation = admin.password_hash, admin.session_generation
+    legacy_before = (await _legacy_settings()).password_hash
+
+    real_commit = AsyncSession.commit
+    failures = {"remaining": 1}
+
+    async def flaky_commit(self: AsyncSession) -> None:
+        if failures["remaining"]:
+            failures["remaining"] -= 1
+            raise RuntimeError("simulated commit failure")
+        await real_commit(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", flaky_commit)
+    async with SessionLocal() as session:
+        with pytest.raises(RuntimeError, match="simulated commit failure"):
+            await DashboardAuthRepository(session).rotate_user_password(admin.id, "$2b$new")
+
+    after_failure = await _compat_user()
+    assert after_failure is not None
+    assert after_failure.password_hash == original_hash
+    assert after_failure.session_generation == original_generation
+    assert (await _legacy_settings()).password_hash == legacy_before
+
+    async with SessionLocal() as session:
+        rotated = await DashboardAuthRepository(session).rotate_user_password(admin.id, "$2b$new")
+    assert rotated.password_hash == "$2b$new"
+    assert rotated.session_generation == original_generation + 1
+    assert (await _legacy_settings()).password_hash == "$2b$new"

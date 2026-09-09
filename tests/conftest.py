@@ -495,6 +495,12 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
+
+        get_dashboard_users_cache().clear()
+    except Exception:
+        pass
+    try:
         from app.core.upstream_proxy.cache import get_upstream_route_cache
 
         get_upstream_route_cache().clear()

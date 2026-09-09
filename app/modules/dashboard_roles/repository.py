@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug
+from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug, RoleKind
 from app.db.models import DashboardRoleRecord
 
 
@@ -40,3 +40,11 @@ class DashboardRolesRepository:
 
     async def get_preset_role(self, slug: PresetRoleSlug) -> DashboardRoleRecord | None:
         return await self.get_role(PRESET_ROLE_IDS[slug])
+
+    async def count_custom_roles(self) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(DashboardRoleRecord)
+            .where(DashboardRoleRecord.kind == RoleKind.CUSTOM.value)
+        )
+        return int((await self._session.execute(stmt)).scalar_one())

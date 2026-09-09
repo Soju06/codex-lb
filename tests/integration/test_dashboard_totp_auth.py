@@ -4,10 +4,38 @@ import asyncio
 
 import pyotp
 import pytest
+from sqlalchemy import select
 
+from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
+from app.core.config.settings_cache import get_settings_cache
+from app.db.models import COMPAT_ADMIN_USERNAME, DashboardSettings, DashboardUser
+from app.db.session import SessionLocal
 from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store
 
 pytestmark = pytest.mark.integration
+
+
+async def _compat_user() -> DashboardUser:
+    async with SessionLocal() as session:
+        return (
+            await session.execute(select(DashboardUser).where(DashboardUser.username == COMPAT_ADMIN_USERNAME))
+        ).scalar_one()
+
+
+async def _legacy_settings() -> DashboardSettings:
+    async with SessionLocal() as session:
+        return (await session.execute(select(DashboardSettings))).scalar_one()
+
+
+async def _force_totp_policy(enabled: bool) -> None:
+    """Flip the global TOTP requirement directly (the API guard needs a configured secret)."""
+
+    async with SessionLocal() as session:
+        row = (await session.execute(select(DashboardSettings))).scalar_one()
+        row.totp_required_on_login = enabled
+        await session.commit()
+    await get_settings_cache().invalidate()
+    await get_dashboard_users_cache().invalidate()
 
 
 @pytest.mark.asyncio
@@ -285,8 +313,9 @@ async def test_disable_totp_requires_existing_totp_configuration(async_client):
     )
     assert setup_password.status_code == 200
 
-    session_id = get_dashboard_session_store().create(
-        password_verified=True, totp_verified=True, ttl_seconds=12 * 60 * 60
+    user = await _compat_user()
+    session_id = get_dashboard_session_store().create_user_session(
+        user.id, user.session_generation, password_verified=True, totp_verified=True, ttl_seconds=12 * 60 * 60
     )
     async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
 
@@ -388,15 +417,15 @@ async def test_verify_rejects_one_of_concurrent_replays(async_client, monkeypatc
     )
     assert setup_password.status_code == 200
 
-    original_try_advance = dashboard_auth_repository_module.DashboardAuthRepository.try_advance_totp_last_verified_step
+    original_try_advance = dashboard_auth_repository_module.DashboardAuthRepository.try_advance_user_totp_step
 
-    async def delayed_try_advance(self, step: int) -> bool:
+    async def delayed_try_advance(self, user_id: str, step: int) -> bool:
         await asyncio.sleep(0.05)
-        return await original_try_advance(self, step)
+        return await original_try_advance(self, user_id, step)
 
     monkeypatch.setattr(
         dashboard_auth_repository_module.DashboardAuthRepository,
-        "try_advance_totp_last_verified_step",
+        "try_advance_user_totp_step",
         delayed_try_advance,
     )
 
@@ -437,3 +466,131 @@ async def test_verify_rejects_one_of_concurrent_replays(async_client, monkeypatc
         async_client.post("/api/dashboard-auth/totp/verify", json={"code": verify_code}),
     )
     assert sorted([first.status_code, second.status_code]) == [200, 400]
+
+
+@pytest.mark.asyncio
+async def test_totp_lifecycle_is_per_user_and_mirrored_to_legacy_settings(async_client, monkeypatch):
+    current_epoch = {"value": 1_700_000_000}
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as dashboard_auth_service_module
+
+    monkeypatch.setattr(totp_module, "time", lambda: current_epoch["value"])
+    monkeypatch.setattr(dashboard_auth_service_module, "time", lambda: current_epoch["value"])
+
+    assert (
+        await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
+    ).status_code == 200
+
+    start = await async_client.post("/api/dashboard-auth/totp/setup/start", json={})
+    assert start.status_code == 200
+    assert "admin" in start.json()["otpauthUri"]  # account label is the username
+    secret = start.json()["secret"]
+    confirm = await async_client.post(
+        "/api/dashboard-auth/totp/setup/confirm",
+        json={"secret": secret, "code": pyotp.TOTP(secret).at(current_epoch["value"])},
+    )
+    assert confirm.status_code == 200
+    user, legacy = await _compat_user(), await _legacy_settings()
+    assert user.totp_secret_encrypted is not None
+    assert user.totp_secret_encrypted == legacy.totp_secret_encrypted
+    assert user.totp_last_verified_step is None
+
+    session = await async_client.get("/api/dashboard-auth/session")
+    assert session.json()["totpConfigured"] is True
+    assert session.json()["user"]["username"] == "admin"
+
+    await _force_totp_policy(True)
+    await async_client.post("/api/dashboard-auth/logout", json={})
+    login = await async_client.post("/api/dashboard-auth/password/login", json={"password": "password123"})
+    assert login.status_code == 200
+    assert login.json()["totpRequiredOnLogin"] is True
+    assert login.json()["authenticated"] is False
+
+    current_epoch["value"] += 30
+    code = pyotp.TOTP(secret).at(current_epoch["value"])
+    verify = await async_client.post("/api/dashboard-auth/totp/verify", json={"code": code})
+    assert verify.status_code == 200
+    user, legacy = await _compat_user(), await _legacy_settings()
+    assert user.totp_last_verified_step is not None
+    assert user.totp_last_verified_step == legacy.totp_last_verified_step
+
+    # Replay of the same step is refused on both rows.
+    replay = await async_client.post("/api/dashboard-auth/totp/disable", json={"code": code})
+    assert replay.status_code == 400
+    assert replay.json()["error"]["code"] == "invalid_totp_code"
+
+    current_epoch["value"] += 30
+    disable = await async_client.post(
+        "/api/dashboard-auth/totp/disable", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert disable.status_code == 200
+    user, legacy = await _compat_user(), await _legacy_settings()
+    assert user.totp_secret_encrypted is None and legacy.totp_secret_encrypted is None
+    assert user.totp_last_verified_step is None and legacy.totp_last_verified_step is None
+    assert legacy.totp_required_on_login is False
+
+
+@pytest.mark.asyncio
+async def test_totp_policy_without_secret_requires_enrollment_before_dashboard_access(async_client, monkeypatch):
+    current_epoch = {"value": 1_700_000_000}
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as dashboard_auth_service_module
+
+    monkeypatch.setattr(totp_module, "time", lambda: current_epoch["value"])
+    monkeypatch.setattr(dashboard_auth_service_module, "time", lambda: current_epoch["value"])
+
+    assert (
+        await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
+    ).status_code == 200
+    await _force_totp_policy(True)
+
+    blocked = await async_client.get("/api/settings")
+    assert blocked.status_code == 403
+    assert blocked.json()["error"]["code"] == "totp_enrollment_required"
+
+    session = await async_client.get("/api/dashboard-auth/session")
+    assert session.status_code == 200
+    payload = session.json()
+    assert payload["authenticated"] is True
+    assert payload["totpEnrollmentRequired"] is True
+    assert payload["totpRequiredOnLogin"] is False
+    assert payload["accessSummary"] is None
+
+    me = await async_client.get("/api/dashboard-auth/me")
+    assert me.status_code == 200
+    assert me.json()["totpConfigured"] is False
+
+    # Same URL prefix, but not self-service: closed until enrolment completes.
+    for method, path, body in (
+        ("POST", "/api/dashboard-auth/guest/password", {"password": "guest-secret-1"}),
+        ("DELETE", "/api/dashboard-auth/guest/password", None),
+        ("POST", "/api/dashboard-auth/guest/logout-all", {}),
+        ("DELETE", "/api/dashboard-auth/password", {"password": "password123"}),
+        ("POST", "/api/dashboard-auth/totp/disable", {"code": "123456"}),
+    ):
+        closed = await async_client.request(method, path, json=body)
+        assert closed.status_code == 403, (method, path, closed.text)
+        assert closed.json()["error"]["code"] == "totp_enrollment_required"
+
+    start = await async_client.post("/api/dashboard-auth/totp/setup/start", json={})
+    assert start.status_code == 200
+    secret = start.json()["secret"]
+    confirm = await async_client.post(
+        "/api/dashboard-auth/totp/setup/confirm",
+        json={"secret": secret, "code": pyotp.TOTP(secret).at(current_epoch["value"])},
+    )
+    assert confirm.status_code == 200
+
+    # Enrolled but this session has not proven the code yet.
+    pending = await async_client.get("/api/settings")
+    assert pending.status_code == 401
+    assert pending.json()["error"]["code"] == "totp_required"
+    current_epoch["value"] += 30
+    verify = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert verify.status_code == 200
+    assert verify.json()["totpEnrollmentRequired"] is False
+    assert (await async_client.get("/api/settings")).status_code == 200

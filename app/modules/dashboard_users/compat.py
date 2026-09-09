@@ -43,6 +43,13 @@ class CompatAdminProjection:
         totp_secret_encrypted: bytes | None = None,
         totp_last_verified_step: int | None = None,
     ) -> DashboardUser:
+        """Create the ``admin`` row, or re-arm an existing credential-less one.
+
+        Password removal keeps the row (with ``password_hash`` NULL) so the
+        install is passwordless again; the next first-run setup must give that
+        same row its new password instead of failing on the unique username.
+        """
+
         user = await self.get()
         if user is not None:
             # Re-arming after a password removal: the row survives with NULL
@@ -50,6 +57,7 @@ class CompatAdminProjection:
             user.password_hash = password_hash
             user.totp_secret_encrypted = totp_secret_encrypted
             user.totp_last_verified_step = totp_last_verified_step
+            await self._session.flush()
             return user
         user = DashboardUser(
             id=COMPAT_ADMIN_USER_ID,

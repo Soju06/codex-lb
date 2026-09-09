@@ -16,13 +16,15 @@ from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.dashboard_access import (
     DashboardPermission,
     DashboardPrincipal,
-    DashboardRole,
     Permission,
     Scope,
     admin_principal,
     guest_principal,
+    scope_satisfies,
+    user_principal,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
+from app.core.auth.dashboard_users_cache import DashboardUsersCache, get_dashboard_users_cache
 from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -33,16 +35,38 @@ from app.core.request_locality import is_local_request
 from app.core.socket_peer import raw_socket_peer_host
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
-from app.db.models import AccountStatus
+from app.db.models import AccountStatus, DashboardUser, DashboardUserStatus
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeyInvalidError, ApiKeysService
-from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store
+from app.modules.dashboard_auth.service import (
+    DASHBOARD_SESSION_COOKIE,
+    DashboardSessionState,
+    get_dashboard_session_store,
+)
+from app.modules.dashboard_roles.service import resolve_role_grants
 
 logger = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-…)", auto_error=False)
+#: The only routes an account that still has to enrol a TOTP secret may reach
+#: (an explicit allow-list, not the module prefix: guest-password management,
+#: password removal and TOTP disable live under the same prefix and stay closed).
+TOTP_ENROLLMENT_ALLOWED_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/dashboard-auth/session",
+        "/api/dashboard-auth/totp/setup/start",
+        "/api/dashboard-auth/totp/setup/confirm",
+        "/api/dashboard-auth/totp/verify",
+        "/api/dashboard-auth/logout",
+        "/api/dashboard-auth/logout-all",
+        "/api/dashboard-auth/me",
+        "/api/dashboard-auth/password/change",
+    }
+)
+#: ``auth_method`` of the implicit admin on a local install without a password.
+AUTH_METHOD_LOCAL_BOOTSTRAP = "local_bootstrap"
 _CODEX_USAGE_IDENTITY_INACTIVE_WORKSPACE_STATUSES = {
     AccountStatus.PAUSED,
     AccountStatus.DEACTIVATED,
@@ -166,6 +190,65 @@ def _get_cached_dashboard_principal(request: Request) -> DashboardPrincipal | No
     return principal if isinstance(principal, DashboardPrincipal) else None
 
 
+async def _resolve_session_user(
+    state: DashboardSessionState | None, users_cache: DashboardUsersCache
+) -> DashboardUser | None:
+    """The account behind a user cookie, or ``None`` when the cookie no longer binds to one.
+
+    A missing, disabled, or invited account and a stale ``session_generation``
+    all fail the same way; the caller answers ``authentication_required``.
+    """
+
+    if state is None or not state.is_user or state.user_id is None:
+        return None
+    user = await users_cache.get_user(state.user_id)
+    if user is None or user.status != DashboardUserStatus.ACTIVE.value:
+        return None
+    if user.session_generation != state.session_generation:
+        return None
+    return user
+
+
+def _user_session_principal(
+    request: Request,
+    user: DashboardUser,
+    state: DashboardSessionState,
+    *,
+    totp_policy_applies: bool,
+) -> DashboardPrincipal:
+    totp_configured = user.totp_secret_encrypted is not None
+    if totp_policy_applies and totp_configured and not state.totp_verified:
+        raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
+    totp_enrollment_required = totp_policy_applies and not totp_configured
+    grants = resolve_role_grants(user.role)
+    # Routes guarded only by this dependency (account inventory, request logs,
+    # ...) assume a reader who may see everything. Until the self-service phase
+    # makes own-scoped routes declare their own requirement (this guard then
+    # moves to route level), a role without dashboard:read at scope `all`
+    # (e.g. member) is refused outright rather than admitted to all-scope views.
+    if not scope_satisfies(grants.get(Permission.DASHBOARD_READ), Scope.ALL):
+        raise DashboardPermissionError(
+            f"Dashboard permission '{Permission.DASHBOARD_READ.value}' is required",
+            code="permission_required",
+            param=Permission.DASHBOARD_READ.value,
+        )
+    principal = user_principal(
+        user,
+        grants,
+        auth_method=state.auth_method,
+        totp_enrollment_required=totp_enrollment_required,
+    )
+    # An account that still has to enrol may only reach the self-service routes
+    # listed above; those routes gate themselves, so every other route that
+    # reaches this dependency is refused here.
+    if totp_enrollment_required and request.url.path not in TOTP_ENROLLMENT_ALLOWED_PATHS:
+        raise DashboardPermissionError(
+            "TOTP enrollment is required before dashboard access",
+            code="totp_enrollment_required",
+        )
+    return _set_dashboard_principal(request, principal)
+
+
 async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     cached = _get_cached_dashboard_principal(request)
     if cached is not None:
@@ -175,12 +258,15 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     if request_auth is not None:
         return _set_dashboard_principal(
             request,
-            admin_principal(auth_mode=request_auth.mode, actor=request_auth.actor),
+            admin_principal(auth_mode=request_auth.mode, actor=request_auth.actor, auth_method=request_auth.mode.value),
         )
 
     settings = await get_settings_cache().get()
-    password_required = bool(settings.password_hash)
-    requires_auth = password_required or settings.totp_required_on_login
+    users_cache = get_dashboard_users_cache()
+    auth_state = await users_cache.local_auth_state()
+    password_required = auth_state.requires_auth
+    totp_policy_applies = settings.totp_required_on_login
+    requires_auth = password_required or totp_policy_applies
     guest_access_enabled = settings.guest_access_enabled
     guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
     passwordless_guest_fallback_allowed = not (
@@ -191,27 +277,23 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     )
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     state = get_dashboard_session_store().get(session_id)
+    session_user = await _resolve_session_user(state, users_cache)
 
-    has_admin_fallback_session = (
-        state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified
-    )
+    has_admin_fallback_session = state is not None and session_user is not None and state.password_verified
     if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not has_admin_fallback_session:
         raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
+    # A guest cookie is only ever minted under the current guest generation, so
+    # a matching generation proves it passed whatever guest credential applied.
     if (
         state is not None
-        and state.role == DashboardRole.GUEST
+        and state.is_guest
         and guest_access_enabled
         and state.guest_session_generation == settings.guest_session_generation
-        and ((not guest_password_required and passwordless_guest_fallback_allowed) or state.guest_verified)
+        and (guest_password_required or passwordless_guest_fallback_allowed)
     ):
         return _set_dashboard_principal(request, guest_principal())
-    if state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified:
-        if settings.totp_required_on_login and not state.totp_verified:
-            raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
-        return _set_dashboard_principal(
-            request,
-            admin_principal(auth_mode=DashboardAuthMode.STANDARD),
-        )
+    if state is not None and session_user is not None and state.password_verified:
+        return _user_session_principal(request, session_user, state, totp_policy_applies=totp_policy_applies)
 
     if not requires_auth:
         if not is_local_request(request):
@@ -225,30 +307,19 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
             )
         return _set_dashboard_principal(
             request,
-            admin_principal(auth_mode=DashboardAuthMode.STANDARD),
+            admin_principal(auth_mode=DashboardAuthMode.STANDARD, auth_method=AUTH_METHOD_LOCAL_BOOTSTRAP),
         )
 
     if guest_access_enabled and not guest_password_required and passwordless_guest_fallback_allowed:
         return _set_dashboard_principal(request, guest_principal())
 
-    if not password_required and settings.totp_required_on_login:
+    if auth_state.active_local_password_users == 0 and totp_policy_applies:
         logger.warning(
-            "dashboard_auth_migration_inconsistency password_hash is NULL"
+            "dashboard_auth_migration_inconsistency no active local password user"
             " while totp_required_on_login=true metric=dashboard_auth_migration_inconsistency"
         )
 
-    if state is None:
-        raise DashboardAuthError("Authentication is required")
-    if state.role != DashboardRole.ADMIN:
-        raise DashboardAuthError("Authentication is required")
-    if password_required and not state.password_verified:
-        raise DashboardAuthError("Authentication is required")
-    if settings.totp_required_on_login and not state.totp_verified:
-        raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
-    return _set_dashboard_principal(
-        request,
-        admin_principal(auth_mode=DashboardAuthMode.STANDARD),
-    )
+    raise DashboardAuthError("Authentication is required")
 
 
 async def require_dashboard_write_access(request: Request) -> DashboardPrincipal:

@@ -5,8 +5,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from app.core.auth.dashboard_mode import DashboardAuthMode
+
+if TYPE_CHECKING:
+    from app.db.models import DashboardUser
 
 
 class DashboardRole(StrEnum):
@@ -194,8 +198,13 @@ PRESET_ROLE_GRANTS: Mapping[PresetRoleSlug, Grants] = MappingProxyType(
 )
 
 #: Presets that may be assigned to a user account. Guest is the anonymous
-#: shared read-only session and is never a user's role.
-ASSIGNABLE_PRESET_ROLES: frozenset[PresetRoleSlug] = frozenset(PresetRoleSlug) - {PresetRoleSlug.GUEST}
+#: shared read-only session and is never a user's role. Member (own-scoped
+#: grants only) becomes assignable once own-scoped views ship; until then the
+#: session dependency refuses roles without ``dashboard:read`` at ``all``.
+ASSIGNABLE_PRESET_ROLES: frozenset[PresetRoleSlug] = frozenset(PresetRoleSlug) - {
+    PresetRoleSlug.GUEST,
+    PresetRoleSlug.MEMBER,
+}
 
 ROLE_GRANTS: Mapping[DashboardRole, Grants] = MappingProxyType(
     {
@@ -248,6 +257,14 @@ class DashboardPrincipal:
     the coarse aliases derived from it and is validated for consistency so the
     two can never drift. ``grants`` is excluded from hashing because mappings
     are unhashable; equality still compares it.
+
+    ``role`` stays the coarse wire value (``admin`` for every user account and
+    for the implicit/trusted-header/disabled admin, ``guest`` for guests);
+    ``role_slug`` carries the account's actual role when the principal is a
+    user. ``user_id`` is ``None`` for principals without a user row.
+    ``totp_enrollment_required`` marks a user whose install requires TOTP but
+    who has not enrolled yet: only the dashboard-auth self-service routes may
+    serve such a principal.
     """
 
     role: DashboardRole
@@ -255,6 +272,11 @@ class DashboardPrincipal:
     auth_mode: DashboardAuthMode
     actor: str | None = None
     grants: Grants = field(kw_only=True, hash=False)
+    user_id: str | None = field(default=None, kw_only=True)
+    username: str | None = field(default=None, kw_only=True)
+    role_slug: str | None = field(default=None, kw_only=True)
+    auth_method: str | None = field(default=None, kw_only=True)
+    totp_enrollment_required: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         validate_grants(self.grants)
@@ -278,13 +300,56 @@ ADMIN_PERMISSIONS = legacy_permissions(ADMIN_GRANTS)
 GUEST_PERMISSIONS = legacy_permissions(GUEST_GRANTS)
 
 
-def admin_principal(*, auth_mode: DashboardAuthMode, actor: str | None = None) -> DashboardPrincipal:
+def permission_strings(grants: Grants) -> list[str]:
+    """Wire form of a grant table: the legacy aliases first, then ``<permission>:<scope>``.
+
+    Clients that predate fine-grained permissions only look for ``write``; newer
+    clients read the scoped entries.
+    """
+
+    aliases = sorted(alias.value for alias in legacy_permissions(grants))
+    scoped = sorted(f"{permission.value}:{scope.value}" for permission, scope in grants.items())
+    return aliases + scoped
+
+
+def admin_principal(
+    *,
+    auth_mode: DashboardAuthMode,
+    actor: str | None = None,
+    auth_method: str | None = None,
+) -> DashboardPrincipal:
+    """The implicit admin: no user row (local passwordless install, trusted header, disabled auth)."""
+
     return DashboardPrincipal(
         role=DashboardRole.ADMIN,
         permissions=ADMIN_PERMISSIONS,
         auth_mode=auth_mode,
         actor=actor,
         grants=ADMIN_GRANTS,
+        auth_method=auth_method,
+    )
+
+
+def user_principal(
+    user: DashboardUser,
+    grants: Grants,
+    *,
+    auth_method: str | None,
+    totp_enrollment_required: bool = False,
+) -> DashboardPrincipal:
+    """A signed-in user account. ``grants`` is the resolved grant table of ``user.role``."""
+
+    return DashboardPrincipal(
+        role=DashboardRole.ADMIN,
+        permissions=legacy_permissions(grants),
+        auth_mode=DashboardAuthMode.STANDARD,
+        actor=user.username,
+        grants=grants,
+        user_id=user.id,
+        username=user.username,
+        role_slug=user.role.slug,
+        auth_method=auth_method,
+        totp_enrollment_required=totp_enrollment_required,
     )
 
 

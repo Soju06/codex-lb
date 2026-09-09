@@ -90,17 +90,20 @@ def test_legacy_role_table_still_maps_to_presets() -> None:
     assert ROLE_GRANTS[DashboardRole.GUEST] is GUEST_GRANTS
 
 
-def test_guest_is_not_assignable() -> None:
+def test_guest_and_member_are_not_assignable_yet() -> None:
+    """Member waits for own-scoped views; guest is never an account role."""
+
     assert PresetRoleSlug.GUEST not in ASSIGNABLE_PRESET_ROLES
+    assert PresetRoleSlug.MEMBER not in ASSIGNABLE_PRESET_ROLES
     assert ASSIGNABLE_PRESET_ROLES == {
         PresetRoleSlug.ADMIN,
         PresetRoleSlug.OPERATOR,
-        PresetRoleSlug.MEMBER,
         PresetRoleSlug.VIEWER,
     }
     rows = {row["slug"]: row for row in preset_role_rows()}
     assert rows["guest"]["assignable_to_users"] is False
-    assert all(rows[slug]["assignable_to_users"] is True for slug in ("admin", "operator", "member", "viewer"))
+    assert rows["member"]["assignable_to_users"] is False
+    assert all(rows[slug]["assignable_to_users"] is True for slug in ("admin", "operator", "viewer"))
     assert all(row["kind"] == RoleKind.PRESET.value for row in rows.values())
 
 

@@ -59,6 +59,12 @@ field and set it to `null` when the preview was not requested and is not dialog-
 - **THEN** a dialog shows the live snapshot JSON with equally prominent enable and disable
   actions
 
+#### Scenario: Dismissing without a decision keeps the undecided dialog reachable
+
+- **GIVEN** default consent remains `undecided` and the current notice version is acknowledged
+- **WHEN** the operator returns to the dashboard without having persisted a decision
+- **THEN** the consent response still includes the exact payload preview for the undecided dialog
+
 #### Scenario: Decision is final until changed in settings
 
 - **WHEN** the operator chooses disable in the dialog

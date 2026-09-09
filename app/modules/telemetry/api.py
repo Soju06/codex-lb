@@ -47,13 +47,14 @@ async def get_telemetry_consent(
     store = TelemetryConsentStore(session)
     consent = await store.resolve()
     notice_version = await store.notice_version()
-    eligible_notice = notice_version < TELEMETRY_NOTICE_VERSION and consent.source != "env"
+    undecided_dialog_due = consent.state == "undecided" and consent.source == "default"
+    notice_upgrade_due = notice_version < TELEMETRY_NOTICE_VERSION and consent.source != "env"
     return await _response(
         session,
         store,
         consent,
-        include_preview=include_preview or eligible_notice,
-        acknowledge_notice=eligible_notice and not include_preview and principal.can(DashboardPermission.WRITE),
+        include_preview=include_preview or undecided_dialog_due or notice_upgrade_due,
+        acknowledge_notice=notice_upgrade_due and not include_preview and principal.can(DashboardPermission.WRITE),
     )
 
 

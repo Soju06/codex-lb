@@ -11,6 +11,8 @@ from app.core.auth.dependencies import validate_dashboard_session
 from app.core.config.settings import get_settings
 from app.db.models import DashboardSettings
 from app.db.session import get_background_session
+from app.modules.settings.repository import SettingsRepository
+from app.modules.telemetry.consent import TELEMETRY_NOTICE_VERSION
 
 
 async def _notice_version() -> int:
@@ -337,3 +339,77 @@ async def test_explicit_preview_after_acknowledgement_keeps_watermark(async_clie
     assert response.status_code == 200
     assert response.json()["preview"] is not None
     assert await _notice_version() == 2
+
+
+@pytest.mark.asyncio
+async def test_undecided_default_dialog_remains_available_after_notice_acknowledgement(
+    async_client, monkeypatch
+) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+    async with get_background_session() as session:
+        row = await SettingsRepository(session).get_or_create()
+        assert row.telemetry_consent == "undecided"
+        assert row.telemetry_notice_version == 0
+
+    # Dismissal saves no decision, so another dashboard entry must still have a preview.
+    for _ in range(2):
+        response = await async_client.get("/api/settings/telemetry")
+        assert response.status_code == 200
+        assert response.json()["state"] == "undecided"
+        assert response.json()["source"] == "default"
+        assert response.json()["preview"] is not None
+        assert await _notice_version() == TELEMETRY_NOTICE_VERSION
+
+
+@pytest.mark.asyncio
+async def test_undecided_operator_enabling_after_preview_does_not_owe_another_notice(async_client, monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+    preview = await async_client.get("/api/settings/telemetry")
+    assert preview.status_code == 200
+    assert preview.json()["state"] == "undecided"
+    assert preview.json()["preview"] is not None
+    assert await _notice_version() == TELEMETRY_NOTICE_VERSION
+
+    decision = await async_client.put("/api/settings/telemetry", json={"enabled": True})
+    assert decision.status_code == 200
+    assert decision.json()["state"] == "enabled"
+    assert decision.json()["source"] == "persisted"
+
+    builder = Mock(side_effect=AssertionError("a decision at the current notice version must not build a preview"))
+    monkeypatch.setattr("app.modules.telemetry.api.TelemetrySnapshotBuilder", builder)
+    response = await async_client.get("/api/settings/telemetry")
+    assert response.status_code == 200
+    assert response.json()["state"] == "enabled"
+    assert response.json()["preview"] is None
+    assert await _notice_version() == TELEMETRY_NOTICE_VERSION
+    builder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_enabled_operator_with_older_notice_sees_preview_once_without_resetting_decision(
+    async_client, monkeypatch
+) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+    decision = await async_client.put("/api/settings/telemetry", json={"enabled": True})
+    assert decision.status_code == 200
+    async with get_background_session() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        row.telemetry_notice_version = TELEMETRY_NOTICE_VERSION - 1
+        await session.commit()
+
+    response = await async_client.get("/api/settings/telemetry")
+    assert response.status_code == 200
+    assert response.json()["state"] == "enabled"
+    assert response.json()["source"] == "persisted"
+    assert response.json()["preview"] is not None
+    assert await _notice_version() == TELEMETRY_NOTICE_VERSION
+
+    response = await async_client.get("/api/settings/telemetry")
+    assert response.status_code == 200
+    assert response.json()["state"] == "enabled"
+    assert response.json()["source"] == "persisted"
+    assert response.json()["preview"] is None

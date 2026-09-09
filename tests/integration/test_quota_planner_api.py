@@ -267,6 +267,24 @@ async def test_quota_planner_forecast_builds_states_from_the_dashboard_snapshot(
     del db_setup
     captured = _record_build_states(monkeypatch, quota_planner_api)
     soft_drain_enabled, inflight_penalty_pct = await _store_dashboard_values_differing_from_environment(async_client)
+    # The snapshot read may refresh the cache through its own session, so it
+    # must complete before the request session issues its first query and
+    # pins a pooled connection.
+    order: list[str] = []
+    settings_cache = quota_planner_api.get_settings_cache()
+    original_cache_get = settings_cache.get
+    original_planner_get_settings = QuotaPlannerRepository.get_settings
+
+    async def recording_cache_get(*args, **kwargs):
+        order.append("dashboard_snapshot")
+        return await original_cache_get(*args, **kwargs)
+
+    async def recording_planner_get_settings(self, *args, **kwargs):
+        order.append("first_repository_query")
+        return await original_planner_get_settings(self, *args, **kwargs)
+
+    monkeypatch.setattr(settings_cache, "get", recording_cache_get)
+    monkeypatch.setattr(QuotaPlannerRepository, "get_settings", recording_planner_get_settings)
 
     response = await async_client.get("/api/quota-planner/forecast?horizonHours=6")
 
@@ -274,6 +292,7 @@ async def test_quota_planner_forecast_builds_states_from_the_dashboard_snapshot(
     assert len(captured) == 1
     assert captured[0]["soft_drain_enabled"] is soft_drain_enabled
     assert captured[0]["routing_tunables"].inflight_penalty_pct == inflight_penalty_pct
+    assert order.index("dashboard_snapshot") < order.index("first_repository_query")
 
 
 @pytest.mark.asyncio

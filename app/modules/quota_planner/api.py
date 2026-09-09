@@ -208,6 +208,11 @@ async def get_quota_planner_forecast(
     horizon_hours: int = Query(default=36, ge=1, le=168, alias="horizonHours"),
     context: QuotaPlannerContext = Depends(get_quota_planner_context),
 ) -> QuotaPlannerForecastResponse:
+    # One dashboard-settings snapshot per request, taken before the first
+    # repository query: a cache refresh opens its own session, so it must not
+    # run while the request session already holds a pooled connection. No
+    # runtime lock is held here either.
+    dashboard_settings = await get_settings_cache().get()
     settings = await context.repository.get_settings()
     demand_slots = await context.repository.aggregate_demand_slot_units()
     forecast = build_demand_forecast(settings=settings, slot_units=demand_slots, horizon_hours=horizon_hours)
@@ -216,9 +221,6 @@ async def get_quota_planner_forecast(
     latest_primary = await usage_repo.latest_by_account()
     latest_secondary = await usage_repo.latest_by_account(window="secondary")
     latest_monthly = await usage_repo.latest_by_account(window="monthly")
-    # One dashboard-settings snapshot per request (no runtime lock is held
-    # here): the states follow the dashboard soft-drain toggle and tunables.
-    dashboard_settings = await get_settings_cache().get()
     states, _ = _build_states(
         accounts=accounts,
         latest_primary=latest_primary,

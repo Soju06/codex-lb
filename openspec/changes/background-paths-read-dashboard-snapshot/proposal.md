@@ -6,7 +6,7 @@
 
 ## What Changes
 
-- The quota planner tick takes one dashboard-settings snapshot per tick (`await get_settings_cache().get()`, before its session, outside any runtime lock) and the forecast endpoint takes one per request; both pass `effective_routing_tunables(snapshot)` and `resolve_resilience_toggles(snapshot).soft_drain_enabled` into `_build_states`.
+- The quota planner tick takes one dashboard-settings snapshot per tick (`await get_settings_cache().get()`, before its session, outside any runtime lock) and the forecast endpoint takes one per request (before its first repository query, so a cache refresh never opens a second session while the request session holds a pooled connection); both pass `effective_routing_tunables(snapshot)` and `resolve_resilience_toggles(snapshot).soft_drain_enabled` into `_build_states`.
 - `reconcile_recoverable_account_statuses` accepts the `dashboard_settings` row the usage-refresh cycle already read for the warmup service, resolves the toggle and the tunables once and passes them into `background_recovery_state_from_account`, which forwards them to `_state_from_account`. Callers without a row (tests) keep the environment layer.
 - No new setting, column, endpoint or dashboard surface; no runtime lock reads settings.
 

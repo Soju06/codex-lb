@@ -37,7 +37,9 @@ None.
 - `images-api-compat`: MODIFIED "OpenAI-compatible image generation endpoint" (fixed default model).
 - `http-ingress-limits`: MODIFIED "HTTP ingress reuses existing budgets" (fixed budgets).
 - `proxy-admission-control`: MODIFIED "Expensive upstream work is admission controlled" (fixed gate sizes and wait), "Local overload reasons are stable and distinguishable" and "HTTP bridge startup admission waits are bounded" (fixed 10 s wait).
-- `usage-refresh-policy`: MODIFIED "Background usage refresh is staggered across accounts" (fixed 60 s interval, no enable switch).
+- `usage-refresh-policy`: MODIFIED "Background usage refresh is staggered across accounts" (fixed 60 s interval, no enable switch) and "Cross-replica token refresh serialization" (the claim TTL is the fixed helper `max(30 s, admission wait + 2 x refresh timeout)`; the derive-or-reject settings scenario becomes a fixed-TTL scenario).
+- `outbound-http-clients`: MODIFIED "Upstream SSE framing scans each byte a bounded number of times" (fixed 16 MiB cap).
+- `proxy-runtime-observability`: MODIFIED "HTTP bridge startup wait timeouts are logged" (fixed 10 s admission wait).
 - `deployment-installation`: MODIFIED "Removed tunables are fixed constants, derived values, or dashboard settings" (this batch added to the fixed list). `context.md` notes reversing the #1340 "stays" decisions for `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS` and `CODEX_LB_IMAGES_DEFAULT_MODEL`.
 - `quota-phase-planner` (`context.md`) and `responses-api-compat` (`ops.md`): prose updated (planner switch is the dashboard mode; the websocket ingress default names the constant).
 

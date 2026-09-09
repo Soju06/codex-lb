@@ -14,7 +14,7 @@
 ## 3. Docs, chart, reference
 - [x] 3.1 Regenerate `docs/reference/settings.md`.
 - [x] 3.2 Helm: remove `config.promptCacheKeyDerivationEnabled` / `config.stickySessionCleanupEnabled` and their configmap lines; assert their absence in `tests/unit/test_helm_replica_artifacts.py`.
-- [x] 3.3 OpenSpec deltas for every spec naming a removed setting; `deployment-installation/context.md`, `quota-phase-planner/context.md`, `responses-api-compat/ops.md` prose.
+- [x] 3.3 OpenSpec deltas for every spec naming a removed setting or calling one of these values "configured" (incl. the `usage-refresh-policy` claim-TTL floor scenario, now a fixed-TTL scenario, and the `outbound-http-clients` / `proxy-runtime-observability` wording); `deployment-installation/context.md`, `quota-phase-planner/context.md`, `responses-api-compat/ops.md` prose.
 
 ## 4. Verification
 - [x] 4.1 Tests inject through constants (`monkeypatch.setattr(module, "CONSTANT", ...)`) or constructor kwargs; `tests/unit/test_timeout_invariants.py` field list trimmed; `test_settings_trace_and_removed.py` covers the 27 names; request-path usage refresh is neutralised by the autouse fixture with the `usage_refresh_request_path` opt-out marker.

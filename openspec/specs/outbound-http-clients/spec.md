@@ -1186,11 +1186,17 @@ For interpreted HTTP Responses streams, Rust MUST stop reading the upstream body
 after classifying `response.completed`, `response.failed`, or
 `response.incomplete`, deliver the entire terminal event, and release the body
 without waiting for EOF. It MUST ignore subsequent bytes of that exchange.
-Only the final fragment of a recognized terminal MAY carry `stream_complete=true`.
+The final fragment of every recognized terminal MUST carry `stream_complete=true`.
+All other fragments MUST omit the completion marker or set it to false.
 An absent completion marker MUST mean false. Python MUST validate this marker and retire that request without sending cancel
 once its complete terminal block has been assembled. Malformed or truncated
 fragments MUST fail without replay. Cancellation before completion and bounded
 queue overflow MUST still release that request without invalidating its peers.
+
+Frames that do not classify as one of these three terminal types, including bare
+`error` events and typeless error envelopes, MUST retain Python's existing
+SDK-dependent normalization, termination decisions, and cancellation cleanup.
+Rust MUST NOT mark such a frame complete solely because it contains an error.
 
 #### Scenario: Upstream remains open after a terminal
 
@@ -1214,3 +1220,10 @@ queue overflow MUST still release that request without invalidating its peers.
 
 - **WHEN** a stream uses raw HTTP, uninterpreted SSE, compact collection, a Python fallback, or a persistent WebSocket
 - **THEN** that transport retains its existing termination protocol
+
+#### Scenario: Typeless error normalization depends on the SDK contract
+
+- **WHEN** a native HTTP stream receives a typeless error envelope followed by a recognized terminal
+- **THEN** without SDK-contract enforcement, the envelope is delivered unchanged and the stream continues to the recognized terminal
+- **AND** with SDK-contract enforcement, Python normalizes the envelope to `response.failed` and terminates through its existing cleanup path
+- **AND** both modes preserve the corresponding Python fallback result

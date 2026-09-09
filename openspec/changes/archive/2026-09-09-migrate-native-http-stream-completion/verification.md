@@ -94,6 +94,27 @@ code and tests were unchanged. Checks repeated on the updated base:
 - Full `make lint`, `uv run ty check`, and strict OpenSpec validation passed
   (**64 specs**).
 
+## Terminal-marker and error-handoff contract clarification
+
+The requirement now explicitly mandates `stream_complete=true` on each
+recognized terminal's final fragment. It also records the existing Python
+ownership of SDK-dependent error normalization and termination. Completion code
+is unchanged. In particular, a typeless error envelope remains nonterminal
+without SDK-contract enforcement, but becomes `response.failed` with it.
+Forcing Rust completion for both modes would break Python fallback parity.
+
+Repeated release-helper checks: **32 passed, 1 warning**, 1.23 seconds:
+
+- `test_native_stream_interpretation_matches_public_python_result`, filtered to
+  `error`, `error_envelope`, `typeless_error`, `canonical_escaped_error_key`, and
+  `data_only_escaped_error_key`: **20 passed** across direct/routed and SDK/native
+  modes. Each sends a later recognized terminal and compares full output with
+  the Python fallback.
+- `test_native_http_terminal_releases_upstream_without_python_cancel`:
+  **12 passed**, including mandatory true markers on final terminal fragments
+  and omitted markers on preceding fragments.
+- Strict OpenSpec validation: **64 passed**.
+
 ## Broader suite and baseline comparison
 
 The extra-dependency, work-stealing run of all unit tests completed with 9,023

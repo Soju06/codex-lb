@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends, Request, Response
 
-from app.core.audit.service import AuditService
-from app.core.auth.dashboard_access import Permission
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
+from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
     require_dashboard_permission,
     require_dashboard_write_access,
@@ -133,7 +133,7 @@ async def create_api_key(
     request: Request,
     response: Response,
     payload: ApiKeyCreateRequest = Body(...),
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyCreateResponse:
     limit_inputs = _build_limit_inputs(payload)
@@ -167,6 +167,8 @@ async def create_api_key(
     AuditService.log_async(
         "api_key_created",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("api_key", created.id),
         details={"key_id": created.id},
     )
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
@@ -192,7 +194,7 @@ async def update_api_key(
     request: Request,
     key_id: str,
     payload: ApiKeyUpdateRequest = Body(...),
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyResponse:
     fields = payload.model_fields_set
@@ -243,6 +245,8 @@ async def update_api_key(
         AuditService.log_async(
             "api_key_revoked",
             actor_ip=request.client.host if request.client else None,
+            actor=AuditActor.from_principal(principal),
+            target=AuditTarget("api_key", key_id),
             details={"key_id": row.id},
         )
     return _to_response(row)
@@ -252,7 +256,7 @@ async def update_api_key(
 async def delete_api_key(
     request: Request,
     key_id: str,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> Response:
     try:
@@ -262,6 +266,8 @@ async def delete_api_key(
     AuditService.log_async(
         "api_key_revoked",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("api_key", key_id),
         details={"key_id": key_id},
     )
     return Response(status_code=204)

@@ -8,6 +8,7 @@ from typing import Any
 import bcrypt
 import pytest
 
+from app.core.audit.service import AuditActor, AuditSeverity, AuditTarget
 from app.core.auth.dashboard_access import PRESET_ROLE_IDS, DashboardPermission, DashboardRole, PresetRoleSlug
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.db.models import COMPAT_ADMIN_USERNAME, DashboardRoleRecord, DashboardUser
@@ -25,19 +26,45 @@ from app.modules.dashboard_users.repository import DashboardUserCounts, LocalAut
 pytestmark = pytest.mark.unit
 
 
+@dataclass(slots=True, frozen=True)
+class _AuditCall:
+    action: str
+    details: dict[str, Any]
+    actor: AuditActor | None
+    target: AuditTarget | None
+    severity: AuditSeverity
+
+
 @pytest.fixture(autouse=True)
-def audit_events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
+def audit_events(monkeypatch: pytest.MonkeyPatch) -> list[_AuditCall]:
     """Record audit calls instead of scheduling background tasks that would outlive the test loop."""
 
     import app.modules.dashboard_auth.service as service_module
 
-    events: list[tuple[str, dict[str, Any]]] = []
+    events: list[_AuditCall] = []
 
-    def _record(action: str, actor_ip: str | None = None, details: Any = None, request_id: str | None = None) -> None:
-        events.append((action, dict(details or {})))
+    def _record(
+        action: str,
+        actor_ip: str | None = None,
+        details: Any = None,
+        request_id: str | None = None,
+        *,
+        actor: AuditActor | None = None,
+        target: AuditTarget | None = None,
+        severity: AuditSeverity = AuditSeverity.INFO,
+    ) -> None:
+        events.append(_AuditCall(action, dict(details or {}), actor, target, severity))
 
     monkeypatch.setattr(service_module.AuditService, "log_async", staticmethod(_record))
     return events
+
+
+def _user_actor(user: DashboardUser, auth_method: str) -> AuditActor:
+    return AuditActor(user_id=user.id, username=user.username, role_slug=user.role.slug, auth_method=auth_method)
+
+
+def _calls(events: list[_AuditCall], action: str) -> list[_AuditCall]:
+    return [call for call in events if call.action == action]
 
 
 @dataclass(slots=True)
@@ -319,9 +346,7 @@ async def test_failed_logins_always_cost_exactly_one_password_check(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_failed_login_audit_keeps_only_well_formed_usernames(
-    audit_events: list[tuple[str, dict[str, Any]]],
-) -> None:
+async def test_failed_login_audit_keeps_only_well_formed_usernames(audit_events: list[_AuditCall]) -> None:
     repository = _FakeRepository()
     service = _service(repository)
     await service.setup_password("password123")
@@ -332,10 +357,93 @@ async def test_failed_login_audit_keeps_only_well_formed_usernames(
     with pytest.raises(InvalidCredentialsError):
         await service.verify_user_password(await service.resolve_login_target("nobody"), "wrong")
 
-    failures = [details for action, details in audit_events if action == "login_failed"]
+    failures = _calls(audit_events, "login_failed")
     assert len(failures) == 4
-    assert [details["username"] for details in failures] == [None, None, None, "nobody"]
-    assert [details["reason"] for details in failures] == ["invalid_username"] * 3 + ["bad_password"]
+    assert [call.details["username"] for call in failures] == [None, None, None, "nobody"]
+    assert [call.details["reason"] for call in failures] == ["invalid_username"] * 3 + ["unknown_identity"]
+    assert all(call.actor is None and call.severity is AuditSeverity.WARNING for call in failures)
+
+
+@pytest.mark.asyncio
+async def test_self_service_audit_names_the_account_and_session_method(audit_events: list[_AuditCall]) -> None:
+    repository = _FakeRepository()
+    service = _service(repository)
+    admin = await service.setup_password("password123")
+    expected_target = AuditTarget("user", admin.id)
+
+    await service.verify_password("password123")
+    (signed_in,) = _calls(audit_events, "login_success")
+    assert signed_in.actor == _user_actor(admin, "password")
+    assert signed_in.target == expected_target
+
+    await service.change_password(admin, "password123", "new-password-456", auth_method="password")
+    (changed,) = _calls(audit_events, "password_changed")
+    assert changed.actor == _user_actor(admin, "password")
+    assert changed.target == expected_target
+    assert changed.severity is AuditSeverity.INFO
+
+    # The session's own method is threaded through; the default is the password method.
+    await service.revoke_user_sessions(admin, auth_method="trusted_header")
+    await service.revoke_user_sessions(admin)
+    threaded, defaulted = _calls(audit_events, "user_sessions_revoked")
+    assert threaded.actor == _user_actor(admin, "trusted_header")
+    assert defaulted.actor == _user_actor(admin, "password")
+    assert threaded.target == defaulted.target == expected_target
+
+    await service.remove_password(admin, "new-password-456", auth_method="password")
+    (removed,) = _calls(audit_events, "password_removed")
+    assert removed.actor == _user_actor(admin, "password")
+    assert removed.target == expected_target
+    assert removed.severity is AuditSeverity.INFO
+
+
+@pytest.mark.asyncio
+async def test_totp_audit_attribution(monkeypatch: pytest.MonkeyPatch, audit_events: list[_AuditCall]) -> None:
+    import pyotp
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as service_module
+    from app.modules.dashboard_auth.service import TotpInvalidCodeError
+
+    current = {"value": 1_700_000_000}
+    monkeypatch.setattr(service_module, "time", lambda: current["value"])
+    monkeypatch.setattr(totp_module, "time", lambda: current["value"])
+
+    repository = _FakeRepository()
+    store = DashboardSessionStore()
+    service = _service(repository, store)
+    admin = await service.setup_password("password123")
+    expected_target = AuditTarget("user", admin.id)
+    secret = pyotp.random_base32()
+    totp = pyotp.TOTP(secret)
+
+    await service.confirm_totp_setup(
+        session_id=_session_for(store, admin), secret=secret, code=totp.at(current["value"])
+    )
+    (enabled,) = _calls(audit_events, "totp_enabled")
+    assert enabled.actor == _user_actor(admin, "password")  # the password session's method
+    assert enabled.target == expected_target
+
+    code = totp.at(current["value"])
+    verified, _ = await service.verify_totp(session_id=_session_for(store, admin), code=code, ttl_seconds=3600)
+    (signed_in,) = _calls(audit_events, "login_success")
+    assert signed_in.actor == _user_actor(admin, "totp")
+    assert signed_in.target == expected_target
+    assert signed_in.details == {"method": "totp", "username": admin.username}
+
+    with pytest.raises(TotpInvalidCodeError):
+        await service.verify_totp(session_id=_session_for(store, admin), code=code, ttl_seconds=3600)
+    (replayed,) = _calls(audit_events, "login_failed")
+    assert replayed.actor is None
+    assert replayed.target is None
+    assert replayed.severity is AuditSeverity.WARNING
+    assert replayed.details == {"method": "totp", "username": admin.username, "reason": "bad_totp"}
+
+    current["value"] += 60
+    await service.disable_totp(session_id=verified, code=totp.at(current["value"]))
+    (disabled,) = _calls(audit_events, "totp_disabled")
+    assert disabled.actor == _user_actor(admin, "password")
+    assert disabled.target == expected_target
 
 
 @pytest.mark.asyncio

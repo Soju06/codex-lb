@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
 from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
     require_dashboard_permission,
@@ -148,7 +148,7 @@ async def consume_account_usage_reset_credit(
     request: Request,
     account_id: str,
     payload: AccountUsageResetConsumeRequest | None = None,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUsageResetConsumeResponse:
     try:
@@ -173,6 +173,8 @@ async def consume_account_usage_reset_credit(
     AuditService.log_async(
         "account_usage_reset_consumed",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", result.account_id),
         details={
             "account_id": result.account_id,
             "code": result.code,
@@ -188,7 +190,7 @@ async def export_account_auth(
     request: Request,
     response: Response,
     account_id: str,
-    _export_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_EXPORT)),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_EXPORT)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountAuthExportResponse:
     result = await context.service.export_auth(account_id)
@@ -200,6 +202,8 @@ async def export_account_auth(
     AuditService.log_async(
         "account_auth_exported",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", account_id),
         details={"account_id": account_id},
     )
     return result
@@ -212,7 +216,7 @@ async def export_account_auth(
 )
 async def import_account(
     request: Request,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountImportResponse:
     raise_for_unsupported_multipart_content_encoding(request)
@@ -232,6 +236,8 @@ async def import_account(
         AuditService.log_async(
             "account_created",
             actor_ip=request.client.host if request.client else None,
+            actor=AuditActor.from_principal(principal),
+            target=AuditTarget("account", response.account_id),
             details={"account_id": response.account_id},
         )
         return response
@@ -261,7 +267,7 @@ async def update_account(
     account_id: str,
     payload: AccountUpdateRequest,
     request: Request,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUpdateResponse:
     changed_fields = [field for field, value in payload.model_dump(exclude_unset=True).items() if value is not None]
@@ -276,6 +282,8 @@ async def update_account(
     AuditService.log_async(
         "account_updated",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", account_id),
         details={
             "account_id": account_id,
             "changed_fields": changed_fields,
@@ -289,7 +297,7 @@ async def probe_account(
     request: Request,
     account_id: str,
     body: AccountProbeRequest | None = None,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountProbeResponse:
     requested_model = body.model if body is not None else None
@@ -327,6 +335,8 @@ async def probe_account(
     AuditService.log_async(
         "account_probed",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", result.account_id),
         details={
             "account_id": result.account_id,
             "probe_status_code": result.probe_status_code,
@@ -401,7 +411,7 @@ async def delete_account(
     request: Request,
     account_id: str,
     delete_history: bool = False,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountDeleteResponse:
     success = await context.service.delete_account(account_id, delete_history=delete_history)
@@ -410,6 +420,8 @@ async def delete_account(
     AuditService.log_async(
         "account_deleted",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", account_id),
         details={"account_id": account_id, "delete_history": delete_history},
     )
     return AccountDeleteResponse(status="deleted")

@@ -13,7 +13,7 @@ from typing import Literal, Protocol
 import bcrypt
 import segno
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditAuthMethod, AuditService, AuditSeverity, AuditTarget
 from app.core.auth.dashboard_access import (
     ADMIN_GRANTS,
     ASSIGNABLE_PRESET_ROLES,
@@ -22,6 +22,7 @@ from app.core.auth.dashboard_access import (
     DashboardRole,
     Grants,
     Permission,
+    PresetRoleSlug,
     permission_strings,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode
@@ -346,10 +347,39 @@ class LoginTarget:
 
     username: str | None
     user: DashboardUser | None
+    #: Why no account was resolved (audit ``login_failed.reason``); ``None`` when ``user`` is set.
+    refusal_reason: str | None = None
 
 
 def _user_is_active(user: DashboardUser | None) -> bool:
     return user is not None and user.status == DashboardUserStatus.ACTIVE.value
+
+
+def _user_actor(user: DashboardUser, auth_method: str) -> AuditActor:
+    return AuditActor(user_id=user.id, username=user.username, role_slug=user.role.slug, auth_method=auth_method)
+
+
+def _user_target(user: DashboardUser) -> AuditTarget:
+    return AuditTarget("user", user.id)
+
+
+_GUEST_ACTOR = AuditActor(
+    user_id=None,
+    username=None,
+    role_slug=PresetRoleSlug.GUEST.value,
+    auth_method=AuditAuthMethod.GUEST.value,
+)
+
+
+def log_login_failed(actor_ip: str | None, method: str, reason: str, *, username: str | None = None) -> None:
+    """Audit a refused sign-in: no actor (nobody authenticated), warning severity, a fixed reason."""
+
+    AuditService.log_async(
+        "login_failed",
+        actor_ip=actor_ip,
+        details={"method": method, "username": username, "reason": reason},
+        severity=AuditSeverity.WARNING,
+    )
 
 
 def role_summary(user: DashboardUser) -> DashboardUserRoleSummary:
@@ -572,8 +602,10 @@ class DashboardAuthService:
 
         A single-user install accepts a login without a username. With more
         than one active local password user the username is mandatory
-        (``UsernameRequiredError``), and that refusal must not spend any
-        rate-limit budget.
+        (``UsernameRequiredError``); that refusal must not spend any rate-limit
+        budget, and the route decides whether to audit it. Why a username did
+        not resolve is kept on the target for the audit row only; the client
+        never learns it.
         """
 
         auth_state = await self._repository.get_local_auth_state()
@@ -586,9 +618,13 @@ class DashboardAuthService:
             return LoginTarget(username=user.username if user is not None else None, user=user)
         normalized = normalize_username(username)
         if not is_valid_username(normalized):
-            return LoginTarget(username=normalized, user=None)
+            return LoginTarget(username=normalized, user=None, refusal_reason="invalid_username")
         user = await self._repository.get_user_by_username(normalized)
-        return LoginTarget(username=normalized, user=user if _user_is_active(user) else None)
+        if user is None:
+            return LoginTarget(username=normalized, user=None, refusal_reason="unknown_identity")
+        if not _user_is_active(user):
+            return LoginTarget(username=normalized, user=None, refusal_reason="disabled_user")
+        return LoginTarget(username=normalized, user=user)
 
     async def verify_user_password(
         self,
@@ -610,14 +646,11 @@ class DashboardAuthService:
         matched = _check_password(password, stored_hash if stored_hash is not None else _dummy_password_hash())
         if user is None or stored_hash is None or not matched:
             username_is_valid = target.username is not None and is_valid_username(target.username)
-            AuditService.log_async(
-                "login_failed",
-                actor_ip=actor_ip,
-                details={
-                    "method": AUTH_METHOD_PASSWORD,
-                    "username": target.username if username_is_valid else None,
-                    "reason": "bad_password" if target.username is None or username_is_valid else "invalid_username",
-                },
+            log_login_failed(
+                actor_ip,
+                AUTH_METHOD_PASSWORD,
+                target.refusal_reason or "bad_password",
+                username=target.username if username_is_valid else None,
             )
             raise InvalidCredentialsError("Invalid credentials")
         await self._repository.touch_last_login(user.id)
@@ -627,6 +660,8 @@ class DashboardAuthService:
                 "login_success",
                 actor_ip=actor_ip,
                 details={"method": AUTH_METHOD_PASSWORD, "username": user.username},
+                actor=_user_actor(user, AUTH_METHOD_PASSWORD),
+                target=_user_target(user),
             )
         return user
 
@@ -648,12 +683,12 @@ class DashboardAuthService:
         generation = settings.guest_session_generation
         current = settings.guest_password_hash
         if current is None:
-            AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"})
+            AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"}, actor=_GUEST_ACTOR)
             return GuestVerification(password_verified=False, guest_session_generation=generation)
         if password is None or not _check_password(password, current):
-            AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "guest"})
+            log_login_failed(actor_ip, AuditAuthMethod.GUEST.value, "bad_password")
             raise InvalidCredentialsError("Invalid credentials")
-        AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"})
+        AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"}, actor=_GUEST_ACTOR)
         return GuestVerification(password_verified=True, guest_session_generation=generation)
 
     async def change_password(
@@ -663,18 +698,35 @@ class DashboardAuthService:
         new_password: str,
         *,
         actor_ip: str | None = None,
+        auth_method: str | None = None,
     ) -> int:
-        """Rotate the password and revoke every other session; returns the new generation."""
+        """Rotate the password and revoke every other session; returns the new generation.
+
+        ``auth_method`` is how the calling session authenticated (audit actor).
+        """
 
         if user.password_hash is None:
             raise PasswordNotConfiguredError("Password is not configured")
         if not _check_password(current_password, user.password_hash):
             raise InvalidCredentialsError("Invalid credentials")
         rotated = await self._repository.rotate_user_password(user.id, _hash_password(new_password))
-        AuditService.log_async("password_changed", actor_ip=actor_ip, details={"username": user.username})
+        AuditService.log_async(
+            "password_changed",
+            actor_ip=actor_ip,
+            details={"username": user.username},
+            actor=_user_actor(user, auth_method or AUTH_METHOD_PASSWORD),
+            target=_user_target(user),
+        )
         return rotated.session_generation
 
-    async def remove_password(self, user: DashboardUser, password: str, *, actor_ip: str | None = None) -> None:
+    async def remove_password(
+        self,
+        user: DashboardUser,
+        password: str,
+        *,
+        actor_ip: str | None = None,
+        auth_method: str | None = None,
+    ) -> None:
         """Solo-install only: drop the user's credentials so the install is passwordless again."""
 
         if user.password_hash is None:
@@ -684,14 +736,28 @@ class DashboardAuthService:
         if await self._repository.count_active_users() != 1 or await self._repository.count_user_identities(user.id):
             raise OtherUsersExistError("Other users exist; log out everywhere instead of removing the password")
         await self._repository.clear_user_credentials(user.id)
-        AuditService.log_async("password_removed", actor_ip=actor_ip, details={"username": user.username})
+        AuditService.log_async(
+            "password_removed",
+            actor_ip=actor_ip,
+            details={"username": user.username},
+            actor=_user_actor(user, auth_method or AUTH_METHOD_PASSWORD),
+            target=_user_target(user),
+        )
 
-    async def revoke_user_sessions(self, user: DashboardUser, *, actor_ip: str | None = None) -> int:
+    async def revoke_user_sessions(
+        self,
+        user: DashboardUser,
+        *,
+        actor_ip: str | None = None,
+        auth_method: str | None = None,
+    ) -> int:
         generation = await self._repository.bump_session_generation(user.id)
         AuditService.log_async(
             "user_sessions_revoked",
             actor_ip=actor_ip,
             details={"username": user.username, "scope": "self"},
+            actor=_user_actor(user, auth_method or AUTH_METHOD_PASSWORD),
+            target=_user_target(user),
         )
         return generation
 
@@ -738,7 +804,13 @@ class DashboardAuthService:
         if not verification.is_valid:
             raise TotpInvalidCodeError("Invalid TOTP code")
         await self._repository.set_user_totp_secret(resolved.user.id, self._encryptor.encrypt(secret))
-        AuditService.log_async("totp_enabled", actor_ip=actor_ip, details={"username": resolved.user.username})
+        AuditService.log_async(
+            "totp_enabled",
+            actor_ip=actor_ip,
+            details={"username": resolved.user.username},
+            actor=_user_actor(resolved.user, resolved.state.auth_method or AUTH_METHOD_PASSWORD),
+            target=_user_target(resolved.user),
+        )
 
     async def verify_totp(
         self,
@@ -760,15 +832,25 @@ class DashboardAuthService:
             window=1,
             last_verified_step=user.totp_last_verified_step,
         )
+        # Snapshot the attribution before the counter write: a refused replay
+        # rolls the session back, which expires ``user`` and would turn a later
+        # attribute read into a lazy load outside the async context.
+        username = user.username
+        actor = _user_actor(user, AuditAuthMethod.TOTP.value)
+        target = _user_target(user)
         if not verification.is_valid or verification.matched_step is None:
-            AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "totp"})
+            log_login_failed(actor_ip, AuditAuthMethod.TOTP.value, "bad_totp", username=username)
             raise TotpInvalidCodeError("Invalid TOTP code")
         updated = await self._repository.try_advance_user_totp_step(user.id, verification.matched_step)
         if not updated:
-            AuditService.log_async("login_failed", actor_ip=actor_ip, details={"method": "totp"})
+            log_login_failed(actor_ip, AuditAuthMethod.TOTP.value, "bad_totp", username=username)
             raise TotpInvalidCodeError("Invalid TOTP code")
         AuditService.log_async(
-            "login_success", actor_ip=actor_ip, details={"method": "totp", "username": user.username}
+            "login_success",
+            actor_ip=actor_ip,
+            details={"method": "totp", "username": username},
+            actor=actor,
+            target=target,
         )
         # Honor the existing password-session expiry so that a TTL change
         # mid-flow (between password login and TOTP submission) cannot extend
@@ -808,7 +890,13 @@ class DashboardAuthService:
         if not updated:
             raise TotpInvalidCodeError("Invalid TOTP code")
         await self._repository.set_user_totp_secret(user.id, None)
-        AuditService.log_async("totp_disabled", actor_ip=actor_ip, details={"username": user.username})
+        AuditService.log_async(
+            "totp_disabled",
+            actor_ip=actor_ip,
+            details={"username": user.username},
+            actor=_user_actor(user, resolved.state.auth_method or AUTH_METHOD_PASSWORD),
+            target=_user_target(user),
+        )
 
     def logout(self, session_id: str | None) -> None:
         self._session_store.delete(session_id)
@@ -826,6 +914,9 @@ _dashboard_session_store = DashboardSessionStore()
 _totp_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="totp")
 _password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
 _guest_password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="guest_password")
+#: Bounds the anonymous ``login_failed`` rows a client can append from refusals
+#: that by design spend no password budget (``username_required``).
+_login_failed_audit_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="login_failed_audit")
 
 
 def get_dashboard_session_store() -> DashboardSessionStore:
@@ -842,6 +933,10 @@ def get_password_rate_limiter() -> DatabaseRateLimiter:
 
 def get_guest_password_rate_limiter() -> DatabaseRateLimiter:
     return _guest_password_rate_limiter
+
+
+def get_login_failed_audit_rate_limiter() -> DatabaseRateLimiter:
+    return _login_failed_audit_rate_limiter
 
 
 def _qr_svg_data_uri(payload: str) -> str:

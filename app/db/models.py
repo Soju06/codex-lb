@@ -718,7 +718,19 @@ class AccountLimitWarmup(Base):
 
 
 class AuditLog(Base):
+    """Append-only record of dashboard actions.
+
+    The ``actor_*`` columns are a snapshot of the acting account, not foreign
+    keys: a row must survive the deletion of the account it names. They are all
+    NULL for rows written before attribution existed and for principals without
+    an account row (implicit local admin, trusted header, guest).
+    """
+
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("idx_audit_logs_actor_user_id", "actor_user_id"),
+        Index("idx_audit_logs_target", "target_type", "target_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False, index=True)
@@ -726,6 +738,13 @@ class AuditLog(Base):
     actor_ip: Mapped[str | None] = mapped_column(String(50), nullable=True)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    actor_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    actor_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    actor_role_slug: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    auth_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'info'"))
 
 
 class SchedulerLeader(Base):

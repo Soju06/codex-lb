@@ -128,7 +128,7 @@ def _login_context(user: DashboardUser | None, *, target: LoginTarget | None = N
 
 
 def _limiter() -> SimpleNamespace:
-    return SimpleNamespace(check_and_increment=AsyncMock(), clear_for_key=AsyncMock())
+    return SimpleNamespace(check=AsyncMock(), check_and_increment=AsyncMock(), clear_for_key=AsyncMock())
 
 
 def _store() -> SimpleNamespace:
@@ -312,7 +312,12 @@ async def test_login_password_username_required_does_not_spend_budget():
         ),
     )
     ip_limiter = _limiter()
-    with patch("app.modules.dashboard_auth.api.get_password_rate_limiter", return_value=ip_limiter):
+    audit_limiter = _limiter()
+    with (
+        patch("app.modules.dashboard_auth.api.get_password_rate_limiter", return_value=ip_limiter),
+        patch("app.modules.dashboard_auth.api.get_login_failed_audit_rate_limiter", return_value=audit_limiter),
+        patch("app.modules.dashboard_auth.api.log_login_failed") as log_login_failed,
+    ):
         with pytest.raises(DashboardValidationError) as exc_info:
             await login_password(
                 _build_login_request("/api/dashboard-auth/password/login"),
@@ -321,7 +326,12 @@ async def test_login_password_username_required_does_not_spend_budget():
             )
 
     assert exc_info.value.code == "username_required"
+    # Audited, but only through the read-only password check plus the audit budget.
+    ip_limiter.check.assert_awaited_once()
     ip_limiter.check_and_increment.assert_not_awaited()
+    audit_limiter.check_and_increment.assert_awaited_once()
+    log_login_failed.assert_called_once()
+    assert log_login_failed.call_args.args[1:] == ("password", "username_required")
 
 
 @pytest.mark.asyncio

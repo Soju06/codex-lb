@@ -14,7 +14,7 @@ from python_socks import ProxyType
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
 from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole, Permission
 from app.core.auth.dependencies import (
     ensure_dashboard_permission,
@@ -1661,6 +1661,8 @@ async def update_settings(
     AuditService.log_async(
         "settings_changed",
         actor_ip=actor_ip,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("settings", "dashboard"),
         details={"changed_fields": changed_fields},
     )
     # M5 conversation archive: enabling turns the proxy into a full

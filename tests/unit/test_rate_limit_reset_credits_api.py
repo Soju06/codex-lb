@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 from fastapi import Request
 
+from app.core.auth.dashboard_access import DashboardAuthMode, admin_principal
 from app.core.auth.dependencies import require_dashboard_write_access
 from app.core.auth.refresh import RefreshError
 from app.core.clients.rate_limit_reset_credits import (
@@ -45,6 +46,7 @@ from app.modules.rate_limit_reset_credits.api import (
 from app.modules.rate_limit_reset_credits.store import RateLimitResetCreditsStore
 
 pytestmark = pytest.mark.unit
+_ADMIN_PRINCIPAL = admin_principal(auth_mode=DashboardAuthMode.STANDARD, auth_method="local_bootstrap")
 
 
 class StubEncryptor(TokenEncryptor):
@@ -1380,7 +1382,7 @@ async def test_consume_handler_returns_404_when_account_missing() -> None:
         await consume_rate_limit_reset_credit(
             _fake_request(),
             account_id="missing",
-            _write_access=None,
+            principal=_ADMIN_PRINCIPAL,
             context=cast(Any, fake_context),
         )
 
@@ -1419,7 +1421,7 @@ async def test_consume_handler_audits_live_available_count_before_when_cache_mis
     response = await consume_rate_limit_reset_credit(
         _fake_request(),
         account_id="acc_1",
-        _write_access=None,
+        principal=_ADMIN_PRINCIPAL,
         context=cast(Any, fake_context),
     )
 
@@ -1459,7 +1461,7 @@ async def test_consume_handler_invalidates_selection_cache_on_permanent_refresh_
         await consume_rate_limit_reset_credit(
             _fake_request(),
             account_id="acc_1",
-            _write_access=None,
+            principal=_ADMIN_PRINCIPAL,
             context=cast(Any, fake_context),
         )
 
@@ -1497,7 +1499,7 @@ async def test_consume_handler_keeps_selection_cache_on_transient_refresh_error(
         await consume_rate_limit_reset_credit(
             _fake_request(),
             account_id="acc_1",
-            _write_access=None,
+            principal=_ADMIN_PRINCIPAL,
             context=cast(Any, fake_context),
         )
 

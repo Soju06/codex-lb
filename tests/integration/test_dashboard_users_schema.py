@@ -322,8 +322,12 @@ async def test_dashboard_users_migration_backfills_the_compat_admin(tmp_path, le
 REPROJECT_REVISION = "20260909_020000_reproject_compat_admin_credentials"
 
 
-def test_reproject_revision_is_the_head() -> None:
-    assert _HEAD_REVISION == REPROJECT_REVISION
+def test_reproject_revision_is_on_the_single_head_path() -> None:
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(_build_alembic_config(get_settings().database_url))
+    assert script.get_heads() == [_HEAD_REVISION]
+    assert REPROJECT_REVISION in {revision.revision for revision in script.iterate_revisions(_HEAD_REVISION, "base")}
 
 
 @pytest.mark.parametrize(

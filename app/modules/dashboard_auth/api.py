@@ -6,7 +6,7 @@ from time import time
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
 from app.core.auth.dashboard_access import (
     ADMIN_GRANTS,
     GUEST_GRANTS,
@@ -79,8 +79,10 @@ from app.modules.dashboard_auth.service import (
     assignable_role_ids,
     get_dashboard_session_store,
     get_guest_password_rate_limiter,
+    get_login_failed_audit_rate_limiter,
     get_password_rate_limiter,
     get_totp_rate_limiter,
+    log_login_failed,
 )
 
 router = APIRouter(
@@ -466,6 +468,7 @@ async def login_password(
     except PasswordNotConfiguredError as exc:
         raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
     except UsernameRequiredError as exc:
+        await _audit_username_required(request, context)
         raise DashboardValidationError(str(exc), code="username_required") from exc
 
     limiter = get_password_rate_limiter()
@@ -487,6 +490,25 @@ async def login_password(
     return await _issue_user_session_response(request, context, user, totp_verified=False, auth_method="password")
 
 
+async def _audit_username_required(request: Request, context: DashboardAuthContext) -> None:
+    """Audit a ``username_required`` refusal without letting it become an unbounded row source.
+
+    The refusal itself never spends password budget, so a client that is
+    already at the password limit gets no row, and a dedicated per-client
+    budget (same 8/60 s shape, own counter) bounds the rows a client can add
+    without ever touching the password limiter's counter.
+    """
+
+    try:
+        await get_password_rate_limiter().check(_session_client_key(request, prefix="password_login"), context.session)
+        await get_login_failed_audit_rate_limiter().check_and_increment(
+            _session_client_key(request, prefix="login_failed_audit"), context.session
+        )
+    except DashboardRateLimitError:
+        return
+    log_login_failed(_client_host(request), "password", "username_required")
+
+
 @router.post("/password/change")
 async def change_password(
     request: Request,
@@ -500,7 +522,11 @@ async def change_password(
 
     try:
         await context.service.change_password(
-            resolved.user, payload.current_password, new_password, actor_ip=_client_host(request)
+            resolved.user,
+            payload.current_password,
+            new_password,
+            actor_ip=_client_host(request),
+            auth_method=resolved.state.auth_method,
         )
     except PasswordNotConfiguredError as exc:
         raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
@@ -553,13 +579,18 @@ async def remove_guest_password(
 async def revoke_guest_sessions(
     request: Request,
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
-    _principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.SECURITY_WRITE)),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.SECURITY_WRITE)),
 ) -> JSONResponse:
     """Invalidate every outstanding guest session without touching guest settings."""
 
     await context.service.revoke_guest_sessions()
     await get_settings_cache().invalidate()
-    AuditService.log_async("guest_sessions_revoked", actor_ip=_client_host(request))
+    AuditService.log_async(
+        "guest_sessions_revoked",
+        actor_ip=_client_host(request),
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("settings", "guest_access"),
+    )
     return JSONResponse(status_code=200, content={"status": "ok"})
 
 
@@ -572,7 +603,12 @@ async def remove_password(
     resolved = await _require_management_session(request, context)
 
     try:
-        await context.service.remove_password(resolved.user, payload.password, actor_ip=_client_host(request))
+        await context.service.remove_password(
+            resolved.user,
+            payload.password,
+            actor_ip=_client_host(request),
+            auth_method=resolved.state.auth_method,
+        )
     except PasswordNotConfiguredError as exc:
         raise DashboardBadRequestError(str(exc), code="password_not_configured") from exc
     except InvalidCredentialsError as exc:
@@ -597,7 +633,9 @@ async def logout_everywhere(
     """Revoke every session of the signed-in account, including this one."""
 
     resolved = await _require_password_session(request, context)
-    await context.service.revoke_user_sessions(resolved.user, actor_ip=_client_host(request))
+    await context.service.revoke_user_sessions(
+        resolved.user, actor_ip=_client_host(request), auth_method=resolved.state.auth_method
+    )
     await get_dashboard_users_cache().invalidate()
     response = JSONResponse(status_code=200, content={"status": "ok"})
     response.delete_cookie(key=DASHBOARD_SESSION_COOKIE, path="/")

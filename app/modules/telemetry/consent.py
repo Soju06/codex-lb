@@ -18,6 +18,7 @@ from app.modules.settings.repository import SettingsRepository
 ConsentState = Literal["undecided", "enabled", "disabled"]
 ConsentSource = Literal["env", "persisted", "default"]
 _VALID_STATES = frozenset({"undecided", "enabled", "disabled"})
+TELEMETRY_NOTICE_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,15 @@ class TelemetryConsentStore:
         self._settings = settings or get_settings()
         self._encryptor = encryptor or TokenEncryptor()
         self._repository = SettingsRepository(session)
+
+    async def acknowledge_notice(self) -> None:
+        row = await self._repository.get_or_create()
+        row.telemetry_notice_version = TELEMETRY_NOTICE_VERSION
+        await self._repository.commit_refresh(row)
+
+    async def notice_version(self) -> int:
+        row = await self._repository.get_or_create()
+        return int(row.telemetry_notice_version)
 
     async def resolve(self) -> ResolvedConsent:
         row = await self._repository.get_or_create()

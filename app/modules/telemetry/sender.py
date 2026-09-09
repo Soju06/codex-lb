@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import platform
 from collections.abc import Awaitable, Callable
 
 import aiohttp
 
+from app import __version__
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
 from app.db.session import get_background_session
@@ -14,12 +16,14 @@ from app.modules.telemetry.consent import TelemetryConsentStore, TelemetryIdenti
 from app.modules.telemetry.schemas import (
     DeploymentMethod,
     TelemetryActivation,
+    TelemetryDay,
     TelemetryModel,
     TelemetryOptOut,
     TelemetryRegistration,
     TelemetrySnapshot,
     build_snapshot_envelope,
 )
+from app.modules.telemetry.snapshot import deployment_method
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +62,32 @@ class TelemetrySender:
                     await self._send_with_retry(lambda: self._transmit_once(session, snapshot, identity))
         except Exception as exc:
             logger.debug("Anonymous telemetry transmission failed", exc_info=exc)
+
+    async def send_day(self, day: TelemetryDay) -> bool:
+        try:
+            active, identity = await self._context_provider()
+            if not active or identity is None or day.instance_id != identity.instance_id:
+                return False
+            async with asyncio.timeout(_TIMEOUT_SECONDS):
+                timeout = aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS)
+                async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+                    await self._send_with_retry(lambda: self._transmit_day_once(session, day, identity))
+            return True
+        except Exception as exc:
+            logger.debug("Anonymous telemetry day transmission failed", exc_info=exc)
+            return False
+
+    async def _transmit_day_once(
+        self, session: aiohttp.ClientSession, day: TelemetryDay, identity: TelemetryIdentity
+    ) -> None:
+        await self._ensure_activated(
+            session,
+            identity,
+            app_version=__version__,
+            deployment_mode=deployment_method(),
+            os_arch=f"{platform.system().lower()}/{platform.machine().lower()}",
+        )
+        await self._post_signed(session, "/v1/day", _json_bytes(day), identity, accepted={200, 202})
 
     async def send_opt_out(
         self,
@@ -218,4 +248,6 @@ async def _load_sender_context() -> tuple[bool, TelemetryIdentity | None]:
 
 
 def _json_bytes(value: TelemetryModel) -> bytes:
-    return json.dumps(value.model_dump(mode="json"), separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return json.dumps(value.model_dump(mode="json", by_alias=True), separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )

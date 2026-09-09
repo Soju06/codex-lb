@@ -7,7 +7,7 @@ import platform
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -25,6 +25,7 @@ from app.core.usage.logs import NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
+    AccountStatus,
     ApiFirewallAllowlist,
     ApiKey,
     AutomationJob,
@@ -36,17 +37,24 @@ from app.db.models import (
 from app.db.sqlite_utils import sqlite_db_path_from_url
 from app.modules.reports.repository import ReportsRepository, _report_conditions
 from app.modules.settings.repository import SettingsRepository
-from app.modules.telemetry.clients import ClientCount, catalog_model_name, client_shares
+from app.modules.telemetry.clients import ClientCount, catalog_model_name, client_family, client_shares
 from app.modules.telemetry.schemas import (
+    LATENCY_BUCKET_EDGES,
+    TPS_BUCKET_EDGES,
     AccountsSnapshot,
     ActiveConsentState,
+    DayDimensions,
+    DayErrors,
     DeploymentMethod,
     DeploymentSnapshot,
+    DimensionEntry,
     FeaturesSnapshot,
+    Histogram,
     ModelUsageSnapshot,
-    PlanMixSnapshot,
+    Outcomes,
     RequestKindsSnapshot,
     ServiceTierMixSnapshot,
+    TelemetryDay,
     TelemetrySnapshot,
     TransportMixSnapshot,
     UsageSnapshot,
@@ -174,7 +182,7 @@ class TelemetrySnapshotBuilder:
         conditions = _report_conditions(start, now, None, None, None)
         dashboard_settings = await SettingsRepository(self._session).get_or_create()
 
-        account_count, workspace_accounts, plan_counts = await self._account_aggregates()
+        account_count, workspace_accounts, plan_counts, status_counts = await self._account_aggregates()
         database_size = await self._database_size_bytes()
         models = await self._model_usage(conditions, summary.total_requests)
         request_kinds = self._request_kind_mix(summary.total_requests)
@@ -189,12 +197,6 @@ class TelemetrySnapshotBuilder:
 
         method = deployment_method()
         db_backend = "postgres" if self._session.get_bind().dialect.name == "postgresql" else "sqlite"
-        plan_mix = PlanMixSnapshot(
-            plus=count_bucket(plan_counts.get("plus", 0)),
-            pro=count_bucket(plan_counts.get("pro", 0)),
-            team=count_bucket(plan_counts.get("team", 0)),
-            free=count_bucket(plan_counts.get("free", 0)),
-        )
         return TelemetrySnapshot(
             consent=consent,
             instance_id=instance_id,
@@ -211,8 +213,9 @@ class TelemetrySnapshotBuilder:
                 reverse_proxy=self._settings.firewall_trust_proxy_headers,
             ),
             accounts=AccountsSnapshot(
-                pool_bucket=count_bucket(account_count),
-                plan_mix=plan_mix,
+                total=account_count,
+                per_plan=plan_counts,
+                per_status=status_counts,
                 workspace_accounts=workspace_accounts,
                 routing_policy=_canonical_routing_policy(dashboard_settings.routing_strategy),
                 limit_warmup_enabled=dashboard_settings.limit_warmup_enabled,
@@ -267,7 +270,33 @@ class TelemetrySnapshotBuilder:
             ),
         )
 
-    async def _account_aggregates(self) -> tuple[int, bool, dict[str, int]]:
+    async def build_day(self, instance_id: str, utc_date: date) -> TelemetryDay:
+        start = datetime(utc_date.year, utc_date.month, utc_date.day)
+        end = start + timedelta(days=1)
+        now = utcnow()
+        if utc_date >= now.date():
+            raise ValueError("in-progress UTC day cannot be aggregated")
+        result = await self._session.execute(
+            select(RequestLog).where(RequestLog.requested_at >= start, RequestLog.requested_at < end)
+        )
+        rows = list(result.scalars())
+        return _build_day_from_rows(instance_id, utc_date, rows)
+
+    async def completed_days(self, instance_id: str, *, acknowledged: date | None = None) -> list[TelemetryDay]:
+        today = utcnow().date()
+        result = await self._session.execute(
+            select(func.date(RequestLog.requested_at)).distinct().order_by(func.date(RequestLog.requested_at).desc())
+        )
+        days = [
+            date.fromisoformat(str(value))
+            for (value,) in result.all()
+            if value
+            and date.fromisoformat(str(value)) < today
+            and (acknowledged is None or date.fromisoformat(str(value)) > acknowledged)
+        ]
+        return [await self.build_day(instance_id, day) for day in days]
+
+    async def _account_aggregates(self) -> tuple[int, bool, dict[str, int], dict[str, int]]:
         result = await self._session.execute(
             select(
                 func.count().label("accounts"),
@@ -276,10 +305,14 @@ class TelemetrySnapshotBuilder:
         )
         row = result.one()
         plan_result = await self._session.execute(select(Account.plan_type, func.count()).group_by(Account.plan_type))
-        plan_counts: defaultdict[str, int] = defaultdict(int)
+        plan_counts: defaultdict[str, int] = defaultdict(int, {"plus": 0, "pro": 0, "team": 0, "free": 0})
         for raw_plan, raw_count in plan_result.all():
             plan_counts[_canonical_plan(raw_plan)] += int(raw_count)
-        return int(row.accounts), bool(row.workspace), dict(plan_counts)
+        status_result = await self._session.execute(select(Account.status, func.count()).group_by(Account.status))
+        status_counts: defaultdict[str, int] = defaultdict(int, {status.value: 0 for status in AccountStatus})
+        for raw_status, raw_count in status_result.all():
+            status_counts[str(getattr(raw_status, "value", raw_status))] += int(raw_count)
+        return int(row.accounts), bool(row.workspace), dict(plan_counts), dict(status_counts)
 
     async def _model_usage(self, conditions: list[Predicate], total_requests: int) -> list[ModelUsageSnapshot]:
         result = await self._session.execute(
@@ -480,3 +513,135 @@ def deployment_method() -> DeploymentMethod:
     except importlib.metadata.PackageNotFoundError:
         return "bare"
     return "pip"
+
+
+def _bucket_index(value: float, edges: tuple[float, ...]) -> int:
+    for index, edge in enumerate(edges):
+        if value <= edge:
+            return index
+    return len(edges) - 1
+
+
+def _histogram(values: list[float], edges: tuple[float, ...]) -> Histogram:
+    counts: defaultdict[str, int] = defaultdict(int)
+    for value in values:
+        counts[str(_bucket_index(value, edges))] += 1
+    return Histogram(sample_count=len(values), buckets=dict(counts))
+
+
+def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog]) -> TelemetryDay:
+    catalog = frozenset(get_model_registry().get_models_with_fallback())
+    upstream_allow = {"ws", "http"}
+    tiers = {"default", "flex", "priority"}
+    families = {
+        "codex-cli",
+        "codex-desktop",
+        "codex-vscode",
+        "openai-sdk-python",
+        "openai-sdk-js",
+        "vercel-ai-sdk",
+        "opencode",
+        "browser",
+        "script",
+        "other",
+    }
+    upstream_codes = _SAFE_UPSTREAM_ERROR_CODES
+    phases = {"connect", "response_create", "bridge_queue", "stream", "settle", "other"}
+    dims: dict[str, dict[str, list[RequestLog]]] = {
+        key: defaultdict(list) for key in ("models", "clients", "transport", "upstream_transport", "service_tier")
+    }
+    global_rows: list[RequestLog] = rows
+    for row in rows:
+        model = catalog_model_name(row.model, catalog)
+        if model not in catalog and model != "other":
+            model = "other"
+        dims["models"][model].append(row)
+        dims["clients"][
+            client_family(row.useragent_group) if client_family(row.useragent_group) in families else "other"
+        ].append(row)
+        dims["transport"]["ws" if row.transport == "websocket" else "http_bridge"].append(row)
+        dims["upstream_transport"][
+            row.upstream_transport if row.upstream_transport in upstream_allow else "other"
+        ].append(row)
+        tier = row.actual_service_tier or row.service_tier or "default"
+        dims["service_tier"][tier if tier in tiers else "other"].append(row)
+
+    def entry(name: str, subset: list[RequestLog]) -> DimensionEntry:
+        latency = [float(r.latency_ms) for r in subset if r.latency_ms is not None and r.latency_ms >= 0]
+        ttft = [
+            float(r.latency_first_token_ms)
+            for r in subset
+            if r.latency_first_token_ms is not None and r.latency_first_token_ms >= 0
+        ]
+        tps: list[float] = []
+        for r in subset:
+            numerator = (r.output_tokens or 0) - (r.reasoning_tokens or 0)
+            denominator = (r.latency_ms or 0) - (r.latency_first_token_ms or 0)
+            if numerator > 0 and denominator > 0:
+                tps.append(numerator * 1000.0 / denominator)
+        return DimensionEntry(
+            name=name,
+            requests=len(subset),
+            latency_ms=_histogram(latency, LATENCY_BUCKET_EDGES),
+            ttft_ms=_histogram(ttft, LATENCY_BUCKET_EDGES),
+            tps=_histogram(tps, TPS_BUCKET_EDGES),
+        )
+
+    def entries(key: str) -> list[DimensionEntry]:
+        values = list(dims[key].items())
+        if key == "models":
+            named = [(name, subset) for name, subset in values if name != "other"]
+            existing_other = [r for name, subset in values if name == "other" for r in subset]
+            if len(named) > 10:
+                named.sort(key=lambda item: (-len(item[1]), item[0]))
+                values = named[:10] + [("other", existing_other + [r for _, subset in named[10:] for r in subset])]
+            else:
+                values = named + ([("other", existing_other)] if existing_other else [])
+        return [entry(name, subset) for name, subset in sorted(values)]
+
+    statuses = {
+        "success": sum(r.status not in NON_ERROR_STATUSES and r.status != "cancelled" for r in rows),
+        "error": sum(r.status not in NON_ERROR_STATUSES and r.status != "cancelled" for r in rows),
+        "cancelled": sum(r.status == "cancelled" for r in rows),
+    }
+    # Successful terminals are represented by the normal non-error status set; errors are explicit error terminals.
+    statuses["success"] = sum(r.status in NON_ERROR_STATUSES for r in rows)
+    statuses["error"] = sum(r.status not in NON_ERROR_STATUSES and r.status != "cancelled" for r in rows)
+
+    def count_map(values: list[str | None], allowed: set[str]) -> dict[str, int]:
+        out: defaultdict[str, int] = defaultdict(int)
+        for value in values:
+            out[value if value in allowed else "other"] += 1
+        return dict(out)
+
+    return TelemetryDay(
+        instance_id=instance_id,
+        utc_date=utc_date,
+        dimensions=DayDimensions(
+            models=entries("models"),
+            clients=entries("clients"),
+            transport=entries("transport"),
+            upstream_transport=entries("upstream_transport"),
+            service_tier=entries("service_tier"),
+            request_kinds=RequestKindsSnapshot(responses=0, chat=0, images=0, unknown=len(rows)),
+            global_=entry("global", global_rows),
+        ),
+        errors=DayErrors(
+            upstream_error_class=count_map(
+                [r.upstream_error_code for r in rows if r.status not in NON_ERROR_STATUSES], set(upstream_codes)
+            ),
+            failure_phase=count_map([r.failure_phase for r in rows if r.status not in NON_ERROR_STATUSES], phases),
+            http_status_class=count_map(
+                [
+                    "429"
+                    if r.upstream_status_code == 429
+                    else f"{int(r.upstream_status_code) // 100}xx"
+                    if r.upstream_status_code
+                    else "other"
+                    for r in rows
+                ],
+                {"2xx", "4xx", "429", "5xx"},
+            ),
+            outcomes=Outcomes(**statuses),
+        ),
+    )

@@ -207,3 +207,28 @@ An instance with accounts `alice@corp.com` (workspace W1) + 12 others, a custom 
 - `senpi` traffic appears in `clients` under `other` and inflates `clients_other_ratio`
 - the strings `alice`, `corp.com`, `W1`, `corp-internal-gpt`, `senpi` appear nowhere in the
   serialized payload (schema snapshot test enforces this)
+
+## Payload schema v2 additions
+
+The heartbeat retains the v1 envelope and rolling `usage_7d` as non-summable instantaneous
+state, with `schema_version: 2`. `accounts.total`, `accounts.per_plan`, and
+`accounts.per_status` are exact local row counts; `features.api_keys_bucket`,
+`usage_7d.cost_usd_bucket`, and `deploy.db_size_bucket` remain bucket strings (`unknown` is used
+when database size cannot be measured).
+
+A completed UTC day is sent as one `/v1/day` body with `instance_id`, `utc_date`, and
+`schema_version`. It contains independent marginal lists for `models`, `clients`, `transport`,
+`upstream_transport`, and `service_tier`, each with exact `requests` and `latency_ms`, `ttft_ms`,
+and `tps` histograms, plus `global` and integer `request_kinds` counts. No entry is nested under
+another dimension. Unknown allowlist values are `other`; models are capped at ten named entries
+plus `other`.
+
+Histograms use sparse bucket indexes with `sample_count` equal to the sum of counts. Latency and
+TTFT upper boundaries are `[0, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200,
+102400, +inf]`; TPS boundaries are `[0, 5, 10, 20, 40, 80, 160, 320, 640, 1280, +inf]`.
+TPS uses `(output_tokens - coalesce(reasoning_tokens,0))*1000/(latency_ms-
+latency_first_token_ms)` only for positive numerator and denominator.
+
+Day errors contain exact `upstream_error_class`, `failure_phase`, `http_status_class` (with `429`
+separate), and `outcomes` counts. Unregistered values map to `other`; free-text failure fields
+are omitted. Per-instance detail is retained by the collector for 365 days.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+from datetime import timedelta
 
 from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,11 +14,13 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
+from app.core.utils.time import utcnow
 from app.db.session import get_session
-from app.modules.telemetry.consent import ResolvedConsent, TelemetryConsentStore
+from app.modules.telemetry.consent import TELEMETRY_NOTICE_VERSION, ResolvedConsent, TelemetryConsentStore
 from app.modules.telemetry.schemas import (
     TelemetryConsentResponse,
     TelemetryConsentUpdate,
+    TelemetryPreview,
     TelemetrySnapshotEnvelope,
     build_snapshot_envelope,
 )
@@ -42,11 +45,15 @@ async def get_telemetry_consent(
 ) -> TelemetryConsentResponse:
     store = TelemetryConsentStore(session)
     consent = await store.resolve()
+    notice_version = await store.notice_version()
+    eligible_notice = (consent.state == "undecided" and consent.source == "default") or (
+        notice_version < TELEMETRY_NOTICE_VERSION and consent.source != "env"
+    )
     return await _response(
         session,
         store,
         consent,
-        include_preview=include_preview or (consent.state == "undecided" and consent.source == "default"),
+        include_preview=include_preview or eligible_notice,
     )
 
 
@@ -93,8 +100,15 @@ async def _response(
             identity.instance_id,
             consent=snapshot_consent,
         )
-        preview = build_snapshot_envelope(snapshot)
+        preview = TelemetryPreview(
+            heartbeat=build_snapshot_envelope(snapshot),
+            day=await TelemetrySnapshotBuilder(session).build_day(
+                identity.instance_id, (utcnow() - timedelta(days=1)).date()
+            ),
+        )
+        await store.acknowledge_notice()
     return TelemetryConsentResponse(
+        notice_version=TELEMETRY_NOTICE_VERSION,
         state=consent.state,
         source=consent.source,
         active=consent.active,

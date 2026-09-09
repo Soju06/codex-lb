@@ -1047,6 +1047,8 @@ class DashboardSettings(Base):
     )
     telemetry_instance_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     telemetry_private_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    telemetry_notice_version: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    telemetry_day_acknowledged_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: Mapped[int] = mapped_column(
         Integer,
         default=3600,

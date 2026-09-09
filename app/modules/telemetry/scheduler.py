@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
@@ -72,11 +73,25 @@ class TelemetryScheduler:
                         return
                     assert consent.state != "disabled"
                     identity = await store.get_or_create_identity()
-                    snapshot = await TelemetrySnapshotBuilder(session).build(
-                        identity.instance_id,
-                        consent=consent.state,
+                    builder = TelemetrySnapshotBuilder(session)
+                    snapshot = await builder.build(identity.instance_id, consent=consent.state)
+                    acknowledged = (await store._repository.get_or_create()).telemetry_day_acknowledged_date
+                    days = await builder.completed_days(
+                        identity.instance_id, acknowledged=acknowledged.date() if acknowledged else None
                     )
+                    to_send = days[:7]
+                    skipped = days[7:8]
                 await self.sender.send_snapshot(snapshot)
+                results = [await self.sender.send_day(day) for day in to_send]
+                watermark = (
+                    skipped[0].utc_date if skipped else (to_send[-1].utc_date if to_send and all(results) else None)
+                )
+                if watermark is not None:
+                    async with get_background_session() as ack_session:
+                        ack_store = TelemetryConsentStore(ack_session)
+                        row = await ack_store._repository.get_or_create()
+                        row.telemetry_day_acknowledged_date = datetime.combine(watermark, datetime.min.time())
+                        await ack_store._repository.commit_refresh(row)
             except Exception as exc:
                 logger.debug("Anonymous telemetry scheduler tick failed", exc_info=exc)
 

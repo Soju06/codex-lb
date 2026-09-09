@@ -27,6 +27,7 @@ class SettingsRepository:
 
         row = DashboardSettings(
             id=_SETTINGS_ID,
+            telemetry_notice_version=2,
             sticky_threads_enabled=True,
             upstream_stream_transport="auto",
             prohibit_fast_mode=False,

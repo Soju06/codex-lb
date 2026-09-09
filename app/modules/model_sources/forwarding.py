@@ -14,6 +14,7 @@ import aiohttp
 
 from app.core.clients.http import lease_model_source_session
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import classify_event_type
@@ -213,7 +214,9 @@ def source_stream_idle_seconds() -> float:
     cap so a silent source never holds a client stream open for hours.
     """
 
-    return min(float(get_settings().stream_idle_timeout_seconds), SOURCE_STREAM_IDLE_CAP_SECONDS)
+    return min(
+        float(with_dashboard_overrides(get_settings()).stream_idle_timeout_seconds), SOURCE_STREAM_IDLE_CAP_SECONDS
+    )
 
 
 def classify_responses_frame(event_type: str | None) -> FrameKind:

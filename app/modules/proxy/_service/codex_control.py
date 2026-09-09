@@ -36,7 +36,11 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_codex_control_request
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
-from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import (
+    AccountSelection,
+    effective_account_concurrency_caps,
+    effective_routing_tunables,
+)
 from app.modules.proxy.selection_errors import selection_failure_response
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -244,6 +248,7 @@ class _CodexControlMixin:
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
             concurrency_caps=effective_account_concurrency_caps(settings),
+            routing_tunables=effective_routing_tunables(settings),
         )
         if selection.account is None:
             return None

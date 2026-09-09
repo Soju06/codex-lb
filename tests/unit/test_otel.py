@@ -1259,7 +1259,7 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
         http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_advertise_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    settings_cache = SimpleNamespace(invalidate=AsyncMock(), get=AsyncMock(return_value=SimpleNamespace()))
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     api_key_limit_reset_scheduler = _DummyScheduler()
@@ -1349,7 +1349,7 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
         metrics_enabled=False,
         shutdown_drain_timeout_seconds=1,
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    settings_cache = SimpleNamespace(invalidate=AsyncMock(), get=AsyncMock(return_value=SimpleNamespace()))
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     api_key_limit_reset_scheduler = _DummyScheduler()

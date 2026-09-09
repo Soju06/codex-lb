@@ -23,7 +23,10 @@ The **Tier** column is the configuration policy for each setting
 - **T1** instance topology — legitimately differs per replica or deployment; env only.
 - **T2** secret — encrypted in the database; env is at most a seed.
 - **T3** behaviour tunable / feature flag — the dashboard is the management
-  surface; a T3 setting that is still env-only is migration backlog.
+  surface. `T3 → dashboard` marks a setting that already has a
+  `dashboard_settings` column of the same name: the dashboard value wins and
+  the variable is a deprecated fallback. `T3 (env, migrating)` marks the
+  remaining env-only backlog.
 - **T4** incident debug — env allowed, dashboard toggle recommended.
 
 ## `PORT` (special case, no prefix)
@@ -107,7 +110,7 @@ anything else belongs in `app/core/config/settings.py`.
 | --- | --- | --- | --- |
 | `CODEX_LB_UPSTREAM_BASE_URL` | T1 | `str` | `'https://chatgpt.com/backend-api'` |
 | `CODEX_LB_UPSTREAM_COMPACT_TIMEOUT_SECONDS` | T3 | `float \| None` | `None` |
-| `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | T3 | `float` | `8.0` |
+| `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | T3 (dashboard) | `float` | `8.0` |
 | `CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES` | T3 | `int` | `15728640` |
 | `CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS` | T1 | `float` | `60.0` |
 | `CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV` | T1 | `bool` | auto-detected from outbound proxy env vars |
@@ -116,16 +119,16 @@ anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
-| `CODEX_LB_COMPACT_REQUEST_BUDGET_SECONDS` | T3 | `float` | `180.0` |
+| `CODEX_LB_COMPACT_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `180.0` |
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT` | T1 | `int` | `100` |
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT_PER_HOST` | T1 | `int` | `50` |
 | `CODEX_LB_HTTP_RESPONSES_STREAM_REQUEST_BUDGET_SECONDS` | T3 | `float` | `7200.0` |
 | `CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES` | T3 | `int` | `33554432` |
 | `CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES` | T3 | `int` | `134217728` |
 | `CODEX_LB_MAX_SSE_EVENT_BYTES` | T3 | `int` | `16777216` |
-| `CODEX_LB_SSE_KEEPALIVE_INTERVAL_SECONDS` | T3 | `float` | `10.0` |
-| `CODEX_LB_STREAM_IDLE_TIMEOUT_SECONDS` | T3 | `float` | `7200.0` |
-| `CODEX_LB_TRANSCRIPTION_REQUEST_BUDGET_SECONDS` | T3 | `float` | `120.0` |
+| `CODEX_LB_SSE_KEEPALIVE_INTERVAL_SECONDS` | T3 (dashboard) | `float` | `10.0` |
+| `CODEX_LB_STREAM_IDLE_TIMEOUT_SECONDS` | T3 (dashboard) | `float` | `7200.0` |
+| `CODEX_LB_TRANSCRIPTION_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `120.0` |
 
 ## HTTP Responses session bridge
 
@@ -161,20 +164,20 @@ anything else belongs in `app/core/config/settings.py`.
 | --- | --- | --- | --- |
 | `CODEX_LB_PROXY_ACCOUNT_CAP_PARTITION_SCALE_DOWN_SECONDS` | T1 | `int` | `60` |
 | `CODEX_LB_PROXY_ACCOUNT_CAPS_SCOPE` | T1 | `'partitioned' \| 'replica'` | `'partitioned'` |
-| `CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED` | T3 | `bool` | `True` |
-| `CODEX_LB_PROXY_ACCOUNT_INFLIGHT_PENALTY_PCT` | T3 | `float` | `2.5` |
-| `CODEX_LB_PROXY_ACCOUNT_LEASE_TOKEN_WEIGHT` | T3 | `float` | `1.0` |
-| `CODEX_LB_PROXY_ACCOUNT_LEASE_TTL_SECONDS` | T3 | `float` | `900.0` |
+| `CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED` | T3 (dashboard) | `bool` | `True` |
+| `CODEX_LB_PROXY_ACCOUNT_INFLIGHT_PENALTY_PCT` | T3 (dashboard) | `float` | `2.5` |
+| `CODEX_LB_PROXY_ACCOUNT_LEASE_TOKEN_WEIGHT` | T3 (dashboard) | `float` | `1.0` |
+| `CODEX_LB_PROXY_ACCOUNT_LEASE_TTL_SECONDS` | T3 (dashboard) | `float` | `900.0` |
 | `CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT` | T3 (dashboard) | `int` | `4` |
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT` | T3 (dashboard) | `int` | `8` |
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` | T3 (dashboard) | `int` | `1` |
 | `CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS` | T3 | `float` | `10.0` |
 | `CODEX_LB_PROXY_API_KEY_FAIR_SHARE_CONGESTION_THRESHOLD_PCT` | T3 (dashboard) | `int` | `0` |
 | `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT` | T3 | `int` | `64` |
-| `CODEX_LB_PROXY_DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT_SECONDS` | T3 | `float` | `120.0` |
-| `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` | T3 | `int` | `1800` |
+| `CODEX_LB_PROXY_DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT_SECONDS` | T3 (dashboard) | `float` | `120.0` |
+| `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` | T3 (dashboard) | `int` | `1800` |
 | `CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS` | T3 | `float` | `5.0` |
-| `CODEX_LB_PROXY_REQUEST_BUDGET_SECONDS` | T3 | `float` | `600.0` |
+| `CODEX_LB_PROXY_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `600.0` |
 | `CODEX_LB_PROXY_RESPONSE_CREATE_LIMIT` | T3 | `int` | `256` |
 | `CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT` | T3 | `int` | `64` |
 | `CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS` | T3 | `list[str]` | `[]` |

@@ -41,11 +41,10 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture(autouse=True)
 async def _force_usage_weighted_routing(async_client) -> None:
-    current = await async_client.get("/api/settings")
-    assert current.status_code == 200
-    payload = current.json()
-    payload["routingStrategy"] = "usage_weighted"
-    response = await async_client.put("/api/settings", json=payload)
+    # Minimal patch on purpose: echoing the GET body back would store every
+    # inheritable effective value (account caps, timeouts) as an explicit
+    # dashboard value and override the Settings these tests monkeypatch.
+    response = await async_client.put("/api/settings", json={"routingStrategy": "usage_weighted"})
     assert response.status_code == 200
 
 
@@ -2785,6 +2784,79 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
     chunks = [cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2)) for _ in range(2)]
     assert any("response.completed" in chunk for chunk in chunks)
     assert seen_client_ip == ["203.0.113.7"]
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_keepalive_interval_honours_dashboard_value_over_environment(async_client, monkeypatch):
+    """A dashboard ``sse_keepalive_interval_seconds`` (0.01 s) beats the 10 s environment value.
+
+    The dashboard value is stored through the settings API, read back through
+    the ``SettingsCache`` snapshot and bound the way ``DashboardOverridesMiddleware``
+    binds it for a request; the keepalive injector then sees it through the
+    settings facade. Outside the binding the environment value applies and no
+    keepalive shows up within the same window.
+    """
+    from app.core.config.dashboard_overrides import dashboard_overrides_bound, with_dashboard_overrides
+    from app.core.config.settings import get_settings as get_environment_settings
+    from app.core.config.settings_cache import get_settings_cache
+
+    response = await async_client.put("/api/settings", json={"sseKeepaliveIntervalSeconds": 0.01})
+    assert response.status_code == 200
+    snapshot = await get_settings_cache().get()
+    assert snapshot.sse_keepalive_interval_seconds == 0.01
+
+    # Real startup settings (10 s keepalive) minus the HTTP bridge, which this
+    # fake service does not model; the facade overlay is what is under test.
+    base_settings = get_environment_settings().model_copy(update={"http_responses_session_bridge_enabled": False})
+    assert base_settings.sse_keepalive_interval_seconds == 10.0
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: with_dashboard_overrides(base_settings))
+    monkeypatch.setattr(
+        proxy_api_module.proxy_service_module, "get_settings", lambda: with_dashboard_overrides(base_settings)
+    )
+
+    class _FakeService:
+        async def rate_limit_headers(self):
+            return {}
+
+        async def stream_responses(self, *args, **kwargs):
+            del args, kwargs
+            _signal_propagated_capacity_startup_ready()
+            await asyncio.sleep(0.3)
+            yield _sse_event({"type": "response.completed", "response": {"id": "resp_dashboard_keepalive"}})
+
+    def _request() -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/backend-api/codex/responses",
+                "headers": [],
+                "client": ("203.0.113.7", 54321),
+            }
+        )
+
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    )
+    context = ProxyContext(service=cast(proxy_module.ProxyService, _FakeService()))
+
+    try:
+        with dashboard_overrides_bound(snapshot):
+            bound = await proxy_api_module._stream_responses(_request(), payload, context, api_key=None)
+            assert isinstance(bound, StreamingResponse)
+            first_chunk = await asyncio.wait_for(bound.body_iterator.__aiter__().__anext__(), timeout=0.2)
+        assert first_chunk == SSE_KEEPALIVE_FRAME
+
+        unbound = await proxy_api_module._stream_responses(_request(), payload, context, api_key=None)
+        assert isinstance(unbound, StreamingResponse)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(unbound.body_iterator.__aiter__().__anext__(), timeout=0.15)
+    finally:
+        # The database is reset per test, but the process-wide SettingsCache is
+        # not: clear the dashboard value and drop the cached row so a following
+        # test cannot observe the 0.01 s keepalive within the cache TTL.
+        await async_client.put("/api/settings", json={"sseKeepaliveIntervalSeconds": None})
+        await get_settings_cache().invalidate(propagate=False)
 
 
 @pytest.mark.asyncio

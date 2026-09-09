@@ -76,6 +76,7 @@ from app.core.clients.usage import (
 )
 from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -4561,7 +4562,7 @@ async def v1_chat_completions(
         return StreamingResponse(
             inject_sse_keepalives(
                 chat_stream,
-                get_settings().sse_keepalive_interval_seconds,
+                with_dashboard_overrides(get_settings()).sse_keepalive_interval_seconds,
                 on_keepalive=lambda: _record_stream_keepalive("chat_completions"),
             ),
             media_type="text/event-stream",
@@ -6133,7 +6134,7 @@ async def _wrap_source_responses_public_stream(
     """
     use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
     keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     event_blocks = _iter_source_sse_event_blocks(
         stream,
         max_event_bytes=getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024),
@@ -6829,7 +6830,7 @@ async def _stream_responses(
     if not preserve_native_failure_lifecycle:
         stream = inject_sse_keepalives(
             stream,
-            get_settings().sse_keepalive_interval_seconds,
+            with_dashboard_overrides(get_settings()).sse_keepalive_interval_seconds,
             keepalive_frame=keepalive_frame,
             on_keepalive=lambda: _record_stream_keepalive("responses"),
         )

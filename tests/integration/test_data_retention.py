@@ -17,6 +17,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import run_fold_pass
 from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
 from app.modules.proxy.model_source_pins import ModelSourcePinRepository, PinWrite
+from app.modules.reports.rollup import run_report_fold_pass
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
 
@@ -95,6 +96,7 @@ async def test_request_log_pruning_respects_watermark_and_preserves_totals(async
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
     await run_conversation_fold_pass(now=now)
+    await run_report_fold_pass(now=now)
 
     async def _request_usage():
         response = await async_client.get("/api/accounts")
@@ -192,6 +194,7 @@ async def test_pruning_drains_backlog_across_batches(db_setup, monkeypatch):
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
     await run_conversation_fold_pass(now=now)
+    await run_report_fold_pass(now=now)
     await _set_retention(request_logs=30)
     monkeypatch.setattr(retention_job, "BATCH_SIZE", 2)
     deleted = await run_retention_pass(now=now)
@@ -267,6 +270,7 @@ async def test_request_log_pruning_skipped_while_hourly_backfill_behind(db_setup
     # Hourly fold catches up -> min watermark is current -> pruning resumes.
     await run_hourly_fold_pass(now=now)
     await run_conversation_fold_pass(now=now)
+    await run_report_fold_pass(now=now)
     async with SessionLocal() as session:
         hourly_before = sorted(
             (await session.execute(sa_select(RequestUsageHourlyRollup))).scalars().all(),
@@ -348,6 +352,7 @@ async def test_request_log_pruning_skipped_while_conversation_backfill_behind(db
     assert (await run_retention_pass(now=now))["request_logs"] == 0
 
     await run_conversation_fold_pass(now=now)
+    await run_report_fold_pass(now=now)
     assert (await run_retention_pass(now=now))["request_logs"] == 1
     async with SessionLocal() as session:
         presence = (await session.execute(sa_select(RequestConversationHourlyRollup))).scalars().all()
@@ -511,6 +516,7 @@ async def test_api_key_totals_survive_pruning_and_match_pre_fold(db_setup, monke
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
     await run_conversation_fold_pass(now=now)
+    await run_report_fold_pass(now=now)
     assert await _key_summary() == before
 
     await _set_retention(request_logs=30)

@@ -1180,9 +1180,9 @@ class RequestLogsRepository:
 
         Only rows in the un-folded live tail — strictly above the lifetime
         watermark (its fold interval is ``(start, end]``) AND at or above the
-        hourly watermark (half-open ``[start, end)``) — are rewritten:
+        hourly and report watermarks (half-open ``[start, end)``) — are rewritten:
         ``model`` is a rollup dimension and ``cost_usd`` a folded measure, so
-        mutating a row either rollup already captured would silently diverge
+        mutating a row any rollup already captured would silently diverge
         that rollup from raw (and the divergence becomes unrepairable once
         retention prunes the raw row).
         A matching row below the watermarks can only be a client-reused
@@ -1203,6 +1203,7 @@ class RequestLogsRepository:
                         select(
                             AccountUsageRollupState.folded_through,
                             AccountUsageRollupState.hourly_folded_through,
+                            AccountUsageRollupState.reports_folded_through,
                         ).where(AccountUsageRollupState.id == 1)
                     )
                 ).first()
@@ -1214,14 +1215,15 @@ class RequestLogsRepository:
                 stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
                 if watermarks is not None:
                     # A row is un-folded by EVERY rollup only when it clears
-                    # both bounds, each matching its fold's own interval
+                    # all bounds, each matching its fold's own interval
                     # convention: the lifetime fold is `(start, end]`
                     # (inclusive end — a row AT the watermark is folded), the
-                    # hourly fold is `[start, end)`.
-                    folded_through, hourly_folded_through = watermarks
+                    # hourly and report folds are `[start, end)`.
+                    folded_through, hourly_folded_through, reports_folded_through = watermarks
                     stmt = stmt.where(
                         RequestLog.requested_at > folded_through,
                         RequestLog.requested_at >= hourly_folded_through,
+                        RequestLog.requested_at >= reports_folded_through,
                     )
                 result_rows = await self._session.execute(stmt)
                 logs = list(result_rows.scalars())

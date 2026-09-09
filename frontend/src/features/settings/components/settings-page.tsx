@@ -24,6 +24,7 @@ import { ResetCreditSettings } from "@/features/settings/components/reset-credit
 import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
+import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream-timeout-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
@@ -36,6 +37,16 @@ import { getErrorMessageOrNull } from "@/utils/errors";
 const TotpSettings = lazy(() =>
   import("@/features/settings/components/totp-settings").then((m) => ({ default: m.TotpSettings })),
 );
+
+// C2-2 routing/overload: a layer move (dashboard <-> inherited) without a
+// value change must still reset the routing form's drafts.
+const ROUTING_OVERLOAD_PROVENANCE_KEYS = [
+  "proxy_overload_isolation_seconds",
+  "proxy_account_error_rate_weighting_enabled",
+  "proxy_account_inflight_penalty_pct",
+  "proxy_account_lease_token_weight",
+  "proxy_account_lease_ttl_seconds",
+] as const;
 
 const FIREWALL_LAYOUT_QUERY_KEYS = [
   ["accounts", "list"],
@@ -208,6 +219,12 @@ export function SettingsPage() {
                    settings.proxyAccountStreamRecoveryReserveOverride,
                    settings.proxyApiKeyFairShareCongestionThresholdPct,
                    settings.proxyApiKeyFairShareCongestionThresholdPctOverride,
+                   settings.proxyOverloadIsolationSeconds,
+                   settings.proxyAccountErrorRateWeightingEnabled,
+                   settings.proxyAccountInflightPenaltyPct,
+                   settings.proxyAccountLeaseTokenWeight,
+                   settings.proxyAccountLeaseTtlSeconds,
+                   ...ROUTING_OVERLOAD_PROVENANCE_KEYS.map((name) => settings.provenance?.[name]?.source ?? ""),
                 ].join(":")}
                 settings={settings}
                 accounts={accountsQuery.data ?? []}
@@ -242,6 +259,21 @@ export function SettingsPage() {
                   settings.usageHistoryRetentionOverrideDays,
                   settings.requestLogRetentionDays,
                   settings.usageHistoryRetentionDays,
+                ].join(":")}
+                settings={settings}
+                busy={controlsDisabled}
+                onSave={handleSave}
+              />
+              <UpstreamTimeoutSettings
+                key={[
+                  settings.version,
+                  settings.upstreamConnectTimeoutSeconds,
+                  settings.proxyRequestBudgetSeconds,
+                  settings.compactRequestBudgetSeconds,
+                  settings.transcriptionRequestBudgetSeconds,
+                  settings.streamIdleTimeoutSeconds,
+                  settings.proxyDownstreamWebsocketIdleTimeoutSeconds,
+                  settings.sseKeepaliveIntervalSeconds,
                 ].join(":")}
                 settings={settings}
                 busy={controlsDisabled}

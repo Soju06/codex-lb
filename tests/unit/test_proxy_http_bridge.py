@@ -52,6 +52,7 @@ from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._service import support as proxy_support_module
 from app.modules.proxy._service.http_bridge import accepted_replay as http_bridge_accepted_replay_module
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
@@ -25738,6 +25739,7 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
         account_id: str | None = None,
         surface: str = "websocket",
         apply_gate_timeout: bool = True,
+        routing_tunables: RoutingTunables | None = None,
     ) -> None:
         del bridge_session
         del compact
@@ -33745,7 +33747,7 @@ async def test_http_bridge_submit_cooldown_suppression_spares_session_owned_by_c
         return allowed
 
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", gate)
-    monkeypatch.setattr(service, "_http_bridge_fair_share_threshold_pct", AsyncMock(return_value=0))
+    monkeypatch.setattr(service, "_http_bridge_reacquire_snapshot", AsyncMock(return_value=(0, RoutingTunables())))
     monkeypatch.setattr(
         service,
         "_ensure_http_bridge_session_stream_lease_locked",

@@ -261,14 +261,20 @@ class Settings(BaseSettings):
     database_alembic_auto_remap_enabled: bool = True
     database_migration_lock_timeout_seconds: float = Field(default=300.0, gt=0)
     upstream_base_url: str = "https://chatgpt.com/backend-api"
+    # T3 → dashboard (deprecated env alias, remove next minor)
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     stream_idle_timeout_seconds: float = Field(default=7200.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
     # Applies to both upstream SSE event buffering and upstream websocket message
     # frames. Keep the default aligned with the common 16 MiB websocket ceiling so
@@ -287,6 +293,7 @@ class Settings(BaseSettings):
     # must not lose its claim mid-work.
     token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
     auth_guardian_enabled: bool = True
+    # T3 → dashboard (deprecated env alias, remove next minor)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
     token_refresh_interval_days: int = 8
     usage_fetch_timeout_seconds: float = 10.0
@@ -486,6 +493,10 @@ class Settings(BaseSettings):
     # Pool-congestion utilization percentage at which per-API-key stream
     # fair-share throttling engages; 0 disables the gate entirely.
     proxy_api_key_fair_share_congestion_threshold_pct: int = Field(default=0, ge=0, le=100)
+    # C2-2 routing/overload: the five fields below have a same-name
+    # ``dashboard_settings`` column; the environment is only the fallback the
+    # dashboard inherits while its column is NULL (``RoutingTunables``).
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
     # Upstream overload (``server_is_overloaded``) handling. Soft backoff and
     # the isolation trip level are fixed constants in
@@ -493,13 +504,17 @@ class Settings(BaseSettings):
     # a sustained-overload account is isolated (fresh selection avoids it and
     # soft sticky owners are rerouted while another candidate exists). ``0``
     # disables the isolation stage and keeps the soft backoff only.
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_overload_isolation_seconds: int = Field(default=1800, ge=0)
     # Weighted routing strategies (``capacity_weighted``, ``relative_availability``)
     # discount each candidate's draw weight by its recent upstream error rate
     # (window, sample floor and weight floor are fixed constants in
     # ``app/modules/proxy/_load_balancer/error_rate.py``).
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_account_error_rate_weighting_enabled: bool = True
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
     proxy_account_caps_scope: Literal["partitioned", "replica"] = "partitioned"
     proxy_account_cap_partition_scale_down_seconds: int = Field(default=60, ge=30)

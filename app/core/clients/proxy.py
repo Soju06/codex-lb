@@ -62,6 +62,7 @@ from app.core.clients.native_egress import (
     discover_native_egress_client,
 )
 from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
 from app.core.errors import (
@@ -3641,7 +3642,7 @@ async def _stream_responses_with_session(
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
 ) -> AsyncGenerator[str, None]:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     headers = apply_codex_installation_headers(
         headers,
         codex_installation_id,
@@ -4732,7 +4733,7 @@ class _CompactCommandTransport:
     allow_direct_egress: bool = False
 
     async def execute(self) -> CompactResponsePayload:
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         native_header_order = _native_responses_header_order(self.headers)
         upstream_base = settings.upstream_base_url.rstrip("/")
         url = f"{upstream_base}/codex/responses"
@@ -5278,7 +5279,7 @@ async def thread_goal_request(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
 ) -> dict[str, JsonValue]:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/thread/goal/{operation}"
     upstream_headers = _build_upstream_headers(headers, access_token, account_id, accept="application/json")
@@ -5488,7 +5489,7 @@ async def codex_control_request(
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     allow_direct_egress: bool = True,
 ) -> CodexControlResponse:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     normalized_path = path.strip("/")
     effective_privacy_policy = (
@@ -5733,7 +5734,7 @@ async def _transcribe_audio_with_session(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = False,
 ) -> dict[str, JsonValue]:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/transcribe"
     upstream_headers = _build_upstream_transcribe_headers(

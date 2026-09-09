@@ -116,6 +116,15 @@ export const DashboardSettingsSchema = z
       .nullable()
       .optional()
       .default(null),
+    // C2-2 routing/overload: effective values; `provenance[<snake_name>]`
+    // says whether the dashboard, the environment or the default owns each.
+    proxyOverloadIsolationSeconds: z.number().int().min(0).optional().default(1800),
+    proxyAccountErrorRateWeightingEnabled: z.boolean().optional().default(true),
+    // Response side keeps the environment bound only (an inherited env value
+    // above the dashboard write cap of 100 must still parse).
+    proxyAccountInflightPenaltyPct: z.number().min(0).optional().default(2.5),
+    proxyAccountLeaseTokenWeight: z.number().min(0).optional().default(1),
+    proxyAccountLeaseTtlSeconds: z.number().positive().optional().default(900),
     openaiCacheAffinityMaxAgeSeconds: z
       .number()
       .int()
@@ -173,6 +182,18 @@ export const DashboardSettingsSchema = z
     usageHistoryRetentionDays: z.number().int().min(0).max(3650).optional().default(0),
     requestLogRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
     usageHistoryRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
+    // C2-1 timeouts: effective values (dashboard column, else environment,
+    // else code default); `provenance[<snake_name>]` says which. Optional with
+    // the code defaults so older backends still parse.
+    // Unbounded like the backend response: an environment value the server
+    // accepts must still render (the update schema below keeps the bounds).
+    upstreamConnectTimeoutSeconds: z.number().optional().default(8),
+    proxyRequestBudgetSeconds: z.number().optional().default(600),
+    compactRequestBudgetSeconds: z.number().optional().default(180),
+    transcriptionRequestBudgetSeconds: z.number().optional().default(120),
+    streamIdleTimeoutSeconds: z.number().optional().default(7200),
+    proxyDownstreamWebsocketIdleTimeoutSeconds: z.number().optional().default(120),
+    sseKeepaliveIntervalSeconds: z.number().optional().default(10),
     // Optional so responses from backends that predate provenance still parse.
     provenance: z.record(z.string(), SettingProvenanceSchema).optional(),
     // C2-3 resilience toggles: effective values; `provenance[<snake_name>]`
@@ -230,6 +251,13 @@ export const SettingsUpdateRequestSchema = z
     proxyAccountStreamLimit: z.number().int().min(0).nullable().optional(),
     proxyAccountStreamRecoveryReserve: z.number().int().min(0).nullable().optional(),
     proxyApiKeyFairShareCongestionThresholdPct: z.number().int().min(0).max(100).nullable().optional(),
+    // C2-2 routing/overload: tri-state like the caps (absent = unchanged,
+    // null = inherit, value = store); bounds mirror the backend schema.
+    proxyOverloadIsolationSeconds: z.number().int().min(0).nullable().optional(),
+    proxyAccountErrorRateWeightingEnabled: z.boolean().nullable().optional(),
+    proxyAccountInflightPenaltyPct: z.number().min(0).max(100).nullable().optional(),
+    proxyAccountLeaseTokenWeight: z.number().min(0).nullable().optional(),
+    proxyAccountLeaseTtlSeconds: z.number().positive().nullable().optional(),
     openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
     dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
     stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
@@ -264,6 +292,16 @@ export const SettingsUpdateRequestSchema = z
     softDrainEnabled: z.boolean().nullable().optional(),
     deterministicFailoverEnabled: z.boolean().nullable().optional(),
     circuitBreakerEnabled: z.boolean().nullable().optional(),
+    // C2-1 timeouts, tri-state like the caps: absent = unchanged, null = clear
+    // (inherit environment / default), value = store. Cross-field invariants
+    // are enforced by the backend against the effective values.
+    upstreamConnectTimeoutSeconds: z.number().positive().max(86400).nullable().optional(),
+    proxyRequestBudgetSeconds: z.number().positive().max(86400).nullable().optional(),
+    compactRequestBudgetSeconds: z.number().positive().max(86400).nullable().optional(),
+    transcriptionRequestBudgetSeconds: z.number().positive().max(86400).nullable().optional(),
+    streamIdleTimeoutSeconds: z.number().positive().max(86400).nullable().optional(),
+    proxyDownstreamWebsocketIdleTimeoutSeconds: z.number().positive().max(86400).nullable().optional(),
+    sseKeepaliveIntervalSeconds: z.number().min(0).max(86400).nullable().optional(),
   })
   .superRefine((settings, ctx) => {
     if (

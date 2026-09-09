@@ -50,6 +50,7 @@ from app.core.clients.proxy import (
     _openai_error_detail,
     filter_inbound_headers,
 )
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorEnvelope, openai_error
@@ -888,7 +889,7 @@ async def _connect_upstream_websocket(
     policy: _UpstreamWebSocketPolicy,
     subprotocols: Sequence[str] = (),
 ) -> UpstreamWebSocket:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     if policy.include_responses_beta:
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
     else:

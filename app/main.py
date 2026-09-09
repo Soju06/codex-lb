@@ -28,8 +28,10 @@ from app.core.balancer import configure_replica_salt
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.clients.native_egress import close_discovered_native_egress_client
+from app.core.config.dashboard_overrides import effective_settings
 from app.core.config.key_fingerprint import verify_encryption_key_fingerprint
 from app.core.config.settings import (
+    Settings,
     _bridge_advertise_hostname_is_replica_specific,
     _parse_port_value,
     get_settings,
@@ -52,6 +54,7 @@ from app.core.middleware import (
     add_trusted_proxy_headers_middleware,
 )
 from app.core.middleware.dashboard_gzip import add_dashboard_gzip_middleware
+from app.core.middleware.dashboard_overrides import DashboardOverridesMiddleware
 from app.core.middleware.inflight import InFlightMiddleware
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.resilience.backpressure import BackpressureMiddleware
@@ -62,7 +65,7 @@ from app.core.retention.scheduler import build_data_retention_scheduler
 from app.core.runtime_logging import install_redacting_loop_exception_handler
 from app.core.scheduling.leader_election import get_leader_election
 from app.core.shutdown import close_control_plane_task_admission
-from app.core.timeout_invariants import validate_runtime_timeout_invariants
+from app.core.timeout_invariants import validate_runtime_timeout_invariants, validate_timeout_invariants
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
@@ -111,9 +114,11 @@ from app.modules.quota_planner import api as quota_planner_api
 from app.modules.quota_planner.scheduler import build_quota_planner_scheduler
 from app.modules.rate_limit_reset_credits import api as rate_limit_reset_credits_api
 from app.modules.reports import api as reports_api
+from app.modules.reports.cache import ReportsCaches
 from app.modules.request_logs import api as request_logs_api
 from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
+from app.modules.settings.service import warn_environment_shadowed_by_dashboard
 from app.modules.sticky_sessions import api as sticky_sessions_api
 from app.modules.sticky_sessions.cleanup_scheduler import (
     OperationRetentionCleanupResult,
@@ -445,10 +450,29 @@ async def _purge_operation_spool_on_startup(*, retention_seconds: float) -> int:
     return operation_purge_result.deleted_operations
 
 
+async def _report_dashboard_timeout_overrides(settings: Settings) -> None:
+    """Best-effort startup report on the dashboard-managed timeouts (C2-1).
+
+    Names env aliases the dashboard shadows and logs (never raises) invariant
+    violations of the effective values — a stored dashboard value can break a
+    combination the environment alone satisfies. A snapshot read failure must
+    not abort boot: the environment fallback stays in force until the cache
+    recovers.
+    """
+    try:
+        dashboard_settings_row = await get_settings_cache().get()
+    except Exception:  # noqa: BLE001 - startup must not depend on the snapshot
+        logger.debug("dashboard settings snapshot unavailable at startup; environment timeouts apply", exc_info=True)
+        return
+    warn_environment_shadowed_by_dashboard(dashboard_settings_row, settings)
+    validate_timeout_invariants(effective_settings(dashboard_settings_row, settings), strict=False, log=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
 
+    app.state.reports_caches = ReportsCaches()
     shutdown_state = import_module("app.core.shutdown")
     # First app code on uvicorn's loop: mask credential-bearing object reprs
     # (aiohttp ConnectionKey proxy URLs, BasicAuth) before the default handler
@@ -481,6 +505,7 @@ async def lifespan(app: FastAPI):
     if _auto_bootstrap_token:
         log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
+    await _report_dashboard_timeout_overrides(settings)
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready is True:
         startup_module.mark_bridge_durable_schema_ready()
@@ -699,7 +724,9 @@ async def lifespan(app: FastAPI):
         await svc.register(iid, endpoint_base_url=None)
         await _wait_for_bridge_advertise_endpoint(
             bridge_endpoint_base_url,
-            connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+            connect_timeout_seconds=effective_settings(
+                await get_settings_cache().get(), settings
+            ).upstream_connect_timeout_seconds,
         )
         await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
         startup_module.mark_bridge_registration_complete()
@@ -923,6 +950,10 @@ def create_app() -> FastAPI:
 
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
 
+    # Innermost of the app-level middlewares: binds the dashboard-managed
+    # settings overrides (C2-1 timeouts) for the request/socket once the
+    # admission middlewares below have let it through.
+    app.add_middleware(cast(Any, DashboardOverridesMiddleware))
     app.add_middleware(cast(Any, InFlightMiddleware))
     add_dashboard_gzip_middleware(app)
     add_dashboard_auth_proxy_middleware(app)

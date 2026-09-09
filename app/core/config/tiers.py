@@ -175,21 +175,14 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
 # "backlog" while none has been designed. Remove the entry in the PR that adds
 # the ``dashboard_settings`` column (the checker warns once it is redundant).
 MIGRATING: Final[dict[str, str]] = {
-    "upstream_connect_timeout_seconds": "backlog",
     "upstream_compact_timeout_seconds": "backlog",
-    "proxy_request_budget_seconds": "backlog",
     "http_responses_stream_request_budget_seconds": "backlog",
-    "compact_request_budget_seconds": "backlog",
-    "stream_idle_timeout_seconds": "backlog",
-    "sse_keepalive_interval_seconds": "backlog",
-    "proxy_downstream_websocket_idle_timeout_seconds": "backlog",
     "max_sse_event_bytes": "backlog",
     "upstream_response_create_max_bytes": "backlog",
     "oauth_timeout_seconds": "backlog",
     "token_refresh_timeout_seconds": "backlog",
     "token_refresh_claim_ttl_seconds": "backlog",
     "auth_guardian_enabled": "backlog",
-    "transcription_request_budget_seconds": "backlog",
     "token_refresh_interval_days": "backlog",
     "usage_fetch_timeout_seconds": "backlog",
     "usage_fetch_max_retries": "backlog",
@@ -230,11 +223,6 @@ MIGRATING: Final[dict[str, str]] = {
     "proxy_response_create_limit": "backlog",
     "proxy_compact_response_create_limit": "backlog",
     "proxy_admission_wait_timeout_seconds": "backlog",
-    "proxy_account_inflight_penalty_pct": "backlog",
-    "proxy_overload_isolation_seconds": "backlog",
-    "proxy_account_error_rate_weighting_enabled": "backlog",
-    "proxy_account_lease_token_weight": "backlog",
-    "proxy_account_lease_ttl_seconds": "backlog",
     "proxy_refresh_failure_cooldown_seconds": "backlog",
     "usage_refresh_auth_failure_cooldown_seconds": "backlog",
 }

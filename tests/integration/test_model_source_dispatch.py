@@ -603,6 +603,64 @@ async def test_limited_key_cancel_before_the_first_output_item_releases(async_cl
     assert get_source_bulkhead().in_flight(source_id) == 0
 
 
+def _cr_framed(payload: dict[str, Any]) -> bytes:
+    """A typed event block framed with bare CR line endings (legal SSE; LF and CRLF are what known servers emit)."""
+
+    return f"event: {payload['type']}\rdata: {json.dumps(payload)}\r\r".encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+async def test_limited_key_cancel_after_bare_cr_framed_bookkeeping_releases(
+    async_client, source_upstream, path: str
+) -> None:
+    """The settlement layer reads a relayed frame's ``event:`` line with the SSE boundary set (CR, LF or CRLF): a
+    bare-CR framed ``response.created`` / ``response.in_progress`` is bookkeeping, not an unknown content-bearing
+    type, so a client that leaves after them owes nothing."""
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    hold = asyncio.Event()
+    lifecycle = {"id": "resp_dispatch_1", "object": "response", "status": "in_progress", "output": []}
+    created = {"type": "response.created", "sequence_number": 0, "response": lifecycle}
+    in_progress = {"type": "response.in_progress", "sequence_number": 1, "response": lifecycle}
+    base_url = await source_upstream(
+        _sse_handler(
+            state,
+            before_hold=[_cr_framed(created), _cr_framed(in_progress)],
+            hold=hold,
+            after_hold=[_ITEM_ADDED, _completed(_USAGE)],
+        ),
+        handler_cancellation=True,
+        shutdown_timeout=1.0,
+    )
+    model = f"dispatch-cancel-after-cr-framed-{path.split('/')[1]}"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    stream = _AsgiStream(
+        app=_app(async_client),
+        path=path,
+        headers={"authorization": f"Bearer {key}", "originator": "codex_cli_rs"},
+        body=json.dumps({"model": model, "instructions": "hi", "input": [], "stream": True}).encode(),
+    )
+    runner = asyncio.create_task(stream.run())
+    await stream.wait_for_text("response.in_progress")
+    assert "response.output_item.added" not in stream.received().decode()
+    stream.disconnect()
+    await asyncio.wait_for(runner, timeout=10)
+    await _drain(async_client)
+    hold.set()
+
+    reservations = await _reservations(key_id)
+    assert [reservation.status for reservation in reservations] == ["released"]
+    rows = await _source_rows(source_id)
+    assert [(row.status, row.error_code) for row in rows] == [("cancelled", "client_disconnected")]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
 @pytest.mark.asyncio
 async def test_non_stream_without_usage_releases_and_answers_502(async_client, source_upstream) -> None:
     await _enable_api_key_auth(async_client)

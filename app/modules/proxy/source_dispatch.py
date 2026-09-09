@@ -49,7 +49,6 @@ designation itself.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import AsyncIterator, Coroutine, Mapping
 from dataclasses import dataclass, field
@@ -76,7 +75,7 @@ from app.core.utils.shared_future import (
     _await_result_deferring_cancellation,
     _await_task_deferring_cancellation,
 )
-from app.core.utils.sse import format_sse_event
+from app.core.utils.sse import _SSE_LINE_BOUNDARY, format_sse_event, parse_sse_data_json
 from app.db.models import ModelSource
 from app.db.session import get_background_session
 from app.modules.api_keys.service import (
@@ -261,23 +260,17 @@ def _is_event_frame(chunk: str) -> bool:
 def _relayed_event_type(frame: str) -> str | None:
     """Event type of a relayed frame: the ``event:`` line the public wrapper frames every typed event with, else the
     type of a raw pass-through block's ``data:`` JSON as the wrapper's own ``classify_event_type`` reads it (a
-    typeless ``{"error": {...}}`` record is an ``error`` terminal there too); ``None`` when neither names one."""
+    typeless ``{"error": {...}}`` record is an ``error`` terminal there too); ``None`` when neither names one.
+
+    Lines end at the SSE boundary set (CR, LF or CRLF -- ``_SSE_LINE_BOUNDARY``, never ``str.splitlines``, whose
+    extra Unicode breaks can sit unescaped inside a JSON string) and a multi-line ``data:`` is joined as the parser
+    joins it (``parse_sse_data_json``), so a spec-legal framing the wrapper relays verbatim classifies as the frame
+    the client parses: a bare-CR ``response.created`` is bookkeeping, not an unknown content-bearing type.
+    """
 
     if frame.startswith("event: "):
-        return frame[7:].split("\n", 1)[0].rstrip("\r")
-    for line in frame.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("data:"):
-            continue
-        data = stripped.removeprefix("data:").strip()
-        if not data or data == "[DONE]":
-            continue
-        try:
-            parsed = json.loads(data)
-        except ValueError:
-            return None
-        return classify_event_type(parsed)
-    return None
+        return _SSE_LINE_BOUNDARY.split(frame[7:], maxsplit=1)[0]
+    return classify_event_type(parse_sse_data_json(frame))
 
 
 def error_code_from_payload(payload: Mapping[str, JsonValue]) -> str | None:

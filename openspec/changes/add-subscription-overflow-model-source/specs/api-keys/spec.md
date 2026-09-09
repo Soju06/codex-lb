@@ -48,6 +48,13 @@ For Responses requests served by an OpenAI-compatible model source, the proxy SH
 - **THEN** the client received no content-bearing frame and the reservation is released
 - **AND** the request-log row records status `cancelled`
 
+#### Scenario: Client cancels after bare-CR framed bookkeeping
+
+- **GIVEN** an API key with a token limit streaming from a model source that frames its events with bare CR line endings (legal SSE) and emits `response.created` and `response.in_progress`, then pauses
+- **WHEN** the client disconnects after `response.in_progress` was relayed
+- **THEN** both frames were classified as bookkeeping and the reservation is released
+- **AND** the request-log row records status `cancelled`
+
 #### Scenario: Client cancels while content is parked ahead of response.created
 
 - **GIVEN** an API key with a token limit streaming from a model source that emits `response.output_text.delta` before any `response.created`

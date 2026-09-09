@@ -27,10 +27,10 @@ def _stub_audit_log(monkeypatch: pytest.MonkeyPatch) -> Mock:
     ``verify_password`` / ``verify_guest_password`` / ``verify_totp`` call
     ``AuditService.log_async``, which is fire-and-forget: it spawns an
     ``audit-log-login_*`` task that writes through the real database session.
-    These tests run against in-memory fakes with no provisioned schema, so the
-    task can never complete; left alone it outlives the test on the shared
-    session loop and trips later suites that assert the audit registry is
-    empty (tests/unit/test_otel.py lifespan drain test, issue #2209).
+    These tests return synchronously right after the call, before the loop
+    ever steps that task, so it stays pending on the shared session loop and
+    trips later suites that assert the audit registry is empty
+    (tests/unit/test_otel.py lifespan drain test, issue #2209).
     """
     log_async = Mock()
     monkeypatch.setattr(AuditService, "log_async", log_async)

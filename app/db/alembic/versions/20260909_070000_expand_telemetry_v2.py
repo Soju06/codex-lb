@@ -35,9 +35,7 @@ def upgrade() -> None:
                 )
             )
         if "telemetry_day_acknowledged_date" not in columns:
-            batch_op.add_column(
-                sa.Column("telemetry_day_acknowledged_date", sa.DateTime(timezone=True), nullable=True)
-            )
+            batch_op.add_column(sa.Column("telemetry_day_acknowledged_date", sa.DateTime(timezone=True), nullable=True))
 
 
 def downgrade() -> None:

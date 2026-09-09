@@ -58,11 +58,12 @@ backport. The main merge preserves these deletions and the dashboard-owned
 transport decision before native dispatch; Rust does not read the removed env setting.
 
 The pre-merge audit on 2026-09-09 extends through `d3f63331d`: #2198 merges
-the existing migration heads, #2200 corrects transport test fixtures, and
-#2187/#2190/#2185 centralize environment reads and retire or constrain settings.
-The transport-policy cleanup remains in Python before dispatch. None changes
-the migrated event parsers or native protocol; merging main preserves these
-fixes and removals without adding another Rust policy implementation.
+the existing migration heads, and #2200 corrects transport test fixtures.
+PRs #2187, #2190 and #2185 centralize environment reads and retire or constrain
+settings. The transport-policy cleanup remains in Python before dispatch.
+These changes leave the migrated event parsers and native protocol unchanged;
+merging main preserves these fixes and removals without adding another Rust
+policy implementation.
 
 The audit found corrections needed in this WebSocket slice: preserve original
 text and numeric values; use last-key precedence and typeless-error classification;

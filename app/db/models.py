@@ -1014,6 +1014,38 @@ class DashboardIdentity(Base):
     user: Mapped["DashboardUser"] = relationship("DashboardUser", back_populates="identities")
 
 
+class DashboardUserInvite(Base):
+    """A one-time invitation link for a pre-created (``status=invited``) account.
+
+    Only the SHA-256 of the token is stored; the plaintext is returned once when
+    the invite is issued or resent. A user holds at most one invite row
+    (resending rotates the token in place). Revoking or lazily expiring the
+    invite of an ``invited`` account deletes the account row with it, so no
+    orphan "invited" accounts remain. ``created_by_user_id`` is a snapshot, not
+    a foreign key: the invite must survive the inviter's deletion.
+    """
+
+    __tablename__ = "dashboard_user_invites"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sso_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    username_locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user: Mapped["DashboardUser"] = relationship("DashboardUser")
+
+
 class DashboardRoleRecord(Base):
     """A dashboard role: one of the five presets or an operator-defined custom role.
 

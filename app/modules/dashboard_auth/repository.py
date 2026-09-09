@@ -29,7 +29,12 @@ from app.db.models import (
 )
 from app.modules.dashboard_roles.repository import DashboardRolesRepository
 from app.modules.dashboard_users.compat import COMPAT_ADMIN_USER_ID
-from app.modules.dashboard_users.repository import DashboardUserCounts, DashboardUsersRepository, LocalAuthState
+from app.modules.dashboard_users.repository import (
+    DashboardUserCounts,
+    DashboardUsersRepository,
+    LocalAuthState,
+    utc_now,
+)
 from app.modules.settings.repository import SettingsRepository
 
 _SETTINGS_ID = 1
@@ -144,6 +149,12 @@ class DashboardAuthRepository:
 
     async def count_user_identities(self, user_id: str) -> int:
         return await self._users.count_identities(user_id)
+
+    async def count_live_invites(self) -> int:
+        return len(await self._users.list_live_invites(utc_now()))
+
+    async def acquire_write_intent(self) -> None:
+        await self._users.acquire_write_intent()
 
     async def get_user_counts(self) -> DashboardUserCounts:
         return await self._users.counts()
@@ -308,7 +319,22 @@ class DashboardAuthRepository:
 
         return await self._write_user(user_id, _user, _legacy, bump_generation=True)
 
-    async def set_user_totp_secret(self, user_id: str, secret_encrypted: bytes | None) -> DashboardUser:
+    async def set_user_totp_secret(
+        self,
+        user_id: str,
+        secret_encrypted: bytes | None,
+        *,
+        bump_generation: bool = False,
+        preserve_policy: bool = False,
+    ) -> DashboardUser:
+        """Set or clear the TOTP secret; an administrative reset also revokes every session.
+
+        Self-service disable on the compat admin also turns the install-wide
+        ``totp_required_on_login`` off in the legacy mirror (today's behaviour);
+        an administrative reset passes ``preserve_policy`` so the mirror only
+        clears the secret and counter and the policy stays as configured.
+        """
+
         def _user(user: DashboardUser) -> None:
             user.totp_secret_encrypted = secret_encrypted
             user.totp_last_verified_step = None
@@ -316,10 +342,10 @@ class DashboardAuthRepository:
         def _legacy(row: DashboardSettings) -> None:
             row.totp_secret_encrypted = secret_encrypted
             row.totp_last_verified_step = None
-            if secret_encrypted is None:
+            if secret_encrypted is None and not preserve_policy:
                 row.totp_required_on_login = False
 
-        return await self._write_user(user_id, _user, _legacy)
+        return await self._write_user(user_id, _user, _legacy, bump_generation=bump_generation)
 
     async def try_advance_user_totp_step(self, user_id: str, step: int) -> bool:
         """Advance the replay counter; ``False`` means the code was already used.

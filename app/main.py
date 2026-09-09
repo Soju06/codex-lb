@@ -97,6 +97,8 @@ from app.modules.automations.scheduler import build_automations_scheduler
 from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
+from app.modules.dashboard_roles import api as dashboard_roles_api
+from app.modules.dashboard_users import api as dashboard_users_api
 from app.modules.firewall import api as firewall_api
 from app.modules.fleet import api as fleet_api
 from app.modules.health import api as health_api
@@ -1039,6 +1041,8 @@ def create_app() -> FastAPI:
     app.include_router(runtime_api.router)
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
+    app.include_router(dashboard_users_api.router)
+    app.include_router(dashboard_roles_api.router)
     app.include_router(settings_api.router)
     app.include_router(telemetry_api.router)
     app.include_router(firewall_api.router)

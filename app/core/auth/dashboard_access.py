@@ -220,6 +220,33 @@ def scope_satisfies(granted: Scope | None, required: Scope) -> bool:
     return _SCOPE_RANK[granted] >= _SCOPE_RANK[required]
 
 
+class InsufficientDelegationError(Exception):
+    """The caller's grants do not cover the grants of the role it wants to assign or act on."""
+
+
+def _grants_cover(caller: Grants, target: Grants) -> bool:
+    return all(scope_satisfies(caller.get(permission), scope) for permission, scope in target.items())
+
+
+def assert_can_delegate(caller: Grants, target: Grants) -> None:
+    """Assigning a role: every (permission, scope) of ``target`` must be at or
+    below the caller's own grant for that permission (``own`` < ``all``; a
+    permission the caller lacks is below both). It follows that only an admin
+    preset holder can grant the admin preset.
+    """
+
+    if not _grants_cover(caller, target):
+        raise InsufficientDelegationError("The role holds permissions the caller does not have")
+
+
+def assert_can_act_on(caller: Grants, target_user_grants: Grants) -> None:
+    """Acting on an account (disable, delete, reset, revoke, re-invite): the
+    same subset check applied to the grants of the account's current role."""
+
+    if not _grants_cover(caller, target_user_grants):
+        raise InsufficientDelegationError("The account holds permissions the caller does not have")
+
+
 def legacy_permissions(grants: Grants) -> frozenset[DashboardPermission]:
     """Derive the coarse ``read`` / ``write`` aliases from fine-grained grants."""
 

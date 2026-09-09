@@ -147,6 +147,12 @@ class _FakeRepository:
     async def count_user_identities(self, user_id: str) -> int:
         return self.identities.get(user_id, 0)
 
+    async def count_live_invites(self) -> int:
+        return 0
+
+    async def acquire_write_intent(self) -> None:
+        return None
+
     async def get_user_counts(self) -> DashboardUserCounts:
         users = list(self.users.values())
         return DashboardUserCounts(
@@ -155,6 +161,7 @@ class _FakeRepository:
             invited=sum(1 for u in users if u.status == "invited"),
             disabled=sum(1 for u in users if u.status == "disabled"),
             non_admin=sum(1 for u in users if u.role_id != PRESET_ROLE_IDS[PresetRoleSlug.ADMIN]),
+            pending_invites=0,
         )
 
     async def count_custom_roles(self) -> int:
@@ -181,7 +188,14 @@ class _FakeRepository:
         user.session_generation += 1
         return user
 
-    async def set_user_totp_secret(self, user_id: str, secret_encrypted: bytes | None) -> DashboardUser:
+    async def set_user_totp_secret(
+        self,
+        user_id: str,
+        secret_encrypted: bytes | None,
+        *,
+        bump_generation: bool = False,
+        preserve_policy: bool = False,
+    ) -> DashboardUser:
         user = self.users[user_id]
         user.totp_secret_encrypted = secret_encrypted
         user.totp_last_verified_step = None

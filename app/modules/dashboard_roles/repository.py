@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug, RoleKind
-from app.db.models import DashboardRoleRecord
+from app.db.models import DashboardRoleRecord, DashboardUser
 
 
 class DashboardRolesRepository:
@@ -48,3 +48,7 @@ class DashboardRolesRepository:
             .where(DashboardRoleRecord.kind == RoleKind.CUSTOM.value)
         )
         return int((await self._session.execute(stmt)).scalar_one())
+
+    async def users_count_by_role(self) -> dict[str, int]:
+        stmt = select(DashboardUser.role_id, func.count()).group_by(DashboardUser.role_id)
+        return {str(role_id): int(count) for role_id, count in (await self._session.execute(stmt)).all()}

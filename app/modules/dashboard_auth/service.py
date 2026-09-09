@@ -43,6 +43,7 @@ from app.modules.dashboard_auth.schemas import (
     TotpSetupStartResponse,
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
+from app.modules.dashboard_users.credentials import assert_credential_remains
 from app.modules.dashboard_users.repository import (
     DashboardUserCounts,
     LocalAuthState,
@@ -81,6 +82,10 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def count_user_identities(self, user_id: str) -> int: ...
 
+    async def count_live_invites(self) -> int: ...
+
+    async def acquire_write_intent(self) -> None: ...
+
     async def get_user_counts(self) -> DashboardUserCounts: ...
 
     async def count_custom_roles(self) -> int: ...
@@ -91,7 +96,14 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def rotate_user_password(self, user_id: str, password_hash: str) -> DashboardUser: ...
 
-    async def set_user_totp_secret(self, user_id: str, secret_encrypted: bytes | None) -> DashboardUser: ...
+    async def set_user_totp_secret(
+        self,
+        user_id: str,
+        secret_encrypted: bytes | None,
+        *,
+        bump_generation: bool = False,
+        preserve_policy: bool = False,
+    ) -> DashboardUser: ...
 
     async def try_advance_user_totp_step(self, user_id: str, step: int) -> bool: ...
 
@@ -565,7 +577,7 @@ class DashboardAuthService:
             users_active=counts.active,
             users_invited=counts.invited,
             users_disabled=counts.disabled,
-            pending_invites=0,
+            pending_invites=counts.pending_invites,
             non_admin_users=counts.non_admin,
             custom_roles=await self._repository.count_custom_roles(),
             providers_enabled=["password"],
@@ -592,7 +604,7 @@ class DashboardAuthService:
     # --- password ---
 
     async def setup_password(self, password: str) -> DashboardUser:
-        user = await self._repository.create_first_admin(_hash_password(password))
+        user = await self._repository.create_first_admin(hash_password(password))
         if user is None:
             raise PasswordAlreadyConfiguredError("Password is already configured")
         return user
@@ -709,7 +721,7 @@ class DashboardAuthService:
             raise PasswordNotConfiguredError("Password is not configured")
         if not _check_password(current_password, user.password_hash):
             raise InvalidCredentialsError("Invalid credentials")
-        rotated = await self._repository.rotate_user_password(user.id, _hash_password(new_password))
+        rotated = await self._repository.rotate_user_password(user.id, hash_password(new_password))
         AuditService.log_async(
             "password_changed",
             actor_ip=actor_ip,
@@ -733,8 +745,17 @@ class DashboardAuthService:
             raise PasswordNotConfiguredError("Password is not configured")
         if not _check_password(password, user.password_hash):
             raise InvalidCredentialsError("Invalid credentials")
-        if await self._repository.count_active_users() != 1 or await self._repository.count_user_identities(user.id):
-            raise OtherUsersExistError("Other users exist; log out everywhere instead of removing the password")
+        # Serialised with account mutations and invite acceptance: a pending
+        # invite would otherwise turn a passwordless install into one where
+        # authentication is mandatory again but no admin holds a password.
+        await self._repository.acquire_write_intent()
+        active_users = await self._repository.count_active_users()
+        identities = await self._repository.count_user_identities(user.id)
+        if active_users != 1 or identities or await self._repository.count_live_invites():
+            raise OtherUsersExistError(
+                "Other users exist or invites are pending; log out everywhere or revoke pending invites instead"
+            )
+        assert_credential_remains(password_hash=None, identity_count=identities, solo_install=active_users == 1)
         await self._repository.clear_user_credentials(user.id)
         AuditService.log_async(
             "password_removed",
@@ -762,7 +783,7 @@ class DashboardAuthService:
         return generation
 
     async def set_guest_password(self, password: str) -> None:
-        await self._repository.set_guest_password_hash(_hash_password(password))
+        await self._repository.set_guest_password_hash(hash_password(password))
 
     async def clear_guest_password(self) -> None:
         await self._repository.clear_guest_password_hash()
@@ -917,6 +938,9 @@ _guest_password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_second
 #: Bounds the anonymous ``login_failed`` rows a client can append from refusals
 #: that by design spend no password budget (``username_required``).
 _login_failed_audit_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="login_failed_audit")
+_invite_lookup_rate_limiter = DatabaseRateLimiter(max_attempts=30, window_seconds=60, type="invite_lookup")
+_invite_accept_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="invite_accept")
+_invite_accept_token_rate_limiter = DatabaseRateLimiter(max_attempts=5, window_seconds=60, type="invite_accept_token")
 
 
 def get_dashboard_session_store() -> DashboardSessionStore:
@@ -939,6 +963,18 @@ def get_login_failed_audit_rate_limiter() -> DatabaseRateLimiter:
     return _login_failed_audit_rate_limiter
 
 
+def get_invite_lookup_rate_limiter() -> DatabaseRateLimiter:
+    return _invite_lookup_rate_limiter
+
+
+def get_invite_accept_rate_limiter() -> DatabaseRateLimiter:
+    return _invite_accept_rate_limiter
+
+
+def get_invite_accept_token_rate_limiter() -> DatabaseRateLimiter:
+    return _invite_accept_token_rate_limiter
+
+
 def _qr_svg_data_uri(payload: str) -> str:
     qr = segno.make(payload)
     buffer = BytesIO()
@@ -947,7 +983,7 @@ def _qr_svg_data_uri(payload: str) -> str:
     return f"data:image/svg+xml;base64,{base64.b64encode(raw).decode('ascii')}"
 
 
-def _hash_password(password: str) -> str:
+def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
@@ -955,7 +991,7 @@ def _hash_password(password: str) -> str:
 def _dummy_password_hash() -> str:
     """A throwaway hash verified against when no real one exists (built on first use, not at import)."""
 
-    return _hash_password(secrets.token_urlsafe(32))
+    return hash_password(secrets.token_urlsafe(32))
 
 
 def _check_password(password: str, password_hash: str) -> bool:

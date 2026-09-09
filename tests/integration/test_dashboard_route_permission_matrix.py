@@ -76,6 +76,19 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("GET", "/api/settings/runtime/connect-address"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/sticky-sessions"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/oauth/status"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    # Account management and the roles read API (PR-1c): users:manage throughout.
+    ("GET", "/api/dashboard-users"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("POST", "/api/dashboard-users"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("GET", "/api/dashboard-users/invites"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("PATCH", "/api/dashboard-users/{user_id}"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("DELETE", "/api/dashboard-users/{user_id}"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("POST", "/api/dashboard-users/{user_id}/invite"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("DELETE", "/api/dashboard-users/{user_id}/invite"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("POST", "/api/dashboard-users/{user_id}/reset-totp"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("POST", "/api/dashboard-users/{user_id}/revoke-sessions"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("POST", "/api/dashboard-users/{user_id}/reactivate-keys"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("GET", "/api/dashboard-roles"): PermissionRequirement(Permission.USERS_MANAGE),
+    ("GET", "/api/dashboard-roles/permissions"): PermissionRequirement(Permission.USERS_MANAGE),
     **DASHBOARD_AUTH_GATED,
 }
 

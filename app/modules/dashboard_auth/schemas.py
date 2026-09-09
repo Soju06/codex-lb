@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import Field
@@ -133,3 +134,20 @@ class PasswordChangeRequest(DashboardModel):
 
 class PasswordRemoveRequest(DashboardModel):
     password: str
+
+
+class InviteDescriptionResponse(DashboardModel):
+    """What the acceptance screen may learn from a valid invite token."""
+
+    role_name: str
+    inviter_display_name: str | None = None
+    suggested_username: str
+    username_locked: bool
+    expires_at: datetime
+
+
+class InviteAcceptRequest(DashboardModel):
+    token: str = Field(max_length=256)
+    username: str | None = Field(default=None, max_length=64)
+    password: str
+    display_name: str | None = Field(default=None, max_length=128)

@@ -10,8 +10,9 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
-from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
+from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
+from app.modules.api_keys.repository import ApiKeyOwnerDisabledError
 from app.modules.api_keys.schemas import (
     ApiKeyAccountCostResponse,
     ApiKeyCreateRequest,
@@ -241,6 +242,8 @@ async def update_api_key(
         raise DashboardNotFoundError(str(exc)) from exc
     except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
+    except ApiKeyOwnerDisabledError as exc:
+        raise DashboardConflictError(str(exc), code="owner_disabled") from exc
     if "is_active" in fields and payload.is_active is False and row.is_active is False:
         AuditService.log_async(
             "api_key_revoked",

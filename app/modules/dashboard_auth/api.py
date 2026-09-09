@@ -39,18 +39,26 @@ from app.core.exceptions import (
     DashboardAuthError,
     DashboardBadRequestError,
     DashboardConflictError,
+    DashboardNotFoundError,
     DashboardPermissionError,
     DashboardRateLimitError,
     DashboardValidationError,
 )
 from app.core.request_locality import is_local_request
 from app.db.models import DashboardUser
-from app.dependencies import DashboardAuthContext, get_dashboard_auth_context
+from app.dependencies import (
+    DashboardAuthContext,
+    DashboardUsersContext,
+    get_dashboard_auth_context,
+    get_dashboard_users_context,
+)
 from app.modules.dashboard_auth.schemas import (
     DashboardAuthSessionResponse,
     DashboardMeResponse,
     GuestLoginRequest,
     GuestPasswordSetRequest,
+    InviteAcceptRequest,
+    InviteDescriptionResponse,
     PasswordChangeRequest,
     PasswordLoginRequest,
     PasswordRemoveRequest,
@@ -79,11 +87,19 @@ from app.modules.dashboard_auth.service import (
     assignable_role_ids,
     get_dashboard_session_store,
     get_guest_password_rate_limiter,
+    get_invite_accept_rate_limiter,
+    get_invite_accept_token_rate_limiter,
+    get_invite_lookup_rate_limiter,
     get_login_failed_audit_rate_limiter,
     get_password_rate_limiter,
     get_totp_rate_limiter,
+    hash_password,
     log_login_failed,
 )
+from app.modules.dashboard_users.api import mapped_user_errors
+from app.modules.dashboard_users.credentials import CredentialRequiredError
+from app.modules.dashboard_users.schemas import ProfileUpdateRequest
+from app.modules.dashboard_users.service import InviteNotFoundError, UsernameLockedError, invite_token_hash
 
 router = APIRouter(
     prefix="/api/dashboard-auth",
@@ -615,6 +631,8 @@ async def remove_password(
         raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
     except OtherUsersExistError as exc:
         raise DashboardConflictError(str(exc), code="other_users_exist") from exc
+    except CredentialRequiredError as exc:
+        raise DashboardConflictError(str(exc), code="credential_required") from exc
 
     await _invalidate_auth_caches()
     bootstrap_token = await ensure_auto_bootstrap_token()
@@ -657,6 +675,94 @@ async def get_me(
         raise DashboardAuthError(str(exc), code="totp_required") from exc
     except TotpEnrollmentRequiredError as exc:
         raise _enrollment_required(exc) from exc
+
+
+@router.patch("/me", response_model=DashboardMeResponse)
+async def update_me(
+    request: Request,
+    payload: ProfileUpdateRequest = Body(...),
+    context: DashboardAuthContext = Depends(get_dashboard_auth_context),
+    users: DashboardUsersContext = Depends(get_dashboard_users_context),
+) -> DashboardMeResponse:
+    """Self-service profile edit (display name, e-mail) for the signed-in account."""
+
+    resolved = await _require_management_session(request, context, allow_unenrolled=True)
+    with mapped_user_errors():
+        await users.service.update_profile(resolved.user, payload, actor_ip=_client_host(request))
+    return await context.service.me(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+
+
+@router.get("/invite/{token}", response_model=InviteDescriptionResponse)
+async def describe_invite(
+    token: str,
+    request: Request,
+    context: DashboardAuthContext = Depends(get_dashboard_auth_context),
+    users: DashboardUsersContext = Depends(get_dashboard_users_context),
+) -> InviteDescriptionResponse:
+    """Unauthenticated: what the acceptance screen shows. Every invalid token is the same 404."""
+
+    limiter = get_invite_lookup_rate_limiter()
+    try:
+        await limiter.check_and_increment(_session_client_key(request, prefix="invite_lookup"), context.session)
+    except DashboardRateLimitError as exc:
+        raise _rate_limit_error(exc, code="invite_rate_limited") from exc
+    try:
+        description = await users.service.describe_invite(token)
+    except InviteNotFoundError as exc:
+        raise DashboardNotFoundError(str(exc), code="invite_not_found") from exc
+    return InviteDescriptionResponse(
+        role_name=description.role_name,
+        inviter_display_name=description.inviter_display_name,
+        suggested_username=description.suggested_username,
+        username_locked=description.username_locked,
+        expires_at=description.expires_at,
+    )
+
+
+@router.post("/invite/accept", response_model=DashboardAuthSessionResponse)
+async def accept_invite(
+    request: Request,
+    payload: InviteAcceptRequest = Body(...),
+    context: DashboardAuthContext = Depends(get_dashboard_auth_context),
+    users: DashboardUsersContext = Depends(get_dashboard_users_context),
+) -> DashboardAuthSessionResponse | JSONResponse:
+    """Unauthenticated: set the invited account's password, activate it, and sign it in."""
+
+    if get_settings().dashboard_auth_mode == DashboardAuthMode.DISABLED:
+        raise DashboardBadRequestError(
+            "Invites cannot be accepted while dashboard auth is bypassed", code="password_management_disabled"
+        )
+    if await context.service.resolve_user_session(request.cookies.get(DASHBOARD_SESSION_COOKIE)) is not None:
+        raise DashboardConflictError("Sign out before accepting an invite", code="already_signed_in")
+    password = payload.password.strip()
+    _validate_password_length(password)
+
+    try:
+        await get_invite_accept_rate_limiter().check_and_increment(
+            _session_client_key(request, prefix="invite_accept"), context.session
+        )
+        await get_invite_accept_token_rate_limiter().check_and_increment(
+            f"invite_accept_token:{invite_token_hash(payload.token).hex()}", context.session
+        )
+    except DashboardRateLimitError as exc:
+        raise _rate_limit_error(exc, code="invite_rate_limited") from exc
+
+    try:
+        with mapped_user_errors():
+            user = await users.service.accept_invite(
+                payload.token,
+                username=payload.username,
+                password_hash=hash_password(password),
+                display_name=payload.display_name,
+                actor_ip=_client_host(request),
+            )
+    except InviteNotFoundError as exc:
+        raise DashboardNotFoundError(str(exc), code="invite_not_found") from exc
+    except UsernameLockedError as exc:
+        raise DashboardValidationError(str(exc), code="username_locked") from exc
+
+    await _invalidate_auth_caches()
+    return await _issue_user_session_response(request, context, user, totp_verified=False, auth_method="password")
 
 
 @router.post("/totp/setup/start", response_model=TotpSetupStartResponse)

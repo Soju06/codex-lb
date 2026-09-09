@@ -7,8 +7,9 @@ MUST classify JSON object frames and embed their original JSON payload in IPC.
 The Python adapter MUST reuse the payload decoded by the IPC reader for native
 WebSocket request matching and event processing. The helper MUST preserve
 original frame text, JSON numbers, duplicate-key precedence and the request
-identifier. Invalid JSON, non-object frames and objects that cannot be classified
-losslessly MUST retain opaque delivery. Live WebSockets MUST remain opaque.
+identifier. Invalid JSON, non-object frames, frames larger than 1 MiB (1,048,576
+UTF-8 bytes), and objects that cannot be classified losslessly MUST retain opaque
+delivery. Live WebSockets MUST remain opaque.
 
 A string `type` MUST take precedence, including an empty string; otherwise an
 object-valued `error` MUST classify as `error`. The native WebSocket boundary MUST

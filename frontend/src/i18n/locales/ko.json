@@ -1104,7 +1104,6 @@
   "settings.retention.description": "백그라운드 스케줄에 따라 오래된 request log와 usage history를 자동 정리합니다.",
   "settings.retention.daysSuffix": "일",
   "settings.retention.inheritPlaceholder": "미설정",
-  "settings.retention.inheritedHint": "미설정: 적용값 {{value}}일 (0 = 비활성화)",
   "settings.retention.save": "보관 설정 저장",
   "settings.retention.requestLogs.label": "Request log 보관",
   "settings.retention.requestLogs.description": "이 일수보다 오래된 request log를 삭제합니다. 0은 삭제 비활성화이며, 0이 아닌 값은 최소 30일이어야 합니다. 비워두면 미설정 상태(비활성화)로 유지됩니다.",

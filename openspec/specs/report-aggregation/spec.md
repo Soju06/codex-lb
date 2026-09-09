@@ -1,7 +1,7 @@
 # report-aggregation Specification
 
 ## Purpose
-TBD - created by archiving change harden-reports-performance. Update Purpose after archive.
+Governs how dashboard reports are assembled from permanent time-bucketed aggregates plus the not-yet-folded raw complement, so historical totals, filter dimensions, and distinct conversation counts survive raw request-log retention and stay correct for any requested timezone. Long report windows previously scanned raw rows until they timed out and every filter change re-ran the full report; this capability bounds that work by preferring folded history, keeping filter options and report caching lightweight, and limiting exact speed metrics to short windows with explicit disclosure.
 ## Requirements
 ### Requirement: Permanent report aggregates
 The system SHALL preserve request counts, error and cancellation counts, token totals, cost, first activity, active accounts and distinct normalized conversations in permanent time buckets, including account, API key, model and User-Agent filter dimensions. Report days SHALL respect the requested timezone. Folded history and raw complement SHALL be read in one snapshot without overlap. Partial storage buckets SHALL use raw data; retained history at sub-hour boundaries has the same bounded edge limitation as existing hourly statistics.

@@ -597,23 +597,24 @@ target.
 
 ### Requirement: Client-to-LB routing hints remain hop-local
 
-The service MUST treat `x-codex-routing-hint` as client-to-LB metadata. The
-header MAY be inspected by local routing or test harnesses, but it MUST NOT be
-included in any upstream HTTP request or WebSocket handshake. Header matching
-MUST be case-insensitive.
+The service MUST discard inbound `x-codex-routing-hint` values case-insensitively.
+Proxy-routed subscription Responses requests with a known model MUST synthesize a
+new hint from the final model and service tier when opening an HTTP request or
+WebSocket handshake. Inbound values MUST
+NOT determine that hint. Inbound LB API-key authentication MUST NOT prevent
+synthesis for a selected subscription account. Non-subscription transports MUST
+NOT synthesize a Codex-backend hint.
 
-#### Scenario: HTTP egress omits routing hint
+#### Scenario: Inbound HTTP hint is replaced
+- **GIVEN** an inbound request advertises a different model or tier in its hint
+- **WHEN** a subscription-account Responses HTTP request is built
+- **THEN** any synthesized hint MUST reflect the final outbound body
 
-- **GIVEN** an inbound request includes `x-codex-routing-hint`
-- **WHEN** codex-lb builds an upstream Responses HTTP request
-- **THEN** the upstream request MUST NOT include that header.
-
-#### Scenario: WebSocket egress omits routing hint
-
-- **GIVEN** an inbound WebSocket handshake includes any case spelling of
-  `x-codex-routing-hint`
-- **WHEN** codex-lb builds an upstream Responses WebSocket handshake
-- **THEN** the upstream handshake MUST NOT include that header.
+#### Scenario: Inbound WebSocket hint is discarded
+- **GIVEN** an inbound handshake includes any case spelling of the hint header
+- **WHEN** upstream WebSocket handshake headers are built
+- **THEN** the inbound value MUST NOT be forwarded
+- **AND** any synthesized hint MUST use trusted request state
 
 ### Requirement: Native HTTP/2 startup profile matches measured Codex
 
@@ -1086,4 +1087,95 @@ Events the native egress helper emits for one request MUST be buffered between t
 - **WHEN** the queued payload exceeds 32 MiB
 - **THEN** that request fails with `consumer_backpressure`
 - **AND** other requests on the same helper keep being served
+
+### Requirement: Subscription Responses synthesize final routing hints
+
+Subscription-account Responses HTTP egress, transient WebSocket handshakes,
+persistent WebSocket handshakes and HTTP fallback MUST synthesize
+`x-codex-routing-hint: model=<model>;tier=<tier>` from the final normalized
+model and service tier. With no tier the hint MUST contain only `model=<model>`.
+A preconnect without a request model MUST omit the hint. Reusing an open
+WebSocket MUST NOT reconnect solely to replace its handshake hint. Synthesis
+MUST NOT alter request bodies, entitlement checks or actual response tiers.
+
+#### Scenario: Fast account request through either public API
+- **WHEN** a subscription request selects Fast through the backend or v1 route
+- **THEN** its outbound body and synthesized hint MUST use priority
+- **AND** caller API-key authentication MUST NOT disable hint synthesis
+
+#### Scenario: WebSocket fallback retains request routing
+- **WHEN** a subscription WebSocket attempt falls back to HTTP
+- **THEN** the HTTP hint MUST use the same final model and service tier
+
+#### Scenario: Custom provider does not gain a backend hint
+- **WHEN** a request is dispatched to a non-subscription model source
+- **THEN** no Codex-backend routing hint MUST be synthesized
+
+### Requirement: Subscription compaction propagates routing hints
+
+Compaction egress for proxy-routed subscription client requests MUST synthesize
+`x-codex-routing-hint: model=<model>;tier=<tier>` from the final normalized request.
+When no tier remains after policy enforcement, the hint MUST contain only
+`model=<model>`. Eligibility MUST use selected subscription provenance, including
+when the optional ChatGPT account-ID header is absent. Hint synthesis MUST NOT
+change compaction input, usage, retries, or the response's actual service tier.
+
+#### Scenario: Fast compaction uses the canonical tier
+- **WHEN** a subscription compaction request selects the Fast alias
+- **THEN** its outbound body and hint MUST both use `priority`
+
+#### Scenario: Ultrafast compaction preserves the requested tier
+- **WHEN** an eligible subscription compaction request selects `ultrafast`
+- **THEN** its outbound body and hint MUST both use `ultrafast`
+
+#### Scenario: Prohibited Fast does not leak through the hint
+- **WHEN** policy removes a subscription compaction request's Fast tier
+- **THEN** its outbound body MUST omit that tier
+- **AND** its hint MUST contain only the final model
+
+#### Scenario: Non-subscription compaction does not synthesize a hint
+- **WHEN** compaction transport is invoked without subscription provenance
+- **THEN** it MUST NOT synthesize or forward a routing hint
+
+### Requirement: Account circuit breakers are constructed unconditionally and used per the dashboard toggle
+
+The upstream client MUST create (and keep) a per-account circuit breaker regardless of the `circuit_breaker_enabled` toggle, and MUST decide per request whether to consult it — pre-call check, half-open probe, success and failure recording — from the effective `circuit_breaker_enabled` value of the dashboard-settings snapshot the request path resolved. Because the client is reached without a settings argument, every request path that reaches the client with an account (stream, compact, WebSocket connect, codex control, thread goal, transcription, warmup fan-out, and the background limit-warmup, quota-planner warmup and automation callers) MUST bind the resolved toggles to its task after taking its snapshot, MUST rebind them before every upstream attempt whose generator may have been handed to another task since (a streaming request that yielded a capacity keepalive before opening upstream), and the client MUST read them from the task; a task with no binding MUST fall back to the process environment value. Turning the toggle on or off in the dashboard MUST take effect on the next upstream attempt without a restart, and turning it off MUST NOT destroy or reset existing breaker state.
+
+#### Scenario: Toggle turned off while a breaker is open
+
+- **GIVEN** the dashboard toggle is on and repeated upstream server errors have opened an account's breaker
+- **WHEN** an operator turns the circuit breaker off in the dashboard and the next request for that account is attempted
+- **THEN** the attempt is not rejected by the open breaker
+- **AND** the breaker object still exists and still reports open
+
+#### Scenario: Toggle turned on without a restart
+
+- **GIVEN** the process started with `CODEX_LB_CIRCUIT_BREAKER_ENABLED=false`
+- **WHEN** an operator turns the circuit breaker on in the dashboard and an account fails with upstream server errors up to the fixed threshold
+- **THEN** the account's breaker opens and the following attempt is rejected with the breaker-open error
+
+### Requirement: Upstream connect timeout is dashboard-managed
+
+The upstream connect timeout applied to every outbound upstream request — Responses streams, thread-goal and control calls, compaction, transcription, file uploads, upstream WebSocket handshakes and the HTTP bridge owner forward — MUST be the effective `upstream_connect_timeout_seconds` resolved as code default < environment < dashboard: a non-NULL `dashboard_settings.upstream_connect_timeout_seconds` overrides `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS`. Consumers MUST read it from the `SettingsCache` snapshot bound at the request or connection entry point (never from the database on the request path); per-attempt overrides that clamp the connect timeout to a remaining budget keep applying on top of the effective value. `PUT /api/settings` MUST reject, with `400 timeout_invariant_violation`, a connect timeout that would exceed the effective proxy, compact or transcription request budget, because such a value is clamped to the budget and can never be honoured.
+
+#### Scenario: Dashboard connect timeout overrides startup environment
+
+- **GIVEN** `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS=8` and an operator stores `3` through `PUT /api/settings`
+- **WHEN** a new request opens an upstream connection on any replica
+- **THEN** the aiohttp connect (`sock_connect`) timeout is 3 seconds
+- **AND** `GET /api/settings` reports `upstreamConnectTimeoutSeconds: 3` with `provenance.upstream_connect_timeout_seconds.source = "dashboard"`
+
+#### Scenario: Connect timeout above a budget is rejected
+
+- **GIVEN** the effective transcription request budget is 120 seconds
+- **WHEN** the operator sends `PUT /api/settings` with `upstreamConnectTimeoutSeconds: 130`
+- **THEN** the request is rejected with `400` and code `timeout_invariant_violation` naming `upstream-connect-within-transcription-budget`
+- **AND** the same `PUT` with `transcriptionRequestBudgetSeconds: 150` alongside is accepted
+
+#### Scenario: Startup warns when the environment is shadowed
+
+- **GIVEN** `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS` is set in the environment and the dashboard column is non-NULL
+- **WHEN** the process starts
+- **THEN** one WARN names the shadowed variable and points at the dashboard
+- **AND** no WARN is logged when the variable is unset or the column is NULL
 

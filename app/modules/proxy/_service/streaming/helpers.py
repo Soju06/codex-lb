@@ -70,7 +70,11 @@ from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
-from app.modules.proxy._load_balancer.overload_backoff import UPSTREAM_OVERLOAD_CODES, record_upstream_overload
+from app.modules.proxy._load_balancer.overload_backoff import (
+    UPSTREAM_OVERLOAD_CODES,
+    record_upstream_burst_rejection,
+    record_upstream_overload,
+)
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -1068,7 +1072,16 @@ async def _handle_stream_error(
     http_status: int | None = None,
     *,
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    retry_after_seconds: float | None = None,
+    burst_cooldown_recorded: bool = False,
 ) -> ClassifiedFailure:
+    """Write account health for a stream failure and return its classification.
+
+    ``burst_cooldown_recorded`` is set by a keyed stream whose health write was
+    deferred until after usage settlement: the replica-local burst cooldown
+    was already engaged at rejection time, so the deferred write must not
+    re-engage it (that would bench an account that has since succeeded).
+    """
     classified = classify_upstream_failure(
         error_code=code,
         error=error,
@@ -1130,6 +1143,18 @@ async def _handle_stream_error(
             await record_upstream_overload(
                 proxy._load_balancer,
                 account,
+                redact_account_id=privacy_policy.redacts_sensitive_details,
+            )
+        elif http_status == 429 and not burst_cooldown_recorded:
+            # A code-less HTTP 429 (rate_limit / quota classes returned above)
+            # is a per-account burst/concurrency rejection: keyed on the status
+            # so ``server_error`` rewrites and ``detail``-parsed bodies are
+            # covered. Short replica-local cooldown only -- never
+            # ``mark_rate_limit`` / persisted RATE_LIMITED.
+            await record_upstream_burst_rejection(
+                proxy._load_balancer,
+                account,
+                retry_after_seconds=retry_after_seconds,
                 redact_account_id=privacy_policy.redacts_sensitive_details,
             )
     return classified

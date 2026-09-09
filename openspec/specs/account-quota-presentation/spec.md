@@ -1,7 +1,7 @@
 # account-quota-presentation Specification
 
 ## Purpose
-TBD - created by archiving change free-account-monthly-window. Update Purpose after archive.
+Governs how account quota windows are presented across the dashboard when an account does not fit the paid 5h/7d shape. Free accounts report a single monthly window, and rendering it as weekly produced wrong bars, trends, donut totals, and assigned-account badges. This capability keeps monthly-only accounts labelled as such, omits zero-credit accounts from window totals they cannot contribute to, and keeps quota refreshes visually stable.
 ## Requirements
 ### Requirement: Free-account quota surfaces are monthly-only
 

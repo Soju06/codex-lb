@@ -1,7 +1,7 @@
 # model-catalog-compat Specification
 
 ## Purpose
-TBD - created by archiving change populate-bootstrap-model-metadata. Update Purpose after archive.
+Governs the model catalogs codex-lb serves to Codex-native and OpenAI-compatible clients, and how those catalogs feed routing. Fresh instances need a usable bootstrap catalog before the first upstream refresh, refreshed upstream data must then stay authoritative and replica-coherent, and catalog metadata (context windows, speed tiers, reasoning efforts, model-source identity) must be preserved exactly so clients can parse it. It also fixes how per-account catalog knowledge constrains or degrades pooled routing without falsely excluding accounts.
 ## Requirements
 ### Requirement: Bootstrap model catalog is available before refresh
 

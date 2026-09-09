@@ -2115,6 +2115,7 @@ class ProxyService(
                 code,
                 http_status=exc.status_code,
                 privacy_policy=privacy_policy,
+                retry_after_seconds=exc.retry_after_seconds,
             )
             return
         await self._handle_stream_error(
@@ -2122,6 +2123,7 @@ class ProxyService(
             _upstream_error_from_openai(error),
             code,
             http_status=exc.status_code,
+            retry_after_seconds=exc.retry_after_seconds,
         )
 
 

@@ -1339,7 +1339,6 @@
   "settings.retention.description": "Automatically prune old request logs and usage history on a background schedule.",
   "settings.retention.daysSuffix": "days",
   "settings.retention.inheritPlaceholder": "not set",
-  "settings.retention.inheritedHint": "Not configured: effective {{value}} days (0 = disabled)",
   "settings.retention.save": "Save retention",
   "settings.retention.requestLogs.label": "Request log retention",
   "settings.retention.requestLogs.description": "Delete request logs older than this many days. 0 disables deletion; non-zero values need at least 30 days. Leave empty to leave retention unconfigured (disabled).",

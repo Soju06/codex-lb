@@ -43,6 +43,7 @@ from app.core.clients.proxy import (
     _CHATGPT_ACCOUNT_ID_HEADER,
     _HOP_BY_HOP_HEADER_NAMES,
     CODEX_INSTALLATION_ID_HEADER,
+    CODEX_ROUTING_HINT_HEADER,
     ProxyResponseError,
     _is_native_codex_request,
     _is_upstream_edge_challenge,
@@ -719,6 +720,7 @@ def _build_upstream_websocket_headers(
     *,
     include_responses_beta: bool = True,
     normalize_non_native_fingerprint: bool = True,
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> dict[str, str]:
     headers = filter_inbound_websocket_headers(inbound)
     # ``filter_inbound_websocket_headers`` strips ``x-codex-installation-id`` because it
@@ -755,6 +757,11 @@ def _build_upstream_websocket_headers(
             headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
     if include_responses_beta:
         _ensure_responses_websocket_beta_header(headers)
+    if routing_hint is not None:
+        model, service_tier = routing_hint
+        headers[CODEX_ROUTING_HINT_HEADER] = f"model={model}"
+        if service_tier is not None:
+            headers[CODEX_ROUTING_HINT_HEADER] += f";tier={service_tier}"
     return headers
 
 
@@ -888,10 +895,13 @@ async def _connect_upstream_websocket(
     allow_direct_egress: bool = False,
     policy: _UpstreamWebSocketPolicy,
     subprotocols: Sequence[str] = (),
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> UpstreamWebSocket:
     settings = with_dashboard_overrides(get_settings())
     if policy.include_responses_beta:
-        upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_websocket_headers(
+            headers, access_token, account_id, routing_hint=routing_hint
+        )
     else:
         upstream_headers = _build_upstream_live_websocket_headers(headers, access_token, account_id)
     require_route_or_direct_egress_opt_in(
@@ -1254,6 +1264,7 @@ async def connect_responses_websocket(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> UpstreamWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -1266,6 +1277,7 @@ async def connect_responses_websocket(
         codex_client=codex_client,
         allow_direct_egress=allow_direct_egress,
         policy=_RESPONSES_WEBSOCKET_POLICY,
+        routing_hint=routing_hint,
     )
 
 

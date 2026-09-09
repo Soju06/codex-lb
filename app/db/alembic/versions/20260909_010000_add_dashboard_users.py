@@ -142,18 +142,38 @@ def upgrade() -> None:
             )
 
 
+def _user_fk_names(inspector: sa.Inspector, column: str) -> list[str]:
+    """Names of api_keys foreign keys from ``column`` to dashboard_users.
+
+    The constraint may carry this revision's explicit name or a dialect
+    default (a schema built by ``Base.metadata.create_all`` on PostgreSQL
+    names it ``api_keys_<column>_fkey``); unnamed SQLite constraints are
+    dropped together with the column by the batch table rebuild.
+    """
+
+    names: list[str] = []
+    for fk in inspector.get_foreign_keys("api_keys"):
+        name = fk.get("name")
+        if (
+            isinstance(name, str)
+            and fk.get("referred_table") == "dashboard_users"
+            and column in fk.get("constrained_columns", ())
+        ):
+            names.append(name)
+    return names
+
+
 def downgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     existing = _columns(bind, "api_keys")
     if existing & set(_API_KEY_COLUMNS):
         with op.batch_alter_table("api_keys") as batch_op:
-            if "owner_user_id" in existing:
-                batch_op.drop_constraint("fk_api_keys_owner_user_id", type_="foreignkey")
-                batch_op.drop_column("owner_user_id")
-            if "created_by_user_id" in existing:
-                batch_op.drop_constraint("fk_api_keys_created_by_user_id", type_="foreignkey")
-                batch_op.drop_column("created_by_user_id")
+            for column in ("owner_user_id", "created_by_user_id"):
+                if column in existing:
+                    for fk_name in _user_fk_names(inspector, column):
+                        batch_op.drop_constraint(fk_name, type_="foreignkey")
+                    batch_op.drop_column(column)
             if "deactivated_reason" in existing:
                 batch_op.drop_column("deactivated_reason")
     if inspector.has_table("dashboard_identities"):

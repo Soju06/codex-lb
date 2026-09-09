@@ -22,6 +22,10 @@ from app.core.auth.dependencies import (
 )
 from app.core.clients.http import _shared_ssl_context
 from app.core.config import settings as settings_module
+from app.core.config.context_window_overrides import (
+    get_model_context_window_overrides_cache,
+    resolve_context_window_overrides,
+)
 from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -40,12 +44,16 @@ from app.modules.proxy.account_cache import (
     get_account_selection_cache,
     propagate_account_routing_change,
 )
+from app.modules.settings.repository import ModelContextWindowOverridesRepository
 from app.modules.settings.schemas import (
     AccountProxyBindingRequest,
     AccountProxyBindingResponse,
     AdditionalQuotaPolicy,
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
+    ModelContextWindowOverrideResponse,
+    ModelContextWindowOverridesResponse,
+    ModelContextWindowOverrideUpsertRequest,
     RuntimeConnectAddressResponse,
     SettingProvenance,
     SubscriptionOverflowPreflightResponse,
@@ -698,6 +706,83 @@ _TIMEOUT_INVARIANT_DASHBOARD_SETTINGS: tuple[str, ...] = (
     *DASHBOARD_TIMEOUT_SETTINGS,
     "proxy_account_lease_ttl_seconds",  # C2-2 routing/overload
 )
+
+
+# M4 model catalogue: per-model context window overrides. One dashboard row per
+# slug (``model_context_window_overrides``); the
+# ``CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES`` entry is the per-slug fallback.
+MODEL_CONTEXT_WINDOW_OVERRIDES_PATH = "/model-context-window-overrides"
+_MODEL_SLUG_MAX_LENGTH = 256
+
+
+def _validate_model_slug(slug: str) -> str:
+    normalized = slug.strip()
+    if (
+        not normalized
+        or len(normalized) > _MODEL_SLUG_MAX_LENGTH
+        or any(character.isspace() or not character.isprintable() for character in normalized)
+    ):
+        raise DashboardBadRequestError(
+            f"Model slug must be 1-{_MODEL_SLUG_MAX_LENGTH} printable characters without whitespace",
+            code="invalid_model_slug",
+        )
+    return normalized
+
+
+async def _model_context_window_overrides_response(context: SettingsContext) -> ModelContextWindowOverridesResponse:
+    dashboard = await ModelContextWindowOverridesRepository(context.session).by_slug()
+    resolved = resolve_context_window_overrides(dashboard, get_app_settings().model_context_window_overrides)
+    return ModelContextWindowOverridesResponse(
+        overrides=[
+            ModelContextWindowOverrideResponse(
+                slug=override.slug,
+                context_window=override.context_window,
+                source=override.source,
+                env_value=override.env_value,
+            )
+            for override in resolved.values()
+        ]
+    )
+
+
+@router.get(MODEL_CONTEXT_WINDOW_OVERRIDES_PATH, response_model=ModelContextWindowOverridesResponse)
+async def get_model_context_window_overrides(
+    context: SettingsContext = Depends(get_settings_context),
+) -> ModelContextWindowOverridesResponse:
+    return await _model_context_window_overrides_response(context)
+
+
+@router.put(MODEL_CONTEXT_WINDOW_OVERRIDES_PATH + "/{slug:path}", response_model=ModelContextWindowOverridesResponse)
+async def put_model_context_window_override(
+    slug: str,
+    payload: ModelContextWindowOverrideUpsertRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> ModelContextWindowOverridesResponse:
+    normalized = _validate_model_slug(slug)
+    await ModelContextWindowOverridesRepository(context.session).upsert(normalized, payload.context_window)
+    # The catalog reads a cached snapshot of the rows: clear + durably bump
+    # before responding so every replica reports the new window.
+    await get_model_context_window_overrides_cache().invalidate()
+    return await _model_context_window_overrides_response(context)
+
+
+@router.delete(MODEL_CONTEXT_WINDOW_OVERRIDES_PATH + "/{slug:path}", response_model=ModelContextWindowOverridesResponse)
+async def delete_model_context_window_override(
+    slug: str,
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> ModelContextWindowOverridesResponse:
+    normalized = _validate_model_slug(slug)
+    if not await ModelContextWindowOverridesRepository(context.session).delete(normalized):
+        raise DashboardNotFoundError(
+            "Model context window override not found", code="model_context_window_override_not_found"
+        )
+    await get_model_context_window_overrides_cache().invalidate()
+    return await _model_context_window_overrides_response(context)
+
+
+# end M4 model catalogue
 
 
 def _proposed_timeout_settings(payload: DashboardSettingsUpdateRequest, current, startup_settings) -> dict[str, float]:

@@ -77,6 +77,10 @@ from app.core.clients.usage import (
 )
 from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
+from app.core.config.context_window_overrides import (
+    effective_context_window_overrides,
+    get_model_context_window_overrides_cache,
+)
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -3870,6 +3874,7 @@ async def _build_codex_models_response_body(
     allowed_models = _allowed_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
     visibility_allowed_models = _codex_model_visibility_allowed_models(api_key)
+    context_window_overrides = await _effective_context_window_overrides()
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
@@ -3921,39 +3926,64 @@ async def _build_codex_models_response_body(
         if visibility_allowed_models is None:
             if allowed_models is not None and slug not in allowed_models:
                 continue
-            entry = _to_codex_model_entry(model)
+            entry = _to_codex_model_entry(model, context_window_overrides=context_window_overrides)
             entries.append(entry)
             seen_slugs.add(slug)
             if model.supported_in_api and entry.visibility == "list":
-                data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
+                data.append(
+                    _to_model_list_item(
+                        slug,
+                        model,
+                        created=_model_list_created_at(model),
+                        context_window_overrides=context_window_overrides,
+                    )
+                )
             continue
         entry = _to_codex_model_entry(
             model,
+            context_window_overrides=context_window_overrides,
             visibility="list" if slug in visibility_allowed_models else "hide",
         )
         entries.append(entry)
         seen_slugs.add(slug)
         if model.supported_in_api and entry.visibility == "list":
-            data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
+            data.append(
+                _to_model_list_item(
+                    slug,
+                    model,
+                    created=_model_list_created_at(model),
+                    context_window_overrides=context_window_overrides,
+                )
+            )
     for slug, model in metadata_models.items():
         if slug in models or slug in source_model_slugs or not _is_codex_backend_catalog_model(model):
             continue
         if visibility_allowed_models is None and allowed_models is not None and slug not in allowed_models:
             continue
-        entries.append(_to_codex_model_entry(model, visibility="hide"))
+        entries.append(
+            _to_codex_model_entry(model, visibility="hide", context_window_overrides=context_window_overrides)
+        )
         seen_slugs.add(slug)
     for model in visible_source_models:
         if model.slug in seen_slugs:
             continue
         if visibility_allowed_models is None:
-            entry = _to_codex_model_entry(model)
+            entry = _to_codex_model_entry(model, context_window_overrides=context_window_overrides)
             entries.append(entry)
             seen_slugs.add(model.slug)
             if model.supported_in_api and entry.visibility == "list":
-                data.append(_to_model_list_item(model.slug, model, created=_model_list_created_at(model)))
+                data.append(
+                    _to_model_list_item(
+                        model.slug,
+                        model,
+                        created=_model_list_created_at(model),
+                        context_window_overrides=context_window_overrides,
+                    )
+                )
             continue
         entry = _to_codex_model_entry(
             model,
+            context_window_overrides=context_window_overrides,
             visibility=_effective_source_codex_visibility(
                 model,
                 visibility_allowed_models=visibility_allowed_models,
@@ -3963,7 +3993,14 @@ async def _build_codex_models_response_body(
         entries.append(entry)
         seen_slugs.add(model.slug)
         if model.supported_in_api and entry.visibility == "list":
-            data.append(_to_model_list_item(model.slug, model, created=_model_list_created_at(model)))
+            data.append(
+                _to_model_list_item(
+                    model.slug,
+                    model,
+                    created=_model_list_created_at(model),
+                    context_window_overrides=context_window_overrides,
+                )
+            )
     return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
 
@@ -3987,6 +4024,7 @@ async def _build_models_response_body(
     allowed_models = _allowed_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
     created = int(time.time())
+    context_window_overrides = await _effective_context_window_overrides()
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
@@ -4000,7 +4038,9 @@ async def _build_models_response_body(
     for slug, model in models.items():
         if not is_public_model(model, allowed_models):
             continue
-        items.append(_to_model_list_item(slug, model, created=created))
+        items.append(
+            _to_model_list_item(slug, model, created=created, context_window_overrides=context_window_overrides)
+        )
         seen_slugs.add(slug)
     for model in source_models:
         if model.slug in seen_slugs:
@@ -4010,7 +4050,9 @@ async def _build_models_response_body(
                 continue
         elif not is_public_model(model, allowed_models):
             continue
-        items.append(_to_model_list_item(model.slug, model, created=created))
+        items.append(
+            _to_model_list_item(model.slug, model, created=created, context_window_overrides=context_window_overrides)
+        )
         seen_slugs.add(model.slug)
     return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
 
@@ -4072,8 +4114,10 @@ def _canonical_model_slug(model: str) -> str:
     return resolve_model_alias(model) or model
 
 
-def _to_model_list_item(slug: str, model: UpstreamModel, *, created: int) -> ModelListItem:
-    context_window = _resolved_context_window(model)
+def _to_model_list_item(
+    slug: str, model: UpstreamModel, *, created: int, context_window_overrides: Mapping[str, int]
+) -> ModelListItem:
+    context_window = _resolved_context_window(model, context_window_overrides)
     return ModelListItem.model_validate(
         {
             "id": slug,
@@ -4153,7 +4197,9 @@ def _codex_wire_default_reasoning_level(model: UpstreamModel) -> str | None:
     return None
 
 
-def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:
+def _to_codex_model_entry(
+    model: UpstreamModel, *, context_window_overrides: Mapping[str, int], visibility: str | None = None
+) -> CodexModelEntry:
     raw = model.raw
     reasoning_levels = _codex_wire_reasoning_levels(model)
 
@@ -4185,7 +4231,7 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
             extra[key] = value
 
     # If context_window is overridden, also override max_context_window to match
-    effective_cw = _resolved_context_window(model)
+    effective_cw = _resolved_context_window(model, context_window_overrides)
     if effective_cw != model.context_window and "max_context_window" in extra:
         extra["max_context_window"] = effective_cw
 
@@ -4217,7 +4263,16 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
     )
 
 
-def _resolved_context_window(model: UpstreamModel) -> int:
+async def _effective_context_window_overrides() -> Mapping[str, int]:
+    # M4 model catalogue: resolved once per catalog build, outside the per-model
+    # loops. Dashboard rows (cached snapshot, settings-namespace invalidation)
+    # win per slug over the deprecated CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES
+    # entry; a slug with neither has no override.
+    dashboard = await get_model_context_window_overrides_cache().get()
+    return effective_context_window_overrides(dashboard, get_settings().model_context_window_overrides)
+
+
+def _resolved_context_window(model: UpstreamModel, overrides: Mapping[str, int]) -> int:
     # An explicit operator context-window override is an assertion about the usable
     # input budget, so it must also reach the generic OpenAI-compatible fields
     # (`context_length`, `contextLength`, `capabilities.context_length`, and
@@ -4238,7 +4293,6 @@ def _resolved_context_window(model: UpstreamModel) -> int:
     # `context_window`/`max_context_window` rewrite, `metadata.context_window`, and
     # every input-budget field all share this one value, so an override above the
     # backend ceiling can never split one model into two contradictory budgets.
-    overrides = get_settings().model_context_window_overrides
     override = overrides.get(model.slug)
     if override is None:
         return model.context_window

@@ -51,6 +51,7 @@ import {
 } from "@/features/dashboard/schemas";
 import type {
 	DashboardSettings,
+	ModelContextWindowOverrides,
 	SubscriptionOverflowPreflight,
 	TelemetryConsent,
 	TelemetrySnapshotEnvelope,
@@ -58,6 +59,7 @@ import type {
 } from "@/features/settings/schemas";
 import {
 	DashboardSettingsSchema,
+	ModelContextWindowOverridesSchema,
 	SubscriptionOverflowPreflightSchema,
 	TelemetryConsentSchema,
 	TelemetrySnapshotEnvelopeSchema,
@@ -84,6 +86,7 @@ export type ConversationDetails = z.infer<typeof ConversationDetailsSchema>;
 export type ConversationModelStat = z.infer<typeof ConversationModelStatSchema>;
 export type { QuotaPlannerDecision, QuotaPlannerForecast, QuotaPlannerSettings };
 export type QuotaPlannerWarmupActionResponse = z.infer<typeof QuotaPlannerWarmupActionResponseSchema>;
+export type { ModelContextWindowOverrides };
 export type OauthCompleteResponse = z.infer<typeof OauthCompleteResponseSchema>;
 
 export type {
@@ -808,6 +811,18 @@ export function createUpstreamProxyAdmin(
 			},
 		],
 		bindings: [],
+		...overrides,
+	});
+}
+
+export function createModelContextWindowOverrides(
+	overrides: Partial<ModelContextWindowOverrides> = {},
+): ModelContextWindowOverrides {
+	return ModelContextWindowOverridesSchema.parse({
+		overrides: [
+			{ slug: "gpt-5.4", contextWindow: 515000, source: "dashboard", envValue: 300000 },
+			{ slug: "gpt-5.5", contextWindow: 400000, source: "env", envValue: 400000 },
+		],
 		...overrides,
 	});
 }

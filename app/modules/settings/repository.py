@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -11,7 +12,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.db.models import DashboardSettings
+from app.db.models import DashboardSettings, ModelContextWindowOverride
 
 _SETTINGS_ID = 1
 
@@ -482,3 +483,41 @@ class SettingsRepository:
             # stale state the hook is meant to reset.
             on_committed()
         await self._session.refresh(settings)
+
+
+# M4 model catalogue: dashboard rows of the per-model context window overrides.
+class ModelContextWindowOverridesRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_all(self) -> list[ModelContextWindowOverride]:
+        result = await self._session.execute(
+            select(ModelContextWindowOverride).order_by(ModelContextWindowOverride.slug.asc())
+        )
+        return list(result.scalars().all())
+
+    async def by_slug(self) -> dict[str, int]:
+        """``slug -> context_window`` for every dashboard row."""
+        return {row.slug: row.context_window for row in await self.list_all()}
+
+    async def upsert(self, slug: str, context_window: int) -> ModelContextWindowOverride:
+        row = await self._session.get(ModelContextWindowOverride, slug)
+        if row is None:
+            row = ModelContextWindowOverride(slug=slug, context_window=context_window)
+            self._session.add(row)
+        else:
+            row.context_window = context_window
+        await self._session.commit()
+        await self._session.refresh(row)
+        return row
+
+    async def delete(self, slug: str) -> bool:
+        row = await self._session.get(ModelContextWindowOverride, slug)
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.commit()
+        return True
+
+
+# end M4 model catalogue

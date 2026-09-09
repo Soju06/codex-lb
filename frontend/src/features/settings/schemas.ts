@@ -451,6 +451,26 @@ export const UpstreamProxyAdminSchema = z.object({
   bindings: z.array(AccountProxyBindingSchema),
 });
 
+// M4 model catalogue: per-model context window overrides. `source` is
+// "dashboard" when a dashboard row exists for the slug and "env" when only the
+// CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES entry applies; `envValue` is that
+// entry (null when the environment has none).
+export const ModelContextWindowOverrideSchema = z.object({
+  slug: z.string().min(1),
+  contextWindow: z.number().int().positive(),
+  source: z.enum(["dashboard", "env"]),
+  envValue: z.number().int().positive().nullable().optional().default(null),
+});
+
+export const ModelContextWindowOverridesSchema = z.object({
+  overrides: z.array(ModelContextWindowOverrideSchema),
+});
+
+export const ModelContextWindowOverrideUpsertRequestSchema = z.object({
+  contextWindow: z.number().int().positive(),
+});
+// end M4 model catalogue
+
 export const TelemetryConsentStateSchema = z.enum(["undecided", "enabled", "disabled"]);
 export const TelemetryConsentSourceSchema = z.enum(["env", "persisted", "default"]);
 
@@ -622,6 +642,9 @@ export type UpstreamProxyPoolMemberRequest = z.infer<typeof UpstreamProxyPoolMem
 export type AccountProxyBinding = z.infer<typeof AccountProxyBindingSchema>;
 export type AccountProxyBindingRequest = z.infer<typeof AccountProxyBindingRequestSchema>;
 export type UpstreamProxyAdmin = z.infer<typeof UpstreamProxyAdminSchema>;
+export type ModelContextWindowOverride = z.infer<typeof ModelContextWindowOverrideSchema>;
+export type ModelContextWindowOverrides = z.infer<typeof ModelContextWindowOverridesSchema>;
+export type ModelContextWindowOverrideUpsertRequest = z.infer<typeof ModelContextWindowOverrideUpsertRequestSchema>;
 export type TelemetrySnapshot = z.infer<typeof TelemetrySnapshotSchema>;
 export type TelemetrySnapshotEnvelope = z.infer<typeof TelemetrySnapshotEnvelopeSchema>;
 export type TelemetryConsent = z.infer<typeof TelemetryConsentSchema>;

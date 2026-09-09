@@ -1213,6 +1213,31 @@ class DashboardSettings(Base):
     __mapper_args__ = {"version_id_col": version}
 
 
+# M4 model catalogue: dashboard-managed per-model context window overrides.
+class ModelContextWindowOverride(Base):
+    """One dashboard-stored context window override for a model slug.
+
+    A row wins over the ``CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES`` entry for
+    the same slug; slugs without a row inherit the environment entry (or have
+    no override). The migration never copies the environment into rows.
+    """
+
+    __tablename__ = "model_context_window_overrides"
+
+    slug: Mapped[str] = mapped_column(String, primary_key=True)
+    context_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+# end M4 model catalogue
+
+
 class RuntimeSentinel(Base):
     """Cross-replica consistency sentinels stamped into the shared database.
 

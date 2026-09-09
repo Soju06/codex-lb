@@ -1056,6 +1056,45 @@ async def test_model_registry_snapshot_migration_upgrade_and_downgrade(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_model_context_window_overrides_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'model-context-window-overrides.sqlite'}"
+    revision = "20260909_110000_model_context_window_overrides"
+
+    def _table_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("model_context_window_overrides"):
+            return None
+        return {column["name"] for column in inspector.get_columns("model_context_window_overrides")}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(_table_state)
+        assert columns == {"slug", "context_window", "created_at", "updated_at"}
+        # The migration never seeds rows from the environment dict.
+        async with engine.connect() as conn:
+            count = (await conn.execute(text("SELECT COUNT(*) FROM model_context_window_overrides"))).scalar_one()
+        assert count == 0
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), f"{revision}-1"))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is None
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_account_refresh_claims_migration_upgrade_and_downgrade(tmp_path):
     """Upgrade creates the refresh-claim coordination table; downgrade drops it;
     a final walk to head proves the revision sits on a single-head graph."""

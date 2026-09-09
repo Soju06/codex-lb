@@ -19,6 +19,7 @@ import { AppearanceSettings } from "@/features/settings/components/appearance-se
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
+import { ModelCatalogueSettings } from "@/features/settings/components/model-catalogue-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
 import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
@@ -252,6 +253,7 @@ export function SettingsPage() {
                 />
               ) : null}
               <ModelSourcesSettings disabled={controlsDisabled} />
+              <ModelCatalogueSettings disabled={controlsDisabled} />
               <FirewallSection disabled={controlsDisabled} />
               <QuotaPlannerSection disabled={controlsDisabled} />
               <StickySessionsSection disabled={controlsDisabled} />

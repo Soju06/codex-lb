@@ -414,6 +414,9 @@ class Settings(BaseSettings):
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor). Per-slug fallback:
+    # a ``model_context_window_overrides`` dashboard row wins for its slug; slugs
+    # without a row still read this dict.
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     # T1 (topology). Raw socket-peer CIDRs allowed to call the proxy without an
     # API key: a fact of this replica's network namespace (sidecar, pod CIDR),

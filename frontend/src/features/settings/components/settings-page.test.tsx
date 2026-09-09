@@ -86,6 +86,10 @@ vi.mock("@/features/settings/components/session-bridge-settings", () => ({
   SessionBridgeSettings: () => <div>Session Bridge Settings</div>,
 }));
 
+vi.mock("@/features/settings/components/model-catalogue-settings", () => ({
+  ModelCatalogueSettings: () => <div>Model Catalogue Settings</div>,
+}));
+
 vi.mock("@/features/settings/components/data-retention-settings", () => ({
   DataRetentionSettings: (props: unknown) => {
     dataRetentionSettingsMock(props);

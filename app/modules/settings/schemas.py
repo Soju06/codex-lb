@@ -353,6 +353,28 @@ class RuntimeConnectAddressResponse(DashboardModel):
     connect_address: str
 
 
+# M4 model catalogue: per-model context window overrides. ``source`` is
+# ``"dashboard"`` when a dashboard row exists for the slug and ``"env"`` when
+# only the ``CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES`` entry applies;
+# ``env_value`` is that entry (``None`` when the environment has none).
+class ModelContextWindowOverrideResponse(DashboardModel):
+    slug: str
+    context_window: int
+    source: Literal["dashboard", "env"]
+    env_value: int | None = None
+
+
+class ModelContextWindowOverridesResponse(DashboardModel):
+    overrides: list[ModelContextWindowOverrideResponse]
+
+
+class ModelContextWindowOverrideUpsertRequest(DashboardModel):
+    context_window: int = Field(ge=1)
+
+
+# end M4 model catalogue
+
+
 class UpstreamProxyEndpointCreateRequest(DashboardModel):
     name: str = Field(min_length=1, max_length=128)
     scheme: str = Field(pattern=r"^(http|https|socks5|socks5h)$")

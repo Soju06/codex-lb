@@ -482,9 +482,32 @@ A nonblank `conversation` without a dedicated resolved owner MUST proceed only w
 
 ### Requirement: Bare process-session cap spillover is non-mutating
 
-The system MUST distinguish a bare process-level session header from explicit Codex turn-state ownership. It MUST use a storage namespace that normalized request headers cannot occupy, so a client-supplied hard turn-state value cannot alias a derived soft-session row, while legacy raw Codex-session mappings remain hard during rolling upgrades. A current replica MUST consult a legacy raw key even when the namespaced session row also exists, and any raw hit MUST take precedence as hard ownership. If a resolved file, response, or bridge owner conflicts with that raw legacy owner, the request MUST fail closed without creating or rewriting either row.
+The system MUST parse process-session and thread headers independently. A bare
+process-session mapping and a bounded thread-local mapping MUST use distinct,
+header-inaccessible storage identities, so a client-supplied hard turn-state
+value cannot alias either derived soft row. A current replica MUST consult a
+legacy raw Codex-session key independently even when a namespaced process or
+thread row exists. Any raw hit MUST take precedence as hard ownership. If a
+resolved file, response, bridge, or other exact owner conflicts with that raw
+legacy owner, the request MUST fail closed without creating or rewriting any
+of those rows.
 
-When the mapped account for a bare process-session key is locally capped and another eligible account is selected, the spillover MUST apply only to that request. Selection MUST NOT update or delete the stored process-session mapping because of account-cap spillover. If the mapped account is below cap, normal sticky selection MUST retain it.
+A missing thread row MAY use an eligible process-session soft row as its
+initial placement preference. If that process row is missing, the first
+admitted thread MUST initialize it with insert-if-absent and MUST persist its
+own bounded thread row. A concurrent or later thread MUST NOT overwrite that
+first-writer process preference. Account-cap spillover or later thread movement
+MUST NOT rewrite or delete the process-session mapping or a sibling's thread
+mapping. A provisional recovery-probe reservation MUST NOT initialize a
+missing process preference, because its thread mapping may still require
+rollback and a probing account is not a stable process default. A later normal
+admission MAY initialize the missing process preference.
+
+When the mapped account for a bare process-session key is locally capped and
+another eligible account is selected, the spillover MUST apply only to that
+request. Selection MUST NOT update or delete the stored process-session mapping
+because of account-cap spillover. If the mapped account is below cap, normal
+sticky selection MUST retain it.
 
 #### Scenario: Capped bare-session owner spills without rebinding
 
@@ -511,7 +534,7 @@ When the mapped account for a bare process-session key is locally capped and ano
 
 #### Scenario: Derived soft key cannot be reused as raw hard turn state
 
-- **GIVEN** a process-session value has a derived internal storage key
+- **GIVEN** a process-session or thread value has a derived internal storage key
 - **WHEN** a client submits the visible representation of that key as a turn-state header
 - **THEN** header normalization cannot reproduce the internal storage identity
 - **AND** hard turn-state selection cannot read or rewrite the soft row
@@ -519,13 +542,13 @@ When the mapped account for a bare process-session key is locally capped and ano
 #### Scenario: Legacy raw mapping remains hard
 
 - **GIVEN** a legacy replica persisted a raw Codex-session mapping
-- **WHEN** a current replica receives a bare session header with the same raw value
+- **WHEN** a current replica receives the matching process or legacy thread header
 - **THEN** it does not reinterpret or mutate the legacy raw row as spillable affinity
 - **AND** mixed-version operation remains fail-closed for that row
 
 #### Scenario: Coexisting legacy and namespaced rows prefer hard ownership
 
-- **GIVEN** mixed-version replicas created a raw row and a namespaced session row for the same bare session
+- **GIVEN** mixed-version replicas created a raw row and a namespaced process or thread row for the same request identity
 - **AND** the rows point to different accounts
 - **WHEN** a current replica selects the request
 - **THEN** the raw row's account is treated as the hard owner
@@ -538,6 +561,36 @@ When the mapped account for a bare process-session key is locally capped and ano
 - **WHEN** the request is routed
 - **THEN** the service fails with `continuity_owner_conflict`
 - **AND** it neither bypasses nor rewrites the raw row
+
+#### Scenario: Process preference seeds only the new thread
+
+- **GIVEN** a process-session soft row points to account A
+- **AND** no bounded row exists for thread T
+- **WHEN** T is admitted on account A or a safely selected alternate
+- **THEN** the admitted account is persisted under T's bounded key
+- **AND** the process-session row remains unchanged
+
+#### Scenario: Missing process preference is initialized once
+
+- **GIVEN** no process-session mapping exists
+- **WHEN** the first thread is admitted on account A and a concurrent or later thread is admitted on account B
+- **THEN** insert-if-absent preserves the first persisted process owner
+- **AND** each thread persists only its own bounded locality after that initialization
+
+#### Scenario: Provisional probe placement does not escape rollback
+
+- **GIVEN** neither process nor thread has a bounded mapping
+- **WHEN** a probing-account placement persists provisionally and then loses its runtime commit
+- **THEN** its thread mutation is restored
+- **AND** no immutable process preference is left behind
+
+#### Scenario: Legacy raw owner wins over thread locality
+
+- **GIVEN** a raw legacy Codex row points to account A
+- **AND** a bounded thread row points to account B
+- **WHEN** the request is routed
+- **THEN** the raw row remains hard ownership evidence and account A wins
+- **AND** neither mapping is rewritten to reconcile the disagreement
 
 ### Requirement: Hard HTTP bridge reconnects remain account-bound after upstream close
 
@@ -586,20 +639,53 @@ The sanitized header set MUST preserve Codex continuity headers such as `session
 
 ### Requirement: Unanchored process-session concurrency uses independent bridge lanes
 
-When multiple Responses requests share a process-level session header but carry neither `previous_response_id` nor non-blank turn-state continuity, the service MUST NOT queue an independent request behind an active response-create gate. If the canonical bridge is still being created, reserved by another request before submit, already has a visible request, or belongs to a different model class, the service MUST create a server request-scoped bridge lane. The lane identity MUST NOT depend on a client-controlled request ID. The fork MUST leave the canonical bridge and its model metadata unchanged. When such requests carry an explicit `prompt_cache_key`, the stable bridge identity MUST combine it with the process-level session header so distinct Codex agent threads remain isolated even when they execute sequentially; repeated requests from the same thread MUST retain one identity. Requests without an explicit prompt-cache key MUST retain the legacy session-header identity. A pre-submit handoff reservation MUST protect its bridge from idle pruning and capacity eviction, and any cancellation or error between lookup and visible submission MUST release it. Owner forwarding MUST preserve whether a session-header or internal-fork request was unanchored instead of treating a proxy-generated downstream turn-state as an explicit client anchor, but MUST NOT attach that v2-only state to prompt-cache or unrelated affinity families. It MUST fail closed when a mixed-version hop cannot authenticate required unanchored state. The v2 primary signature MUST bind whether client-IP metadata was present, while the companion signature MUST bind its value. When the canonical owner itself creates a fork for a forwarded request, it MUST own that fork locally instead of re-hashing it into another forwarding hop. Explicitly anchored owner forwards MUST retain the legacy-compatible primary signature during rolling upgrades, and a receiving instance MUST reject ambiguous delimiter-bearing legacy fields. Durable aliases derived from the forked lane MUST retain hard owner and account continuity. If durable ownership fencing rejects a stale owner's new alias, the stale owner MUST remove the matching local alias without removing a newer local generation's mapping.
+When multiple Responses requests share a process-level session header but
+carry neither `previous_response_id` nor nonblank turn-state continuity, the
+service MUST NOT queue an independent request behind an active response-create
+gate. If the canonical bridge is still being created, reserved by another
+request before submit, already has a visible request, or belongs to a different
+model class, the service MUST create a server request-scoped bridge lane. The
+lane identity MUST NOT depend on a client-controlled request ID. The fork MUST
+leave the canonical bridge and its model metadata unchanged.
+
+When such requests carry nonblank `thread-id`, each thread MUST have a stable
+canonical bridge identity derived from process and thread identity regardless
+of `prompt_cache_key`; distinct threads MUST remain isolated even when they
+execute sequentially, and repeated requests from one thread MUST retain one
+identity. Requests without `thread-id` MUST retain the legacy session-header
+identity, including the established explicit-prompt-cache composition.
+
+A pre-submit handoff reservation MUST protect its bridge from idle pruning and
+capacity eviction, and any cancellation or error between lookup and visible
+submission MUST release it. Owner forwarding MUST preserve whether a
+session-header, thread-header, or internal-fork request was unanchored instead
+of treating a proxy-generated downstream turn-state as an explicit client
+anchor, but MUST NOT attach that v2-only state to prompt-cache or unrelated
+affinity families. It MUST fail closed when a mixed-version hop cannot
+authenticate required unanchored state. The v2 primary signature MUST bind
+whether client-IP metadata was present, while the companion signature MUST bind
+its value. When the canonical owner itself creates a fork for a forwarded
+request, it MUST own that fork locally instead of re-hashing it into another
+forwarding hop. Explicitly anchored owner forwards MUST retain the
+legacy-compatible primary signature during rolling upgrades, and a receiving
+instance MUST reject ambiguous delimiter-bearing legacy fields. Durable aliases
+derived from the forked lane MUST retain hard owner and account continuity. If
+durable ownership fencing rejects a stale owner's new alias, the stale owner
+MUST remove the matching local alias without removing a newer local
+generation's mapping.
 
 #### Scenario: sequential child agent does not reuse parent bridge history
 
-- **GIVEN** a parent and child Codex agent share one process session header
-- **AND** each agent supplies its own stable explicit `prompt_cache_key`
+- **GIVEN** a parent and child Codex agent share one process session and `prompt_cache_key`
+- **AND** each agent supplies its own stable `thread-id`
 - **WHEN** the child starts after the parent's visible request has completed
 - **THEN** the child uses a different bridge identity from the parent
 - **AND** another request from that same child keeps the child's bridge identity
 
 #### Scenario: Background requests do not block behind a foreground turn
 
-- **GIVEN** a foreground request is active on a session-header bridge
-- **WHEN** two unanchored background requests arrive with the same session header
+- **GIVEN** a foreground request is active on a session-header or thread-header bridge
+- **WHEN** two unanchored background requests arrive with the same canonical identity
 - **THEN** each background request uses an independent response-create gate
 - **AND** neither request waits for the foreground response to complete
 - **AND** the foreground bridge's model metadata remains unchanged
@@ -607,7 +693,7 @@ When multiple Responses requests share a process-level session header but carry 
 #### Scenario: Lookup-to-submit requests remain isolated
 
 - **GIVEN** an unanchored request has reserved an idle canonical bridge but has not yet made queued activity visible
-- **WHEN** another unanchored request arrives with the same session header and client request ID
+- **WHEN** another unanchored request arrives with the same canonical identity and client request ID
 - **THEN** the second request uses a distinct server-scoped bridge lane
 - **AND** it does not reuse the reserved canonical bridge
 
@@ -651,7 +737,7 @@ When multiple Responses requests share a process-level session header but carry 
 
 #### Scenario: Blank turn-state is not an anchor
 
-- **GIVEN** a request has a session header and an empty or whitespace-only turn-state header
+- **GIVEN** a request has process/thread identity and an empty or whitespace-only turn-state header
 - **WHEN** the request is forwarded to its owner
 - **THEN** the signed forwarding context marks the original request as unanchored
 - **AND** the generated downstream turn-state does not collapse it onto the canonical gate
@@ -674,7 +760,7 @@ When multiple Responses requests share a process-level session header but carry 
 
 - **GIVEN** an unanchored first-turn request uses a prompt-cache affinity lane
 - **WHEN** that request is forwarded to its canonical owner
-- **THEN** the origin does not attach session-header unanchored v2 state
+- **THEN** the origin does not attach session/thread-header unanchored v2 state
 - **AND** an older owner may accept the legacy-compatible forwarding contract
 
 #### Scenario: Legacy session-header canonical lane proves its turn-state anchor

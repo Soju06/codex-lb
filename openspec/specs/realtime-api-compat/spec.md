@@ -108,7 +108,7 @@ The live connector MUST replace downstream proxy authorization, account identity
 - **THEN** the proxy preserves the normalized status without route or credential details and does not replay the denial
 - **WHEN** the live connector raises `InvalidProxy`, `InvalidHandshake`, or `OSError`
 - **THEN** the sideband receives a fixed capability-specific, credential-safe message
-- **AND** ordinary Responses WebSocket exception behavior remains unchanged
+- **AND** the Responses WebSocket connector returns the same fixed credential-safe message for `InvalidProxy`, logging only the connector's URL-free reason, while its `InvalidHandshake` and `OSError` behavior remains unchanged
 
 #### Scenario: either peer disconnects or connection is cancelled
 

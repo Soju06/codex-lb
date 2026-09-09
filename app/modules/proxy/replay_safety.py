@@ -1142,6 +1142,9 @@ _DECLARED_TOOL_TYPE_BY_ITEM_TYPE = {
 # or account-side state -- containers, vector stores, connectors -- and are never
 # portable in v1, declared or not.
 _STATELESS_DECLARABLE_TOOL_TYPES = frozenset({"apply_patch", "local_shell", "shell", "tool_search"})
+# Public alias: the overflow neutral release passes this set because the release target is a
+# subscription account for which these stateless Codex tool declarations are native.
+STATELESS_DECLARABLE_TOOL_TYPES = _STATELESS_DECLARABLE_TOOL_TYPES
 # The only shape a stateless declaration may take to be set aside: ``type`` plus
 # an optional string ``description``. A positive allowlist, not a scan for known
 # account-scoped keys, so an unknown field (an account-bound ``container``, a

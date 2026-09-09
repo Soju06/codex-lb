@@ -1089,6 +1089,36 @@ async def test_pinned_source_disabled_source_free_transcript_is_released_neutral
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_type", ["shell", "apply_patch", "local_shell", "tool_search"])
+async def test_pinned_source_disabled_release_admits_stateless_codex_tool_declarations(
+    env: _Env, tool_type: str
+) -> None:
+    """CP-6 regression: a transcript that only DECLARES a stateless Codex tool type is still source-free.
+
+    The fresh path admitted exactly these declarations when it pinned the thread, and the release
+    target is a subscription account for which they are native, so they must not turn the release
+    into a hard 400 (mutant: ``transcript_is_source_free(view)`` with the empty default vocabulary).
+    """
+
+    record = _pin_record(thread_pin_key(_thread_key()), now=env.clock.now())
+    env.pins.live(record)
+    env.sources.clear()
+    env.unservable_cause = "source_disabled"
+    payload = _payload(
+        input=[{**_user("hello"), "id": "msg_source_1"}, {**_user("more"), "id": "msg_source_3"}],
+        tools=[{"type": tool_type}, {"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+    )
+
+    result = await env.resolve(payload=payload)
+
+    assert result is None, "declaring a stateless Codex tool must not block the neutral release"
+    assert env.executor.deleted == [(record.pin_key, True)]
+    assert isinstance(payload.input, list)
+    assert all(isinstance(item, dict) and "id" not in item for item in payload.input)
+    assert env.outcomes == ["pinned_released_neutral"]
+
+
+@pytest.mark.asyncio
 async def test_neutral_release_never_serves_before_the_delete_verifies(env: _Env) -> None:
     """Mutant: serve before the delete commits."""
 

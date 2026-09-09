@@ -81,6 +81,7 @@ from app.modules.proxy.model_source_pins import (
     thread_pin_key,
 )
 from app.modules.proxy.replay_safety import (
+    STATELESS_DECLARABLE_TOOL_TYPES,
     input_carries_image_parts,
     is_binding_turn_state,
     responses_payload_is_provider_portable,
@@ -1279,7 +1280,13 @@ async def _unservable_answer(
         if stripped_input is not None:
             body["input"] = stripped_input
         view = overflow_portability_view(body)
-        if isinstance(view, PortabilityView) and transcript_is_source_free(view):
+        # The release target is a subscription account, for which the stateless Codex tool
+        # declarations (shell/apply_patch/local_shell/tool_search) are native, so they must
+        # not make an otherwise source-free transcript unreleasable (they are exactly the
+        # declarations the fresh path admitted when it pinned the thread).
+        if isinstance(view, PortabilityView) and transcript_is_source_free(
+            view, supported_tool_types=STATELESS_DECLARABLE_TOOL_TYPES
+        ):
             outcome = await decision.pin_executor.delete_durably(
                 record.pin_key, scheduler=decision.scheduler, cache=decision.cache
             )

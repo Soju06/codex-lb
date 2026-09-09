@@ -215,6 +215,17 @@ def _disable_account_usage_summary_cache(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_dashboard_trailing_demand_cache(monkeypatch):
+    """Zero the weekly-pace trailing-demand cache TTL so dashboard pace
+    figures stay exact within a test. The TTL is a fixed constant in
+    production; cache-behavior tests patch it back to a positive value."""
+    import app.modules.dashboard.repository as dashboard_repository_module
+
+    dashboard_repository_module._clear_trailing_demand_cache()
+    monkeypatch.setattr(dashboard_repository_module, "_TRAILING_DEMAND_TTL_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def _disable_background_loop_schedulers(monkeypatch) -> tuple[str, ...]:
     """Replace every ambient app-lifespan background loop with a no-op.
 

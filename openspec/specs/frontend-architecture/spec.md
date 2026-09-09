@@ -1452,11 +1452,11 @@ The dashboard SHALL render `/reports` with a visible `UserAgent` filter beside t
 
 #### Scenario: Reports page reuses the relaxed reports query for user-agent filter choices
 - **WHEN** `/reports` loads or refreshes filter choices
-- **THEN** the page obtains `UserAgent` filter options from the same relaxed `GET /api/reports` query flow used for report filter-option discovery
-- **AND** the page does not require a separate endpoint to load `UserAgent` choices
+- **THEN** the page obtains `Model` and `UserAgent` options from `GET /api/reports/options` scoped by dates, timezone, accounts and API keys
+- **AND** the options query does not change when only model or User-Agent selection changes
 
 #### Scenario: Reports page shows one shared relaxed-catalog error for report filter choices
-- **WHEN** the relaxed `GET /api/reports` query for report filter-option discovery fails
+- **WHEN** the `GET /api/reports/options` query fails
 - **THEN** the page shows one page-owned error describing the combined `Model` and `UserAgent` option loading failure
 - **AND** the page does not show separate duplicate relaxed-catalog errors for `Model` and `UserAgent`
 

@@ -305,6 +305,39 @@ class AccountUsageRollupState(Base):
         server_default=text("'1970-01-01 00:00:00'"),
     )
 
+    reports_folded_through: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
+
+
+class RequestReportHourlyRollup(Base):
+    """Permanent report measures; conversation remains a dimension for exact distinct counts.
+
+    Hours are assembled into timezone days at read time. Normal traffic only,
+    including detached/deleted accounts, matching the reports contract.
+    """
+
+    __tablename__ = "request_report_hourly_rollups"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    useragent_group: Mapped[str] = mapped_column(String, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    first_requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    error_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cancelled_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    reasoning_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    reasoning_usage_known_requests: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
+
 
 class RequestUsageHourlyRollup(Base):
     """Hour-bucketed request-usage sums (time-axis rollup).

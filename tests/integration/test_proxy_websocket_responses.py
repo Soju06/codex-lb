@@ -265,6 +265,7 @@ def test_responses_websocket_route_drain_preserves_terminal_ownership_and_reject
     app_instance,
     monkeypatch,
 ):
+    """Preserve settlement ownership while denying late upgrades with retryable errors."""
     terminal_release = threading.Event()
     terminal_waiting = threading.Event()
     settlement_started = threading.Event()

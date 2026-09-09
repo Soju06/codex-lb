@@ -52,6 +52,7 @@ class InFlightMiddleware:
         self._shutdown_state: ModuleType | None = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Track admitted work and reject new requests while the server drains."""
         scope_type = scope["type"]
         if scope_type not in {"http", "websocket"}:
             await self.app(scope, receive, send)

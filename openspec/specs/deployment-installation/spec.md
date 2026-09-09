@@ -733,8 +733,13 @@ be operator-configurable: prewarm eligibility MUST be the
 with no canary sampling percent and no API-key allow/deny cohort lists.
 `database_pool_size` and `database_max_overflow` MUST remain
 operator-configurable settings, and `soft_drain_enabled` and
-`deterministic_failover_enabled` MUST remain the failover subsystem's
-enable switches.
+`deterministic_failover_enabled` MUST remain the failover subsystem's only
+enable switches. Those two switches and `circuit_breaker_enabled` MUST be
+dashboard runtime settings (`dashboard_settings` columns of the same name,
+NULL on the first-created row; see `account-routing` and
+`outbound-http-clients`) whose `CODEX_LB_*` variables are deprecated aliases
+that apply only while the column is NULL and that join the removed-settings
+warning list in the next minor release.
 
 #### Scenario: Removed env vars are ignored with one startup warning
 
@@ -856,4 +861,14 @@ enable switches.
   not been prewarmed
 - **THEN** the session prewarm is attempted for that request
 - **AND** no request is excluded by canary sampling or an allow/deny cohort
+
+#### Scenario: Resilience toggle env aliases apply only until the dashboard sets a value
+
+- **GIVEN** `CODEX_LB_CIRCUIT_BREAKER_ENABLED=true` and a `dashboard_settings`
+  row whose `circuit_breaker_enabled` column is NULL
+- **WHEN** an operator sets the circuit breaker off in the dashboard
+- **THEN** the next request runs with the breaker off on every replica without
+  a restart, and the settings API reports `source: "dashboard"`
+- **AND** clearing the dashboard value returns to the environment alias
+  (`source: "env"`) until that alias is removed in the next minor release
 

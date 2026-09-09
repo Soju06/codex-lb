@@ -1136,3 +1136,46 @@ change compaction input, usage, retries, or the response's actual service tier.
 #### Scenario: Non-subscription compaction does not synthesize a hint
 - **WHEN** compaction transport is invoked without subscription provenance
 - **THEN** it MUST NOT synthesize or forward a routing hint
+
+### Requirement: Account circuit breakers are constructed unconditionally and used per the dashboard toggle
+
+The upstream client MUST create (and keep) a per-account circuit breaker regardless of the `circuit_breaker_enabled` toggle, and MUST decide per request whether to consult it — pre-call check, half-open probe, success and failure recording — from the effective `circuit_breaker_enabled` value of the dashboard-settings snapshot the request path resolved. Because the client is reached without a settings argument, every request path that reaches the client with an account (stream, compact, WebSocket connect, codex control, thread goal, transcription, warmup fan-out, and the background limit-warmup, quota-planner warmup and automation callers) MUST bind the resolved toggles to its task after taking its snapshot, MUST rebind them before every upstream attempt whose generator may have been handed to another task since (a streaming request that yielded a capacity keepalive before opening upstream), and the client MUST read them from the task; a task with no binding MUST fall back to the process environment value. Turning the toggle on or off in the dashboard MUST take effect on the next upstream attempt without a restart, and turning it off MUST NOT destroy or reset existing breaker state.
+
+#### Scenario: Toggle turned off while a breaker is open
+
+- **GIVEN** the dashboard toggle is on and repeated upstream server errors have opened an account's breaker
+- **WHEN** an operator turns the circuit breaker off in the dashboard and the next request for that account is attempted
+- **THEN** the attempt is not rejected by the open breaker
+- **AND** the breaker object still exists and still reports open
+
+#### Scenario: Toggle turned on without a restart
+
+- **GIVEN** the process started with `CODEX_LB_CIRCUIT_BREAKER_ENABLED=false`
+- **WHEN** an operator turns the circuit breaker on in the dashboard and an account fails with upstream server errors up to the fixed threshold
+- **THEN** the account's breaker opens and the following attempt is rejected with the breaker-open error
+
+### Requirement: Upstream connect timeout is dashboard-managed
+
+The upstream connect timeout applied to every outbound upstream request — Responses streams, thread-goal and control calls, compaction, transcription, file uploads, upstream WebSocket handshakes and the HTTP bridge owner forward — MUST be the effective `upstream_connect_timeout_seconds` resolved as code default < environment < dashboard: a non-NULL `dashboard_settings.upstream_connect_timeout_seconds` overrides `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS`. Consumers MUST read it from the `SettingsCache` snapshot bound at the request or connection entry point (never from the database on the request path); per-attempt overrides that clamp the connect timeout to a remaining budget keep applying on top of the effective value. `PUT /api/settings` MUST reject, with `400 timeout_invariant_violation`, a connect timeout that would exceed the effective proxy, compact or transcription request budget, because such a value is clamped to the budget and can never be honoured.
+
+#### Scenario: Dashboard connect timeout overrides startup environment
+
+- **GIVEN** `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS=8` and an operator stores `3` through `PUT /api/settings`
+- **WHEN** a new request opens an upstream connection on any replica
+- **THEN** the aiohttp connect (`sock_connect`) timeout is 3 seconds
+- **AND** `GET /api/settings` reports `upstreamConnectTimeoutSeconds: 3` with `provenance.upstream_connect_timeout_seconds.source = "dashboard"`
+
+#### Scenario: Connect timeout above a budget is rejected
+
+- **GIVEN** the effective transcription request budget is 120 seconds
+- **WHEN** the operator sends `PUT /api/settings` with `upstreamConnectTimeoutSeconds: 130`
+- **THEN** the request is rejected with `400` and code `timeout_invariant_violation` naming `upstream-connect-within-transcription-budget`
+- **AND** the same `PUT` with `transcriptionRequestBudgetSeconds: 150` alongside is accepted
+
+#### Scenario: Startup warns when the environment is shadowed
+
+- **GIVEN** `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS` is set in the environment and the dashboard column is non-NULL
+- **WHEN** the process starts
+- **THEN** one WARN names the shadowed variable and points at the dashboard
+- **AND** no WARN is logged when the variable is unset or the column is NULL
+

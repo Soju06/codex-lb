@@ -1019,6 +1019,8 @@ and durable circuit state.
 ### Requirement: Long Codex websocket turns tolerate extended upstream silence
 The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.
 
+`compact_request_budget_seconds`, `stream_idle_timeout_seconds` and `proxy_request_budget_seconds` are dashboard-managed (`configuration-tiers`): each has a nullable `dashboard_settings` column of the same name whose non-NULL value MUST override the process environment value, which in turn overrides the code default. Consumers MUST read the effective value from the `SettingsCache` snapshot bound at the request or WebSocket entry point and MUST NOT query the database per request or per event. The environment variables remain as deprecated fallbacks and MUST NOT be copied into the column by the server; a client that echoes the effective values of a `GET /api/settings` response back through `PUT` stores them as explicit dashboard values (clients MUST send only the fields they intend to change). `GET /api/settings` MUST report any environment value the `Settings` model accepts, including one outside the bounds `PUT` enforces.
+
 #### Scenario: compact and stream watchdog defaults leave room for long turns
 - **WHEN** the service starts with default configuration
 - **THEN** `compact_request_budget_seconds` is at least 180 seconds
@@ -1039,9 +1041,26 @@ The default compact request budget MUST be at least 180 seconds, and the default
 - **THEN** both operations remain bounded by the original 7200-second stream deadline
 - **AND** the reconnect does not fail solely because the generic 600-second budget elapsed
 
+#### Scenario: Dashboard value overrides startup environment
+- **GIVEN** `CODEX_LB_PROXY_REQUEST_BUDGET_SECONDS=600` in the process environment and an operator has stored `900` for `proxy_request_budget_seconds` through `PUT /api/settings`
+- **WHEN** a new request computes its request deadline on any replica
+- **THEN** the deadline uses the 900 second dashboard value
+- **AND** `GET /api/settings` reports `proxyRequestBudgetSeconds: 900` with `provenance.proxy_request_budget_seconds.source = "dashboard"`
+
+#### Scenario: Clearing the dashboard value returns to the environment
+- **GIVEN** the same deployment
+- **WHEN** the operator sends `PUT /api/settings` with `proxyRequestBudgetSeconds: null`
+- **THEN** the column becomes NULL, new requests use the 600 second environment value, and the provenance source becomes `"env"` (or `"default"` when the environment matches the code default)
+
+#### Scenario: Timeout invariants are enforced on the effective values
+- **GIVEN** the environment-only admission wait is 10 seconds
+- **WHEN** the operator sends `PUT /api/settings` with `proxyRequestBudgetSeconds: 5`
+- **THEN** the request is rejected with `400` and code `timeout_invariant_violation` naming `admission-wait-within-proxy-budget`
+- **AND** a request that raises every violated budget in the same `PUT` is accepted
+
 ### Requirement: Responses upstream websocket liveness is bounded
 
-The proxy MUST configure direct and routed upstream Responses WebSocket transports with finite ping/pong liveness detection derived from `proxy_downstream_websocket_idle_timeout_seconds`. A direct connection MUST use the native helper watchdog when native egress is selected and the Python `websockets` watchdog only on the pre-dispatch missing-helper fallback. When an established Responses WebSocket is terminated because its transport did not receive the required pong, the adapter MUST classify the failure as `upstream_websocket_liveness_timeout`. Direct WebSocket and HTTP bridge relay owners MUST treat that failure as account neutral, MUST NOT transparently replay a pending request whose delivery is ambiguous, MUST finalize its pending request ownership exactly once, and MUST retire the affected upstream socket so a later client retry opens a fresh connection. An HTTP bridge reader MUST suppress its own pending-deque settlement only when a concurrent submitter explicitly claimed liveness-settlement ownership under the session lifecycle lock; `session.closed` alone MUST NOT suppress settlement.
+The proxy MUST configure direct and routed upstream Responses WebSocket transports with finite ping/pong liveness detection derived from `proxy_downstream_websocket_idle_timeout_seconds`, read as the effective dashboard-managed value (a non-NULL `dashboard_settings.proxy_downstream_websocket_idle_timeout_seconds` overrides the environment value) from the snapshot bound to the connection. A direct connection MUST use the native helper watchdog when native egress is selected and the Python `websockets` watchdog only on the pre-dispatch missing-helper fallback. When an established Responses WebSocket is terminated because its transport did not receive the required pong, the adapter MUST classify the failure as `upstream_websocket_liveness_timeout`. Direct WebSocket and HTTP bridge relay owners MUST treat that failure as account neutral, MUST NOT transparently replay a pending request whose delivery is ambiguous, MUST finalize its pending request ownership exactly once, and MUST retire the affected upstream socket so a later client retry opens a fresh connection. An HTTP bridge reader MUST suppress its own pending-deque settlement only when a concurrent submitter explicitly claimed liveness-settlement ownership under the session lifecycle lock; `session.closed` alone MUST NOT suppress settlement.
 
 #### Scenario: Direct Responses websocket loses pong liveness
 
@@ -1082,6 +1101,13 @@ The proxy MUST configure direct and routed upstream Responses WebSocket transpor
 - **WHEN** the submitter is cancelled before whole-deque settlement completes
 - **THEN** settlement continues until every pending sibling is finalized exactly once
 - **AND** the submitter cancellation is preserved after settlement completes
+
+#### Scenario: Dashboard idle timeout controls new connections
+
+- **GIVEN** `CODEX_LB_PROXY_DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT_SECONDS=120` and an operator stores `45` through `PUT /api/settings`
+- **WHEN** a new downstream WebSocket connection is accepted on any replica
+- **THEN** its idle timeout and the derived upstream ping/pong liveness window use 45 seconds
+- **AND** connections accepted before the change keep the value they were bound with
 
 ### Requirement: Upstream websocket drops penalize affected accounts
 
@@ -2341,7 +2367,7 @@ When an upstream websocket or HTTP bridge session has multiple pending Responses
 
 ### Requirement: HTTP bridge streams emit downstream liveness frames while pending
 
-When an HTTP bridge Responses request is waiting for upstream queue events, the system MUST emit a downstream SSE liveness frame at the configured `sse_keepalive_interval_seconds` interval so downstream clients do not disconnect before the upstream terminal frame arrives. The first generated liveness frame MUST be delayed until after the HTTP bridge startup-error probe window so a local startup `ProxyResponseError` can still be surfaced as a non-2xx HTTP response. Once a generated liveness frame is emitted, the stream MUST be considered started for later HTTP-error propagation decisions, so a subsequent upstream `response.failed` is forwarded in-stream instead of being raised as a startup HTTP error. If the pending request already has a response id, the liveness frame MAY be a `response.in_progress` SSE event for that response id. If no response id is known yet, the Codex CLI route MUST emit an ignored `codex.keepalive` SSE data event because comment-only frames do not reset the CLI's EventSource idle timer. Public `/v1/responses` stream normalization MUST preserve SSE comment keepalives instead of treating them as malformed data, and MUST drop `codex.*` liveness events from the public OpenAI SDK contract surface.
+When an HTTP bridge Responses request is waiting for upstream queue events, the system MUST emit a downstream SSE liveness frame at the configured `sse_keepalive_interval_seconds` interval so downstream clients do not disconnect before the upstream terminal frame arrives. The interval is dashboard-managed: a non-NULL `dashboard_settings.sse_keepalive_interval_seconds` MUST override the environment value, `0` disables generated liveness frames, and the value MUST be read from the `SettingsCache` snapshot bound to the request rather than from the environment alone. The first generated liveness frame MUST be delayed until after the HTTP bridge startup-error probe window so a local startup `ProxyResponseError` can still be surfaced as a non-2xx HTTP response. Once a generated liveness frame is emitted, the stream MUST be considered started for later HTTP-error propagation decisions, so a subsequent upstream `response.failed` is forwarded in-stream instead of being raised as a startup HTTP error. If the pending request already has a response id, the liveness frame MAY be a `response.in_progress` SSE event for that response id. If no response id is known yet, the Codex CLI route MUST emit an ignored `codex.keepalive` SSE data event because comment-only frames do not reset the CLI's EventSource idle timer. Public `/v1/responses` stream normalization MUST preserve SSE comment keepalives instead of treating them as malformed data, and MUST drop `codex.*` liveness events from the public OpenAI SDK contract surface.
 
 Before a response id exists, a verified native Codex client on `/backend-api/codex/responses` MUST receive an event-bearing `codex.keepalive` JSON SSE frame even when payload-shape heuristics also require OpenAI-compatible response normalization, because comment-only frames do not reset the native client's parsed-event idle timer. Native identity MUST come from the existing native User-Agent or originator allowlist and MUST NOT be inferred from continuity headers. Explicit OpenAI SDK fingerprint markers, including `x-stainless-*` headers or an OpenAI User-Agent, MUST retain precedence for heartbeat framing and MUST receive comment liveness. Public `/v1/responses` and other non-native OpenAI SDK streams MUST retain comment heartbeats before `response.created`. Heartbeat selection MUST NOT disable authentication, payload validation, event normalization, fingerprint normalization, or routing policy.
 
@@ -2393,6 +2419,12 @@ Before a response id exists, a verified native Codex client on `/backend-api/cod
 - **WHEN** the request is pending before `response.created`
 - **THEN** periodic liveness uses OpenAI-contract-safe comment frames
 - **AND** the first data event remains `response.created`
+
+#### Scenario: Dashboard keepalive interval overrides startup environment
+- **GIVEN** the process environment leaves `sse_keepalive_interval_seconds` at 10 and an operator stores `0.5` through `PUT /api/settings`
+- **WHEN** a Responses stream waits for its first upstream event on any replica
+- **THEN** liveness frames are emitted every 0.5 seconds
+- **AND** the request did not read `dashboard_settings` from the database beyond the cached snapshot
 
 ### Requirement: Codex WebSocket pre-created turns receive application heartbeats
 When serving the Codex-native `/backend-api/codex/responses` WebSocket route, the proxy SHALL emit a parseable Codex vendor heartbeat while a `response.create` request is pending but upstream has not yet emitted `response.created`. The heartbeat MUST be an application text frame so Codex clients reset stream-idle watchdogs that do not observe WebSocket protocol ping/pong frames. Once upstream assigns a response id, the proxy MUST continue using the existing `response.in_progress` heartbeat shape for that response id.

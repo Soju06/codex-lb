@@ -119,8 +119,14 @@ export function UpstreamTimeoutSettings({ settings, busy, onSave }: UpstreamTime
 
   const invalidKeys = TIMEOUT_FIELDS.filter(({ field }) => !parsed[field].valid).map(({ key }) => key);
   const connect = effective("upstreamConnectTimeoutSeconds", "upstream_connect_timeout_seconds");
+  // Like the backend, only violations this edit introduces block the save: a
+  // combination already violated by the inherited values must not stop the
+  // operator from changing (or fixing) other fields.
   const budgetViolations = TIMEOUT_FIELDS.filter(
-    ({ field, name }) => CONNECT_BUDGET_FIELDS.includes(field) && connect > effective(field, name),
+    ({ field, name }) =>
+      CONNECT_BUDGET_FIELDS.includes(field) &&
+      connect > effective(field, name) &&
+      !(settings.upstreamConnectTimeoutSeconds > settings[field]),
   );
   const changed = Object.keys(patch).length > 0;
   const canSave = changed && invalidKeys.length === 0 && budgetViolations.length === 0;

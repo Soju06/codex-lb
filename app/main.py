@@ -471,7 +471,6 @@ async def lifespan(app: FastAPI):
     reload_additional_quota_registry()
     settings = get_settings()
     warn_removed_settings()
-    validate_runtime_timeout_invariants(settings)
     # Anchor round-robin tie-break decorrelation to this replica's stable bridge
     # instance identity so peer replicas spread exact ties across equally-good
     # accounts instead of all herding onto the lexicographically-first account.
@@ -484,7 +483,13 @@ async def lifespan(app: FastAPI):
     if _auto_bootstrap_token:
         log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
-    warn_environment_shadowed_by_dashboard(await get_settings_cache().get(), settings)
+    # Dashboard-managed timeouts (C2-1) take precedence over the environment, so
+    # the startup invariants are checked on the effective values once the
+    # settings row is readable: a stored dashboard value can fix (or break) an
+    # environment combination, and the WARN names env aliases it shadows.
+    dashboard_settings_row = await get_settings_cache().get()
+    warn_environment_shadowed_by_dashboard(dashboard_settings_row, settings)
+    validate_runtime_timeout_invariants(effective_settings(dashboard_settings_row, settings))
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready is True:
         startup_module.mark_bridge_durable_schema_ready()

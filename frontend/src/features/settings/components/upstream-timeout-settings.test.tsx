@@ -131,6 +131,26 @@ describe("UpstreamTimeoutSettings", () => {
     );
   });
 
+  it("lets an unrelated edit through when the inherited values already violate an invariant", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    // Environment: connect 200 s > transcription budget 120 s (pre-existing violation).
+    const settings = settingsWithProvenance(
+      { upstreamConnectTimeoutSeconds: 200 },
+      { upstream_connect_timeout_seconds: { source: "env", envValue: 200, default: 8 } },
+    );
+    render(<UpstreamTimeoutSettings settings={settings} busy={false} onSave={onSave} />);
+
+    expect(screen.queryByText(/must not exceed/)).not.toBeInTheDocument();
+    await user.type(screen.getByRole("spinbutton", { name: "Stream idle timeout" }), "900");
+    expect(screen.getByRole("button", { name: "Save timeouts" })).toBeEnabled();
+
+    // Introducing a new violation (proxy budget below the connect timeout) is still blocked.
+    await user.type(screen.getByRole("spinbutton", { name: "Proxy request budget" }), "150");
+    expect(screen.getByText(/must not exceed the Proxy request budget/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save timeouts" })).toBeDisabled();
+  });
+
   it("falls back to placeholders without badges against a backend that reports no provenance", () => {
     const settings = { ...createDashboardSettings(), provenance: undefined };
     render(<UpstreamTimeoutSettings settings={settings} busy={false} onSave={vi.fn()} />);

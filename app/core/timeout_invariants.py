@@ -1,8 +1,10 @@
-"""Startup timeout-invariant validation over raw ``Settings`` values.
+"""Startup timeout-invariant validation over effective ``Settings`` values.
 
-This module intentionally validates only startup ``Settings`` fields and a
-small set of code constants whose relations are fixed at import/runtime. It
-does not validate per-request ContextVar overrides
+This module validates startup ``Settings`` fields — with the dashboard-managed
+timeouts applied on top (``app.core.config.dashboard_overrides``), both at
+startup and when ``PUT /api/settings`` changes one of them — and a small set of
+code constants whose relations are fixed at import/runtime. It does not
+validate per-request ContextVar overrides
 (``app/core/clients/proxy.py:3450-3467``,
 ``app/modules/proxy/_service/streaming/helpers.py:861-868``,
 ``app/modules/proxy/_service/compact.py:727-738``,

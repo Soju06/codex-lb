@@ -48,10 +48,8 @@ from app.modules.accounts.schemas import (
     AccountAdditionalWindow,
     AccountAuthExportResponse,
     AccountAuthExportTokens,
-    AccountExportResponse,
     AccountImportResponse,
     AccountOpenCodeAuthExportAccount,
-    AccountOpenCodeAuthExportResponse,
     AccountProbeResponse,
     AccountRequestUsage,
     AccountSummary,
@@ -437,31 +435,6 @@ class AccountsService:
             return None
         return account
 
-    async def export_opencode_auth(self, account_id: str) -> AccountOpenCodeAuthExportResponse | None:
-        account = await self._get_visible_account(account_id)
-        if account is None:
-            return None
-
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
-        refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
-        expires = token_expiry_epoch_ms(access_token) or 0
-        return AccountOpenCodeAuthExportResponse(
-            filename=_opencode_auth_export_filename(account),
-            account=AccountOpenCodeAuthExportAccount(
-                account_id=account.id,
-                chatgpt_account_id=account.chatgpt_account_id,
-                email=account.email,
-            ),
-            auth_json=OpenCodeAuthJson(
-                openai=OpenCodeOAuthAuth(
-                    refresh=refresh_token,
-                    access=access_token,
-                    expires=expires,
-                    account_id=account.chatgpt_account_id,
-                ),
-            ),
-        )
-
     async def export_auth(self, account_id: str) -> AccountAuthExportResponse | None:
         account = await self._get_visible_account(account_id)
         if account is None:
@@ -704,35 +677,6 @@ class AccountsService:
         if normalized == "":
             normalized = None
         return await self._repo.update_alias(account_id, normalized)
-
-    async def export_account(self, account_id: str) -> AccountExportResponse | None:
-        account = await self._get_visible_account(account_id)
-        if not account:
-            return None
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
-        refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
-        id_token = self._encryptor.decrypt(account.id_token_encrypted)
-        auth_json = {
-            "auth_mode": "chatgpt",
-            "OPENAI_API_KEY": None,
-            "tokens": {
-                "id_token": id_token,
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "account_id": account.chatgpt_account_id,
-            },
-            "last_refresh": account.last_refresh.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
-        }
-        return AccountExportResponse(
-            account_id=account.id,
-            email=account.email,
-            workspace_id=account.workspace_id,
-            workspace_label=account.workspace_label,
-            seat_type=account.seat_type,
-            plan_type=account.plan_type,
-            status=account.status.value,
-            auth_json=json.dumps(auth_json, indent=2),
-        )
 
     async def probe_account(
         self,

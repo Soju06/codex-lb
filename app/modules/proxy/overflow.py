@@ -124,6 +124,7 @@ __all__ = [
     "MODEL_SOURCE_BUSY_CODE",
     "MODEL_SOURCE_UNAVAILABLE_CODE",
     "OVERFLOW_OUTCOMES",
+    "OverflowFinishedHook",
     "OVERFLOW_TOTAL_METRIC",
     "OverflowDispatch",
     "OverflowPinExecutor",
@@ -158,6 +159,7 @@ __all__ = [
     "handshake_denial",
     "overflow_thread_key",
     "portability_decline",
+    "pin_commit_outcome_label",
     "record_overflow_outcome",
     "record_overflow_transport_decision",
     "resolve_subscription_overflow",
@@ -802,7 +804,7 @@ class OverflowDispatch:
     def owner_kwargs(self) -> dict[str, Any]:
         """Exactly the ``SourceDispatch`` kwargs the route helper splats: ``request_log_source``, ``dispatch_kind``,
         ``pin_intent``, ``pin_executor``, ``drain_until``, ``pin_failure_error_code``, ``pin_unverified_error_code``,
-        ``on_finished``."""
+        ``on_finished`` (the route-bound ``OverflowFinishedHook``)."""
 
         return {
             "request_log_source": self.request_log_source,
@@ -812,7 +814,7 @@ class OverflowDispatch:
             "drain_until": self.drain_until,
             "pin_failure_error_code": PIN_UNAVAILABLE_CODE,
             "pin_unverified_error_code": PIN_UNVERIFIED_CODE,
-            "on_finished": record_overflow_transport_decision,
+            "on_finished": OverflowFinishedHook(self.route),
         }
 
 
@@ -1669,7 +1671,7 @@ def background_job_allowed(headers: Mapping[str, str]) -> bool:
 
 
 def record_overflow_transport_decision(owner: SourceDispatch, status: DispatchStatus) -> None:
-    """``on_finished`` hook: records the upstream transport decision with ``policy="subscription_overflow"``.
+    """Records the upstream transport decision with ``policy="subscription_overflow"``.
 
     ``sticky=owner.dispatch_kind != "fresh"``; the observability import happens at call time.
     """
@@ -1683,3 +1685,33 @@ def record_overflow_transport_decision(owner: SourceDispatch, status: DispatchSt
         sticky=owner.dispatch_kind != DISPATCH_KIND_FRESH,
         status=status,
     )
+
+
+def pin_commit_outcome_label(pin_outcome: PinWriteOutcome | None) -> str | None:
+    """``pin_commit_failed`` / ``pin_commit_unverified`` for a pin commit that did not verify; ``None`` otherwise."""
+
+    if pin_outcome is None or pin_outcome == "written":
+        return None
+    return "pin_commit_unverified" if pin_outcome == "unknown" else "pin_commit_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class OverflowFinishedHook:
+    """``SourceDispatch.on_finished`` of an overflow dispatch, bound to the decision's ``route``.
+
+    Called exactly once per lifecycle from ``finish()``: counts the pin-commit
+    outcome (``pin_commit_failed`` / ``pin_commit_unverified``, design §8.5)
+    when the owner's ``pin_outcome`` did not verify -- the streaming hook and
+    the non-streaming route both set it before the pin-failure ``finish()`` --
+    and records the transport decision. A commit interrupted by the caller's
+    cancellation leaves ``pin_outcome`` unset and counts nothing: the outcome
+    was never seen by this dispatch (the fast-decline mark still applies).
+    """
+
+    route: str
+
+    def __call__(self, owner: SourceDispatch, status: DispatchStatus) -> None:
+        outcome = pin_commit_outcome_label(owner.pin_outcome)
+        if outcome is not None:
+            record_overflow_outcome(self.route, outcome)
+        record_overflow_transport_decision(owner, status)

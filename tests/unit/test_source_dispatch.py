@@ -2405,3 +2405,97 @@ def test_stream_trial_result_table(
         forwarding_error=forwarding_error,
     )
     assert result == expected
+
+
+# -- pin-commit outcome counter through the ``on_finished`` hook (spec: pin_commit_failed / _unverified) ---------
+
+
+class _OutcomeCounter:
+    def __init__(self) -> None:
+        self.outcomes: list[tuple[str, str]] = []
+        self._pending: tuple[str, str] | None = None
+
+    def labels(self, **labels: str) -> _OutcomeCounter:
+        self._pending = (labels["route"], labels["outcome"])
+        return self
+
+    def inc(self, amount: float = 1) -> None:
+        assert self._pending is not None
+        self.outcomes.append(self._pending)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "expected"), [("not_written", "pin_commit_failed"), ("unknown", "pin_commit_unverified")]
+)
+async def test_settlement_stream_pin_failure_records_the_pin_commit_outcome_once(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch, outcome: str, expected: str
+) -> None:
+    """Streaming path: ``on_first_content`` sets ``pin_outcome`` before the pin-failure ``finish()``, whose single
+    ``on_finished`` call records the outcome under the decision's route exactly once."""
+
+    from app.modules.proxy import overflow as overflow_module
+
+    counter = _OutcomeCounter()
+    monkeypatch.setattr(overflow_module, "subscription_overflow_total", counter)
+    executor = _FakeExecutor(outcome)
+    owner = _owner(
+        recorder,
+        reservation=_reservation(),
+        pin_intent=_intent(),
+        pin_executor=executor,
+        on_finished=overflow_module.OverflowFinishedHook("codex_responses"),
+    )
+    holder = SourceUsageHolder(first_content_seen=True, created_envelope={"id": "resp_src", "object": "response"})
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        await owner.on_first_content(holder)
+        yield "data: never delivered\n\n"
+
+    chunks = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert len(chunks) == 2
+    assert counter.outcomes == [("codex_responses", expected)]
+    await owner.finish(status="error", error_code="again")  # the latch: no second count
+    assert counter.outcomes == [("codex_responses", expected)]
+
+
+@pytest.mark.asyncio
+async def test_non_stream_pin_failure_finish_records_the_pin_commit_outcome_once(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-streaming path (``_finish_non_stream_source_dispatch``): ``pin_outcome`` is set on the owner and the
+    pin-failure ``finish()`` runs the same hook."""
+
+    from app.modules.proxy import overflow as overflow_module
+
+    counter = _OutcomeCounter()
+    monkeypatch.setattr(overflow_module, "subscription_overflow_total", counter)
+    hook = overflow_module.OverflowFinishedHook("v1_responses")
+    owner = _owner(recorder, reservation=_reservation(), on_finished=hook)
+    _attach_stream(owner)
+    owner.pin_outcome = "unknown"
+
+    await owner.finish(status="error", error_code=owner.pin_failure_row_code)
+
+    assert counter.outcomes == [("v1_responses", "pin_commit_unverified")]
+    assert recorder.release_calls == [owner.reservation]
+
+
+@pytest.mark.asyncio
+async def test_written_pin_records_no_pin_commit_outcome(recorder: _Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.modules.proxy import overflow as overflow_module
+
+    counter = _OutcomeCounter()
+    monkeypatch.setattr(overflow_module, "subscription_overflow_total", counter)
+    owner = _owner(
+        recorder,
+        pin_intent=_intent(),
+        pin_executor=_FakeExecutor("written"),
+        on_finished=overflow_module.OverflowFinishedHook("codex_responses"),
+    )
+    _attach_stream(owner, holder=SourceUsageHolder(terminal_kind="completed"))
+    await owner.on_first_content(SourceUsageHolder())
+    await owner.finish(status="success")
+    assert counter.outcomes == []

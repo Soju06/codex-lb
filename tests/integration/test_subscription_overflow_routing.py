@@ -79,6 +79,7 @@ from app.modules.proxy.overflow import (
     SOURCE_UNAVAILABLE_CODE,
     UNSUPPORTED_INPUT_CODE,
     OverflowDispatch,
+    OverflowFinishedHook,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 from app.modules.proxy.source_admission import get_source_bulkhead
@@ -344,11 +345,8 @@ async def _all_rows() -> list[RequestLog]:
 
 
 def _double_owner_kwargs(self: OverflowDispatch) -> dict[str, Any]:
-    """The contract's ``SourceDispatch`` kwargs, restricted to the owner fields C1 defines.
-
-    (``on_finished`` is the decision module's hook and is exercised by its own
-    tests; the wiring only has to splat whatever the decision hands over.)
-    """
+    """The contract's ``SourceDispatch`` kwargs: the owner fields C1 defines plus the decision module's real
+    ``on_finished`` hook (so the pin-commit outcome counter is observed through the wiring as well)."""
 
     return {
         "request_log_source": self.request_log_source,
@@ -358,7 +356,30 @@ def _double_owner_kwargs(self: OverflowDispatch) -> dict[str, Any]:
         "drain_until": self.drain_until,
         "pin_failure_error_code": PIN_UNAVAILABLE_CODE,
         "pin_unverified_error_code": PIN_UNVERIFIED_CODE,
+        "on_finished": OverflowFinishedHook(self.route),
     }
+
+
+class _OverflowCounter:
+    """``codex_lb_subscription_overflow_total`` recorder: ``(route, outcome)`` in increment order."""
+
+    def __init__(self) -> None:
+        self.outcomes: list[tuple[str, str]] = []
+        self._pending: tuple[str, str] | None = None
+
+    def labels(self, **labels: str) -> _OverflowCounter:
+        self._pending = (labels["route"], labels["outcome"])
+        return self
+
+    def inc(self, amount: float = 1) -> None:
+        assert self._pending is not None
+        self.outcomes.append(self._pending)
+
+
+def _spy_overflow_counter(monkeypatch: pytest.MonkeyPatch) -> _OverflowCounter:
+    counter = _OverflowCounter()
+    monkeypatch.setattr(overflow_module, "subscription_overflow_total", counter)
+    return counter
 
 
 @dataclass(frozen=True, slots=True)
@@ -654,15 +675,19 @@ async def test_overflow_non_stream_dispatch_commits_the_resolved_pin_before_the_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("outcome", "row_code"),
-    [("not_written", PIN_UNAVAILABLE_CODE), ("unknown", PIN_UNVERIFIED_CODE)],
+    ("outcome", "row_code", "counted"),
+    [
+        ("not_written", PIN_UNAVAILABLE_CODE, "pin_commit_failed"),
+        ("unknown", PIN_UNVERIFIED_CODE, "pin_commit_unverified"),
+    ],
 )
 async def test_overflow_non_stream_pin_failure_answers_503_and_writes_an_error_row(
-    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch, outcome: str, row_code: str
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch, outcome: str, row_code: str, counted: str
 ) -> None:
     """Never "proceed unpinned": a non-``written`` outcome fails the request closed with the pin-failure twin."""
 
     _forbid_subscription_stream(monkeypatch)
+    counter = _spy_overflow_counter(monkeypatch)
 
     async def responses(request: web.Request) -> web.Response:
         await request.json()
@@ -705,6 +730,7 @@ async def test_overflow_non_stream_pin_failure_answers_503_and_writes_an_error_r
     rows = await _source_rows(source_id)
     assert [(row.status, row.error_code) for row in rows] == [("error", row_code)]
     assert get_source_bulkhead().in_flight(source_id) == 0
+    assert counter.outcomes == [(ROUTE_V1_RESPONSES, counted)], "the pin-commit outcome is counted exactly once"
 
 
 @pytest.mark.asyncio
@@ -1662,6 +1688,7 @@ async def test_pin_write_failure_yields_one_synthesized_pair_and_fast_declines_t
     from app.db.session import sqlite_writer_section
 
     _forbid_subscription_stream(monkeypatch)
+    counter = _spy_overflow_counter(monkeypatch)
     monkeypatch.setattr(pins_module, "PIN_WRITE_ACQUIRE_DEADLINE_SECONDS", 0.3)
     scene = await _exhausted_scene(
         async_client,
@@ -1718,6 +1745,11 @@ async def test_pin_write_failure_yields_one_synthesized_pair_and_fast_declines_t
     assert retry.status_code == 429
     assert retry.json() == _todays_429(scene.reset_at)
     assert len(scene.state.requests) == 1, "the fast-declined retry must not pay for a second dispatch"
+    assert counter.outcomes == [
+        (ROUTE_CODEX_RESPONSES, "dispatched_fresh"),
+        (ROUTE_CODEX_RESPONSES, "pin_commit_failed"),
+        (ROUTE_CODEX_RESPONSES, "declined_pin_commit_recent_failure"),
+    ]
 
 
 @pytest.mark.asyncio

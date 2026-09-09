@@ -83,6 +83,7 @@ from app.modules.proxy.overflow import (
     DeclineReason,
     FastDeclineSet,
     OverflowDispatch,
+    OverflowFinishedHook,
     PinToucher,
     SourceBreaker,
     apply_usage_limit_hint,
@@ -558,7 +559,7 @@ async def test_fresh_dispatch_shape_claims_last_and_owner_kwargs(env: _Env) -> N
         "drain_until": None,
         "pin_failure_error_code": PIN_UNAVAILABLE_CODE,
         "pin_unverified_error_code": PIN_UNVERIFIED_CODE,
-        "on_finished": record_overflow_transport_decision,
+        "on_finished": OverflowFinishedHook(ROUTE_CODEX_RESPONSES),
     }
     assert env.metrics.outcomes == [(ROUTE_CODEX_RESPONSES, "dispatched_fresh")]
     # The probe asked the real question with the step-1 settings snapshot (mutant: probe without service_tier).
@@ -1513,6 +1514,52 @@ def test_overflow_thread_key_is_thread_only_and_session_independent() -> None:
     assert overflow_thread_key({"thread-id": "   "}) is None
     thread_pin_key(key)  # accepted by the pin key builders
     bounce_pin_key(key)
+
+
+@pytest.mark.parametrize(
+    ("pin_outcome", "expected"),
+    [("not_written", "pin_commit_failed"), ("unknown", "pin_commit_unverified")],
+)
+def test_finished_hook_counts_the_pin_commit_outcome_once_under_the_route(
+    monkeypatch: pytest.MonkeyPatch, pin_outcome: str, expected: str
+) -> None:
+    """Spec: a pin commit that is not ``written`` counts ``pin_commit_failed`` / ``pin_commit_unverified``. Mutant
+    (the hook records only the transport decision): both outcomes exist only in the enum and the canary drills
+    watching ``codex_lb_subscription_overflow_total`` never see a pin failure."""
+
+    import app.modules.proxy._service.observability as observability
+
+    metrics = _Metrics()
+    monkeypatch.setattr(overflow_module, "subscription_overflow_total", metrics)
+    transport_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        observability, "_record_upstream_transport_decision", lambda **kwargs: transport_calls.append(kwargs)
+    )
+    hook = OverflowFinishedHook(ROUTE_V1_RESPONSES)
+    owner = SimpleNamespace(dispatch_kind="pinned", pin_outcome=pin_outcome)
+
+    hook(cast(Any, owner), "error")
+
+    assert metrics.outcomes == [(ROUTE_V1_RESPONSES, expected)]
+    assert [(call["policy"], call["sticky"], call["status"]) for call in transport_calls] == [
+        ("subscription_overflow", True, "error")
+    ]
+    assert hook == OverflowFinishedHook(ROUTE_V1_RESPONSES) and hook != OverflowFinishedHook(ROUTE_CODEX_RESPONSES)
+
+
+@pytest.mark.parametrize("pin_outcome", [None, "written"])
+def test_finished_hook_counts_nothing_without_a_pin_failure(
+    monkeypatch: pytest.MonkeyPatch, pin_outcome: str | None
+) -> None:
+    import app.modules.proxy._service.observability as observability
+
+    metrics = _Metrics()
+    monkeypatch.setattr(overflow_module, "subscription_overflow_total", metrics)
+    monkeypatch.setattr(observability, "_record_upstream_transport_decision", lambda **kwargs: None)
+    OverflowFinishedHook(ROUTE_CODEX_RESPONSES)(
+        cast(Any, SimpleNamespace(dispatch_kind="fresh", pin_outcome=pin_outcome)), "success"
+    )
+    assert metrics.outcomes == []
 
 
 def test_record_overflow_transport_decision_reports_policy_and_stickiness(monkeypatch: pytest.MonkeyPatch) -> None:

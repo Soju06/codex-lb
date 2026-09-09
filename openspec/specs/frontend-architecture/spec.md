@@ -257,6 +257,7 @@ The dashboard SHALL show weekly quota runway when account weekly capacity credit
 - **THEN** the response reports `scheduleGapCredits` for the current deficit against the linear schedule
 - **AND** the response reports `projectedShortfallCredits` only for a future shortfall forecast based on recent burn
 - **AND** any surface that presents the linear-schedule deficit describes it as over planned usage, fewer credits remaining than scheduled, or equivalent over-consumption wording rather than "behind schedule"
+- **AND** the dashboard labels the two concepts separately
 
 #### Scenario: Displayed pace gap uses configured smoothing
 
@@ -264,6 +265,7 @@ The dashboard SHALL show weekly quota runway when account weekly capacity credit
 - **WHEN** recent weekly usage samples are available for the current weekly reset/window segment
 - **THEN** the response includes `smoothedDeltaPercent`, `smoothedScheduleGapCredits`, and `paceGapSmoothingMinutes`
 - **AND** `actualUsedPercent` remains the live current value
+- **AND** the Weekly credits pace card displays the smoothed gap while keeping `actualUsedPercent` as the live current value
 
 #### Scenario: Weekly pace smoothing resets with quota window
 

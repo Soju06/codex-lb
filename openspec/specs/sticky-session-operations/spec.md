@@ -306,7 +306,7 @@ Outside the explicit goal-continuation restart abandonment defined above, reques
 - **AND** an account that has remained unavailable since the original backfill is not given a fresh grace window merely by this process starting
 
 ### Requirement: Dashboard exposes sticky-session administration
-The system SHALL provide dashboard APIs for listing sticky-session mappings, deleting one mapping, and purging stale mappings.
+The system SHALL provide dashboard APIs for listing sticky-session mappings, deleting mappings by explicit `key` and `kind` through the batch delete endpoint, and purging stale mappings. The system SHALL NOT expose a per-item `DELETE /api/sticky-sessions/{kind}/{key}` route; deleting one mapping is a one-entry batch delete.
 
 #### Scenario: List sticky-session mappings
 - **WHEN** the dashboard requests sticky-session entries
@@ -318,8 +318,9 @@ The system SHALL provide dashboard APIs for listing sticky-session mappings, del
 - **THEN** the system applies stale prompt-cache filtering before enforcing the result limit
 
 #### Scenario: Delete one mapping
-- **WHEN** the dashboard deletes a sticky-session mapping by both `key` and `kind`
-- **THEN** the system removes that mapping and returns a success response
+- **WHEN** the dashboard posts a batch delete containing exactly one `{key, kind}` entry
+- **THEN** the system removes that mapping and reports it in `deleted` with `deletedCount` 1
+- **AND** a missing or reserved mapping is reported in `failed` with reason `not_found` instead of a route-level error
 
 #### Scenario: Purge stale prompt-cache mappings
 - **WHEN** the dashboard requests a stale purge

@@ -6,7 +6,19 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.core.auth.dashboard_access import guest_principal
+from app.core.auth.dependencies import validate_dashboard_session
 from app.core.config.settings import get_settings
+from app.db.models import DashboardSettings
+from app.db.session import get_background_session
+
+
+async def _notice_version() -> int:
+    async with get_background_session() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        return int(row.telemetry_notice_version)
+
 
 pytestmark = pytest.mark.unit
 
@@ -75,6 +87,7 @@ async def test_consent_api_builds_decided_preview_only_when_requested(
     assert payload["state"] == "disabled"
     assert payload["preview"]["heartbeat"]["instance_id"] == payload["preview"]["heartbeat"]["metrics"]["instance_id"]
     assert payload["preview"]["heartbeat"]["metrics"]["consent"] == "enabled"
+    assert await _notice_version() == 0
 
 
 @pytest.mark.asyncio
@@ -226,6 +239,11 @@ async def test_opt_out_identity_failure_is_debug_only_and_preserves_disabled_sta
 
     assert response.status_code == 200
     assert response.json()["state"] == "disabled"
+    async with get_background_session() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        row.telemetry_notice_version = 2
+        await session.commit()
     persisted = await async_client.get("/api/settings/telemetry")
     assert persisted.status_code == 200
     assert persisted.json()["state"] == "disabled"
@@ -252,3 +270,59 @@ async def test_unexpected_opt_out_task_failure_is_debug_only_and_does_not_change
     assert response.status_code == 200
     assert caplog.records
     assert all(record.levelno == logging.DEBUG for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_read_only_notice_preview_does_not_acknowledge_and_write_principal_can_later_ack(
+    async_client, app_instance, monkeypatch
+) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+    app_instance.dependency_overrides[validate_dashboard_session] = lambda: guest_principal()
+    try:
+        response = await async_client.get("/api/settings/telemetry")
+        assert response.status_code == 200
+        assert response.json()["preview"] is not None
+        assert await _notice_version() == 0
+    finally:
+        app_instance.dependency_overrides.pop(validate_dashboard_session, None)
+
+    response = await async_client.get("/api/settings/telemetry")
+    assert response.status_code == 200
+    assert response.json()["preview"] is not None
+    assert await _notice_version() == 2
+
+    response = await async_client.get("/api/settings/telemetry")
+    assert response.status_code == 200
+    assert response.json()["preview"] is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_preview_never_acknowledges_unacknowledged_notice(async_client, monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+    await async_client.put("/api/settings/telemetry", json={"enabled": False})
+    assert await _notice_version() == 0
+
+    response = await async_client.get("/api/settings/telemetry?include_preview=true")
+    assert response.status_code == 200
+    assert response.json()["preview"] is not None
+    assert await _notice_version() == 0
+
+    response = await async_client.get("/api/settings/telemetry")
+    assert response.status_code == 200
+    assert response.json()["preview"] is not None
+    assert await _notice_version() == 2
+
+
+@pytest.mark.asyncio
+async def test_explicit_preview_after_acknowledgement_keeps_watermark(async_client, monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+    await async_client.get("/api/settings/telemetry")
+    assert await _notice_version() == 2
+
+    response = await async_client.get("/api/settings/telemetry?include_preview=true")
+    assert response.status_code == 200
+    assert response.json()["preview"] is not None
+    assert await _notice_version() == 2

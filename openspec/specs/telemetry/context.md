@@ -181,9 +181,8 @@ notice. Followers perform none of that work, avoiding duplicate snapshots and du
 
 Each snapshot summarizes the previous seven days of existing local request logs. codex-lb does
 not create a second local telemetry history or queue failed transmissions. The project-operated
-collector is `https://telemetry.tokmaxxing.com`; its server-side retention duration is not yet
-specified, so operators should assume transmitted snapshots remain stored until a published
-retention policy or explicit deletion.
+collector is `https://telemetry.tokmaxxing.com`; it retains per-instance detail for 365 days
+and then deletes it. Non-identifying fleet aggregates may be retained beyond that period.
 
 ## Failure modes
 

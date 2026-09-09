@@ -81,9 +81,8 @@ sent only for a dashboard-driven active-to-inactive transition; setting
 ## Retention and failures
 
 Each snapshot summarizes the previous seven days of data already present in `request_logs`.
-codex-lb does not keep a separate local telemetry history and does not queue a failed send. The
-collector's server-side retention duration is not currently specified; assume transmitted
-snapshots remain stored until a published retention policy or explicit deletion.
+codex-lb does not keep a separate local telemetry history and does not queue a failed send. The collector retains per-instance detail for 365 days and then deletes it. Non-identifying
+fleet aggregates may be retained beyond that period.
 
 Snapshot and opt-out endpoint failures use a five-second total timeout, retry no more than once,
 are logged only at debug level, and never interrupt proxy traffic or change the dashboard

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import __version__
+from app.core.auth.dashboard_access import DashboardPermission, DashboardPrincipal
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
     set_dashboard_error_format,
@@ -40,19 +41,19 @@ router = APIRouter(
 @router.get("/telemetry", response_model=TelemetryConsentResponse)
 async def get_telemetry_consent(
     include_preview: bool = Query(default=False),
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     session: AsyncSession = Depends(get_session),
 ) -> TelemetryConsentResponse:
     store = TelemetryConsentStore(session)
     consent = await store.resolve()
     notice_version = await store.notice_version()
-    eligible_notice = (consent.state == "undecided" and consent.source == "default") or (
-        notice_version < TELEMETRY_NOTICE_VERSION and consent.source != "env"
-    )
+    eligible_notice = notice_version < TELEMETRY_NOTICE_VERSION and consent.source != "env"
     return await _response(
         session,
         store,
         consent,
         include_preview=include_preview or eligible_notice,
+        acknowledge_notice=eligible_notice and not include_preview and principal.can(DashboardPermission.WRITE),
     )
 
 
@@ -81,7 +82,7 @@ async def update_telemetry_consent(
             task.add_done_callback(_handle_opt_out_task_done)
         except Exception as exc:
             logger.debug("Unable to schedule anonymous telemetry opt-out", exc_info=exc)
-    return await _response(session, store, consent, include_preview=False)
+    return await _response(session, store, consent, include_preview=False, acknowledge_notice=False)
 
 
 async def _response(
@@ -90,6 +91,7 @@ async def _response(
     consent: ResolvedConsent,
     *,
     include_preview: bool,
+    acknowledge_notice: bool,
 ) -> TelemetryConsentResponse:
     preview: TelemetryPreview | None = None
     if include_preview:
@@ -105,7 +107,8 @@ async def _response(
                 identity.instance_id, (utcnow() - timedelta(days=1)).date()
             ),
         )
-        await store.acknowledge_notice()
+        if acknowledge_notice:
+            await store.acknowledge_notice()
     return TelemetryConsentResponse(
         notice_version=TELEMETRY_NOTICE_VERSION,
         state=consent.state,

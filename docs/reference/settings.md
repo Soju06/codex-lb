@@ -218,7 +218,7 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_CONVERSATION_ARCHIVE_DIR` | T1 | `Path` | `<data_dir>/conversation-archive` |
-| `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED` | T3 | `bool` | `False` |
+| `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED` | T3 (dashboard) | `bool` | `False` |
 | `CODEX_LB_CONVERSATION_ARCHIVE_QUEUE_MAX_BYTES` | T1 | `int` | `268435456` |
 
 ## Schedulers

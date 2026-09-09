@@ -17,6 +17,7 @@ from app.core.config.inheritable import SettingScalar as SettingScalar
 from app.core.config.inheritable import SettingSource as SettingSource
 from app.core.config.inheritable import resolve_inheritable as resolve_inheritable
 from app.core.config.settings import Settings, get_settings
+from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
@@ -110,6 +111,9 @@ class DashboardSettingsData:
     automations_scheduler_enabled: bool
     rate_limit_reset_credits_refresh_enabled: bool
     # end M2 background jobs
+    # M5 conversation archive: effective toggle; provenance carries the source.
+    conversation_archive_enabled: bool
+    # end M5 conversation archive
     version: int
     # C2-1 timeouts: effective values (dashboard column, else environment,
     # else code default); the column values are exposed through ``provenance``.
@@ -221,6 +225,10 @@ class DashboardSettingsUpdateData:
     rate_limit_reset_credits_refresh_enabled: bool | None = None
     clear_rate_limit_reset_credits_refresh_enabled: bool = False
     # end M2 background jobs
+    # M5 conversation archive: tri-state like the resilience toggles.
+    conversation_archive_enabled: bool | None = None
+    clear_conversation_archive_enabled: bool = False
+    # end M5 conversation archive
     # C2-1 timeouts (tri-state like the caps: value = store, clear = NULL,
     # neither = untouched).
     upstream_connect_timeout_seconds: float | None = None
@@ -349,6 +357,10 @@ class SettingsService:
             # C2-3 resilience toggles
             soft_drain_enabled=payload.soft_drain_enabled,
             clear_soft_drain_enabled=payload.clear_soft_drain_enabled,
+            # M5 conversation archive
+            conversation_archive_enabled=payload.conversation_archive_enabled,
+            clear_conversation_archive_enabled=payload.clear_conversation_archive_enabled,
+            # end M5 conversation archive
             deterministic_failover_enabled=payload.deterministic_failover_enabled,
             clear_deterministic_failover_enabled=payload.clear_deterministic_failover_enabled,
             circuit_breaker_enabled=payload.circuit_breaker_enabled,
@@ -423,6 +435,7 @@ _ENVIRONMENT_INHERITABLE_SETTINGS = (
     # M3 codex prewarm: bool; a NULL column inherits the deprecated env alias.
     "http_responses_session_bridge_codex_prewarm_enabled",
     # end M3 codex prewarm
+    CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive (bool, env alias)
 )
 # Retention has no environment fallback: NULL = never set from the dashboard =
 # disabled; 0 = explicitly disabled.
@@ -583,6 +596,9 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         automations_scheduler_enabled=bool(resolved["automations_scheduler_enabled"].value),
         rate_limit_reset_credits_refresh_enabled=bool(resolved["rate_limit_reset_credits_refresh_enabled"].value),
         # end M2 background jobs
+        # M5 conversation archive
+        conversation_archive_enabled=bool(resolved[CONVERSATION_ARCHIVE_SETTING].value),
+        # end M5 conversation archive
         version=row.version,
         # C2-1 timeouts
         upstream_connect_timeout_seconds=float(resolved["upstream_connect_timeout_seconds"].value),

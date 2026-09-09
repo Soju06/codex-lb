@@ -1202,6 +1202,11 @@ class DashboardSettings(Base):
     automations_scheduler_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     rate_limit_reset_credits_refresh_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # end M2 background jobs
+    # M5 conversation archive: NULL inherits the deprecated
+    # ``CODEX_LB_CONVERSATION_ARCHIVE_ENABLED`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    conversation_archive_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M5 conversation archive
     version: Mapped[int] = mapped_column(
         Integer,
         default=1,

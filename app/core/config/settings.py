@@ -398,6 +398,9 @@ class Settings(BaseSettings):
     # (upstream request summary/completion), ``upstream_payload`` (upstream
     # request payload). Interactive incident use only, not steady-state config.
     trace: str = ""
+    # T3 → dashboard (deprecated env alias, remove next minor): the
+    # ``dashboard_settings.conversation_archive_enabled`` column wins when set;
+    # the archive writer resolves it from the settings-cache snapshot.
     conversation_archive_enabled: bool = False
     conversation_archive_dir: Path = DEFAULT_CONVERSATION_ARCHIVE_DIR
     conversation_archive_queue_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)

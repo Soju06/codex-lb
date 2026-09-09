@@ -99,6 +99,8 @@ class SettingsRepository:
             auth_guardian_enabled=None,
             automations_scheduler_enabled=None,
             rate_limit_reset_credits_refresh_enabled=None,
+            # M5 conversation archive: NULL = inherit the env alias / default.
+            conversation_archive_enabled=None,
         )
         self._session.add(row)
         try:
@@ -197,6 +199,10 @@ class SettingsRepository:
         clear_automations_scheduler_enabled: bool = False,
         rate_limit_reset_credits_refresh_enabled: bool | None = None,
         clear_rate_limit_reset_credits_refresh_enabled: bool = False,
+        # M5 conversation archive (tri-state like the resilience toggles)
+        conversation_archive_enabled: bool | None = None,
+        clear_conversation_archive_enabled: bool = False,
+        # end M5 conversation archive
         # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
         # inherit, neither = untouched).
         upstream_connect_timeout_seconds: float | None = None,
@@ -421,6 +427,13 @@ class SettingsRepository:
             elif value is not None:
                 setattr(settings, column_name, value)
         # end M2 background jobs
+        # M5 conversation archive: clear flag resets to NULL (inherit the env
+        # alias / code default); a non-None value is dashboard-owned.
+        if clear_conversation_archive_enabled:
+            settings.conversation_archive_enabled = None
+        elif conversation_archive_enabled is not None:
+            settings.conversation_archive_enabled = conversation_archive_enabled
+        # end M5 conversation archive
         # C2-1 timeouts
         for column_name, value, clear in (
             (

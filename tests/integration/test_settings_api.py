@@ -369,6 +369,7 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "auth_guardian_enabled",
         "automations_scheduler_enabled",
         "rate_limit_reset_credits_refresh_enabled",
+        "conversation_archive_enabled",  # M5 conversation archive
         # C2-1 timeouts
         "upstream_connect_timeout_seconds",
         "proxy_request_budget_seconds",
@@ -2455,3 +2456,57 @@ async def test_model_context_window_override_slug_may_contain_a_slash(async_clie
     assert response.status_code == 200
     assert response.json()["overrides"][0]["slug"] == "vendor/model-a"
     assert (await async_client.delete(f"{_OVERRIDES_PATH}/vendor/model-a")).status_code == 200
+
+
+# M5 conversation archive
+@pytest.mark.asyncio
+async def test_settings_api_conversation_archive_round_trip_with_provenance(async_client, monkeypatch):
+    """default -> dashboard on -> cleared/env -> unchanged on omit; the archive dir is read-only."""
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["conversationArchiveEnabled"] is False
+    assert payload["provenance"]["conversation_archive_enabled"] == {
+        "source": "default",
+        "envValue": False,
+        "default": False,
+    }
+    # T1 directory of this replica, shown read-only next to the toggle.
+    assert payload["conversationArchiveDir"] == str(settings_service.get_settings().conversation_archive_dir)
+
+    enabled = await async_client.put("/api/settings", json={"conversationArchiveEnabled": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["conversationArchiveEnabled"] is True
+    assert enabled.json()["provenance"]["conversation_archive_enabled"]["source"] == "dashboard"
+
+    # The directory is not writable through the API (unknown fields are ignored).
+    renamed = await async_client.put("/api/settings", json={"conversationArchiveDir": "/elsewhere"})
+    assert renamed.status_code == 200
+    assert renamed.json()["conversationArchiveDir"] == payload["conversationArchiveDir"]
+
+    # Explicit null clears the column; the deprecated env alias applies again.
+    inherited = settings_service.get_settings().model_copy(update={"conversation_archive_enabled": True})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put("/api/settings", json={"conversationArchiveEnabled": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["conversationArchiveEnabled"] is True
+    assert cleared.json()["provenance"]["conversation_archive_enabled"] == {
+        "source": "env",
+        "envValue": True,
+        "default": False,
+    }
+
+    # Omitting the field (any unrelated save) never copies the inherited value
+    # into the column.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["provenance"]["conversation_archive_enabled"]["source"] == "env"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.conversation_archive_enabled is None
+
+
+# end M5 conversation archive

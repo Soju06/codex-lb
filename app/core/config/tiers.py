@@ -156,7 +156,6 @@ MIGRATING: Final[dict[str, str]] = {
     # a tunable, so it has no MIGRATING row.
     "http_responses_session_bridge_operation_spool_retention_seconds": "backlog",
     "http_responses_session_bridge_ambiguous_continuation_recovery_mode": "backlog",
-    "conversation_archive_enabled": "backlog",
 }
 
 # T3 fields whose database home already exists under a different column name

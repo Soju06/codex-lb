@@ -570,3 +570,26 @@ async def test_features_automations_reads_the_effective_dashboard_toggle(async_s
     )
     assert paused.features.automations is False
     assert (await async_session.get(DashboardSettings, 1)) is row
+
+
+# M5 conversation archive
+@pytest.mark.asyncio
+async def test_features_conversation_archive_follows_the_dashboard_value(async_session: AsyncSession) -> None:
+    """The feature flag reports the effective toggle (dashboard column over the env alias)."""
+    from app.core.config.settings import get_settings
+    from app.modules.settings.repository import SettingsRepository
+
+    row = await SettingsRepository(async_session).get_or_create()
+    row.conversation_archive_enabled = True
+    await async_session.commit()
+    environment = get_settings().model_copy(update={"conversation_archive_enabled": False})
+
+    snapshot = await TelemetrySnapshotBuilder(async_session, settings=environment).build(
+        "00000000-0000-4000-8000-000000000001",
+        consent="enabled",
+    )
+
+    assert snapshot.features.conversation_archive is True
+
+
+# end M5 conversation archive

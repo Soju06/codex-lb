@@ -2754,3 +2754,45 @@ async def test_dashboard_background_job_toggles_migration_upgrade_and_downgrade(
         assert toggle_columns <= await _settings_columns(engine)
     finally:
         await engine.dispose()
+
+
+# M5 conversation archive
+@pytest.mark.asyncio
+async def test_dashboard_conversation_archive_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the nullable ``conversation_archive_enabled`` column; downgrade drops it;
+    a final walk to head proves the revision sits on a single-head graph."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'conversation-archive.sqlite'}"
+    parent_revision = "20260909_090000_dashboard_background_job_toggles"
+    archive_revision = "20260909_120000_dashboard_conversation_archive"
+
+    async def _columns(engine) -> dict[str, dict[str, object]]:
+        async with engine.connect() as conn:
+            result = await conn.execute(text("PRAGMA table_info(dashboard_settings)"))
+            return {row[1]: {"notnull": row[3], "default": row[4]} for row in result.fetchall()}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert "conversation_archive_enabled" not in await _columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, archive_revision, bootstrap_legacy=False))
+        columns = await _columns(engine)
+        # Nullable without a default: NULL = inherit the env alias / code default.
+        assert columns["conversation_archive_enabled"] == {"notnull": 0, "default": None}
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert "conversation_archive_enabled" not in await _columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert "conversation_archive_enabled" in await _columns(engine)
+    finally:
+        await engine.dispose()
+
+
+# end M5 conversation archive

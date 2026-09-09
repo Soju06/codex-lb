@@ -16,6 +16,7 @@ import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
 import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
+import { ConversationArchiveSettings } from "@/features/settings/components/conversation-archive-settings";
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
@@ -273,6 +274,8 @@ export function SettingsPage() {
                 busy={controlsDisabled}
                 onSave={handleSave}
               />
+              {/* M5 conversation archive: next to Data retention (same "what we keep" family). */}
+              <ConversationArchiveSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <UpstreamTimeoutSettings
                 key={[
                   settings.version,

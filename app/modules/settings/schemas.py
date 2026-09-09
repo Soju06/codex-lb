@@ -146,6 +146,13 @@ class DashboardSettingsResponse(DashboardModel):
     automations_scheduler_enabled: bool
     rate_limit_reset_credits_refresh_enabled: bool
     # end M2 background jobs
+    # M5 conversation archive: effective toggle (``provenance`` says whether it
+    # comes from the dashboard, the deprecated env alias or the default) and
+    # the read-only T1 archive directory of *this* replica (each replica writes
+    # its own local shard; ``None`` for read-only guests).
+    conversation_archive_enabled: bool
+    conversation_archive_dir: str | None = None
+    # end M5 conversation archive
     version: int = Field(ge=1)
     # C2-1 timeouts: effective values; ``provenance[<name>]`` says whether the
     # dashboard, the environment or the code default supplied each one. No
@@ -274,6 +281,11 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     automations_scheduler_enabled: bool | None = None
     rate_limit_reset_credits_refresh_enabled: bool | None = None
     # end M2 background jobs
+    # M5 conversation archive: tri-state like the resilience toggles. ``true``
+    # turns the proxy into a full prompt/response recorder; the dashboard asks
+    # for confirmation first and the API audits every effective on/off change.
+    conversation_archive_enabled: bool | None = None
+    # end M5 conversation archive
     # C2-1 timeouts: tri-state like the caps (absent = unchanged, null = clear
     # to inherit the environment / default, value = store). Cross-field timeout
     # invariants are checked against the effective values in the API handler.

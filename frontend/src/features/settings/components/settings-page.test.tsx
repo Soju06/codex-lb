@@ -101,6 +101,10 @@ vi.mock("@/features/settings/components/data-retention-settings", () => ({
   },
 }));
 
+vi.mock("@/features/settings/components/conversation-archive-settings", () => ({
+  ConversationArchiveSettings: () => <div>Conversation Archive Settings</div>,
+}));
+
 vi.mock("@/features/settings/components/upstream-timeout-settings", () => ({
   UpstreamTimeoutSettings: (props: unknown) => {
     upstreamTimeoutSettingsMock(props);
@@ -281,6 +285,7 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Quota Planner Section")).toBeInTheDocument();
     expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
     expect(screen.getByText("Data Retention Settings")).toBeInTheDocument();
+    expect(screen.getByText("Conversation Archive Settings")).toBeInTheDocument();
     expect(screen.getByText("Upstream Timeout Settings")).toBeInTheDocument();
   });
 

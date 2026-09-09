@@ -13,6 +13,7 @@ from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import (
     InheritableValue,
+    SettingSource,
     SettingsService,
     _dump_additional_quota_routing_policies,
     _parse_additional_quota_routing_policies,
@@ -103,6 +104,9 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         "auth_guardian_enabled": InheritableValue(True, "default", True, True),
         "automations_scheduler_enabled": InheritableValue(True, "default", True, True),
         "rate_limit_reset_credits_refresh_enabled": InheritableValue(True, "default", True, True),
+        # M5 conversation archive: NULL column, env double without the field
+        # -> code default (off).
+        "conversation_archive_enabled": InheritableValue(False, "default", False, False),
         # C2-1 timeouts: NULL columns and a startup fake without the fields
         # resolve to the code default.
         **{
@@ -524,3 +528,56 @@ async def test_settings_data_resolves_background_job_toggles_with_provenance(mon
 
     startup.leader_election_enabled = True
     assert (await service.get_settings()).auth_guardian_blocked_by_topology is False
+
+
+# M5 conversation archive
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("column", "env", "expected", "source"),
+    [
+        (None, False, False, "default"),
+        (None, True, True, "env"),
+        (True, False, True, "dashboard"),
+        (False, True, False, "dashboard"),
+    ],
+)
+async def test_settings_data_resolves_conversation_archive_toggle_with_provenance(
+    monkeypatch: pytest.MonkeyPatch, column: bool | None, env: bool, expected: bool, source: SettingSource
+) -> None:
+    row = DashboardSettings()
+    row.conversation_archive_enabled = column
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            proxy_account_response_create_limit=4,
+            proxy_account_stream_limit=8,
+            proxy_account_stream_recovery_reserve=1,
+            proxy_api_key_fair_share_congestion_threshold_pct=0,
+            conversation_archive_enabled=env,
+        ),
+    )
+
+    data = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+
+    assert data.conversation_archive_enabled is expected
+    assert data.provenance["conversation_archive_enabled"] == InheritableValue(expected, source, env, False)
+
+
+def test_conversation_archive_env_shadow_warning_names_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A set CODEX_LB_CONVERSATION_ARCHIVE_ENABLED that the dashboard column overrides is reported at startup."""
+    row = DashboardSettings()
+    row.conversation_archive_enabled = False
+    environment = Settings(conversation_archive_enabled=True)
+
+    shadowed = settings_service_module.warn_environment_shadowed_by_dashboard(row, environment)
+
+    assert "conversation_archive_enabled" in shadowed
+
+
+# end M5 conversation archive

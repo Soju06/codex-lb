@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.audit.service import AuditService
+from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
     set_dashboard_error_format,
@@ -31,6 +32,7 @@ from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 from app.core.config.inheritable import resolve_inheritable
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING, CONVERSATION_ARCHIVE_TOGGLED_ACTION
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError, DashboardSettingsConflictError
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
@@ -160,8 +162,15 @@ def _clears_dashboard_value(payload: DashboardSettingsUpdateRequest, name: str) 
 # end C2-2 routing/overload
 
 
-def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
+def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> DashboardSettingsResponse:
     environment_settings = get_app_settings()
+    # M5 conversation archive: the T1 directory is this replica's local shard;
+    # a filesystem path is admin-only information. ``getattr``: startup-settings
+    # fakes in tests may carry only the fields they exercise.
+    archive_dir = getattr(environment_settings, "conversation_archive_dir", None)
+    conversation_archive_dir = (
+        str(archive_dir) if archive_dir is not None and principal.role == DashboardRole.ADMIN else None
+    )
     additional_quota_policies = [
         AdditionalQuotaPolicy(
             quota_key=definition.quota_key,
@@ -283,6 +292,10 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         automations_scheduler_enabled=settings.automations_scheduler_enabled,
         rate_limit_reset_credits_refresh_enabled=settings.rate_limit_reset_credits_refresh_enabled,
         # end M2 background jobs
+        # M5 conversation archive
+        conversation_archive_enabled=settings.conversation_archive_enabled,
+        conversation_archive_dir=conversation_archive_dir,
+        # end M5 conversation archive
         version=settings.version,
         # C2-1 timeouts
         upstream_connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
@@ -308,10 +321,11 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
 
 @router.get("", response_model=DashboardSettingsResponse)
 async def get_settings(
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     settings = await context.service.get_settings()
-    return _dashboard_settings_response(settings)
+    return _dashboard_settings_response(settings, principal=principal)
 
 
 @router.get("/subscription-overflow/preflight", response_model=SubscriptionOverflowPreflightResponse)
@@ -913,7 +927,7 @@ def _timeout_field(payload: DashboardSettingsUpdateRequest, name: str) -> tuple[
 async def update_settings(
     request: Request,
     payload: DashboardSettingsUpdateRequest = Body(...),
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
@@ -1315,6 +1329,17 @@ async def update_settings(
                     payload, "rate_limit_reset_credits_refresh_enabled"
                 ),
                 # end M2 background jobs
+                # M5 conversation archive: tri-state via model_fields_set.
+                conversation_archive_enabled=(
+                    payload.conversation_archive_enabled
+                    if CONVERSATION_ARCHIVE_SETTING in payload.model_fields_set
+                    else None
+                ),
+                clear_conversation_archive_enabled=(
+                    CONVERSATION_ARCHIVE_SETTING in payload.model_fields_set
+                    and payload.conversation_archive_enabled is None
+                ),
+                # end M5 conversation archive
                 # C2-1 timeouts
                 upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][0],
                 clear_upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][1],
@@ -1428,14 +1453,16 @@ async def update_settings(
             "deterministic_failover_enabled",
             "circuit_breaker_enabled",
             *BACKGROUND_JOB_SETTINGS,  # M2 background jobs
+            CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive
             *DASHBOARD_TIMEOUT_SETTINGS,  # C2-1 timeouts
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
-    # C2-3 resilience toggles / M2 background jobs: storing the inherited value
-    # (or clearing it) changes ownership without changing the effective value;
-    # audit that too.
-    for field_name in (*RESILIENCE_TOGGLE_SETTINGS, *BACKGROUND_JOB_SETTINGS):
+    # C2-3 resilience toggles / M2 background jobs / M5 conversation archive:
+    # storing the inherited value (or clearing it) changes ownership without
+    # changing the effective value; audit that too. An effective archive flip
+    # additionally gets its own audit line naming the actor (further below).
+    for field_name in (*RESILIENCE_TOGGLE_SETTINGS, *BACKGROUND_JOB_SETTINGS, CONVERSATION_ARCHIVE_SETTING):
         if current.provenance[field_name] != updated.provenance[field_name] and field_name not in changed_fields:
             changed_fields.append(field_name)
     # C2-1 timeouts: a dashboard value equal to the inherited one still changes
@@ -1484,9 +1511,26 @@ async def update_settings(
         # instead of the first recovered poll cycle. The re-clear inside
         # ``invalidate`` is harmless; the guarding clear already ran pre-await.
         await get_upstream_route_cache().invalidate()
+    actor_ip = request.client.host if request.client else None
     AuditService.log_async(
         "settings_changed",
-        actor_ip=request.client.host if request.client else None,
+        actor_ip=actor_ip,
         details={"changed_fields": changed_fields},
     )
-    return _dashboard_settings_response(updated)
+    # M5 conversation archive: enabling turns the proxy into a full
+    # prompt/response recorder readable by the same dashboard admin, so every
+    # effective on/off change is a dedicated audit event with the actor, not
+    # just an entry in ``changed_fields``.
+    if current.conversation_archive_enabled != updated.conversation_archive_enabled:
+        AuditService.log_async(
+            CONVERSATION_ARCHIVE_TOGGLED_ACTION,
+            actor_ip=actor_ip,
+            details={
+                "enabled": updated.conversation_archive_enabled,
+                "source": updated.provenance[CONVERSATION_ARCHIVE_SETTING].source,
+                "actor": principal.actor,
+                "actor_role": principal.role.value,
+            },
+        )
+    # end M5 conversation archive
+    return _dashboard_settings_response(updated, principal=principal)

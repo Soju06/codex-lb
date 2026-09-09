@@ -570,6 +570,9 @@ export function createDashboardSettings(
 		authGuardianBlockedByTopology: false,
 		automationsSchedulerEnabled: true,
 		rateLimitResetCreditsRefreshEnabled: true,
+		// M5 conversation archive
+		conversationArchiveEnabled: false,
+		conversationArchiveDir: "/var/lib/codex-lb/conversation-archive",
 		...overrides,
 	});
 }

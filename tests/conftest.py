@@ -242,6 +242,42 @@ def _disable_leader_election_startup(monkeypatch):
     monkeypatch.setattr(main_module, "get_leader_election", lambda: election)
 
 
+@pytest.fixture(autouse=True)
+def _forbid_blocking_test_client_on_running_loop(monkeypatch):
+    """Fail fast when starlette's blocking ``TestClient`` is entered on the running test loop.
+
+    ``TestClient.__enter__`` blocks the calling thread until the app lifespan
+    has started on the client's portal thread. Called from an ``async def``
+    test, the blocked thread is the shared session loop — the loop that owns
+    the ``async_client`` lifespan's background SQLite writers. A write
+    transaction one of them has in flight (INSERT executed, COMMIT not yet
+    dispatched) can no longer release the single writer slot, so the portal
+    lifespan's startup stamps wait out the 30 s ``busy_timeout`` and fail with
+    ``database is locked`` (issue #1949). That deadlock is nondeterministic
+    and looked like a lock-contention bug in production code; turn it into an
+    immediate, explanatory failure instead. Async tests use
+    ``tests.integration.off_loop_test_client.off_loop_test_client``; sync
+    tests (no running loop on the calling thread) are unaffected.
+    """
+    from starlette.testclient import TestClient
+
+    original_enter = TestClient.__enter__
+
+    def _guarded_enter(self):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return original_enter(self)
+        raise RuntimeError(
+            "TestClient.__enter__ called on a thread with a running event loop: this blocks the loop "
+            "that owns the app lifespan's SQLite writers and deadlocks the portal lifespan's startup "
+            "writes until busy_timeout (issue #1949). In async tests use "
+            "`async with off_loop_test_client(app) as client:` from tests.integration.off_loop_test_client."
+        )
+
+    monkeypatch.setattr(TestClient, "__enter__", _guarded_enter)
+
+
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def dispose_engine():
     yield

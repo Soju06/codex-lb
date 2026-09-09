@@ -126,10 +126,13 @@ def record_ttft_sample(
     """Record one eligible first-token latency for ``account_id`` at the balancer clock.
 
     ``retried`` marks a row whose first-token latency spans more than one
-    upstream send or an account-capacity wait (WebSocket/bridge retries after
-    a capacity wait or an owner-pinned quota error); such a latency includes
-    the failed attempt and the recovery sleep and, after an account switch,
-    would be charged to the destination account, so it is never sampled.
+    upstream send or an account-capacity wait (bridge retries, transparent
+    direct-WebSocket replays after a dropped upstream, retries after a
+    capacity wait or an owner-pinned quota error); such a latency includes
+    the failed attempt and the reconnect and, after an account switch, would
+    be charged to the destination account, so it is never sampled.
+    ``queued_wait_ms`` is the response-create gate wait (which includes the
+    global response-create admission wait) plus the bridge-queue wait.
 
     Called from the request-log funnel on stream close. Synchronous and
     lock-free on purpose: there is no await between reading and writing the

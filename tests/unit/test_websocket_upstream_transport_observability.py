@@ -263,6 +263,53 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param({}, False, id="single-attempt"),
+        pytest.param({"replay_count": 1}, True, id="direct-websocket-replay"),
+        pytest.param({"response_create_attempt_count": 2}, True, id="bridge-retry"),
+        pytest.param({"account_capacity_wait_started_at": 1.0}, True, id="capacity-wait"),
+    ],
+)
+async def test_websocket_finalizer_marks_replayed_turns_as_upstream_retried(
+    overrides: dict[str, object], expected: bool
+) -> None:
+    # A transparent direct-WebSocket replay bumps ``replay_count`` only; the
+    # bridge counts ``response_create_attempt_count``. Either leaves the failed
+    # attempt inside the first-token latency, so the TTFT cohort sampler must
+    # see the row as retried.
+    service = _DummyWebSocketService()
+    request_state = _WebSocketRequestState(
+        request_id="ws_direct_replay",
+        response_id="resp_direct_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport=_REQUEST_TRANSPORT_WEBSOCKET,
+        upstream_transport=_REQUEST_TRANSPORT_WEBSOCKET,
+        **cast(Any, overrides),
+    )
+
+    await service._finalize_websocket_request_state(
+        request_state,
+        account=cast(Any, object()),
+        account_id_value="acc_direct",
+        event=None,
+        event_type="response.completed",
+        payload={},
+        api_key=None,
+        upstream_control=_WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert len(service.request_log_calls) == 1
+    assert service.request_log_calls[0]["upstream_retried"] is expected
+
+
+@pytest.mark.asyncio
 async def test_websocket_connect_failure_records_bridge_upstream_transport_and_metric(monkeypatch):
     service = _DummyWebSocketService()
     metric_calls: list[dict[str, object]] = []

@@ -199,8 +199,8 @@ class _RequestLogMixin:
         client_ip: str | None = None,
         archive_request_id: str | None = None,
         # True when the row's first-token latency spans more than one upstream
-        # send or an account-capacity wait (WebSocket/bridge retries). Not
-        # persisted; it only keeps the row out of the TTFT cohort sample.
+        # send (bridge retry or direct WebSocket replay) or an account-capacity
+        # wait. Not persisted; it only keeps the row out of the TTFT cohort sample.
         upstream_retried: bool = False,
     ) -> None:
         task = scheduler_for(self).create_task(

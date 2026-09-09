@@ -504,10 +504,21 @@ def _resolve_upstream_stream_transport(upstream_stream_transport: str) -> str | 
     return upstream_stream_transport
 
 
-def _should_penalize_stream_error(code: str | None) -> bool:
+def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:
     if code is None:
         return False
-    return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or code in _facade()._TRANSIENT_RETRY_CODES
+    should_penalize = code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or code in _facade()._TRANSIENT_RETRY_CODES
+    if not should_penalize and _is_account_neutral_request_rejection(
+        code=code,
+        http_status=None,
+        message=message,
+    ):
+        _facade().logger.info(
+            "Skipped account error penalty for account-neutral request rejection code=%s request_id=%s",
+            code,
+            get_request_id(),
+        )
+    return should_penalize
 
 
 _MODEL_CAPACITY_LIMIT_CODES = {
@@ -1017,21 +1028,6 @@ def _is_account_neutral_request_rejection(
     if is_account_neutral_safety_policy_rejection(code=code, http_status=http_status, message=message):
         return True
     return code == "invalid_request_error" and bool(_facade()._is_missing_tool_output_message(message))
-
-
-def _log_account_neutral_stream_rejection(
-    account_id: str,
-    request_id: str,
-    code: str | None,
-    message: str | None,
-) -> None:
-    if _is_account_neutral_request_rejection(code=code or "", http_status=None, message=message):
-        _facade().logger.info(
-            "Skipped account error penalty for account-neutral request rejection account_id=%s request_id=%s code=%s",
-            account_id,
-            request_id,
-            code,
-        )
 
 
 def _is_model_scoped_rejection(

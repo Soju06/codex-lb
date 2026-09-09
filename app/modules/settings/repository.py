@@ -204,6 +204,12 @@ class SettingsRepository:
         http_responses_session_bridge_codex_prewarm_enabled: bool | None = None,
         clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False,
         # end M3 codex prewarm
+        # M1 stream/bridge budgets (same tri-state contract).
+        http_responses_stream_request_budget_seconds: float | None = None,
+        clear_http_responses_stream_request_budget_seconds: bool = False,
+        http_responses_session_bridge_request_budget_seconds: float | None = None,
+        clear_http_responses_session_bridge_request_budget_seconds: bool = False,
+        # end M1 stream/bridge budgets
         expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -406,6 +412,18 @@ class SettingsRepository:
                 clear_proxy_downstream_websocket_idle_timeout_seconds,
             ),
             ("sse_keepalive_interval_seconds", sse_keepalive_interval_seconds, clear_sse_keepalive_interval_seconds),
+            # M1 stream/bridge budgets
+            (
+                "http_responses_stream_request_budget_seconds",
+                http_responses_stream_request_budget_seconds,
+                clear_http_responses_stream_request_budget_seconds,
+            ),
+            (
+                "http_responses_session_bridge_request_budget_seconds",
+                http_responses_session_bridge_request_budget_seconds,
+                clear_http_responses_session_bridge_request_budget_seconds,
+            ),
+            # end M1 stream/bridge budgets
         ):
             if clear:
                 setattr(settings, column_name, None)

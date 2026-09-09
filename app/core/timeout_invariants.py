@@ -99,12 +99,12 @@ PROXY_BUDGET = _field("proxy_request_budget_seconds", "app/core/config/settings.
 TRANSCRIPTION_BUDGET = _field("transcription_request_budget_seconds", "app/core/clients/proxy.py:5733")
 STREAM_BUDGET = _field(
     "http_responses_stream_request_budget_seconds",
-    "app/modules/proxy/_service/streaming/helpers.py:724",
+    "app/modules/proxy/_service/streaming/helpers.py:925",
 )
 COMPACT_BUDGET = _field("compact_request_budget_seconds", "app/modules/proxy/_service/compact.py:585")
 BRIDGE_BUDGET = _field(
     "http_responses_session_bridge_request_budget_seconds",
-    "app/modules/proxy/_service/http_bridge/helpers.py:2469",
+    "app/modules/proxy/_service/http_bridge/helpers.py:3685",
 )
 ADMISSION_WAIT = _expr(
     "ADMISSION_WAIT_TIMEOUT_SECONDS",
@@ -114,7 +114,7 @@ ADMISSION_WAIT = _expr(
 ACCOUNT_LEASE_TTL = _field("proxy_account_lease_ttl_seconds", "app/modules/proxy/load_balancer.py:1993")
 BRIDGE_STUCK_GATE_HARD_ANCHOR_RETIRE = _expr(
     "2 * HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
-    "app/modules/proxy/_service/http_bridge/helpers.py:222",
+    "app/modules/proxy/_service/http_bridge/helpers.py:224",
     lambda settings: 2.0 * _http_bridge_stuck_gate_retire_after_seconds(),
 )
 MODEL_REGISTRY_SNAPSHOT_MAX_AGE = _field(
@@ -192,6 +192,13 @@ TIMEOUT_INVARIANT_RULES: tuple[TimeoutInvariantRule, ...] = (
         "<=",
         TRANSCRIPTION_BUDGET,
         "Transcription requests connect inside their own budget; a connect timeout above it can never be honoured.",
+    ),
+    TimeoutInvariantRule(
+        "upstream-connect-within-stream-budget",
+        UPSTREAM_CONNECT_TIMEOUT,
+        "<=",
+        STREAM_BUDGET,
+        "Responses streams connect inside the stream request budget; a connect timeout above it is never honoured.",
     ),
     TimeoutInvariantRule(
         "admission-wait-within-proxy-budget",

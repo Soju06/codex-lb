@@ -277,6 +277,12 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         proxy_downstream_websocket_idle_timeout_seconds=settings.proxy_downstream_websocket_idle_timeout_seconds,
         sse_keepalive_interval_seconds=settings.sse_keepalive_interval_seconds,
         # end C2-1 timeouts
+        # M1 stream/bridge budgets
+        http_responses_stream_request_budget_seconds=settings.http_responses_stream_request_budget_seconds,
+        http_responses_session_bridge_request_budget_seconds=(
+            settings.http_responses_session_bridge_request_budget_seconds
+        ),
+        # end M1 stream/bridge budgets
         provenance={
             name: SettingProvenance(source=resolved.source, env_value=resolved.env_value, default=resolved.default)
             for name, resolved in settings.provenance.items()
@@ -1175,6 +1181,21 @@ async def update_settings(
                 sse_keepalive_interval_seconds=timeout_fields["sse_keepalive_interval_seconds"][0],
                 clear_sse_keepalive_interval_seconds=timeout_fields["sse_keepalive_interval_seconds"][1],
                 # end C2-1 timeouts
+                # M1 stream/bridge budgets (registered in DASHBOARD_TIMEOUT_SETTINGS,
+                # so the PUT-time invariant check and the audit loop cover them).
+                http_responses_stream_request_budget_seconds=timeout_fields[
+                    "http_responses_stream_request_budget_seconds"
+                ][0],
+                clear_http_responses_stream_request_budget_seconds=timeout_fields[
+                    "http_responses_stream_request_budget_seconds"
+                ][1],
+                http_responses_session_bridge_request_budget_seconds=timeout_fields[
+                    "http_responses_session_bridge_request_budget_seconds"
+                ][0],
+                clear_http_responses_session_bridge_request_budget_seconds=timeout_fields[
+                    "http_responses_session_bridge_request_budget_seconds"
+                ][1],
+                # end M1 stream/bridge budgets
             ),
             # CAS anchor: omitted fields above were merged from `current`
             # (version checked against expectedVersion when supplied), so the

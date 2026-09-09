@@ -154,6 +154,49 @@ async def test_timeout_settings_resolve_dashboard_then_environment_then_default(
 
 
 @pytest.mark.asyncio
+async def test_stream_and_bridge_budgets_resolve_dashboard_then_environment_then_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # M1 stream/bridge budgets: the three resolver states on the two new columns.
+    row = DashboardSettings()
+    row.http_responses_stream_request_budget_seconds = 3600.0
+    row.http_responses_session_bridge_request_budget_seconds = None
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    # (a) dashboard column set -> dashboard; (b) NULL column + env differs -> env.
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_stream_request_budget_seconds=5000.0,
+            http_responses_session_bridge_request_budget_seconds=5400.0,
+        ),
+    )
+    settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+    assert settings.http_responses_stream_request_budget_seconds == 3600.0
+    assert settings.provenance["http_responses_stream_request_budget_seconds"] == InheritableValue(
+        3600.0, "dashboard", 5000.0, 7200.0
+    )
+    assert settings.http_responses_session_bridge_request_budget_seconds == 5400.0
+    assert settings.provenance["http_responses_session_bridge_request_budget_seconds"] == InheritableValue(
+        5400.0, "env", 5400.0, 7200.0
+    )
+
+    # (c) NULL column and no environment value -> code default.
+    row.http_responses_stream_request_budget_seconds = None
+    monkeypatch.setattr(settings_service_module, "get_settings", lambda: SimpleNamespace())
+    settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+    assert settings.http_responses_stream_request_budget_seconds == 7200.0
+    assert settings.provenance["http_responses_stream_request_budget_seconds"] == InheritableValue(
+        7200.0, "default", 7200.0, 7200.0
+    )
+    assert settings.provenance["http_responses_session_bridge_request_budget_seconds"].source == "default"
+
+
+@pytest.mark.asyncio
 async def test_migrated_null_account_caps_inherit_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     row = DashboardSettings()
     row.proxy_account_response_create_limit = None

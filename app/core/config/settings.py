@@ -307,6 +307,7 @@ class Settings(BaseSettings):
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
     # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)
@@ -329,6 +330,7 @@ class Settings(BaseSettings):
     additional_quota_registry_file: Path | None = None
     rate_limit_reset_credits_refresh_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
+    # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor): the same-name
     # ``dashboard_settings`` column wins when set (M3 codex prewarm).

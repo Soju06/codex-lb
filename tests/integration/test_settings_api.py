@@ -373,6 +373,9 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "stream_idle_timeout_seconds",
         "proxy_downstream_websocket_idle_timeout_seconds",
         "sse_keepalive_interval_seconds",
+        # M1 stream/bridge budgets
+        "http_responses_stream_request_budget_seconds",
+        "http_responses_session_bridge_request_budget_seconds",
     }
     # Retention is database-only: no environment value, NULL reads as default.
     assert provenance["request_log_retention_days"] == {"source": "default", "envValue": None, "default": 0}
@@ -571,6 +574,148 @@ async def test_settings_api_rejects_timeouts_that_break_invariants_against_effec
     assert response.status_code == 422
     response = await async_client.put("/api/settings", json={"sseKeepaliveIntervalSeconds": -1})
     assert response.status_code == 422
+
+
+# M1 stream/bridge budgets
+@pytest.mark.asyncio
+async def test_settings_api_stream_and_bridge_budget_round_trip_with_provenance_and_null_clear(
+    async_client, monkeypatch
+):
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["httpResponsesStreamRequestBudgetSeconds"] == 7200.0
+    assert payload["httpResponsesSessionBridgeRequestBudgetSeconds"] == 7200.0
+    assert payload["provenance"]["http_responses_stream_request_budget_seconds"] == {
+        "source": "default",
+        "envValue": 7200.0,
+        "default": 7200.0,
+    }
+    assert payload["provenance"]["http_responses_session_bridge_request_budget_seconds"]["source"] == "default"
+
+    configured = await async_client.put(
+        "/api/settings",
+        json={"httpResponsesStreamRequestBudgetSeconds": 3600, "httpResponsesSessionBridgeRequestBudgetSeconds": 5400},
+    )
+    assert configured.status_code == 200
+    configured_payload = configured.json()
+    assert configured_payload["httpResponsesStreamRequestBudgetSeconds"] == 3600.0
+    assert configured_payload["httpResponsesSessionBridgeRequestBudgetSeconds"] == 5400.0
+    assert configured_payload["provenance"]["http_responses_stream_request_budget_seconds"]["source"] == "dashboard"
+    assert (
+        configured_payload["provenance"]["http_responses_session_bridge_request_budget_seconds"]["source"]
+        == "dashboard"
+    )
+
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.http_responses_stream_request_budget_seconds == 3600.0
+        assert row.http_responses_session_bridge_request_budget_seconds == 5400.0
+        assert row.proxy_request_budget_seconds is None
+
+    # Omitting the fields leaves them untouched.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["httpResponsesStreamRequestBudgetSeconds"] == 3600.0
+    assert unchanged.json()["httpResponsesSessionBridgeRequestBudgetSeconds"] == 5400.0
+
+    # null clears the column: the stream budget inherits an environment value
+    # that differs from the default, the bridge budget falls back to the default.
+    inherited = settings_service.get_settings().model_copy(
+        update={"http_responses_stream_request_budget_seconds": 5000.0}
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put(
+        "/api/settings",
+        json={"httpResponsesStreamRequestBudgetSeconds": None, "httpResponsesSessionBridgeRequestBudgetSeconds": None},
+    )
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["httpResponsesStreamRequestBudgetSeconds"] == 5000.0
+    assert cleared_payload["provenance"]["http_responses_stream_request_budget_seconds"] == {
+        "source": "env",
+        "envValue": 5000.0,
+        "default": 7200.0,
+    }
+    assert cleared_payload["httpResponsesSessionBridgeRequestBudgetSeconds"] == 7200.0
+    assert cleared_payload["provenance"]["http_responses_session_bridge_request_budget_seconds"]["source"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_stream_and_bridge_budgets_that_break_invariants(async_client):
+    # A connect timeout that fits the proxy/compact/transcription budgets but
+    # not the stream budget stored in the same PUT (upstream-connect-within-stream-budget).
+    response = await async_client.put(
+        "/api/settings",
+        json={"upstreamConnectTimeoutSeconds": 100, "httpResponsesStreamRequestBudgetSeconds": 60},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "timeout_invariant_violation"
+    assert "upstream-connect-within-stream-budget" in body["error"]["message"]
+    assert "upstream-connect-within-proxy-budget" not in body["error"]["message"]
+
+    # The bridge budget must exceed twice the fixed 300 s stuck-gate threshold.
+    response = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeRequestBudgetSeconds": 600})
+    assert response.status_code == 400
+    assert "bridge-stuck-gate-retire-within-bridge-budget" in response.json()["error"]["message"]
+    current = await async_client.get("/api/settings")
+    assert current.json()["provenance"]["http_responses_session_bridge_request_budget_seconds"]["source"] == "default"
+
+    response = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeRequestBudgetSeconds": 601})
+    assert response.status_code == 200
+    assert response.json()["httpResponsesSessionBridgeRequestBudgetSeconds"] == 601.0
+
+    # Stream budget below the environment-only admission wait (10 s).
+    response = await async_client.put("/api/settings", json={"httpResponsesStreamRequestBudgetSeconds": 5})
+    assert response.status_code == 400
+    assert "admission-wait-within-stream-budget" in response.json()["error"]["message"]
+
+    # Out-of-range scalars are schema errors.
+    response = await async_client.put("/api/settings", json={"httpResponsesStreamRequestBudgetSeconds": 0})
+    assert response.status_code == 422
+    response = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeRequestBudgetSeconds": 86401})
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_stream_request_deadline_honours_dashboard_budget_over_environment(async_client):
+    """A dashboard stream budget (3600 s) beats the 7200 s environment value without a restart.
+
+    The value is stored through the settings API, read back from the
+    ``SettingsCache`` snapshot and bound the way ``DashboardOverridesMiddleware``
+    binds it for a request; the proxy service settings facade that
+    ``_stream_request_budget_seconds`` reads then yields the dashboard value.
+    Outside the binding the environment value keeps applying.
+    """
+    from app.core.config.dashboard_overrides import dashboard_overrides_bound
+    from app.modules.proxy import service as proxy_service_module
+    from app.modules.proxy._service.streaming.helpers import _stream_request_budget_seconds
+
+    assert proxy_service_module.get_settings().http_responses_stream_request_budget_seconds == 7200.0
+    response = await async_client.put("/api/settings", json={"httpResponsesStreamRequestBudgetSeconds": 3600})
+    assert response.status_code == 200
+    snapshot = await get_settings_cache().get()
+    assert snapshot.http_responses_stream_request_budget_seconds == 3600.0
+
+    try:
+        with dashboard_overrides_bound(snapshot):
+            bound = proxy_service_module.get_settings()
+            assert bound.http_responses_stream_request_budget_seconds == 3600.0
+            assert _stream_request_budget_seconds(bound, request_transport="http") == 3600.0
+            assert _stream_request_budget_seconds(bound, request_transport="websocket") == 3600.0
+        unbound = proxy_service_module.get_settings()
+        assert _stream_request_budget_seconds(unbound, request_transport="http") == 7200.0
+    finally:
+        # The process-wide SettingsCache outlives the per-test database.
+        await async_client.put("/api/settings", json={"httpResponsesStreamRequestBudgetSeconds": None})
+        await get_settings_cache().invalidate(propagate=False)
+
+
+# end M1 stream/bridge budgets
 
 
 @pytest.mark.asyncio

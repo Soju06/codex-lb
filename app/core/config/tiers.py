@@ -151,13 +151,11 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
 # "backlog" while none has been designed. Remove the entry in the PR that adds
 # the ``dashboard_settings`` column (the checker warns once it is redundant).
 MIGRATING: Final[dict[str, str]] = {
-    "http_responses_stream_request_budget_seconds": "backlog",
     "auth_guardian_enabled": "backlog",
     "token_refresh_interval_days": "backlog",
     "rate_limit_reset_credits_refresh_enabled": "fold into auto_redeem_reset_credits_before_expiry",
     # K2 bridge: http_responses_session_bridge_enabled is a T4 kill switch, not
     # a tunable, so it has no MIGRATING row.
-    "http_responses_session_bridge_request_budget_seconds": "backlog",
     "http_responses_session_bridge_operation_spool_retention_seconds": "backlog",
     "http_responses_session_bridge_ambiguous_continuation_recovery_mode": "backlog",
     "automations_scheduler_enabled": "backlog",

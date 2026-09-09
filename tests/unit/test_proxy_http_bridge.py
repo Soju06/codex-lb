@@ -37496,6 +37496,50 @@ async def test_stale_operation_maintenance_protects_canonical_detached_and_batch
 
 
 @pytest.mark.asyncio
+async def test_stale_operation_maintenance_honours_dashboard_bridge_budget_over_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M1: the heartbeat pass runs outside any request binding, so it applies the
+    dashboard bridge budget from one snapshot read; a snapshot failure keeps the
+    environment budget instead of skipping the pass."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    abandon_stale_operations = AsyncMock(return_value=[])
+    service._durable_bridge = cast(Any, SimpleNamespace(abandon_stale_operations=abandon_stale_operations))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_request_budget_seconds=120.0),
+    )
+    row = DashboardSettings()
+    row.http_responses_session_bridge_request_budget_seconds = 10800.0
+
+    class _SettingsCache:
+        async def get(self) -> DashboardSettings:
+            return row
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache())
+
+    assert await service.abandon_stale_http_bridge_operations() == 0
+
+    assert abandon_stale_operations.await_args is not None
+    kwargs = abandon_stale_operations.await_args.kwargs
+    cutoff_age = (proxy_service.utcnow() - kwargs["cutoff"]).total_seconds()
+    # Dashboard 10800 s, not max(1800, env 120) = 1800 s.
+    assert 10799.0 <= cutoff_age <= 10801.0
+
+    class _FailingSettingsCache:
+        async def get(self) -> DashboardSettings:
+            raise RuntimeError("snapshot unavailable")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _FailingSettingsCache())
+    assert await service.abandon_stale_http_bridge_operations() == 0
+    assert abandon_stale_operations.await_args is not None
+    kwargs = abandon_stale_operations.await_args.kwargs
+    cutoff_age = (proxy_service.utcnow() - kwargs["cutoff"]).total_seconds()
+    assert 1799.0 <= cutoff_age <= 1801.0
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_maintenance_runs_all_bridge_passes() -> None:
     """The ring heartbeat keeps ownership, operation, and socket cleanup live
     even when a replica receives no request traffic."""

@@ -12,6 +12,8 @@ const TIMEOUT_NAMES = [
   "proxy_request_budget_seconds",
   "compact_request_budget_seconds",
   "transcription_request_budget_seconds",
+  "http_responses_stream_request_budget_seconds",
+  "http_responses_session_bridge_request_budget_seconds",
   "stream_idle_timeout_seconds",
   "proxy_downstream_websocket_idle_timeout_seconds",
   "sse_keepalive_interval_seconds",
@@ -28,6 +30,8 @@ function settingsWithProvenance(
     proxy_request_budget_seconds: 600,
     compact_request_budget_seconds: 180,
     transcription_request_budget_seconds: 120,
+    http_responses_stream_request_budget_seconds: 7200,
+    http_responses_session_bridge_request_budget_seconds: 7200,
     stream_idle_timeout_seconds: 7200,
     proxy_downstream_websocket_idle_timeout_seconds: 120,
     sse_keepalive_interval_seconds: 10,
@@ -50,7 +54,7 @@ describe("UpstreamTimeoutSettings", () => {
     expect(budget).toHaveValue(null);
     expect(budget).toHaveAttribute("placeholder", "700");
     expect(screen.getByText("Inherited from environment (700)")).toBeInTheDocument();
-    expect(screen.getAllByText(/^Default \(/)).toHaveLength(6);
+    expect(screen.getAllByText(/^Default \(/)).toHaveLength(8);
     expect(screen.getByRole("button", { name: "Save timeouts" })).toBeDisabled();
   });
 
@@ -127,6 +131,44 @@ describe("UpstreamTimeoutSettings", () => {
         upstreamConnectTimeoutSeconds: 130,
         transcriptionRequestBudgetSeconds: 150,
         sseKeepaliveIntervalSeconds: 0,
+      }),
+    );
+  });
+
+  it("mirrors the stream and bridge budget invariants (M1)", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<UpstreamTimeoutSettings settings={settingsWithProvenance()} busy={false} onSave={onSave} />);
+
+    // 100 s connect fits the proxy (600), compact (180) and transcription (120)
+    // budgets but not a 60 s stream budget typed in the same edit.
+    await user.type(screen.getByRole("spinbutton", { name: "Upstream connect timeout" }), "100");
+    await user.type(screen.getByRole("spinbutton", { name: "Responses stream request budget" }), "60");
+    expect(
+      screen.getByText(
+        "The connect timeout (100 s) must not exceed the Responses stream request budget; the proxy clamps it to the budget anyway.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save timeouts" })).toBeDisabled();
+    await user.clear(screen.getByRole("spinbutton", { name: "Upstream connect timeout" }));
+    expect(screen.getByRole("button", { name: "Save timeouts" })).toBeEnabled();
+
+    // The bridge budget must exceed twice the fixed 300 s stuck gate.
+    await user.type(screen.getByRole("spinbutton", { name: "Session bridge request budget" }), "600");
+    expect(
+      screen.getByText(
+        "The session bridge request budget (600 s) must exceed 600 s (twice the fixed 300 s stuck-gate threshold).",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save timeouts" })).toBeDisabled();
+    await user.type(screen.getByRole("spinbutton", { name: "Session bridge request budget" }), "1");
+    expect(screen.getByRole("button", { name: "Save timeouts" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Save timeouts" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      buildSettingsUpdateRequest(settingsWithProvenance(), {
+        httpResponsesStreamRequestBudgetSeconds: 60,
+        httpResponsesSessionBridgeRequestBudgetSeconds: 6001,
       }),
     );
   });

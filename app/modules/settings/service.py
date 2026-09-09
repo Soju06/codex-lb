@@ -112,6 +112,11 @@ class DashboardSettingsData:
     proxy_downstream_websocket_idle_timeout_seconds: float
     sse_keepalive_interval_seconds: float
     # end C2-1 timeouts
+    # M1 stream/bridge budgets: effective values (dashboard column, else
+    # environment, else code default); provenance carries the source.
+    http_responses_stream_request_budget_seconds: float
+    http_responses_session_bridge_request_budget_seconds: float
+    # end M1 stream/bridge budgets
     # Effective value, source and fallbacks of every inheritable setting, keyed
     # by setting name; the settings API exposes it as ``provenance``.
     provenance: Mapping[str, InheritableValue[Any]] = field(default_factory=dict)
@@ -221,6 +226,12 @@ class DashboardSettingsUpdateData:
     http_responses_session_bridge_codex_prewarm_enabled: bool | None = None
     clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False
     # end M3 codex prewarm
+    # M1 stream/bridge budgets (tri-state like the C2-1 timeouts).
+    http_responses_stream_request_budget_seconds: float | None = None
+    clear_http_responses_stream_request_budget_seconds: bool = False
+    http_responses_session_bridge_request_budget_seconds: float | None = None
+    clear_http_responses_session_bridge_request_budget_seconds: bool = False
+    # end M1 stream/bridge budgets
 
 
 class SettingsService:
@@ -351,6 +362,18 @@ class SettingsService:
                 payload.clear_http_responses_session_bridge_codex_prewarm_enabled
             ),
             # end M3 codex prewarm
+            # M1 stream/bridge budgets
+            http_responses_stream_request_budget_seconds=payload.http_responses_stream_request_budget_seconds,
+            clear_http_responses_stream_request_budget_seconds=(
+                payload.clear_http_responses_stream_request_budget_seconds
+            ),
+            http_responses_session_bridge_request_budget_seconds=(
+                payload.http_responses_session_bridge_request_budget_seconds
+            ),
+            clear_http_responses_session_bridge_request_budget_seconds=(
+                payload.clear_http_responses_session_bridge_request_budget_seconds
+            ),
+            # end M1 stream/bridge budgets
         )
         return _settings_data(row)
 
@@ -528,6 +551,14 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         ),
         sse_keepalive_interval_seconds=float(resolved["sse_keepalive_interval_seconds"].value),
         # end C2-1 timeouts
+        # M1 stream/bridge budgets
+        http_responses_stream_request_budget_seconds=float(
+            resolved["http_responses_stream_request_budget_seconds"].value
+        ),
+        http_responses_session_bridge_request_budget_seconds=float(
+            resolved["http_responses_session_bridge_request_budget_seconds"].value
+        ),
+        # end M1 stream/bridge budgets
         provenance=resolved,
     )
 

@@ -150,6 +150,11 @@ class DashboardSettingsResponse(DashboardModel):
     proxy_downstream_websocket_idle_timeout_seconds: float
     sse_keepalive_interval_seconds: float
     # end C2-1 timeouts
+    # M1 stream/bridge budgets: effective values, unbounded like the C2-1
+    # timeouts above; ``provenance[<name>]`` names the source.
+    http_responses_stream_request_budget_seconds: float
+    http_responses_session_bridge_request_budget_seconds: float
+    # end M1 stream/bridge budgets
     # Provenance of every inheritable setting keyed by its setting name (the
     # ``dashboard_settings`` column / ``Settings`` field name). Additive: the
     # flat ``<name>``, ``<name>_environment_value`` and ``<name>_override``
@@ -265,6 +270,12 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     proxy_downstream_websocket_idle_timeout_seconds: float | None = Field(default=None, gt=0, le=86400)
     sse_keepalive_interval_seconds: float | None = Field(default=None, ge=0, le=86400)
     # end C2-1 timeouts
+    # M1 stream/bridge budgets: same tri-state contract and bounds as the
+    # C2-1 timeouts; the connect-within-stream-budget and stuck-gate-within-
+    # bridge-budget invariants are checked on the effective values.
+    http_responses_stream_request_budget_seconds: float | None = Field(default=None, gt=0, le=86400)
+    http_responses_session_bridge_request_budget_seconds: float | None = Field(default=None, gt=0, le=86400)
+    # end M1 stream/bridge budgets
 
     @field_validator("request_log_retention_override_days")
     @classmethod

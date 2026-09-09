@@ -13,10 +13,10 @@ pytestmark = pytest.mark.integration
 
 
 class _ArchiveEnvironment:
-    """Startup ``Settings`` double: the env alias is off, the archive dir is a temp shard."""
+    """Startup ``Settings`` double: the deprecated env alias, and a temp archive shard."""
 
-    def __init__(self, directory: Path) -> None:
-        self.conversation_archive_enabled = False
+    def __init__(self, directory: Path, *, enabled: bool = False) -> None:
+        self.conversation_archive_enabled = enabled
         self.conversation_archive_dir = directory
         self.conversation_archive_queue_max_bytes = 8 * 1024 * 1024
 
@@ -67,5 +67,36 @@ async def test_dashboard_toggle_starts_and_stops_archiving_without_a_restart(asy
         await cache.get()
         _archive_one("after-disable")
         assert [record["extra"] for record in _records(tmp_path)] == [{"marker": "while-enabled"}]
+    finally:
+        await cache.invalidate(propagate=False)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_off_survives_a_cache_invalidation_with_the_env_alias_on(async_client, monkeypatch, tmp_path):
+    """A settings mutation must not let the deprecated env alias resume recording.
+
+    Every ``PUT /api/settings`` invalidates the settings cache, and a replica
+    serving only long-lived WebSocket traffic may not load a fresh snapshot for
+    a long time. The gate therefore reads the last loaded row rather than
+    forgetting it, or an operator who turned the archive off on a host that
+    still sets ``CODEX_LB_CONVERSATION_ARCHIVE_ENABLED=true`` would silently
+    start recording again.
+    """
+    cache = get_settings_cache()
+    monkeypatch.setattr(conversation_archive, "get_settings", lambda: _ArchiveEnvironment(tmp_path, enabled=True))
+    try:
+        turned_off = await async_client.put("/api/settings", json={"conversationArchiveEnabled": False})
+        assert turned_off.status_code == 200
+        await cache.get()
+        assert conversation_archive.archive_enabled() is False
+
+        unrelated = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+        assert unrelated.status_code == 200
+        await cache.invalidate(propagate=False)  # the state right after any mutation
+
+        assert cache.cached_row() is not None
+        assert conversation_archive.archive_enabled() is False
+        _archive_one("after-invalidate")
+        assert _records(tmp_path) == []
     finally:
         await cache.invalidate(propagate=False)

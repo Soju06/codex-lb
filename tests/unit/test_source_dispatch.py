@@ -1827,3 +1827,130 @@ async def test_missing_usage_increments_usage_estimated_total_with_source_and_ca
 
     assert counter.calls == [{"source_id": owner.source.id, "cause": "missing_usage"}]
     assert counter.incs == 1
+
+
+# -- on_finished hook and anchor resolution (#2123 WP-C2, C1 gaps 9/10) ------------------------------
+
+
+@dataclass(slots=True)
+class _HookRecorder:
+    calls: list[tuple[SourceDispatch, str]] = field(default_factory=list)
+    error: Exception | None = None
+
+    def __call__(self, owner: SourceDispatch, status: str) -> None:
+        self.calls.append((owner, status))
+        if self.error is not None:
+            raise self.error
+
+
+@pytest.mark.asyncio
+async def test_on_finished_is_called_exactly_once_even_when_release_and_row_raise(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder.release_error = RuntimeError("db down")
+    hook = _HookRecorder()
+    owner = _owner(recorder, reservation=_reservation(), on_finished=hook)
+    _attach_stream(owner)
+
+    async def failing_row(self: SourceDispatch, **kwargs: object) -> None:
+        raise RuntimeError("row down")
+
+    monkeypatch.setattr(SourceDispatch, "write_row", failing_row)
+    with pytest.raises(RuntimeError, match="row down"):
+        await owner.finish(status="error", error_code="model_source_timeout")
+    await owner.finish(status="error", error_code="model_source_timeout")
+    await owner.finish(status="success")
+    await owner.abandon(ABANDON_CLIENT_DISCONNECTED_DURING_OPEN)
+
+    assert hook.calls == [(owner, "error")]
+    assert owner.finished is True
+
+
+@pytest.mark.asyncio
+async def test_on_finished_receives_the_settlement_corrected_status(recorder: _Recorder) -> None:
+    recorder.settle_result = False
+    hook = _HookRecorder()
+    owner = _owner(recorder, reservation=_reservation(limited=False), on_finished=hook)
+    _attach_stream(owner)
+    await owner.finish(status="success", usage=SourceUsage(input_tokens=3, output_tokens=2))
+    assert hook.calls == [(owner, "error")]
+    assert recorder.rows[0]["error_code"] == "usage_settlement_failed"
+
+
+@pytest.mark.asyncio
+async def test_on_finished_failure_never_breaks_the_latch(recorder: _Recorder, caplog) -> None:
+    hook = _HookRecorder(error=RuntimeError("metrics down"))
+    bulkhead = SourceBulkhead()
+    owner = _owner(recorder, reservation=_reservation(), bulkhead=bulkhead, on_finished=hook)
+    _attach_stream(owner)
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.source_dispatch")
+    await owner.finish(status="success", usage=SourceUsage(input_tokens=1, output_tokens=1))
+    assert len(hook.calls) == 1
+    assert len(recorder.rows) == 1
+    assert bulkhead.in_flight(owner.source.id) == 0
+    assert "source_dispatch_on_finished_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_on_finished_defaults_to_none_for_direct_routing(recorder: _Recorder) -> None:
+    owner = _owner(recorder)
+    assert owner.on_finished is None
+    _attach_stream(owner)
+    await owner.finish(status="success")
+    assert len(recorder.rows) == 1
+
+
+class _ResolvingExecutor:
+    def __init__(self) -> None:
+        self.intents: list[PinIntent] = []
+
+    async def commit(self, intent: PinIntent, *, drain_until: object, scheduler: object, clock: object) -> str:
+        self.intents.append(intent)
+        return "written"
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_commits_the_intent_resolved_against_the_source_response_id(recorder: _Recorder) -> None:
+    """The anchor row for an SDK chain lands in the same transaction as the thread pin (design §3, §6.3)."""
+
+    executor = _ResolvingExecutor()
+    intent = PinIntent(
+        writes=(PinWrite(pin_key="thread\nabc", kind="thread", source_id="src", api_key_id="key-1"),),
+        thread_key="abc",
+        source_id="src",
+        anchor_api_key_id="key-1",
+        anchor=True,
+    )
+    owner = _owner(recorder, pin_intent=intent, pin_executor=executor)
+    await owner.on_first_content(SourceUsageHolder(response_id="resp_source_1"))
+
+    assert len(executor.intents) == 1
+    committed = executor.intents[0]
+    assert [write.pin_key for write in committed.writes] == ["thread\nabc", "anchor\nkey-1\nresp_source_1"]
+    assert committed.writes[1].kind == "anchor"
+    assert committed.writes[1].source_id == "src"
+    assert owner.pin_outcome == "written"
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_without_a_response_id_commits_the_thread_pin_only(recorder: _Recorder) -> None:
+    executor = _ResolvingExecutor()
+    intent = PinIntent(
+        writes=(PinWrite(pin_key="thread\nabc", kind="thread", source_id="src", api_key_id=None),),
+        thread_key="abc",
+        source_id="src",
+        anchor=True,
+    )
+    owner = _owner(recorder, pin_intent=intent, pin_executor=executor)
+    await owner.on_first_content(SourceUsageHolder())
+    assert [write.pin_key for write in executor.intents[0].writes] == ["thread\nabc"]
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_store_false_intent_never_anchors(recorder: _Recorder) -> None:
+    """Mutant: anchor written for ``store: false`` (``anchor=False``)."""
+
+    executor = _ResolvingExecutor()
+    owner = _owner(recorder, pin_intent=_intent(), pin_executor=executor)
+    await owner.on_first_content(SourceUsageHolder(response_id="resp_source_1"))
+    assert [write.kind for write in executor.intents[0].writes] == ["thread"]

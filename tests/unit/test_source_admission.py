@@ -175,3 +175,38 @@ def test_saturated_source_increments_bulkhead_rejections_with_source_id(monkeypa
 
     assert counter.calls == [{"source_id": "src_busy"}]
     assert counter.incs == 1
+
+
+# --- overflow breaker token riding in the claims (#2123 WP-C2, C1 gap 1/2) ---------------------
+
+
+def test_try_claim_carries_the_trial_and_settles_it_with_the_slot() -> None:
+    trial = _Trial()
+    bulkhead = SourceBulkhead()
+    source = _source(max_concurrency=1)
+    claims = try_claim(source, bulkhead=bulkhead, trial=trial)
+    assert claims is not None
+    assert claims.trial is trial
+    claims.release("success")
+    assert trial.results == ["success"]
+    assert bulkhead.in_flight(source.id) == 0
+
+
+def test_try_claim_saturated_returns_none_without_settling_the_trial() -> None:
+    """The caller still holds the token and releases it (``try_claim_overflow``)."""
+
+    trial = _Trial()
+    bulkhead = SourceBulkhead()
+    source = _source(max_concurrency=1)
+    first = try_claim(source, bulkhead=bulkhead)
+    assert first is not None
+    assert try_claim(source, bulkhead=bulkhead, trial=trial) is None
+    assert trial.results == []
+    first.release_if_unowned()
+
+
+def test_try_claim_without_a_trial_keeps_direct_routing_tokenless() -> None:
+    claims = try_claim(_source(max_concurrency=None), bulkhead=SourceBulkhead())
+    assert claims is not None
+    assert claims.trial is None
+    claims.release("failure")

@@ -210,6 +210,27 @@ def project_responses_input_for_account_neutral_fresh_replay(
     )
 
 
+def strip_input_item_ids(input_items: list[JsonValue]) -> list[JsonValue]:
+    """Copy ``input_items`` with the top-level ``id`` of every object item removed; nothing else changes.
+
+    The neutral release of a pinned conversation (#2123 WP-C2, design §7.2)
+    hands a source-served, provably source-free transcript back to a
+    subscription account, where the source-minted item ids would not resolve.
+    This is the one body mutation the release performs: only the top-level
+    ``id`` goes -- nested content, tool payloads and non-object items are
+    returned as they are (the same object when nothing was removed), so the
+    projection is idempotent and never fabricates a field.
+    """
+
+    stripped: list[JsonValue] = []
+    for item in input_items:
+        if isinstance(item, dict) and "id" in item:
+            stripped.append({key: value for key, value in item.items() if key != "id"})
+        else:
+            stripped.append(item)
+    return stripped
+
+
 def _is_canonical_lite_tool_bundle(item: JsonValue) -> bool:
     return (
         isinstance(item, dict)

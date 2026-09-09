@@ -42,15 +42,18 @@ as usage -- they are visible through the WARN line and the
 ``codex_lb_model_source_usage_estimated_total`` counter.
 
 The overflow decision (WP-C2) supplies ``request_log_source``,
-``dispatch_kind`` and the pin intent; this module never spells the
-designation itself.
+``dispatch_kind``, the pin intent and the ``on_finished`` hook; this module
+never spells the designation itself. The pin intent is resolved against the
+source response id at the content trigger (``PinIntent.resolve``) so an anchor
+row for an SDK ``previous_response_id`` chain lands in the same transaction as
+the thread pin.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol, TypeVar
@@ -415,6 +418,11 @@ class SourceDispatch:
     body: AsyncIterator[str] | None = None
     pin_failure_error_code: str = DEFAULT_PIN_FAILURE_ERROR_CODE
     pin_unverified_error_code: str = DEFAULT_PIN_UNVERIFIED_ERROR_CODE
+    # Called exactly once per lifecycle from ``finish()`` with the terminal
+    # status, after the result was recorded and before the row is written
+    # (the overflow decision records its transport-decision counter here);
+    # failure-isolated like every other step.
+    on_finished: Callable[[SourceDispatch, DispatchStatus], None] | None = None
     pin_outcome: PinWriteOutcome | None = None
     # Non-stream completions carry the source response id in the JSON body
     # (streams expose it through the usage holder).
@@ -469,8 +477,10 @@ class SourceDispatch:
 
         if self.pin_intent is None or self.pin_executor is None:
             return
+        # The source response id is known only now: an anchored intent appends
+        # the anchor row here so both rows land in one transaction (design §3, §6.3).
         outcome = await self.pin_executor.commit(
-            self.pin_intent,
+            self.pin_intent.resolve(holder.response_id),
             drain_until=self.drain_until,
             scheduler=self.scheduler,
             clock=self.clock,
@@ -631,6 +641,20 @@ class SourceDispatch:
         self._result_recorded = True
         _inc(model_source_dispatch_total, kind=self.dispatch_kind, status=status)
 
+    def _notify_finished(self, status: DispatchStatus) -> None:
+        hook = self.on_finished
+        if hook is None:
+            return
+        try:
+            hook(self, status)
+        except Exception:  # the hook never breaks the latch
+            logger.warning(
+                "source_dispatch_on_finished_failed request_id=%s source_id=%s",
+                self.request_id,
+                self.source.id,
+                exc_info=True,
+            )
+
     async def write_row(
         self,
         *,
@@ -705,7 +729,9 @@ class SourceDispatch:
         trial_result: TrialResult = "inconclusive",
         timings: SourceTimings | None = None,
     ) -> None:
-        """``close_source -> settle_or_release -> release_claims + record_result -> write_row``; idempotent.
+        """``close_source -> settle_or_release -> release_claims + record_result + on_finished -> write_row``.
+
+        Idempotent (``finished`` is the latch).
 
         Every step is awaited with cancellation deferred and isolated from the
         others: a failing release never skips the row, a failing row write
@@ -738,6 +764,7 @@ class SourceDispatch:
                 try:
                     self.release_claims(trial_result)
                     self.record_result(status)
+                    self._notify_finished(status)
                 finally:
                     await _await_cleanup_deferring_cancellation(
                         self.write_row(

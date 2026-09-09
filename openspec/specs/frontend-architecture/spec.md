@@ -232,38 +232,39 @@ The dashboard request logs view SHALL allow operators to filter rows by one or m
 
 ### Requirement: Dashboard weekly credits pace
 
-The dashboard SHALL show weekly quota pace when account weekly capacity credits, remaining credits, reset time, and window length are available. The pace calculation MUST use credit totals rather than averaging per-account percentages, because weekly ChatGPT quota credits are not the same unit as raw request tokens. The dashboard MUST prefer the backend-provided `weeklyCreditPace` object from `GET /api/dashboard/overview` when present, and MAY fall back to a local calculation only for older responses that do not include that field. The dashboard projections payload SHALL expose smoothed weekly pace gap fields for display while preserving instantaneous live usage fields.
+The dashboard SHALL show weekly quota runway when account weekly capacity credits, remaining credits, reset time, and window length are available. The card MUST present, in priority order: fleet headroom (percent and credits), depletion ETA at the recent burn rate, the next reset relief (arrival time and credits returned), a survives-to-relief verdict, and per-API-key burn attribution for the trailing two hours. The runway calculation MUST use credit totals rather than averaging per-account percentages, because weekly ChatGPT quota credits are not the same unit as raw request tokens. The dashboard MUST render the card immediately from the `weeklyCreditPace` object in `GET /api/dashboard/overview` without waiting for any other request, and MAY refine it when the projections payload arrives; it MAY fall back to a local calculation only for older responses that do not include that field. Card status MUST derive from the relief verdict (`safe`, `tight`, `runs_dry`) rather than from deviation against a linear schedule. Linear-schedule pace fields SHALL remain populated in the response for one release for wire compatibility. The dashboard projections payload SHALL expose smoothed weekly pace gap fields for display while preserving instantaneous live usage fields.
 
 #### Scenario: Weekly credits pace uses account reset deadlines
 
 - **WHEN** multiple accounts have weekly quota data with different `resetAtSecondary` values
-- **THEN** the system computes each account's expected remaining weekly credits from that account's own reset time and window length before summing totals
+- **THEN** the system computes depletion, relief, and expected remaining weekly credits from each account's own reset time and window length before summing fleet totals
 
 #### Scenario: Weekly credits pace excludes hard-blocked or stale usage rows
 
 - **WHEN** an account is `reauth_required`, paused, deactivated, missing from the account table, or its latest weekly usage sample is older than the freshness window derived from the usage refresh interval
-- **THEN** the account is not included in weekly pace totals or forecasts
+- **THEN** the account is not included in weekly runway totals or forecasts
 - **AND** the response reports the excluded stale account count separately from the included account count
 
 #### Scenario: Exhausted accounts still count in weekly credits pace
 
 - **WHEN** an account is `rate_limited` or `quota_exceeded`
 - **AND** it has complete, fresh weekly capacity, remaining credits, reset time, and window length
-- **THEN** the account is included in weekly pace totals and forecasts
+- **THEN** the account is included in weekly runway totals and forecasts
 
 #### Scenario: Current schedule gap is separate from forecast shortfall
 
 - **WHEN** actual remaining weekly credits are lower than scheduled remaining weekly credits
 - **THEN** the response reports `scheduleGapCredits` for the current deficit against the linear schedule
 - **AND** the response reports `projectedShortfallCredits` only for a future shortfall forecast based on recent burn
+- **AND** any surface that presents the linear-schedule deficit describes it as over planned usage, fewer credits remaining than scheduled, or equivalent over-consumption wording rather than "behind schedule"
 - **AND** the dashboard labels the two concepts separately
-- **AND** the dashboard describes the current deficit as over planned usage, fewer credits remaining than scheduled, or equivalent over-consumption wording rather than "behind schedule"
 
 #### Scenario: Displayed pace gap uses configured smoothing
 
 - **GIVEN** the weekly pace gap smoothing window is configured
 - **WHEN** recent weekly usage samples are available for the current weekly reset/window segment
 - **THEN** the response includes `smoothedDeltaPercent`, `smoothedScheduleGapCredits`, and `paceGapSmoothingMinutes`
+- **AND** `actualUsedPercent` remains the live current value
 - **AND** the Weekly credits pace card displays the smoothed gap while keeping `actualUsedPercent` as the live current value
 
 #### Scenario: Weekly pace smoothing resets with quota window
@@ -275,22 +276,70 @@ The dashboard SHALL show weekly quota pace when account weekly capacity credits,
 #### Scenario: Forecast burn uses recent weekly usage slope
 
 - **WHEN** an account has high cumulative weekly usage from earlier in the window but no recent increase in weekly used percent
-- **THEN** the projected shortfall forecast is based on the recent slope and does not assume the earlier full-window average continues
+- **THEN** the depletion forecast is based on the recent slope and does not assume the earlier full-window average continues
 
 #### Scenario: Near-reset depletion is not a false alarm
 
 - **WHEN** an account has consumed 99% of its weekly quota and 99% of its weekly window has elapsed
-- **THEN** the weekly pace treats that account as on pace rather than over plan
+- **THEN** the runway verdict treats that account's imminent reset as relief rather than reporting it as over plan
 
 #### Scenario: Missing weekly credit data is omitted
 
 - **WHEN** an account is missing weekly capacity credits, remaining credits, reset time, or window length
-- **THEN** that account is omitted from weekly pace calculation
+- **THEN** that account is omitted from weekly runway calculation
 
 #### Scenario: No valid weekly credit data hides pace
 
 - **WHEN** no account has complete, fresh weekly credits pace data for an `active`, `rate_limited`, or `quota_exceeded` account
-- **THEN** the dashboard does not render a fake weekly pace value
+- **THEN** the dashboard does not render a fake weekly runway value
+
+#### Scenario: Relief falls back to the full fleet when no account is near exhaustion
+
+- **WHEN** no included account is at or above 95 percent weekly usage
+- **THEN** the next relief time is the soonest reset among all included accounts
+- **AND** the relief credits sum the used credits of included accounts whose reset falls within one hour of that soonest reset
+
+#### Scenario: Verdict reflects whether relief arrives before depletion
+
+- **WHEN** the depletion ETA at the recent burn rate falls before the soonest reset among accounts at or above 95% weekly usage
+- **THEN** the response reports `runwayStatus` as `runs_dry`
+- **AND** the card presents the depletion time and the missed relief time together
+
+#### Scenario: Surviving to relief is not an incident
+
+- **WHEN** the depletion ETA falls after the soonest relief reset
+- **AND** the margin between them is at least 24 hours and fleet headroom is at least 12 percent
+- **THEN** the response reports `runwayStatus` as `safe`
+- **AND** the card renders without warning emphasis
+
+#### Scenario: Per-key attribution names the burn source
+
+- **WHEN** request logs exist in the trailing two hours
+- **THEN** the response lists the top API keys by requests and by billable tokens with request count, billable tokens, and dominant model
+- **AND** the card renders them so an operator can identify the consumer without leaving the dashboard
+
+#### Scenario: Saturated fleet labels demand as a floor
+
+- **WHEN** every included account is at or above 99.5 percent weekly usage
+- **THEN** demand-derived figures are labeled as at-least floors rather than exact demand
+
+#### Scenario: Add-capacity recommendation is stable and gated
+
+- **WHEN** trailing seven-day fleet demand in quota-weeks exceeds current fleet weekly capacity
+- **AND** the runway verdict is `runs_dry` or at least one account is saturated
+- **THEN** the response recommends additional Pro accounts computed from the weekly demand surplus
+- **AND** the recommendation does not change materially from hour to hour under steady traffic
+
+#### Scenario: Throttle guidance precedes purchase guidance
+
+- **WHEN** the runway verdict is `runs_dry`
+- **AND** `throttleToPercent` is available
+- **THEN** the card presents throttling to the sustainable rate as the first remedy before any add-capacity suggestion
+
+#### Scenario: Card paints without the projections request
+
+- **WHEN** the overview response has arrived and the projections request is still in flight or failed
+- **THEN** the weekly runway card renders its full content from the overview payload with a stable layout footprint
 
 ### Requirement: Account weekly trend planned line
 
@@ -1615,7 +1664,6 @@ existing request-log filters, set the clicked conversation ID as the active
 URL-backed conversation filter, and reset pagination.
 
 #### Scenario: Clicking a conversation filters the request log
-
 - **GIVEN** request details display conversation ID `conv-a` while other filters
   are active
 - **WHEN** the conversation ID is activated
@@ -1642,7 +1690,6 @@ contain only `requestCount` and `aggregatedCostUsd`; it MUST NOT duplicate the
 conversation ID because the active URL-backed filter already identifies it.
 
 #### Scenario: Dismissing the badge clears only conversation state
-
 - **GIVEN** the conversation badge and other request-log filters are active
 - **WHEN** the badge is dismissed
 - **THEN** only the conversation filter is cleared
@@ -1650,7 +1697,6 @@ conversation ID because the active URL-backed filter already identifies it.
 - **AND** the other filters remain active
 
 #### Scenario: Summary describes the active filtered conversation
-
 - **GIVEN** the active URL-backed conversation filter is `conv-a` and the
   filtered response contains
   `conversation: { requestCount: 12, aggregatedCostUsd: 1.23 }`, with timeframe
@@ -1664,12 +1710,20 @@ conversation ID because the active URL-backed filter already identifies it.
   `requestCount` and `aggregatedCostUsd`, with no ID field
 
 #### Scenario: Summary omits suffix without other filters
-
 - **GIVEN** the active URL-backed conversation filter is `conv-a` and no other
   non-conversation filter is active
 - **WHEN** the request-log page renders
 - **THEN** the summary contains the conversation sentence without an inline
   filter suffix
+
+#### Scenario: Conversation summary values use inline code formatting
+- **GIVEN** a filtered conversation has ID `ses_123`, request count `35`, and
+  formatted cost `$0.74`
+- **WHEN** the conversation summary box renders
+- **THEN** it uses the copy `The conversation ses_123 runs 35 request(s), cost =
+  $0.74`
+- **AND** the ID, count, and cost are separate styled inline-code values
+- **AND** literal backtick characters are absent
 
 ### Requirement: Dashboard and report metrics count distinct conversations
 
@@ -1682,7 +1736,6 @@ each applicable daily row and once in the report-wide total. Neither card MUST
 render a `{count} distinct` secondary label.
 
 #### Scenario: Dashboard count deduplicates IDs
-
 - **GIVEN** the selected dashboard timeframe contains repeated, null, and empty
   conversation IDs
 - **WHEN** overview metrics are rendered
@@ -1690,7 +1743,6 @@ render a `{count} distinct` secondary label.
 - **AND** the card is between Est. API Cost and Error Rate
 
 #### Scenario: Report summary and daily counts use distinct IDs
-
 - **GIVEN** one conversation has requests on two report days and another has
   requests on one day
 - **WHEN** report metrics are rendered
@@ -1709,7 +1761,6 @@ total MUST remain the exact timeframe aggregate rather than a sum of trend
 points.
 
 #### Scenario: Conversation trend de-duplicates model groups
-
 - **GIVEN** one bucket contains the same conversation ID under two models and a
   second distinct conversation ID under one model
 - **WHEN** the dashboard overview trends are rendered
@@ -1717,7 +1768,6 @@ points.
 - **AND** the series contains one point per configured bucket
 
 #### Scenario: Empty conversation buckets are zero-filled
-
 - **GIVEN** the selected dashboard timeframe has no valid conversation IDs in
   one or more buckets
 - **WHEN** the dashboard overview response is built
@@ -1731,7 +1781,6 @@ MUST preserve the distinct non-empty daily conversation counts, including
 zero-filled days.
 
 #### Scenario: Daily conversation values are sortable and exported
-
 - **GIVEN** daily report rows have different conversation counts, including a
   zero-count row
 - **WHEN** the Conversations column is sorted or CSV export is generated
@@ -1748,10 +1797,12 @@ credit for the selected account, SHALL force-fetch upstream usage after a
 successful or idempotently successful consume without sending model probe
 traffic, and SHALL refresh account-related dashboard queries after success. The
 dashboard SHALL NOT reduce or add permanent polling intervals to make this
-reset appear sooner.
+reset appear sooner. When the selected account summary exposes
+`reset_credit_nearest_expires_at`, the Usage resets row SHALL show the earliest
+reset-credit expiry using the dashboard's local datetime formatting and a
+compact remaining-time label.
 
 #### Scenario: Confirmed account usage reset consumes one credit
-
 - **GIVEN** an active selected account is visible on the Accounts page
 - **AND** the selected account has at least one available usage reset credit
 - **WHEN** the operator clicks the Usage panel Reset action
@@ -1764,11 +1815,17 @@ reset appear sooner.
   refetch interval
 
 #### Scenario: Dismissed account usage reset does not consume a credit
-
 - **GIVEN** an active selected account is visible on the Accounts page
 - **WHEN** the operator clicks the Usage panel Reset action
 - **AND** cancels the dialog
 - **THEN** the dashboard does not send a usage reset consume request
+
+#### Scenario: Usage reset row shows nearest reset-credit expiry
+- **GIVEN** an active selected account is visible on the Accounts page
+- **AND** the selected account summary exposes `reset_credit_nearest_expires_at`
+- **WHEN** the Usage panel renders the Usage resets row
+- **THEN** the row shows the earliest reset-credit expiry in local time
+- **AND** the row shows a compact remaining-time label for that expiry
 
 ### Requirement: Automations page is available from top-level navigation
 
@@ -2115,7 +2172,7 @@ and route compatibility.
 
 ### Requirement: Accounts page exposes a reset-credits redeem action
 
-The Accounts page per-account action bar SHALL render a `Reset (N)` button next to the existing Export button with matching button styling whenever the account reports `available_reset_credits > 0`, where `N` is the available reset-credit count for that account. The button SHALL be hidden when `available_reset_credits` is `0`. Activating the button SHALL open a confirmation dialog that describes redeeming the soonest-expiring banked reset credit for that account and, when credit details are available, shows the soonest credit's expiry in local time using `YYYY-MM-DD HH:MM:SS`. Confirming SHALL submit a redeem request for that account and refresh account data on success.
+The Accounts page per-account action bar SHALL render a `Reset (N)` button next to the existing Export button with matching button styling whenever the account reports `available_reset_credits > 0`, where `N` is the available reset-credit count for that account. The button SHALL be hidden when `available_reset_credits` is `0`. Activating the button SHALL open a confirmation dialog that describes redeeming the soonest-expiring banked reset credit for that account and, when credit details are available, shows the soonest credit's expiry in local time using `YYYY-MM-DD HH:MM:SS`. Confirming SHALL submit a redeem request for that account and refresh account data on success. The compact remaining-time label pinned to the reset action SHALL be controlled by the dashboard setting `show_reset_credit_expiry_badge`, defaulting to enabled.
 
 #### Scenario: Reset button mirrors Export styling and placement
 - **WHEN** the Accounts page renders the per-account action bar for an account with `available_reset_credits > 0`
@@ -2135,9 +2192,16 @@ The Accounts page per-account action bar SHALL render a `Reset (N)` button next 
 - **WHEN** the operator opens the reset-credit confirmation dialog and credit details include an expiry timestamp
 - **THEN** the dialog renders the credit expiry in local time using `YYYY-MM-DD HH:MM:SS`
 
+#### Scenario: Reset action expiry label can be hidden
+- **GIVEN** `show_reset_credit_expiry_badge` is disabled
+- **AND** an account reports `available_reset_credits > 0` and `reset_credit_nearest_expires_at`
+- **WHEN** the Accounts page renders the per-account action bar
+- **THEN** the `Reset (N)` button remains visible
+- **AND** the compact remaining-time label is not rendered on that button
+
 ### Requirement: AccountListItem displays a reset-credits count badge
 
-The Accounts page `AccountListItem` SHALL render a count badge pinned to the right-upper radius of the item whenever the account reports `available_reset_credits > 0`. The badge SHALL display the integer count, capped visually at `"99+"` when the count exceeds 99. The badge SHALL be absent when `available_reset_credits` is `0`.
+The Accounts page `AccountListItem` SHALL render a count badge pinned to the right-upper radius of the item whenever the account reports `available_reset_credits > 0` and dashboard setting `show_reset_credit_badges` is enabled. The badge SHALL display the integer count, capped visually at `"99+"` when the count exceeds 99. The badge SHALL be absent when `available_reset_credits` is `0` or `show_reset_credit_badges` is disabled.
 
 #### Scenario: Badge shows the available count
 - **WHEN** an `AccountListItem` renders for an account with `available_reset_credits: 3`
@@ -2150,6 +2214,12 @@ The Accounts page `AccountListItem` SHALL render a count badge pinned to the rig
 #### Scenario: Badge absent when zero
 - **WHEN** an `AccountListItem` renders for an account with `available_reset_credits: 0`
 - **THEN** no count badge is rendered
+
+#### Scenario: Badge visibility follows settings
+- **GIVEN** `show_reset_credit_badges` is disabled
+- **AND** an account reports `available_reset_credits: 3`
+- **WHEN** an `AccountListItem` renders
+- **THEN** the reset-credit count badge is absent
 
 ### Requirement: Accounts page can sort by available reset credits
 
@@ -2183,7 +2253,7 @@ The Dashboard Accounts section SHALL render a reset action next to the existing 
 
 ### Requirement: Dashboard header shows the total available reset-credit count
 
-The dashboard top navigation SHALL render the total available reset-credit count on the Accounts tab, pinned to the tab's upper-right radius. The total SHALL equal the sum of `available_reset_credits` across the current account list data. The badge SHALL display `99+` when the total exceeds 99 and SHALL be hidden when the total is 0.
+The dashboard top navigation SHALL render the total available reset-credit count on the Accounts tab, pinned to the tab's upper-right radius. The total SHALL equal the sum of `available_reset_credits` across the current account list data. The badge SHALL display `99+` when the total exceeds 99 and SHALL be hidden when the total is 0. The badge SHALL also be hidden when dashboard setting `show_reset_credit_badges` is disabled.
 
 #### Scenario: Accounts tab shows the summed total
 - **WHEN** the current account list totals `available_reset_credits` to `14`
@@ -2196,6 +2266,13 @@ The dashboard top navigation SHALL render the total available reset-credit count
 #### Scenario: Accounts tab hides empty totals
 - **WHEN** every account reports `available_reset_credits: 0`
 - **THEN** the Accounts nav tab displays no reset-credit badge
+
+#### Scenario: Top navigation reset-credit badge visibility follows settings
+
+- **GIVEN** the settings API returns `show_reset_credit_badges: false`
+- **AND** account summaries report available reset credits
+- **WHEN** the top navigation renders
+- **THEN** the Accounts navigation reset-credit badge is absent
 
 ### Requirement: Reset actions display a single-unit expiry countdown
 
@@ -4021,4 +4098,125 @@ current asset graph. Route-level code splitting MUST remain intact.
 - **WHEN** the operator activates reload after a lazy import rejection
 - **THEN** the browser fully navigates the current URL
 - **AND** the route renders when its chunk becomes available
+
+### Requirement: Guest request details hide sensitive metadata and archives
+
+The Request Details dialog MUST render full User Agent, Client IP, Conversation ID controls, and the conversation archive panel only for an admin dashboard principal. It MUST omit those fields and MUST NOT mount the archive panel for a guest principal. Request status, model, transport, timing, token, cost, and error details MUST remain available to guests.
+
+#### Scenario: Guest opens request details
+
+- **GIVEN** the authenticated dashboard principal has role `guest`
+- **WHEN** the guest opens a request-log detail dialog
+- **THEN** the dialog does not render User Agent, Client IP, Conversation ID, or archive controls
+- **AND** it continues to render the non-identifying operational request details
+
+#### Scenario: Admin opens request details
+
+- **GIVEN** the authenticated dashboard principal has role `admin`
+- **WHEN** the admin opens a request-log detail dialog
+- **THEN** the dialog renders the identifying metadata fields when present
+- **AND** it mounts the archive panel using `archiveRequestId` with the existing `requestId` fallback
+
+### Requirement: Dashboard conversations query uses a server-authoritative timeframe
+
+The dashboard conversations query (`useConversations`) SHALL request the conversations list by sending the `timeframe` query parameter to `GET /api/conversations` and SHALL NOT synthesize or send a browser-clock-derived `since` timestamp on the polling or refetch path. The query identity (TanStack query key) and the outgoing API parameters for a given `(search, timeframe)` SHALL remain stable across automatic refetches triggered by polling, window focus, or re-mount, so that an unchanged filter selection reuses the same request and the same server-derived window rather than producing a new timestamp on every refetch. Changing the conversation timeframe SHALL trigger a refetch with the newly selected timeframe.
+
+#### Scenario: Conversations polling sends timeframe and omits browser-generated since
+
+- **GIVEN** the dashboard conversations view is mounted with `conversationTimeframe=7d` in the URL
+- **WHEN** the 30-second polling refetch fires
+- **THEN** the outgoing request to `GET /api/conversations` includes `timeframe=7d`
+- **AND** the request does not include any `since` parameter generated from the browser clock
+
+#### Scenario: Refetch reuses the same API parameters for an unchanged timeframe
+
+- **GIVEN** the dashboard conversations view is mounted with `conversationTimeframe=7d` and `search=foo`
+- **WHEN** automatic refetches fire multiple times without any filter change
+- **THEN** every outgoing request carries the same `timeframe=7d` and `search=foo` parameters
+- **AND** the query key for the conversations query does not change between those refetches
+
+#### Scenario: Changing the conversation timeframe triggers a refetch with the new key
+
+- **GIVEN** the dashboard conversations view is mounted with `conversationTimeframe=7d`
+- **WHEN** the operator changes the conversation timeframe selector to `30d`
+- **THEN** the URL `conversationTimeframe` parameter updates to `30d`
+- **AND** the conversations query refetches with `timeframe=30d` under a new query key
+
+#### Scenario: Standalone conversations view also uses server-authoritative timeframe
+
+- **GIVEN** the conversations view is mounted without an injected dashboard state (the standalone mount path)
+- **WHEN** the view reads the `conversationTimeframe` parameter from the URL and fetches
+- **THEN** the outgoing request sends `timeframe=<key>` and no browser-generated `since`
+- **AND** the standalone mount path produces the same server-authoritative behavior as the dashboard-embedded path
+
+#### Scenario: Browser clock skew does not change the conversations request
+
+- **GIVEN** the browser clock is skewed days ahead of or behind the server clock
+- **WHEN** the dashboard conversations view fetches or refetches
+- **THEN** the outgoing request parameters are unaffected by the browser clock
+- **AND** only the `timeframe` parameter (and `search`/`limit`/`offset` when present) is sent
+
+### Requirement: Settings page exposes reset-credit controls
+
+The Settings page SHALL expose a Reset credits section. The section SHALL allow operators to update `show_reset_credit_badges`, `auto_redeem_reset_credits_before_expiry`, and `show_reset_credit_expiry_badge` through the settings API. `show_reset_credit_badges` and `show_reset_credit_expiry_badge` SHALL default to enabled. `auto_redeem_reset_credits_before_expiry` SHALL default to disabled so upgraded deployments preserve the current manual-only redemption behavior. The automatic redemption control SHALL describe that the system attempts to redeem the soonest reset credit about five minutes before it expires. Changes to any of these three settings SHALL be included in the `settings_changed` audit entry's `changed_fields` list.
+
+#### Scenario: Reset-credit display settings save through settings API
+
+- **WHEN** an operator toggles reset-credit badge visibility
+- **THEN** the dashboard sends `showResetCreditBadges` through the settings API
+
+#### Scenario: Reset-credit auto redeem setting saves through settings API
+
+- **WHEN** an operator toggles automatic reset-credit redemption
+- **THEN** the dashboard sends `autoRedeemResetCreditsBeforeExpiry` through the settings API
+
+### Requirement: Conversation detail URLs preserve opaque identifiers
+
+The dashboard MUST construct conversation detail URLs so stored IDs equal to
+`.` or `..` cannot be normalized by the browser into collection or parent
+paths. The detail request MUST still resolve to the original conversation ID.
+
+#### Scenario: Dot-only IDs remain detail requests
+
+- **GIVEN** a conversation has the non-empty ID `.` or `..`
+- **WHEN** the operator opens its details
+- **THEN** the browser requests an opaque detail path
+- **AND** the API receives the original dot-only conversation ID
+
+### Requirement: Model-source reasoning metadata editor
+
+The dashboard MUST let operators configure the reasoning metadata stored on
+model-source models without assuming one global effort vocabulary.
+
+#### Scenario: Edit arbitrary supported reasoning efforts
+
+- **GIVEN** a model source whose `raw_metadata_json` contains
+  `supports_reasoning: true`
+- **AND** its `supported_reasoning_levels` include values such as `none` or a
+  provider-specific slug
+- **WHEN** the dashboard opens the model-source create or edit form
+- **THEN** the reasoning controls MUST show those effort slugs without dropping
+  or rewriting them
+- **AND** saving the form MUST write the edited effort list back into
+  `supported_reasoning_levels`.
+
+#### Scenario: Normalize stale defaults during save
+
+- **GIVEN** a model source whose configured default effort is no longer present
+  in the edited supported-effort list
+- **WHEN** the operator saves the form
+- **THEN** the dashboard MUST replace the stale default with one of the
+  configured supported efforts
+- **AND** it MUST NOT leave `default_reasoning_level` pointing at a removed
+  value.
+
+#### Scenario: Seed a first-time reasoning configuration
+
+- **GIVEN** an operator enables reasoning for a model source that previously had
+  no configured supported-effort list
+- **WHEN** the dashboard reveals the reasoning metadata controls
+- **THEN** the form MUST seed an editable default effort list and default value
+  so the operator can save a valid initial configuration
+- **AND** the operator MUST still be able to replace that seed with arbitrary
+  effort slugs before saving.
 

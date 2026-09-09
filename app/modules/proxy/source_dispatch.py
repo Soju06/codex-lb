@@ -16,7 +16,9 @@ Composition rules:
 * ``SourceStreamingResponse.__call__`` wraps the transport in
   ``try/finally: _await_cleanup_deferring_cancellation(owner.finalize_transport(), scheduler=owner.scheduler)``
   so a client that leaves before Starlette starts the body still reaches one
-  ``finish()``;
+  ``finish()``; the direct chat-completions stream route, which has no
+  dispatch owner, hands the same response class a ``SourceChatStreamOwner``
+  so its never-started body closes the source transport too;
 * the handler segment uses ``except BaseException -> abandon(); raise``
   (``CancelledError`` is a ``BaseException`` and is never caught by
   ``except Exception``);
@@ -42,15 +44,18 @@ as usage -- they are visible through the WARN line and the
 ``codex_lb_model_source_usage_estimated_total`` counter.
 
 The overflow decision (WP-C2) supplies ``request_log_source``,
-``dispatch_kind`` and the pin intent; this module never spells the
-designation itself.
+``dispatch_kind``, the pin intent and the ``on_finished`` hook; this module
+never spells the designation itself. The pin intent is resolved against the
+source response id at the content trigger (``PinIntent.resolve``) so an anchor
+row for an SDK ``previous_response_id`` chain lands in the same transaction as
+the thread pin.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Coroutine, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol, TypeVar
@@ -88,6 +93,7 @@ from app.modules.api_keys.service import (
 from app.modules.model_sources.catalog import source_model_cost_usd
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
+    SourceChatStream,
     SourceResponsesStream,
     SourceTimings,
     SourceUsage,
@@ -415,6 +421,11 @@ class SourceDispatch:
     body: AsyncIterator[str] | None = None
     pin_failure_error_code: str = DEFAULT_PIN_FAILURE_ERROR_CODE
     pin_unverified_error_code: str = DEFAULT_PIN_UNVERIFIED_ERROR_CODE
+    # Called exactly once per lifecycle from ``finish()`` with the terminal
+    # status, after the result was recorded and before the row is written
+    # (the overflow decision records its transport-decision counter here);
+    # failure-isolated like every other step.
+    on_finished: Callable[[SourceDispatch, DispatchStatus], None] | None = None
     pin_outcome: PinWriteOutcome | None = None
     # Non-stream completions carry the source response id in the JSON body
     # (streams expose it through the usage holder).
@@ -469,8 +480,10 @@ class SourceDispatch:
 
         if self.pin_intent is None or self.pin_executor is None:
             return
+        # The source response id is known only now: an anchored intent appends
+        # the anchor row here so both rows land in one transaction (design §3, §6.3).
         outcome = await self.pin_executor.commit(
-            self.pin_intent,
+            self.pin_intent.resolve(holder.response_id),
             drain_until=self.drain_until,
             scheduler=self.scheduler,
             clock=self.clock,
@@ -631,6 +644,20 @@ class SourceDispatch:
         self._result_recorded = True
         _inc(model_source_dispatch_total, kind=self.dispatch_kind, status=status)
 
+    def _notify_finished(self, status: DispatchStatus) -> None:
+        hook = self.on_finished
+        if hook is None:
+            return
+        try:
+            hook(self, status)
+        except Exception:  # the hook never breaks the latch
+            logger.warning(
+                "source_dispatch_on_finished_failed request_id=%s source_id=%s",
+                self.request_id,
+                self.source.id,
+                exc_info=True,
+            )
+
     async def write_row(
         self,
         *,
@@ -705,7 +732,9 @@ class SourceDispatch:
         trial_result: TrialResult = "inconclusive",
         timings: SourceTimings | None = None,
     ) -> None:
-        """``close_source -> settle_or_release -> release_claims + record_result -> write_row``; idempotent.
+        """``close_source -> settle_or_release -> release_claims + record_result + on_finished -> write_row``.
+
+        Idempotent (``finished`` is the latch).
 
         Every step is awaited with cancellation deferred and isolated from the
         others: a failing release never skips the row, a failing row write
@@ -738,6 +767,7 @@ class SourceDispatch:
                 try:
                     self.release_claims(trial_result)
                     self.record_result(status)
+                    self._notify_finished(status)
                 finally:
                     await _await_cleanup_deferring_cancellation(
                         self.write_row(
@@ -814,14 +844,81 @@ class SourceDispatch:
             await self.abandon(ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY)
 
 
+class TransportOwner(Protocol):
+    """Owner of a source transport whose ``finalize_transport()`` a ``SourceStreamingResponse`` always reaches.
+
+    ``body`` is the outermost iterator handed to Starlette (assigned by the
+    response); ``finalize_transport`` closes it and settles whatever a body that
+    never started could not settle itself. ``SourceDispatch`` implements it for
+    Responses dispatch, ``SourceChatStreamOwner`` for the direct chat route.
+    """
+
+    scheduler: Scheduler
+    body: AsyncIterator[Any] | None
+
+    async def finalize_transport(self) -> None: ...
+
+
+@dataclass(slots=True)
+class SourceChatStreamOwner:
+    """Transport owner for the direct chat-completions stream route, which has no dispatch owner.
+
+    The route's settlement generator wrapped around ``stream.body`` is the sole
+    body iterator: it releases the reservation and writes the row, but only
+    once Starlette iterates the body. Between the route returning and
+    ``http.response.start`` completing there is one await in which a client
+    departure (task cancellation) or a failed first write leaves the generator
+    never started, and ``aclose()`` on a never-started async generator skips
+    its ``finally`` -- the upstream response, the pooled lease and the
+    reservation were held until garbage collection. ``finalize_transport``
+    mirrors ``SourceDispatch.finalize_transport``: it closes the body (a
+    started body settles itself), then, when the generator never ran, closes
+    the source transport directly and runs ``on_abandoned_before_body`` (the
+    route's reservation release and ``cancelled`` row). Every await defers
+    cancellation; the finalizer is idempotent.
+    """
+
+    stream: SourceChatStream
+    # Route-owned: releases the reservation and writes the ``cancelled`` row
+    # with ``ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY`` (``api.py`` owns both).
+    on_abandoned_before_body: Callable[[], Awaitable[None]]
+    scheduler: Scheduler = REAL_SCHEDULER
+    # Outermost body iterator handed to ``SourceStreamingResponse`` (assigned by it).
+    body: AsyncIterator[bytes] | None = None
+    # Set by the settlement generator on entry: from then on it owns the outcome
+    # through its own except/finally paths, whether it completes, is cancelled
+    # mid-stream or is closed by the finalizer below.
+    body_started: bool = False
+    # Latch for the abandoned-before-body outcome recorded by the finalizer.
+    finished: bool = False
+
+    async def finalize_transport(self) -> None:
+        body = self.body
+        if body is not None:
+            aclose = getattr(body, "aclose", None)
+            if aclose is not None:
+                try:
+                    await _await_cleanup_deferring_cancellation(aclose(), scheduler=self.scheduler)
+                except Exception:
+                    logger.warning("source_chat_stream_body_close_failed", exc_info=True)
+        if self.body_started or self.finished:
+            return
+        self.finished = True
+        try:
+            await _await_cleanup_deferring_cancellation(self.stream.aclose(), scheduler=self.scheduler)
+        except Exception:
+            logger.warning("source_chat_stream_close_failed", exc_info=True)
+        await _await_cleanup_deferring_cancellation(self.on_abandoned_before_body(), scheduler=self.scheduler)
+
+
 class SourceStreamingResponse(StreamingResponse):
     """``StreamingResponse`` whose transport exit always reaches ``owner.finalize_transport()``."""
 
     def __init__(
         self,
-        content: AsyncIterator[str],
+        content: AsyncIterator[str] | AsyncIterator[bytes],
         *,
-        owner: SourceDispatch,
+        owner: TransportOwner,
         media_type: str = "text/event-stream",
         headers: Mapping[str, str] | None = None,
     ) -> None:

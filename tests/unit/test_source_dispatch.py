@@ -12,6 +12,7 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Coroutine
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -29,6 +30,8 @@ from app.modules.api_keys.service import (
 )
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
+    SourceChatStream,
+    SourceStreamTransport,
     SourceUsage,
     SourceUsageHolder,
 )
@@ -42,6 +45,7 @@ from app.modules.proxy.source_dispatch import (
     OPEN_DISCONNECT_POLL_SECONDS,
     STALL_EVIDENCE_SECONDS,
     ClientDisconnectedDuringOpen,
+    SourceChatStreamOwner,
     SourceDispatch,
     SourcePinCommitError,
     SourceStreamingResponse,
@@ -1758,6 +1762,146 @@ async def test_streaming_response_disconnect_before_the_body_starts_finishes_can
     assert owner.claims.released is True
 
 
+# -- chat-completions transport owner (WP-C1 follow-up F1) -------------------------------------------
+
+
+def _chat_stream(record: list[str]) -> SourceChatStream:
+    """A ``SourceChatStream`` whose transport is a real ``SourceStreamTransport`` over a recording exit stack."""
+
+    stack = AsyncExitStack()
+
+    async def release_transport() -> None:
+        record.append("transport_closed")
+
+    stack.push_async_callback(release_transport)
+
+    async def body() -> AsyncIterator[bytes]:
+        yield b"data: chunk\n\n"
+
+    return SourceChatStream(
+        body=body(),
+        usage_holder=SourceUsageHolder(),
+        upstream_status_code=200,
+        transport=SourceStreamTransport(stack, scheduler=dispatch_module.REAL_SCHEDULER),
+    )
+
+
+def _chat_owner(record: list[str]) -> SourceChatStreamOwner:
+    async def abandoned_before_body() -> None:
+        record.append("abandoned_before_body")
+
+    return SourceChatStreamOwner(stream=_chat_stream(record), on_abandoned_before_body=abandoned_before_body)
+
+
+@pytest.mark.asyncio
+async def test_chat_owner_disconnect_before_the_body_starts_closes_the_transport_and_records_once() -> None:
+    """Chat parity with CL-6: an ASGI disconnect before Starlette iterates the body closes the source transport
+    directly and runs the route's abandoned-before-body step exactly once, even when finalized again."""
+
+    record: list[str] = []
+    owner = _chat_owner(record)
+    started = asyncio.Event()
+
+    async def outer() -> AsyncIterator[bytes]:
+        owner.body_started = True  # what the route's settlement generator does on entry
+        started.set()
+        yield b"data: a\n\n"
+
+    response = SourceStreamingResponse(outer(), owner=owner)
+    await _run_response(response, disconnect_immediately=True)
+
+    assert not started.is_set()
+    assert record == ["transport_closed", "abandoned_before_body"]
+    assert owner.finished is True and owner.body_started is False
+
+    await owner.finalize_transport()
+    assert record == ["transport_closed", "abandoned_before_body"]
+
+
+@pytest.mark.asyncio
+async def test_chat_owner_leaves_a_started_body_to_its_own_settlement() -> None:
+    """Once the settlement generator ran it owns the outcome: the finalizer neither closes the transport (the body's
+    ``finally`` does) nor records a second outcome."""
+
+    record: list[str] = []
+    owner = _chat_owner(record)
+
+    async def outer() -> AsyncIterator[bytes]:
+        owner.body_started = True
+        try:
+            yield b"data: a\n\n"
+            yield b"data: b\n\n"
+        finally:
+            record.append("body_finally")
+
+    response = SourceStreamingResponse(outer(), owner=owner)
+    sent = await _run_response(response, disconnect_immediately=False)
+
+    bodies = [message["body"] for message in sent if message["type"] == "http.response.body"]
+    assert b"".join(cast(list[bytes], bodies)) == b"data: a\n\ndata: b\n\n"
+    assert record == ["body_finally"]
+    assert owner.finished is False
+
+
+@pytest.mark.asyncio
+async def test_chat_owner_finalizer_closes_a_body_suspended_at_a_yield_before_deciding() -> None:
+    """A body abandoned mid-yield (the first write failed after the generator started) is closed first, so its own
+    cleanup runs and the abandoned-before-body step does not."""
+
+    record: list[str] = []
+    owner = _chat_owner(record)
+
+    async def outer() -> AsyncIterator[bytes]:
+        owner.body_started = True
+        try:
+            yield b"data: a\n\n"
+        finally:
+            record.append("body_finally")
+
+    body = outer()
+    SourceStreamingResponse(body, owner=owner)
+    assert await anext(body) == b"data: a\n\n"
+
+    await owner.finalize_transport()
+
+    assert record == ["body_finally"]
+    assert owner.finished is False
+
+
+@pytest.mark.asyncio
+async def test_chat_owner_records_the_abandonment_even_when_the_transport_close_raises() -> None:
+    record: list[str] = []
+    stack = AsyncExitStack()
+
+    async def broken_release() -> None:
+        record.append("transport_close_attempted")
+        raise RuntimeError("connector gone")
+
+    stack.push_async_callback(broken_release)
+
+    async def body() -> AsyncIterator[bytes]:
+        yield b""
+
+    async def abandoned_before_body() -> None:
+        record.append("abandoned_before_body")
+
+    owner = SourceChatStreamOwner(
+        stream=SourceChatStream(
+            body=body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+            transport=SourceStreamTransport(stack, scheduler=dispatch_module.REAL_SCHEDULER),
+        ),
+        on_abandoned_before_body=abandoned_before_body,
+    )
+    SourceStreamingResponse(body(), owner=owner)
+
+    await owner.finalize_transport()
+
+    assert record == ["transport_close_attempted", "abandoned_before_body"]
+    assert owner.finished is True
+
+
 # -- metric increments (spec scenario -> counter assertions) --------------------------------------
 
 
@@ -1827,3 +1971,130 @@ async def test_missing_usage_increments_usage_estimated_total_with_source_and_ca
 
     assert counter.calls == [{"source_id": owner.source.id, "cause": "missing_usage"}]
     assert counter.incs == 1
+
+
+# -- on_finished hook and anchor resolution (#2123 WP-C2, C1 gaps 9/10) ------------------------------
+
+
+@dataclass(slots=True)
+class _HookRecorder:
+    calls: list[tuple[SourceDispatch, str]] = field(default_factory=list)
+    error: Exception | None = None
+
+    def __call__(self, owner: SourceDispatch, status: str) -> None:
+        self.calls.append((owner, status))
+        if self.error is not None:
+            raise self.error
+
+
+@pytest.mark.asyncio
+async def test_on_finished_is_called_exactly_once_even_when_release_and_row_raise(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder.release_error = RuntimeError("db down")
+    hook = _HookRecorder()
+    owner = _owner(recorder, reservation=_reservation(), on_finished=hook)
+    _attach_stream(owner)
+
+    async def failing_row(self: SourceDispatch, **kwargs: object) -> None:
+        raise RuntimeError("row down")
+
+    monkeypatch.setattr(SourceDispatch, "write_row", failing_row)
+    with pytest.raises(RuntimeError, match="row down"):
+        await owner.finish(status="error", error_code="model_source_timeout")
+    await owner.finish(status="error", error_code="model_source_timeout")
+    await owner.finish(status="success")
+    await owner.abandon(ABANDON_CLIENT_DISCONNECTED_DURING_OPEN)
+
+    assert hook.calls == [(owner, "error")]
+    assert owner.finished is True
+
+
+@pytest.mark.asyncio
+async def test_on_finished_receives_the_settlement_corrected_status(recorder: _Recorder) -> None:
+    recorder.settle_result = False
+    hook = _HookRecorder()
+    owner = _owner(recorder, reservation=_reservation(limited=False), on_finished=hook)
+    _attach_stream(owner)
+    await owner.finish(status="success", usage=SourceUsage(input_tokens=3, output_tokens=2))
+    assert hook.calls == [(owner, "error")]
+    assert recorder.rows[0]["error_code"] == "usage_settlement_failed"
+
+
+@pytest.mark.asyncio
+async def test_on_finished_failure_never_breaks_the_latch(recorder: _Recorder, caplog) -> None:
+    hook = _HookRecorder(error=RuntimeError("metrics down"))
+    bulkhead = SourceBulkhead()
+    owner = _owner(recorder, reservation=_reservation(), bulkhead=bulkhead, on_finished=hook)
+    _attach_stream(owner)
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.source_dispatch")
+    await owner.finish(status="success", usage=SourceUsage(input_tokens=1, output_tokens=1))
+    assert len(hook.calls) == 1
+    assert len(recorder.rows) == 1
+    assert bulkhead.in_flight(owner.source.id) == 0
+    assert "source_dispatch_on_finished_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_on_finished_defaults_to_none_for_direct_routing(recorder: _Recorder) -> None:
+    owner = _owner(recorder)
+    assert owner.on_finished is None
+    _attach_stream(owner)
+    await owner.finish(status="success")
+    assert len(recorder.rows) == 1
+
+
+class _ResolvingExecutor:
+    def __init__(self) -> None:
+        self.intents: list[PinIntent] = []
+
+    async def commit(self, intent: PinIntent, *, drain_until: object, scheduler: object, clock: object) -> str:
+        self.intents.append(intent)
+        return "written"
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_commits_the_intent_resolved_against_the_source_response_id(recorder: _Recorder) -> None:
+    """The anchor row for an SDK chain lands in the same transaction as the thread pin (design §3, §6.3)."""
+
+    executor = _ResolvingExecutor()
+    intent = PinIntent(
+        writes=(PinWrite(pin_key="thread\nabc", kind="thread", source_id="src", api_key_id="key-1"),),
+        thread_key="abc",
+        source_id="src",
+        anchor_api_key_id="key-1",
+        anchor=True,
+    )
+    owner = _owner(recorder, pin_intent=intent, pin_executor=executor)
+    await owner.on_first_content(SourceUsageHolder(response_id="resp_source_1"))
+
+    assert len(executor.intents) == 1
+    committed = executor.intents[0]
+    assert [write.pin_key for write in committed.writes] == ["thread\nabc", "anchor\nkey-1\nresp_source_1"]
+    assert committed.writes[1].kind == "anchor"
+    assert committed.writes[1].source_id == "src"
+    assert owner.pin_outcome == "written"
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_without_a_response_id_commits_the_thread_pin_only(recorder: _Recorder) -> None:
+    executor = _ResolvingExecutor()
+    intent = PinIntent(
+        writes=(PinWrite(pin_key="thread\nabc", kind="thread", source_id="src", api_key_id=None),),
+        thread_key="abc",
+        source_id="src",
+        anchor=True,
+    )
+    owner = _owner(recorder, pin_intent=intent, pin_executor=executor)
+    await owner.on_first_content(SourceUsageHolder())
+    assert [write.pin_key for write in executor.intents[0].writes] == ["thread\nabc"]
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_store_false_intent_never_anchors(recorder: _Recorder) -> None:
+    """Mutant: anchor written for ``store: false`` (``anchor=False``)."""
+
+    executor = _ResolvingExecutor()
+    owner = _owner(recorder, pin_intent=_intent(), pin_executor=executor)
+    await owner.on_first_content(SourceUsageHolder(response_id="resp_source_1"))
+    assert [write.kind for write in executor.intents[0].writes] == ["thread"]

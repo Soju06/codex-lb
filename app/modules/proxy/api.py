@@ -9,6 +9,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, C
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import partial
 from json import JSONDecodeError
 from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
@@ -319,11 +320,13 @@ from app.modules.proxy.schemas import (
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 from app.modules.proxy.source_admission import try_claim as try_claim_source_admission
 from app.modules.proxy.source_dispatch import (
+    ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
     ABANDON_CLIENT_DISCONNECTED_DURING_OPEN,
     ABANDON_DISPATCH_INTERRUPTED,
     ABANDON_SOURCE_STALL,
     CANCELLED_CLIENT_DISCONNECTED,
     ClientDisconnectedDuringOpen,
+    SourceChatStreamOwner,
     SourceDispatch,
     SourceStreamingResponse,
     open_with_disconnect_watch,
@@ -5490,6 +5493,22 @@ async def _source_chat_completion_response(
                 upstream_status_code=stream.upstream_status_code,
                 rate_limit_headers=rate_limit_headers,
             )
+        # The settlement generator owns the outcome once Starlette iterates the
+        # body; the transport owner covers the one await before that (the
+        # response start), where a departing client would otherwise leave the
+        # upstream response, the pooled lease and the reservation to garbage
+        # collection (``SourceChatStreamOwner``).
+        owner = SourceChatStreamOwner(
+            stream=stream,
+            on_abandoned_before_body=partial(
+                _abandon_source_chat_stream_before_body,
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                reservation=reservation,
+            ),
+        )
         body = _source_chat_stream_with_settlement(
             stream.body,
             usage_holder=stream.usage_holder,
@@ -5499,10 +5518,11 @@ async def _source_chat_completion_response(
             api_key=api_key,
             model=model,
             reservation=reservation,
+            owner=owner,
         )
-        return StreamingResponse(
+        return SourceStreamingResponse(
             body,
-            media_type="text/event-stream",
+            owner=owner,
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
 
@@ -5716,6 +5736,11 @@ async def _buffered_limited_source_chat_stream_response(
             raise close_exc
         raise cancel_exc
     except ModelSourceForwardingError as exc:
+        # Post-open failures only (idle timeout, transport loss, the
+        # empty-stream verdict above): a source ``Retry-After`` rides a
+        # pre-open 4xx/5xx, which the open site answers before this handler
+        # exists, so these errors never carry one and there is nothing to
+        # merge into the headers here (``test_body_phase_errors_carry_no_retry_after``).
         await _release_reservation(reservation)
         await _log_source_chat_completion(
             request,
@@ -5727,9 +5752,7 @@ async def _buffered_limited_source_chat_stream_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(
-            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
-        )
+        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
     except Exception as exc:
         await _release_reservation(reservation)
         error = openai_error(
@@ -6003,7 +6026,13 @@ async def _source_chat_stream_with_settlement(
     api_key: ApiKeyData | None,
     model: str,
     reservation: ApiKeyUsageReservationData | None,
+    owner: SourceChatStreamOwner | None = None,
 ) -> AsyncIterator[_SourceStreamChunkT]:
+    if owner is not None:
+        # From here on this generator owns the outcome (reservation and row)
+        # through its own except/finally paths; the owner's transport finalizer
+        # only steps in for a body that never started.
+        owner.body_started = True
     status = "success"
     error_code: str | None = None
     error_message: str | None = None
@@ -6089,6 +6118,49 @@ async def _source_chat_stream_with_settlement(
                 error_message=error_message,
                 upstream_status_code=row_upstream_status_code,
             )
+        )
+
+
+async def _abandon_source_chat_stream_before_body(
+    request: Request,
+    *,
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    model: str,
+    reservation: ApiKeyUsageReservationData | None,
+) -> None:
+    """A chat stream body that never started: release the reservation and record the abandoned attempt.
+
+    Runs from ``SourceChatStreamOwner.finalize_transport`` (which already
+    defers cancellation and has closed the source transport) when the client
+    left between the route returning and the response start, so the
+    settlement generator that normally owns both steps never ran. The row is
+    the same ``cancelled`` classification the Responses owner writes for this
+    window (``client_disconnected_before_body``) and stays out of every
+    error-rate numerator (#1552).
+    """
+
+    release_exc: Exception | None = None
+    if reservation is not None:
+        try:
+            await _release_reservation(reservation)
+        except Exception as exc:
+            release_exc = exc
+    await _log_source_chat_completion(
+        request,
+        source=source,
+        api_key=api_key,
+        model=model,
+        status="cancelled",
+        error_code=ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
+        error_message="client disconnected before the source stream body started",
+    )
+    if release_exc is not None:
+        logger.warning(
+            "Failed to release source stream reservation after client disconnect before body source_id=%s model=%s",
+            source.id,
+            model,
+            exc_info=release_exc,
         )
 
 

@@ -124,8 +124,19 @@ class SourceAdmission:
                 (self.bulkhead or get_source_bulkhead()).release(self.slot)
 
 
-def try_claim(source: ModelSource, *, bulkhead: SourceBulkhead | None = None) -> SourceAdmission | None:
-    """Claim a bulkhead slot for ``source``; ``None`` when it is saturated (``503 model_source_busy``)."""
+def try_claim(
+    source: ModelSource,
+    *,
+    bulkhead: SourceBulkhead | None = None,
+    trial: TrialClaim | None = None,
+) -> SourceAdmission | None:
+    """Claim a bulkhead slot for ``source``; ``None`` when it is saturated (``503 model_source_busy``).
+
+    ``trial`` is the overflow breaker's token (WP-C2): it rides in the claims
+    and is settled by the same latch that releases the slot. A saturated source
+    returns ``None`` without settling it -- the caller still holds the token and
+    releases it (``try_claim_overflow``).
+    """
 
     active = bulkhead if bulkhead is not None else get_source_bulkhead()
     slot = active.try_acquire(source.id, source.max_concurrency)
@@ -137,4 +148,4 @@ def try_claim(source: ModelSource, *, bulkhead: SourceBulkhead | None = None) ->
             active.in_flight(source.id),
         )
         return None
-    return SourceAdmission(slot=slot, bulkhead=active)
+    return SourceAdmission(slot=slot, trial=trial, bulkhead=active)

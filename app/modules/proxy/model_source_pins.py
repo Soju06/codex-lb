@@ -29,11 +29,13 @@ Three layers, each usable on its own:
   ``unknown`` instead of guessing (design §8.5, CL-4).
 
 This module is the only request-path reader of the pin table and of the TTL
-constants in ``app.modules.settings.subscription_overflow``; the inertness
-ratchet (``tests/unit/test_subscription_overflow_inert.py``) pins that. Nothing
-under ``app/modules/proxy`` imports it yet: the pin primitive is armed by WP-C2.
-The retention job (``app/core/retention/job.py``) is its only production caller
-in this stage (purge + drain-invariant alarm).
+constants in ``app.modules.settings.subscription_overflow``. Its request-path
+callers are the overflow decision (``app.modules.proxy.overflow``: thread,
+anchor and compact lookups, the handshake evidence read, the neutral release),
+the dispatch owner (``source_dispatch.py``: the pre-content commit) and the
+WebSocket parity helper (bounce rows); the retention job
+(``app/core/retention/job.py``) purges tombstones, checks the drain invariant
+and samples the live-pin gauge.
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -83,7 +85,9 @@ __all__ = [
     "classify_pin",
     "drain_capped_expiry",
     "drain_deadline_from_settings",
+    "get_pin_cache",
     "lookup_pin_bounded",
+    "lookup_pins_bounded",
     "thread_pin_key",
 ]
 
@@ -520,6 +524,18 @@ class PinCache:
         self._entries.pop(pin_key, None)
 
 
+_PIN_CACHE: PinCache | None = None
+
+
+def get_pin_cache() -> PinCache:
+    """Process-wide positive-only pin cache (one per replica worker)."""
+
+    global _PIN_CACHE
+    if _PIN_CACHE is None:
+        _PIN_CACHE = PinCache()
+    return _PIN_CACHE
+
+
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 WriterSection = Callable[[], AbstractAsyncContextManager[None]]
 
@@ -527,6 +543,11 @@ WriterSection = Callable[[], AbstractAsyncContextManager[None]]
 async def _read_pin(pin_key: str, session_factory: SessionFactory) -> PinRecord | None:
     async with session_factory() as session:
         return await ModelSourcePinRepository(session).reread(pin_key)
+
+
+async def _read_pins(pin_keys: Sequence[str], session_factory: SessionFactory) -> dict[str, PinRecord]:
+    async with session_factory() as session:
+        return await ModelSourcePinRepository(session).reread_many(pin_keys)
 
 
 async def lookup_pin_bounded(
@@ -562,12 +583,83 @@ async def lookup_pin_bounded(
     return result
 
 
+async def lookup_pins_bounded(
+    pin_keys: Sequence[str],
+    *,
+    cache: PinCache | None,
+    scheduler: Scheduler = REAL_SCHEDULER,
+    clock: Clock = REAL_CLOCK,
+    session_factory: SessionFactory = get_background_session,
+) -> dict[str, PinLookupResult]:
+    """``lookup_pin_bounded`` for several keys with one bounded read (the handshake's thread + bounce evidence).
+
+    Same cache discipline per key: a cached record is served only while it
+    still classifies as ``live``; every other key is read in one
+    ``reread_many`` bounded by ``PIN_LOOKUP_DEADLINE_SECONDS``, and only live
+    records are cached afterwards. Raises ``PinLookupTimeout``.
+    """
+
+    now = clock.now()
+    results: dict[str, PinLookupResult] = {}
+    missing: list[str] = []
+    for pin_key in dict.fromkeys(pin_keys):
+        cached = cache.get(pin_key, now=clock.monotonic()) if cache is not None else None
+        if cached is not None:
+            result = classify_pin(cached, now)
+            if result.state == "live":
+                results[pin_key] = result
+                continue
+            if cache is not None:
+                cache.invalidate(pin_key)
+        missing.append(pin_key)
+    if not missing:
+        return results
+    try:
+        records = await scheduler.wait_for(_read_pins(missing, session_factory), PIN_LOOKUP_DEADLINE_SECONDS)
+    except TimeoutError as exc:
+        raise PinLookupTimeout(f"model-source pin lookup exceeded {PIN_LOOKUP_DEADLINE_SECONDS:g}s") from exc
+    for pin_key in missing:
+        result = classify_pin(records.get(pin_key), now)
+        results[pin_key] = result
+        if cache is not None and result.state == "live" and result.record is not None:
+            cache.put(result.record, now=clock.monotonic())
+    return results
+
+
 @dataclass(frozen=True, slots=True)
 class PinIntent:
-    """Pins to commit before the first content frame reaches the client (I11)."""
+    """Pins to commit before the first content frame reaches the client (I11).
+
+    ``writes`` are known at decision time (the thread pin of a fresh dispatch;
+    empty for a pinned or anchored dispatch, which only touches). An anchored
+    intent (``anchor=True``: the client did not send ``store: false``) gains the
+    anchor row for the source-minted response id through ``resolve`` at the
+    content trigger, so SDK ``previous_response_id`` follow-ups return to the
+    same source (design §3, §7.2).
+    """
 
     writes: tuple[PinWrite, ...]
     thread_key: str | None
+    source_id: str | None = None
+    anchor_api_key_id: str | None = None
+    anchor: bool = False
+
+    def __post_init__(self) -> None:
+        if self.anchor and self.source_id is None:
+            raise ValueError("an anchored pin intent needs the source id")
+
+    def resolve(self, response_id: str | None) -> PinIntent:
+        """The intent with the anchor row appended iff ``anchor`` is set and the source minted a response id."""
+
+        if not self.anchor or not response_id or self.source_id is None:
+            return self
+        anchor_write = PinWrite(
+            anchor_pin_key(self.anchor_api_key_id, response_id),
+            PIN_KIND_ANCHOR,
+            self.source_id,
+            self.anchor_api_key_id,
+        )
+        return replace(self, writes=(*self.writes, anchor_write))
 
 
 PinWriteOutcome = Literal["written", "not_written", "unknown"]

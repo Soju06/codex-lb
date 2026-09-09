@@ -1,7 +1,7 @@
 # model-catalog-compat Specification
 
 ## Purpose
-TBD - created by archiving change populate-bootstrap-model-metadata. Update Purpose after archive.
+Keep model catalog and OpenAI-compatible metadata available and authoritative across bootstrap, refresh, and backend context-window changes.
 ## Requirements
 ### Requirement: Bootstrap model catalog is available before refresh
 
@@ -1116,4 +1116,3 @@ The system MUST treat `ultrafast` as an access-controlled service tier and MUST 
 
 - **WHEN** no live or retained account catalog advertises `ultrafast`
 - **THEN** bootstrap model metadata does not expose or grant that tier
-

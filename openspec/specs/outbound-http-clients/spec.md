@@ -654,17 +654,87 @@ fallback.
 
 ### Requirement: Native WebSocket transport-event queues do not impose a fixed event-count limit
 
-The Python native-egress adapter MUST NOT impose a fixed event-count capacity on an individual native WebSocket transport-event queue and MUST NOT terminate an otherwise healthy WebSocket solely because more than a fixed number of helper events are pending. It MUST preserve event ordering, request isolation, cancellation, helper-generation failure handling, and terminal delivery. The separate application-message queue exposed to WebSocket consumers MUST retain its existing bounded overflow behavior.
+The Python native-egress adapter MUST NOT impose a fixed event-count capacity on an individual native WebSocket transport-event queue and MUST NOT terminate an otherwise healthy WebSocket solely because more than a fixed number of helper events are pending. It MUST preserve event ordering, request isolation, cancellation, helper-generation failure handling, and terminal delivery. Transport-event and decoded application-message queues MUST share bounded per-connection and per-helper byte budgets. Exhausting a data budget MUST preserve already accepted messages and terminal delivery, isolate the overflowing connection, and release charges during consumption and cleanup. Native HTTP SSE framing MUST NOT weaken these WebSocket guarantees.
 
 #### Scenario: Bursty native WebSocket events exceed the former limit
 
 - **GIVEN** a native WebSocket helper emits more than 64 ordered transport events for one connection before its relay task drains them
-- **WHEN** the relay consumes the connection
+- **WHEN** the relay consumes the connection and the byte budgets are not exceeded
 - **THEN** every event is delivered in order through the existing WebSocket API
 - **AND** the adapter does not synthesize a `consumer_backpressure` failure from the transport-event queue
 
 #### Scenario: Application-message backpressure remains bounded
 
 - **GIVEN** a native WebSocket consumer stops draining application messages
-- **WHEN** more than the existing message-queue capacity is received
-- **THEN** the adapter preserves its existing bounded overflow failure and cleans up the native request
+- **WHEN** incoming messages exceed the connection byte budget
+- **THEN** the adapter delivers the accepted prefix followed by the bounded overflow failure and cleans up the native request
+- **AND** another connection can continue and released charges remain available for later traffic
+
+#### Scenario: Raw and decoded stages share the helper ceiling
+
+- **WHEN** raw events and decoded messages coexist across connections in one helper generation
+- **THEN** both stages consume their connection and shared helper byte budgets
+- **AND** moving or clearing messages releases their previous stage's charges
+
+### Requirement: Native SSE framing is an explicitly negotiated transport mode
+
+The native protocol MUST advertise and the Python adapter MUST require
+`http_sse_v1` before dispatch. HTTP requests MAY include SSE framing options
+with positive idle timeout and event byte limit. Without these options, and
+for HTTP statuses at least 400, the worker MUST preserve raw chunk output.
+With these options and a successful HTTP response, Rust MUST emit complete
+SSE text blocks and own byte framing and the deadline between body reads.
+Python MUST NOT reframe these blocks or replay a dispatched request.
+IPC text fragments MUST be bounded to at most 16 KiB of UTF-8, with an explicit
+continuation flag; the adapter MUST join them before exposing an event and
+MUST reject a clean EOF that leaves an incomplete event.
+
+#### Scenario: Old helper cannot silently ignore framing options
+
+- **WHEN** an installed helper omits `http_sse_v1`
+- **THEN** negotiation fails before HTTP dispatch
+- **AND** the adapter does not fall back to another transport
+
+#### Scenario: Partial bytes keep the upstream stream active
+
+- **WHEN** body bytes arrive within each configured idle interval without completing an SSE block
+- **THEN** the Rust body-read deadline resets on activity
+- **AND** no premature event-wait timeout is introduced in Python
+
+#### Scenario: HTTP error and ordinary body consumption
+
+- **WHEN** SSE options are absent or the HTTP response status is at least 400
+- **THEN** consumers receive the ordinary raw body chunk contract
+
+#### Scenario: One framed request fails or is cancelled
+
+- **WHEN** one framed stream exceeds its byte limit, times out, or is cancelled
+- **THEN** only that attempt terminates and its stream registration is released
+- **AND** unrelated requests sharing the helper remain usable
+- **AND** failure diagnostics do not contain upstream body content or credentials
+
+### Requirement: Routed native SSE options preserve transport ownership
+
+Unbuffered routed HTTP requests MAY supply typed native SSE options.
+`CodexClient` MUST pass these options unchanged to each native endpoint attempt
+and MUST reject their use with buffered response consumption before dispatch.
+It MUST NOT forward native-only options to a Python HTTP client. Each native
+attempt MUST use only its resolved proxy endpoint, and successful results MUST
+retain selected route metadata and native framed-response consumption.
+
+#### Scenario: Pre-dispatch endpoint fallback preserves framing limits
+
+- **WHEN** an unbuffered routed native POST has a confirmed replay-safe connect failure at its first endpoint
+- **THEN** the next eligible endpoint receives the same framing limits
+- **AND** the result records that endpoint and fallback use
+
+#### Scenario: Missing helper uses the same resolved Python route
+
+- **WHEN** the helper is unavailable before dispatch for a routed SSE request
+- **THEN** Python transport uses the resolved endpoint and ordinary SSE parser
+- **AND** native-only SSE options do not reach the HTTP client
+
+#### Scenario: Buffered operation cannot select framed consumption
+
+- **WHEN** a caller supplies native SSE options with buffered response consumption
+- **THEN** the request fails before either native or Python dispatch

@@ -1,7 +1,7 @@
 # account-pool-usage-v1-usage Specification
 
 ## Purpose
-TBD - created by archiving change add-account-pool-usage-to-v1-usage. Update Purpose after archive.
+Expose API-key-scoped pooled account capacity in the OpenAI-compatible usage response while respecting configured privacy and detail sections.
 ## Requirements
 ### Requirement: /v1/usage response includes account_pool_usage
 
@@ -73,4 +73,3 @@ The system SHALL store an API key's visible usage sections in a `usage_sections`
 - **WHEN** an API key has `usage_sections` set to `""`
 - **AND** a client calls `GET /v1/usage`
 - **THEN** `upstream_limits` is an empty list AND `account_pool_usage` is `null`
-

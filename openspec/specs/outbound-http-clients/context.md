@@ -23,3 +23,52 @@ Deferred on purpose: sharing one routed `TCPConnector`/`ClientSession` across pe
 ## Credential-bearing proxy hops
 
 Beta.4 permits HTTP/SOCKS proxy endpoints carrying credentials and exposes a warning, superseding the earlier hard rejection. The LB-to-proxy hop is still unencrypted for those schemes; an HTTPS upstream target protects the upstream connection, not the preceding proxy-authentication exchange. For example, an `http` endpoint with a username/password is accepted for an HTTPS target and flagged as `plaintextCredentials`, whereas an HTTPS proxy or a credential-free IP allowlist avoids that plaintext credential hop. The warning identifies the endpoint without printing its credentials. See [spec.md](spec.md) and the owning `allow-plaintext-proxy-credentials-with-warning` change for connector and fail-closed rules.
+
+## Native Responses SSE ownership (2026-09-08)
+
+The `http_sse_v1` capability moves byte framing for direct and account-routed streaming Responses
+into the existing Rust egress library. Python supplies the configured idle
+interval and event byte limit; Rust applies them while reading the body.
+For example, an event split over several active body reads must not time out
+just because Python has not yet received a complete event. Python retains
+normalization, terminal detection, archives, selection, health, and replay.
+
+Complete events cross IPC as UTF-8 text fragments of at most 16 KiB, with a
+`more` flag. This bounds line/queue expansion for control characters and invalid
+UTF-8 while avoiding Python byte scanning and base64 decoding. Shared fixtures
+pin the legacy framing behavior, including CR/LF splits, whitespace, EOF
+residue, and limits measured in original body bytes. The adapter only joins
+text fragments. An incomplete IPC event at clean EOF fails the protocol.
+
+HTTP error bodies and requests without SSE options retain raw body delivery.
+Compact framing remains a separate future cutover. Missing helpers
+keep the pre-dispatch Python fallback; installed helpers without the capability
+fail before dispatch. No dispatched request is replayed through that fallback.
+Response close finishes its owned cancellation handshake even inside an already
+cancelled Starlette/AnyIO scope, then propagates cancellation. Other requests
+sharing the helper continue normally.
+
+Routed streaming uses typed `native_sse` options with unbuffered consumption
+through `CodexClient`. Each endpoint attempt receives the same options; the
+options never reach aiohttp keyword arguments. Keeping the native response
+type avoids the raw-body wrapper hiding its framed-event interface. Endpoint
+fallback and trace metadata remain Python-owned. The locally created client
+finishes asynchronous session close before propagating cancellation; borrowed
+clients retain their caller's lifecycle ownership.
+
+## Fork buffer preservation in beta.5
+
+The fork retains shared byte accounting for raw WebSocket events and decoded
+messages: 128 MiB per connection and the configured helper-wide ceiling. A burst
+of 128 small events is not itself overflow; actual byte exhaustion preserves the
+accepted prefix and a terminal error, while cancellation and close release the
+charges. Cooperative 32-event reader/pump batches and per-SSE-event yields keep
+other tasks runnable. SSE framing does not replace these budgets with upstream's
+event-count queues. See [spec.md](spec.md) for the retained contract.
+
+Post-beta.5 #2173 is not imported wholesale because its WebSocket queue and
+overflow behavior differ. The HTTP transport-event queue still has no byte
+budget in this fork; adding an HTTP-only memory bound remains separate follow-up
+work. #2143's every-event scheduling policy is likewise not claimed as imported.
+The candidate helper must be rebuilt with `http_sse_v1`; an older installed
+helper fails negotiation rather than silently using incompatible framing.

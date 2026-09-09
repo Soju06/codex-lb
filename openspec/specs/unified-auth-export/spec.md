@@ -1,7 +1,7 @@
 # unified-auth-export Specification
 
 ## Purpose
-TBD - created by archiving change unify-auth-export. Update Purpose after archive.
+Offer one authenticated export flow for supported account credential formats with explicit format selection and security warnings.
 ## Requirements
 ### Requirement: Combined auth export endpoint
 
@@ -59,4 +59,3 @@ The Auth Export modal SHALL display a warning: "This payload contains raw access
 - **GIVEN** the "Auth Export" modal is open
 - **WHEN** the user switches between "codex" and "opencode" modes
 - **THEN** the security warning remains visible regardless of mode
-

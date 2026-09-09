@@ -1,7 +1,7 @@
 # proxy-warmup Specification
 
 ## Purpose
-TBD - created by archiving change add-v1-warmup-endpoint. Update Purpose after archive.
+Provide a deterministic authenticated warmup operation that probes the accounts available to a proxy key with minimal upstream work.
 ## Requirements
 ### Requirement: Warmup endpoint is exposed on the v1 proxy surface
 The system SHALL expose `POST /v1/warmup` on the same authenticated proxy surface as other `/v1/*` routes. The endpoint SHALL accept a JSON body with `mode` and SHALL return HTTP 200 with a structured JSON summary of submitted, skipped, and failed account warmups for every valid execution. Per-account `ProxyAuthError` and `ProxyRateLimitError` failures SHALL be represented in the `failed` summary regardless of the number of target accounts.
@@ -101,4 +101,3 @@ Warmup request rows SHALL be excluded from aggregate dashboard request/error/cos
 #### Scenario: API key usage summaries ignore warmup rows
 - **WHEN** API key usage summary/trend endpoints are queried for a key with warmup and normal rows
 - **THEN** warmup rows do not contribute to API key request/token/cost usage totals
-

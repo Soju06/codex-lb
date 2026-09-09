@@ -1,7 +1,7 @@
 # account-quota-presentation Specification
 
 ## Purpose
-TBD - created by archiving change free-account-monthly-window. Update Purpose after archive.
+Present quota information according to account plan capabilities, keeping free-account monthly semantics distinct from paid short- and long-window views.
 ## Requirements
 ### Requirement: Free-account quota surfaces are monthly-only
 
@@ -37,4 +37,3 @@ Aggregate quota donuts SHALL omit assigned accounts whose visible assigned credi
 #### Scenario: Zero-credit account does not contribute to donut totals
 - **WHEN** an assigned account has zero visible credits for a 5h or weekly donut calculation
 - **THEN** that account is excluded from the corresponding donut total and legend contributions
-

@@ -1,7 +1,7 @@
 # scheduler-coordination Specification
 
 ## Purpose
-TBD - created by archiving change harden-scheduler-leader-election. Update Purpose after archive.
+Coordinate singleton background schedulers through an atomic shared leader lease with consistent expiry, renewal, and demotion behavior.
 ## Requirements
 ### Requirement: Singleton schedulers gate on the shared leader lease
 
@@ -292,4 +292,3 @@ The Auth Guardian scheduler is the one exception to the escape hatch: because it
 - **WHEN** the Auth Guardian scheduler is built
 - **THEN** the scheduler is disabled
 - **AND** a warning log states that the guardian is disabled because the ring runs without leader election
-

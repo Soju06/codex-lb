@@ -1912,7 +1912,7 @@ replacement bridge.
 
 ### Requirement: Cross-account bridge retries clear turn-state
 
-When a pre-visible HTTP bridge request is proven safe to replay on another account, the proxy MUST clear the retired account's upstream and downstream turn-state before opening the replacement connection. The replacement handshake MUST NOT carry an `x-codex-turn-state` header learned from the excluded account.
+When an HTTP bridge request is replayed or reconnected on an account other than the one that served its retired socket -- whether that account was excluded before the reconnect (a pre-visible request proven safe to replay on another account) or the reconnect selected a different account without an exclusion (an accepted replay left unexcluded for a hard-capable Codex session owner whose soft namespaced row moved because the owner was unselectable) -- the proxy MUST NOT carry a turn state learned on the retired account into the replacement handshake. The replacement connection's `x-codex-turn-state` header, if any, MUST NOT be one learned from the retired account, and the proxy MUST clear the retired account's upstream and downstream turn-state from the session. The handshake decides this from the account selection actually returned, not from whether the retired account was excluded. A reconnect that returns to the same account keeps offering that account its own retained turn state.
 
 #### Scenario: safe bridge replay excludes the stalled account
 
@@ -1920,6 +1920,22 @@ When a pre-visible HTTP bridge request is proven safe to replay on another accou
 - **WHEN** the failed bridge account is excluded before reconnect
 - **THEN** the proxy clears the retired account's turn-state fields and header
 - **AND** the replacement account receives no turn-state from the retired socket
+
+#### Scenario: Unexcluded accepted replay moved by a soft row opens the replacement without the owner's turn state
+
+- **GIVEN** a native Codex bridge session on a hard `session_header` key whose accepted output-free replay left its owner unexcluded
+- **AND** the owner's socket issued an upstream turn state on its handshake
+- **AND** no raw legacy hard row exists for the bare session header, so the owner is only the soft-row preference and is unselectable at reconnect time
+- **WHEN** the reconnect selection returns the other account
+- **THEN** the replacement handshake carries no `x-codex-turn-state`
+- **AND** the session retains no turn state learned on the owner
+- **AND** the request is re-sent once to the replacement account within the single lifecycle the client is reading
+
+#### Scenario: Same-account reconnect keeps the retained turn state
+
+- **GIVEN** a bridge session that retained the upstream turn state issued on its current account's socket
+- **WHEN** the reconnect selection returns that same account
+- **THEN** the replacement handshake carries that retained turn state, unchanged from established reconnect behaviour
 
 ### Requirement: Pre-visible unary refresh/connect failures fail over
 
@@ -5645,15 +5661,17 @@ captured when the connection began.
 - **GIVEN** `prohibitFastMode` is enabled
 - **WHEN** an internal owner-forwarded payload carries a priority service tier
 - **THEN** the receiving preparation boundary omits `service_tier` before upstream forwarding
+
 ### Requirement: Native direct HTTP egress preserves Responses streaming semantics
 
 Direct Responses HTTP/SSE requests sent through native egress MUST preserve the existing normalized upstream payload and headers, rate-limit header ingestion, maximum SSE event size, idle and total request deadlines, terminal-event requirements, downstream event normalization, archives, and error envelope behavior. Downstream cancellation MUST cancel and await only the owned native request task, unregister its event stream, and leave unrelated multiplexed requests usable. Native transport selection MUST NOT change the public HTTP status or SSE framing contract.
 
 #### Scenario: Native SSE response uses the ordinary parser
 
-- **GIVEN** native direct egress returns an HTTP success and streamed SSE chunks
+- **GIVEN** native direct egress returns an HTTP success for a streaming Responses request
 - **WHEN** the proxy consumes the response
-- **THEN** chunks pass through the ordinary SSE parser, normalizer, terminal-event detection, and archive path
+- **THEN** Rust frames body bytes into SSE blocks with the existing CR/LF, UTF-8 replacement, whitespace, EOF, and size-limit behavior
+- **AND** Python applies the ordinary normalizer, terminal-event detection, and archive path without byte reframing
 - **AND** the downstream event sequence matches the Python transport contract
 
 #### Scenario: Downstream cancellation owns helper cleanup
@@ -5663,6 +5681,12 @@ Direct Responses HTTP/SSE requests sent through native egress MUST preserve the 
 - **THEN** only that native request task is cancelled and awaited
 - **AND** the helper and unrelated request streams remain usable
 - **AND** the cancelled POST is not replayed through another HTTP client
+
+#### Scenario: Framing failures retain public error behavior
+
+- **WHEN** native SSE framing exceeds the configured event byte limit or receives no body bytes within the idle deadline
+- **THEN** the public response uses the existing stream-event-too-large or stream-idle-timeout error behavior
+- **AND** idle timeout remains account-neutral
 
 ### Requirement: HTTP session bridge admission obeys downstream transport policy
 
@@ -5847,11 +5871,12 @@ When a native Codex HTTP bridge or direct WebSocket `response.create` has been a
 
 An output-free failure is either a terminal `error` / `response.failed` whose normalized code is `server_is_overloaded`, `overloaded_error`, or `model_at_capacity`, or whose message names the selected-model capacity, or a transport close that is not account-neutral. The terminal MUST NOT name another response and MUST NOT report output items or billed output or reasoning tokens. Quota and rate-limit codes after acceptance MUST keep their stronger classification and MUST NOT be replayed. Anchored continuations without a retry-safe fresh payload, requests sharing the socket with another pending request, and requests whose replay budget is consumed MUST NOT be replayed. The other-pending check MUST be evaluated under the pending lock at the moment the replay is decided, after every await the terminal handling performs, never from a snapshot taken before such an await. The requirement "Direct WebSocket replay never mixes numeric response sequences" is unchanged: a direct WebSocket request whose forwarded prelude carried a finite integer `sequence_number` MUST NOT be replayed, and its capacity terminal or transport close keeps the existing fail-closed handling.
 
-The replay MUST capture the client-visible response id and arm prelude suppression before the request's upstream response id is cleared. On the HTTP bridge the replay MUST re-claim the session response-create gate without waiting; when another request holds the gate the upstream terminal MUST be forwarded unchanged. The replay MUST re-acquire shared work admission before sending, and when the request body is account-neutral the failing account MUST be excluded from the replacement selection on the HTTP bridge and on a direct WebSocket whose affinity cannot resolve to a hard sticky owner. A replay that swaps a retry-safe fresh body in for an anchored one MUST re-derive its owner requirement from the fresh body (an account-neutral body releases the anchor owner's pin; an account-bound body keeps it), and the failing account MUST NOT be excluded while the replay is still required to reconnect to it. On the direct WebSocket surface the failing account MUST NOT be excluded either when the request's affinity may resolve to a hard `CODEX_SESSION` owner the request state does not carry -- a `CODEX_SESSION` affinity (bare session header or turn state) or any affinity that consults a raw legacy compatibility row (`legacy_selection_key`) -- because a resolved hard row narrows selection to its owner and excluding that owner fails every re-selection with `hard_affinity_saturated`; such a replay reconnects through selection without an exclusion, exactly as the created-only transport-close replay did before this change. When the fresh body cannot release that pin -- the client supplied the anchor, or the fresh body names an account-scoped upload -- a capacity terminal MUST re-send the anchored body to the account that accepted it and MUST NOT fail the turn closed as `previous_response_owner_unavailable`. The classified capacity code an accepted terminal is replayed under MUST be a transparent replay code (`model_at_capacity` is reported as `server_is_overloaded`). When the request is API-key-backed, the failing account's health write MUST wait for the request's reservation settlement, as for pre-created replays. On the HTTP bridge only a terminal transport message (close or error) MAY replay an accepted turn.
+The replay MUST capture the client-visible response id and arm prelude suppression before the request's upstream response id is cleared. On the HTTP bridge the replay MUST re-claim the session response-create gate without waiting; when another request holds the gate the upstream terminal MUST be forwarded unchanged. The replay MUST re-acquire shared work admission before sending, and when the request body is account-neutral the failing account MUST be excluded from the replacement selection on a soft HTTP bridge session and on a direct WebSocket whose affinity cannot resolve to a hard sticky owner. A replay that swaps a retry-safe fresh body in for an anchored one MUST re-derive its owner requirement from the fresh body (an account-neutral body releases the anchor owner's pin; an account-bound body keeps it), and the failing account MUST NOT be excluded while the replay is still required to reconnect to it. On the direct WebSocket surface, and on an accepted HTTP bridge replay with a hard session key, the failing account MUST NOT be excluded either when the request's affinity may resolve to a hard `CODEX_SESSION` owner the request state does not carry -- a `CODEX_SESSION` affinity (bare session header or turn state) or any affinity that consults a raw legacy compatibility row (`legacy_selection_key`) -- because a resolved hard row narrows selection to its owner and excluding that owner fails every re-selection with `hard_affinity_saturated`; such a replay reconnects through selection without an exclusion, exactly as the created-only transport-close replay did before this change. When the fresh body cannot release that pin -- the client supplied the anchor, or the fresh body names an account-scoped upload -- a capacity terminal MUST re-send the anchored body to the account that accepted it and MUST NOT fail the turn closed as `previous_response_owner_unavailable`. The classified capacity code an accepted terminal is replayed under MUST be a transparent replay code (`model_at_capacity` is reported as `server_is_overloaded`). When the request is API-key-backed, the failing account's health write MUST wait for the request's reservation settlement, as for pre-created replays. On the HTTP bridge only a terminal transport message (close or error) MAY replay an accepted turn.
 
 #### Scenario: Bridge terminal capacity error after acceptance is retried on another account
 
 - **GIVEN** the HTTP responses session bridge is enabled and two accounts are selectable
+- **AND** the bridge has soft affinity without a required account owner
 - **AND** upstream delivers `response.created` and `response.in_progress` for a native Codex request and then an `error` with `code = "server_is_overloaded"` or `code = "model_at_capacity"` and no output
 - **WHEN** the bridge processes that terminal
 - **THEN** the request is re-sent once on the other account
@@ -5869,6 +5894,7 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 #### Scenario: Bridge abrupt close after acceptance is retried on another account
 
 - **GIVEN** an unanchored native Codex bridge request whose `response.created` and `response.in_progress` were forwarded
+- **AND** the bridge has soft affinity without a required account owner
 - **WHEN** the upstream websocket closes with a non-account-neutral close before any output
 - **THEN** the request is re-sent once on another account within the same single response lifecycle
 
@@ -5998,3 +6024,98 @@ The replay MUST capture the client-visible response id and arm prelude suppressi
 
 - **WHEN** the bridge upstream socket yields a protocol-invalid binary frame while an accepted request is pending
 - **THEN** the proxy MUST NOT replay the accepted request
+
+### Requirement: Routed native Responses streams consume Rust-framed SSE
+
+Account-routed streaming Responses HTTP requests using native egress MUST
+delegate byte framing, event byte limits, and body-read idle deadlines to the
+existing Rust SSE transport contract. Python MUST consume the framed events
+without byte reframing, preserving normalization, terminal detection, rate-limit
+headers, archives, route trace, and public error envelopes. Non-streaming HTTP
+responses and HTTP errors MUST retain raw body consumption. Body failures and
+cancellation MUST NOT replay a dispatched POST or switch its proxy endpoint.
+
+#### Scenario: Routed native success skips Python byte framing
+
+- **WHEN** the selected proxy endpoint returns a successful streaming Responses body
+- **THEN** Rust emits the same SSE event contract as direct native streaming
+- **AND** Python performs ordinary downstream event processing without scanning bytes
+
+#### Scenario: Framing failure preserves route and error behavior
+
+- **WHEN** a routed body exceeds its byte limit or goes idle
+- **THEN** the existing stream-event-too-large or stream-idle-timeout envelope is produced
+- **AND** route metadata remains associated with that attempt without endpoint replay
+
+#### Scenario: Routed cancellation isolates the owned stream
+
+- **WHEN** a routed native SSE stream closes or is cancelled, including in an already cancelled scope
+- **THEN** its owned native request is cancelled and unregistered
+- **AND** a locally created routed client finishes closing its session before cancellation propagates
+- **AND** another active request in the same helper remains usable
+
+#### Scenario: Routed error or non-streaming response remains raw
+
+- **WHEN** the routed response is an HTTP error or the request disables streaming
+- **THEN** the ordinary JSON/error body path and public response envelope are preserved
+
+### Requirement: HTTP bridge accepted replays keep a hard-capable Codex session owner eligible
+
+When the HTTP responses session bridge replays an accepted, output-free native Codex turn within its single response lifecycle (the `replay_downstream_response_id` capture of the accepted output-free capacity replay) on a hard bridge session key (`session_header`, `thread_header`, or `turn_state_header`), and the session affinity the reconnect selects with may resolve a hard `CODEX_SESSION` owner the request state does not carry -- a `CODEX_SESSION` affinity (bare session header or turn state) or any affinity that consults a raw legacy compatibility row (`legacy_selection_key`) -- the bridge MUST NOT exclude the account that accepted the turn from the replacement selection. The replay MUST reconnect through selection without that exclusion, so a resolved hard row resolves to the same owner again and the request is re-sent to it, and the reconnect MUST NOT wait on `hard_affinity_saturated` for the owner the replay itself excluded. The replacement reconnect MUST otherwise follow the established fresh hard-request path: the owner's account-scoped response-create lease is released and re-acquired for the selected account, no owner pin is installed, and the retry does not require a same-account reconnect, so a soft namespaced row may still move the replay through selection when the owner is unavailable. When that selection returns a different account, the replacement handshake MUST carry no turn state learned on the owner's socket (the modified requirement "Cross-account bridge retries clear turn-state" below applies to this unexcluded move as well).
+
+The created-only (pre-created) bridge replay MUST keep excluding the silent account exactly as before; a soft bridge session key MUST keep excluding the failing account so the accepted replay moves to another account; a model-fallback replay MUST keep excluding the rejecting account; and a hard session key whose affinity cannot resolve a hard owner MUST keep the exclusion. The predicate deciding whether an affinity may resolve a hard owner MUST be shared with the direct WebSocket surface.
+
+#### Scenario: Bridge bare-session accepted failure is re-sent to its hard sticky owner
+
+- **GIVEN** the HTTP responses session bridge is enabled, two accounts are selectable, and a native Codex request carries a `session_id` header, so the bridge session key is hard (`session_header`) and its affinity consults the raw legacy `CODEX_SESSION` row for that value
+- **AND** that raw row names the accepting account as the hard owner while the request carries no owner pin (unanchored, account-neutral turn)
+- **AND** upstream delivers `response.created` and `response.in_progress` on that owner and then an output-free capacity `error` (`server_is_overloaded` or `model_at_capacity`) or closes the transport abruptly (1011 or 1006) before any output
+- **WHEN** the bridge replays the turn
+- **THEN** the replacement selection is performed with no excluded account and resolves the raw row to the same owner
+- **AND** the request is re-sent once to that owner on a fresh socket and never to the other account
+- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id, never a `hard_affinity_saturated` selection failure or a synthetic `stream_incomplete`
+
+#### Scenario: Created-only and soft-key bridge replays keep excluding the failing account
+
+- **GIVEN** the same hard `session_header` bridge session whose affinity consults the raw legacy row
+- **WHEN** a pre-created request (no `response.created` observed) is replayed after a transport close
+- **THEN** the silent account is excluded from the replacement selection exactly as before this change
+- **WHEN** instead an accepted output-free request on a soft bridge session key (for example `request` or `prompt_cache`) is replayed
+- **THEN** the failing account is excluded and the replay moves to another account, unchanged
+
+### Requirement: Hard-affinity local selection failures preserve their error envelope at the request deadline
+
+When Responses account selection resolves a hard affinity owner outside the request's authenticated account or security policy scope, the proxy MUST treat that scope mismatch as non-recoverable within the request. It MUST skip account-capacity recovery waits, avoid upstream dispatch, and emit the established hard-affinity error envelope exactly once, preserving `hard_affinity_saturated` unless an existing stronger required-owner envelope applies. It MUST NOT rewrite this local ownership failure as `upstream_request_timeout` by repeatedly retrying an ineligible owner until the deadline. The selection MUST leave no account lease or owner-row mutation behind.
+
+Scope mismatch MUST be derived from the authenticated policy pool before health, model eligibility, retry exclusions, and concurrency filtering. Temporary unavailability of an in-scope owner MUST NOT be treated as a scope mismatch.
+
+Genuine budget exhaustion during an upstream connection, token refresh, or stream attempt MUST continue to surface `upstream_request_timeout`. Soft-affinity capacity waits and eligible local-capacity recovery MUST retain their existing retry and terminal classifications.
+
+#### Scenario: API-key-scoped hard owner fails closed at selection deadline
+
+- **GIVEN** a durable hard Codex-session owner outside the API-key assignment scope
+- **AND** no assigned account can satisfy the hard ownership constraint
+- **WHEN** selection resolves that out-of-scope owner, including near the request deadline
+- **THEN** the route emits one `hard_affinity_saturated` error envelope
+- **AND** it performs no capacity recovery wait or retry
+- **AND** it does not dispatch upstream or retire/rebind the durable owner
+
+#### Scenario: Upstream work timeout remains distinct
+
+- **GIVEN** account selection succeeds within the request budget
+- **WHEN** an upstream connect or stream attempt consumes the remaining budget
+- **THEN** the route emits `upstream_request_timeout`
+
+#### Scenario: Eligible local capacity keeps recovery semantics
+
+- **GIVEN** selection reports a recoverable local account-capacity condition and another account can become eligible
+- **WHEN** the request remains within its budget
+- **THEN** the route waits and retries as before
+- **AND** a terminal local-capacity error is not rewritten as a hard-affinity failure
+
+#### Scenario: In-scope owner remains recoverable
+
+- **GIVEN** a hard owner within authenticated policy scope is temporarily unavailable or excluded for a retry
+- **WHEN** selection returns `hard_affinity_saturated`
+- **THEN** the existing bounded owner-recovery behavior remains available
+- **AND** the owner is neither rebound nor marked out of scope

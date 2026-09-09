@@ -300,6 +300,26 @@ OpenSpec change first.
 
 ## Operational Notes
 
+A resolved hard owner outside authenticated policy scope cannot recover through
+a capacity wait. Sticky selection now carries that distinction to the shared
+recovery helper, so a key assigned only to B cannot spin on A's raw session row
+until the terminal becomes an upstream timeout. It returns the existing local
+ownership error without dispatching or rebinding. An in-scope owner excluded
+after a transient failure or temporarily out of quota keeps its existing retry
+policy. Unknown ownership and genuine upstream timeouts are not reclassified.
+See the selection-deadline requirement in [spec.md](spec.md); regression coverage
+uses virtual time and the API-key-scoped Responses route. Monitor the original
+hard-affinity code separately from actual upstream request timeouts.
+
+Beta.5 accepted bridge replay keeps a possible hard Codex owner eligible. For
+example, account A accepts a turn and then closes before output: excluding A
+while selecting through A's raw legacy session row would make every reconnect
+wait on the owner it just excluded. The corrected path retries through selection
+without that exclusion and preserves the single visible response ID. A soft row
+may still select B; that replacement handshake cannot carry turn-state learned
+on A. Created-only and soft-key replay policies remain distinct. See [spec.md](spec.md)
+for the hard-owner and cross-account turn-state requirements.
+
 - Pre-release: run unit/integration tests and optional OpenAI client compatibility tests.
 - Smoke tests: stream a response, validate non-stream responses, and verify error envelopes.
 - Post-deploy: monitor `no_accounts`, `upstream_unavailable`, compact retry attempts, and compact failure phases, especially on direct compact requests.

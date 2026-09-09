@@ -1,7 +1,7 @@
 # api-firewall Specification
 
 ## Purpose
-TBD - created by archiving change port-firewall-to-react. Update Purpose after archive.
+Manage and enforce the proxy firewall allowlist, including trusted-proxy handling and bounded address-cache behavior for protected routes.
 ## Requirements
 ### Requirement: Firewall allowlist management API
 Dashboard API MUST expose firewall allowlist management endpoints at `/api/firewall/ips` for listing, creating, and deleting allowed client IP addresses.
@@ -117,4 +117,3 @@ The application MUST fail settings validation when `firewall_trust_proxy_headers
 - **AND** `firewall_trusted_proxy_cidrs` normalizes to an empty list
 - **THEN** settings validation succeeds
 - **AND** forwarded client-IP headers remain untrusted
-

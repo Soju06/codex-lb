@@ -1,7 +1,7 @@
 # files-upload-protocol Specification
 
 ## Purpose
-TBD - created by archiving change add-backend-api-files-protocol. Update Purpose after archive.
+Implement the native file upload lifecycle and route file-bound proxy operations through durable ownership, account selection, and request logging.
 ## Requirements
 ### Requirement: Native file upload registration endpoint
 
@@ -105,4 +105,3 @@ The system MUST apply the same `validate_proxy_api_key` and dashboard `apiKeyAut
 
 - **WHEN** dashboard `apiKeyAuthEnabled` is true and a client posts to `/backend-api/files/{file_id}/uploaded` without a valid API key
 - **THEN** the service returns HTTP 401 with `error.code = "invalid_api_key"`
-

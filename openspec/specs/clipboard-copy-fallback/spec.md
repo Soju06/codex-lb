@@ -1,7 +1,7 @@
 # clipboard-copy-fallback Specification
 
 ## Purpose
-TBD - created by archiving change add-clipboard-fallback. Update Purpose after archive.
+Provide a reliable clipboard-copy utility that uses secure browser APIs when available and a scoped fallback when they are not.
 ## Requirements
 ### Requirement: Clipboard copy utility supports secure and fallback paths
 The frontend clipboard utility SHALL use `navigator.clipboard.writeText` when available in secure contexts and SHALL fall back to `document.execCommand("copy")` when the Clipboard API is unavailable or blocked.
@@ -28,4 +28,3 @@ The fallback clipboard path SHALL accept an optional DOM container and SHALL mou
 #### Scenario: Fallback container cleanup always runs
 - **WHEN** fallback copy completes or throws
 - **THEN** the temporary textarea is removed from the provided container
-

@@ -1,7 +1,7 @@
 # account-identity Specification
 
 ## Purpose
-TBD - created by archiving change fix-shared-workspace-account-slots. Update Purpose after archive.
+Preserve distinct local account slots and clear upstream workspace identity when multiple credentials share upstream account identifiers.
 ## Requirements
 ### Requirement: Shared upstream workspace identities preserve account slots
 
@@ -21,4 +21,3 @@ Dashboard account summaries MUST expose and render the upstream ChatGPT account 
 - **WHEN** the dashboard renders the account workspace context
 - **THEN** it displays the ChatGPT account id
 - **AND** it does not display the generic unknown-workspace label
-

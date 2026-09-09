@@ -14,6 +14,7 @@ import app.modules.proxy.load_balancer as load_balancer_module
 from app.db.models import Account, AccountStatus, StickySession, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy._load_balancer.sticky_selection import StickySelectionOutcome, StickySelectionRequest
 from app.modules.proxy.account_cache import AccountSelectionCache
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountSelection, LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -582,8 +583,10 @@ async def test_required_continuity_owner_preserves_transient_hard_affinity_satur
     balancer, _, _, sticky_repo = _balancer([owner], selection_cache)
     sticky_repo.account_id = owner.id
 
-    async def saturated_selection(_owner: object, *, request: Any) -> object:
-        return SimpleNamespace(
+    async def saturated_selection(
+        _owner: object, *, request: StickySelectionRequest[load_balancer_module._SelectionInputs]
+    ) -> StickySelectionOutcome[load_balancer_module._SelectionInputs]:
+        return StickySelectionOutcome(
             selection_inputs=request.selection_inputs,
             selected_snapshot=None,
             selected_lease=None,

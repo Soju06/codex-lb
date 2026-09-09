@@ -485,8 +485,9 @@ async def test_non_400_model_rejection_message_still_penalizes_account() -> None
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_still_marks_rate_limit() -> None:
-    """Negative control: quota/rate-limit accounting is unchanged."""
+@pytest.mark.parametrize("code", ["rate_limit_exceeded", "usage_limit_reached"])
+async def test_rate_limit_still_marks_rate_limit(code: str) -> None:
+    """Both upstream codes retain the rate-limit health contract."""
     load_balancer = SimpleNamespace(
         record_error=AsyncMock(),
         mark_rate_limit=AsyncMock(),
@@ -495,15 +496,17 @@ async def test_rate_limit_still_marks_rate_limit() -> None:
     )
     proxy = SimpleNamespace(_load_balancer=load_balancer)
 
-    await streaming_helpers_module._handle_stream_error(
+    classified = await streaming_helpers_module._handle_stream_error(
         proxy,
         cast(Account, SimpleNamespace(id="acc-1")),
         {"message": "Rate limit reached"},
-        "rate_limit_exceeded",
+        code,
         429,
     )
 
+    assert classified["failure_class"] == "rate_limit"
     load_balancer.mark_rate_limit.assert_awaited_once()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
     load_balancer.record_error.assert_not_awaited()
 
 
@@ -24997,6 +25000,66 @@ async def test_select_websocket_connect_account_skips_capacity_wait_for_usage_li
     assert sent_payload["error"]["code"] == "usage_limit_reached"
     assert sent_payload["error"]["type"] == "usage_limit_reached"
     assert sent_payload["error"]["resets_at"] == 1_700_003_600
+
+
+@pytest.mark.asyncio
+async def test_select_websocket_connect_account_scope_mismatch_is_terminal(monkeypatch):
+    from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
+
+    clock = VirtualClock(monotonic_value=100.0)
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()), clock=clock, scheduler=scheduler)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_scope_mismatch",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=clock.monotonic(),
+    )
+    selection = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="Hard affinity owner account is unavailable",
+            error_code="hard_affinity_saturated",
+            hard_affinity_scope_mismatch=True,
+        )
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget", selection)
+    websocket_send = AsyncMock()
+    task = scheduler.create_task(
+        service._select_websocket_connect_account(
+            clock.monotonic() + 0.01,
+            sticky_key="out-of-scope-owner",
+            sticky_kind=StickySessionKind.CODEX_SESSION,
+            prefer_earlier_reset=False,
+            routing_strategy="usage_weighted",
+            model="gpt-5.1",
+            request_state=request_state,
+            api_key=None,
+            client_send_lock=anyio.Lock(),
+            websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+            reallocate_sticky=False,
+            sticky_max_age_seconds=None,
+            exclude_account_ids=set(),
+            preferred_account_id=None,
+            require_preferred_account=False,
+        )
+    )
+    try:
+        await scheduler.drain()
+        assert task.done()
+        assert await task is None
+        selection.assert_awaited_once()
+        websocket_send.assert_awaited_once()
+        assert websocket_send.await_args is not None
+        event = json.loads(websocket_send.await_args.args[0])
+        assert event["status"] == 503
+        assert event["error"]["code"] == "hard_affinity_saturated"
+        assert clock.monotonic() == 100.0
+        assert scheduler.pending_timers == 0
+    finally:
+        await scheduler.cancel_owned_tasks()
 
 
 @pytest.mark.asyncio

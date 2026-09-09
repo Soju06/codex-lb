@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import text, update
@@ -16,6 +17,7 @@ from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyData, ApiKeysService
@@ -677,9 +679,12 @@ async def test_codex_goal_restart_cas_miss_reloads_concurrently_rebound_raw_owne
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner_status", [AccountStatus.ACTIVE, AccountStatus.QUOTA_EXCEEDED])
 async def test_codex_goal_restart_cannot_retire_owner_outside_api_key_scope(
     async_client,
+    app_instance,
     monkeypatch,
+    owner_status,
 ):
     from sqlalchemy import select
 
@@ -721,7 +726,7 @@ async def test_codex_goal_restart_cannot_retire_owner_outside_api_key_scope(
             owner_id,
             kind=StickySessionKind.CODEX_SESSION,
         )
-        await session.execute(update(Account).where(Account.id == owner_id).values(status=AccountStatus.QUOTA_EXCEEDED))
+        await session.execute(update(Account).where(Account.id == owner_id).values(status=owner_status))
         await session.commit()
     async with SessionLocal() as session:
         created_key = await ApiKeysService(ApiKeysRepository(session)).create_key(
@@ -744,6 +749,9 @@ async def test_codex_goal_restart_cannot_retire_owner_outside_api_key_scope(
             yield ""
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
+    balancer = get_proxy_service_for_app(app_instance)._load_balancer
+    select_account = AsyncMock(wraps=balancer.select_account)
+    monkeypatch.setattr(balancer, "select_account", select_account)
     response = await async_client.post(
         "/backend-api/codex/responses",
         headers={
@@ -772,8 +780,14 @@ async def test_codex_goal_restart_cannot_retire_owner_outside_api_key_scope(
         for line in response.text.splitlines()
         if line.startswith("data: ") and line != "data: [DONE]"
     ]
-    failed_event = next(event for event in events if event.get("type") == "response.failed")
+    failed_events = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed_events) == 1
+    failed_event = failed_events[0]
     assert failed_event["response"]["error"]["code"] == "hard_affinity_saturated"
+    assert not any(event.get("status") == "waiting_for_account_capacity" for event in events)
+    select_account.assert_awaited_once()
+    assert await balancer.account_pressure_snapshot(owner_id) == (0, 0, 0.0)
+    assert await balancer.account_pressure_snapshot(replacement_id) == (0, 0, 0.0)
     async with SessionLocal() as session:
         raw_row = await session.scalar(
             select(StickySession).where(

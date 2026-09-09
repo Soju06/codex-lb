@@ -81,7 +81,10 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # The operator-approved 3-GiB profile needs a 1-GiB aggregate queue budget,
 # while stock 1-GiB containers retain a conservative 256-MiB default. This
 # host-specific memory choice cannot be expressed by a universal constant.
-MAX_SETTINGS_FIELDS = 134
+# 134 -> 136: beta.5 overload isolation interval and error-rate weighting.
+# Upstream defaults work without tuning; operators can disable either policy
+# independently when diagnosing routing or sizing account recovery windows.
+MAX_SETTINGS_FIELDS = 136
 
 
 def test_generated_settings_reference_matches_code() -> None:

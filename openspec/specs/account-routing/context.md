@@ -8,16 +8,14 @@ routing without becoming permanently invisible behind healthier accounts.
 
 ## Reauthentication warning state
 
-`reauth_required` means refresh-token exchange needs operator repair; it does not
-prove that the stored access token is unusable. Such accounts remain eligible
-for ordinary requests and retain sticky, bridge, file, response, and realtime
-ownership while the access token remains unexpired. Proactive refresh is skipped.
-At known access-token expiry, selection and bridge reuse reject the account
-locally: movable soft affinity may fail over, while hard account-owned continuity
-remains fail-closed. Before expiry, an upstream rejection plus permanent forced-
-refresh failure excludes the account only from that request's remaining movable
-retries. Paused, deactivated, deleted, and security-ineligible accounts retain
-their hard exclusions.
+This fork quarantines `reauth_required` accounts regardless of access-token
+expiry, including foreground selection and reuse of already-open bridges.
+Operator reauthentication or import repairs the account before it can serve
+again. Movable soft affinity can fail over; hard account-owned continuity stays
+fail-closed. This deliberately differs from upstream's unexpired-token policy.
+Paused, deactivated, deleted, and security-ineligible accounts retain their
+hard exclusions. Beta.5 overload isolation and quota recovery do not relax this
+fork-specific rule; the normative contract remains in [spec.md](spec.md).
 
 ## Replica-local soft health
 
@@ -96,3 +94,27 @@ short windows, or evaluated for a quota the plan does not have.
 Settlement is discarded if newer replica-local runtime activity arrives while
 that snapshot is loading, preventing an older probe success from clearing a
 later failure.
+
+## Beta.5 overload isolation and evidence-gated quota recovery
+
+Repeated overload rejection escalates from soft backoff to replica-local
+isolation, even with intermittent successes. Isolation defaults to 1,800 seconds;
+zero disables that escalation. Weighted strategies also discount recent
+account-attributable errors after sufficient evidence, without changing
+deterministic strategies or hard continuity. These two upstream settings retain
+working defaults and allow targeted operator diagnosis without changing the
+fork's memory profile or HA topology.
+
+The integration additionally includes upstream #2078. A new usage sample is not
+proof that quota recovered: applicable windows must actually have capacity.
+For example, a two-hour upstream 429 followed by primary usage at 100% and weekly
+usage at 40% keeps its hold rather than oscillating back to ACTIVE. Only the
+marking replica may recover early from valid post-block evidence; peers honor
+the persisted deadline or later persisted recovery. Historical or same-second
+credit evidence cannot undo an explicit quota block. Ordinary deadline expiry
+and the client's upstream error classification are unchanged.
+
+During a later mixed-version rollout, old replicas can still execute the old
+early-recovery policy. Schema compatibility is not proof that every replica has
+the new evidence gate; verify all serving images after rollout. See [spec.md](spec.md)
+and the `treat-usage-limit-as-quota-exhaustion` change for the precise scenarios.

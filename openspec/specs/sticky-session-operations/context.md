@@ -65,6 +65,13 @@ the request remains fail-closed.
 
 ## Operational Notes
 
+Beta.5 overload isolation may release soft sticky owners to an eligible sibling,
+unlike ordinary soft backoff. For example, an isolated prompt-cache owner A can
+be rebound to B, but a response/file/turn-state owner cannot. If B is saturated
+or the strategy rejects every alternative, A remains the fallback. Isolation
+state is replica-local and disappears on restart; persisted hard ownership is
+unchanged. See [spec.md](spec.md) for caps, budget filters and diagnostics.
+
 No schema or setting migration is required for bare-session spillover. Namespaced rows appear lazily, and old raw rows age out only through existing operational controls. Rollback simply removes the spillover capability and leaves both row forms readable.
 
 Goal-restart recovery adds no setting. Its nullable abandonment-scope migration

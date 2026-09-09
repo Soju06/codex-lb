@@ -1,7 +1,7 @@
 # bridge-ring-membership Specification
 
 ## Purpose
-TBD - created by archiving change harden-bridge-ring-lifecycle. Update Purpose after archive.
+Maintain durable replica membership and liveness for the HTTP bridge ring so serving and shutdown transitions remain safe across replicas.
 ## Requirements
 ### Requirement: Replicas register in the bridge ring before serving bridge traffic
 Each replica MUST register its instance id (and advertised endpoint when configured) in the shared `bridge_ring_members` table before hard-affinity HTTP bridge requests are admitted. While registration is incomplete in a multi-replica deployment, hard-affinity bridge requests MUST wait for registration up to the configured connect timeout and fail with a retryable `bridge_owner_unreachable` error when the wait expires.
@@ -40,4 +40,3 @@ The background cleanup loop MUST delete `bridge_ring_members` rows whose heartbe
 - **AND** one ring row's heartbeat is older than 24 hours while another's is recent
 - **THEN** the old row is deleted
 - **AND** the recent row is preserved
-

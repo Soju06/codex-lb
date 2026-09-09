@@ -1,7 +1,7 @@
 # upstream-proxy-routing Specification
 
 ## Purpose
-TBD - created by archiving change add-codex-proxy-pool-egress. Update Purpose after archive.
+Route account-bound upstream traffic through its resolved proxy pool and persist the route and installation metadata needed for reliable egress.
 
 ## Requirements
 

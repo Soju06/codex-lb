@@ -3923,7 +3923,7 @@ async def test_unresolved_conversation_allows_only_eligible_account() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scope_mode", ["excluded", "api_key_scope"])
+@pytest.mark.parametrize("scope_mode", ["excluded", "api_key_scope", "security_scope"])
 async def test_hard_codex_session_owner_outside_selection_pool_fails_closed(scope_mode: str) -> None:
     balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer(f"hard-owner-{scope_mode}")
     assert alternate is not None
@@ -3934,16 +3934,27 @@ async def test_hard_codex_session_owner_outside_selection_pool_fails_closed(scop
             lease_kind="stream",
             exclude_account_ids={owner.id},
         )
-    else:
+    elif scope_mode == "api_key_scope":
         selected = await balancer.select_account(
             sticky_key="hard-owner-selection",
             sticky_kind=StickySessionKind.CODEX_SESSION,
             lease_kind="stream",
             account_ids={alternate.id},
         )
+    else:
+        owner.security_work_authorized = False
+        alternate.security_work_authorized = True
+        selected = await balancer.select_account(
+            sticky_key="hard-owner-selection",
+            sticky_kind=StickySessionKind.CODEX_SESSION,
+            lease_kind="stream",
+            require_security_work_authorized=True,
+        )
 
     assert selected.account is None
     assert selected.error_code == "hard_affinity_saturated"
+    assert selected.hard_affinity_scope_mismatch is (scope_mode != "excluded")
+    assert selected.lease is None
     assert sticky_repo.account_id == owner.id
     assert sticky_repo.deleted == []
     assert sticky_repo.upserts == []
@@ -4176,6 +4187,7 @@ async def test_unusable_hard_codex_session_does_not_delete_mapping_under_budget_
 
     assert result.account is None
     assert result.error_code == "hard_affinity_saturated"
+    assert result.hard_affinity_scope_mismatch is False
     assert sticky_repo.account_id == account_a.id
     assert sticky_repo.deleted == []
     assert sticky_repo.upserts == []

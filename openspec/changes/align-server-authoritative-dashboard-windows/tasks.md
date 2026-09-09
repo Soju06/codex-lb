@@ -34,4 +34,4 @@
 - [x] 6.1 Run focused backend tests: `uv run pytest tests/integration/test_conversations_api.py tests/unit/test_request_logs_repository.py -q` (and the dashboard overview test if parity test lives there).
 - [x] 6.2 Run focused frontend tests + typecheck: `npm --prefix frontend test -- use-conversations conversations-view` and `npm --prefix frontend run typecheck`.
 - [x] 6.3 Validate OpenSpec: `openspec validate align-server-authoritative-dashboard-windows --strict` and `openspec validate --specs`.
-- [ ] 6.4 Confirm rollout ordering note is in the PR body: backend MUST deploy before frontend.
+- [x] 6.4 Confirm rollout ordering note is in the PR body: backend MUST deploy before frontend. _(verification-only; struck at archive)_

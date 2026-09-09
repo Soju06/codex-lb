@@ -15,16 +15,31 @@ account-health write MUST remain unapplied. Tracked persistence ownership MUST
 remain registered through an ordering-sensitive fallback release, including
 cancellation before the primary coroutine starts or during that release, so
 graceful shutdown drains both phases. When the existing stream-retry path
-deliberately defers an account-health penalty until the same
-ordering-sensitive settlement, it MUST likewise apply neither that penalty nor
-an immediately following terminal health write unless settlement is confirmed,
-and it MUST NOT start a second settlement for the transferred reservation. In
-all other cases the settlement MUST run as a tracked background task; when it
-fails or is cancelled, the reservation MUST still be released by the tracking
-fallback, and the request's finalization path MUST NOT double-release a
-transferred settlement. Reservations MUST continue to count toward key limits
-until finalized or released, so deferred settlement can never admit usage a
-synchronous settlement would have rejected.
+deliberately defers an
+account-health penalty until the same ordering-sensitive settlement, it MUST
+likewise apply neither that penalty nor an immediately following terminal health
+write unless settlement is confirmed, and it MUST NOT start a second settlement
+for the transferred reservation. The HTTP bridge's pre-created retry handling
+(model-capacity wait, owner-pinned quota, and generic retryable pre-created
+failures) MUST likewise defer a keyed request's classified account-health
+write until that request's reservation settles or its fallback release
+commits, MUST leave the deferred write unapplied when neither confirms, and
+MUST keep the immediate write for unkeyed requests. After a committed
+settlement or fallback release, deferred account-backoff writes and deferred
+stream-health writes MUST drain on independent lanes so a failure in one
+cannot orphan the other, and a deferred health write that itself fails MUST be
+logged and dropped without aborting the remaining terminal finalization. In
+all other cases the settlement MUST run as
+a tracked background task; when it fails or is cancelled, the reservation MUST
+still be released by the tracking fallback, and the request's finalization path
+MUST NOT double-release a transferred settlement. If the tracking fallback
+itself encounters a persistence failure, it MUST remain tracked and retry the
+idempotent release; no more than four retry-enabled detached fallback repository
+attempts may run concurrently per proxy service instance, waiting fallbacks MUST
+NOT open repository sessions until admitted, and persistence drain MUST NOT
+report completion while any retry remains unfinished. Reservations MUST continue
+to count toward key limits until finalized or released, so deferred settlement
+can never admit usage a synchronous settlement would have rejected.
 
 #### Scenario: Response close precedes settlement completion
 
@@ -38,6 +53,21 @@ synchronous settlement would have rejected.
 - **GIVEN** a detached settlement whose finalize raises
 - **WHEN** the settlement task completes
 - **THEN** the tracking fallback releases the reservation
+
+#### Scenario: Failed fallback release remains tracked
+
+- **GIVEN** a detached settlement whose finalize raises
+- **AND** the first tracking-fallback release attempt also raises
+- **WHEN** persistence recovers before the drain deadline
+- **THEN** the tracked fallback retries and releases the reservation exactly once
+- **AND** persistence drain does not report completion before that release
+
+#### Scenario: Concurrent fallback release retries are bounded to four
+
+- **GIVEN** five failed detached settlements in one proxy service instance
+- **WHEN** their tracking fallbacks attempt repository persistence concurrently
+- **THEN** no more than four release attempts open repository sessions
+- **AND** the waiting fallbacks remain tracked until they can retry
 
 #### Scenario: Websocket health-error settlement precedes the health write
 
@@ -86,8 +116,32 @@ synchronous settlement would have rejected.
 - **THEN** the deferred penalty and any immediately following terminal health write remain unapplied
 - **AND** the retry path does not start a second settlement for the transferred reservation
 
+#### Scenario: Keyed pre-created retry defers the health write
+
+- **GIVEN** a keyed HTTP-bridge request whose reservation is unsettled
+- **WHEN** a retryable pre-created failure (model capacity, owner-pinned quota, or another retryable error) is handled
+- **THEN** no load-balancer health write occurs before settlement
+- **AND** the classified penalty is queued on the request state
+- **AND** an equivalent unkeyed request keeps the immediate health write
+
+#### Scenario: Deferred pre-created penalty applies after settlement commits
+
+- **GIVEN** a keyed HTTP-bridge request with a queued pre-created health penalty
+- **WHEN** its reservation settlement or fallback release commits
+- **THEN** the queued penalty is applied after the commit
+- **AND** each queued entry is applied exactly once
+
+#### Scenario: Failed deferred health write does not abort finalization
+
+- **GIVEN** a committed settlement with a queued pre-created health penalty
+- **WHEN** the deferred health write fails
+- **THEN** the failure is logged and the penalty is dropped
+- **AND** the remaining terminal finalization continues
+- **AND** a deferred account-backoff failure does not prevent the deferred health drain
+
 #### Scenario: Shutdown drains pending settlements
 
 - **WHEN** the service shuts down gracefully with settlements in flight
 - **THEN** shutdown waits for them up to the configured drain timeout
 - **AND** a pending ordering-sensitive fallback release remains part of that drain despite cancellation before primary startup or during fallback
+- **AND** reports an incomplete drain if a tracked settlement or release remains unfinished at that timeout

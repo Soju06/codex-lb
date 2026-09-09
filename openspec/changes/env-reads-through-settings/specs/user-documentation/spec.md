@@ -22,31 +22,26 @@ from regenerated output, when the settings surface exceeds its ratchet
 `.env.example` assignment differs from the code default.
 
 #### Scenario: Settings change without regeneration fails CI
-
 - **GIVEN** a change to `Settings` fields in `app/core/config/settings.py`
 - **WHEN** the unit test suite runs without regenerating `docs/reference/settings.md`
 - **THEN** the regenerate-and-diff test fails until the page is regenerated and committed
 
 #### Scenario: Reference page is reachable and generated
-
 - **WHEN** a reader opens the published settings reference page
 - **THEN** it is in the site navigation and linked from the Configuration page
 - **AND** it identifies itself as generated from `scripts/generate_settings_reference.py`
 - **AND** it links the owning OpenSpec capability
 
 #### Scenario: Settings surface growth trips the ratchet
-
 - **WHEN** the number of `Settings` fields exceeds the ratchet value
 - **THEN** the ratchet unit test fails, forcing a simplicity-budget discussion before the surface grows
 
 #### Scenario: Aliased setting renders every env name
-
 - **WHEN** a setting is declared with validation aliases (for example `forwarded_allow_ips`)
 - **THEN** the reference row shows the primary env name and each alias
 - **AND** an operator can find the setting by either name
 
 #### Scenario: Process-level conventions are documented but not settings
-
 - **WHEN** codex-lb honors an environment variable that is a third-party or POSIX convention
 - **THEN** the reference lists it in the process-level section with its consumer
 - **AND** it is not counted toward the settings ratchet

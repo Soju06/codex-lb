@@ -1,5 +1,3 @@
-# proxy-admission-control
-
 ## MODIFIED Requirements
 
 ### Requirement: Dashboard-configurable account concurrency caps
@@ -8,13 +6,15 @@ The dashboard settings API MUST persist nonnegative per-account
 `proxy_account_response_create_limit`, `proxy_account_stream_limit`, and
 `proxy_account_stream_recovery_reserve` overrides, plus the
 `proxy_api_key_fair_share_congestion_threshold_pct` override in the range
-0-100. These four overrides MUST be
-nullable stored values: a `NULL` value inherits the corresponding process
-environment value at read time until an operator explicitly stores an
-override. A settings row created for the first time MUST seed all four
-overrides as `NULL` and MUST NOT copy the process environment values into the
-row. Existing settings rows keep their stored values; a stored non-`NULL`
-value is a dashboard override and MUST be reported as such.
+0-100. A settings row created for the first time MUST leave these four
+overrides `NULL`; it MUST NOT copy the process environment values into the row.
+Existing settings rows MUST use nullable stored overrides so a `NULL` value
+continues to inherit the corresponding process environment value (or the code
+default when the variable is unset) until an operator explicitly stores an
+override, and an operator MAY clear an override to return to inheritance.
+Precedence follows `configuration-tiers`: code default, then environment, then
+a non-NULL dashboard value. Existing settings rows keep their stored values; a
+stored non-`NULL` value is a dashboard override and MUST be reported as such.
 
 The settings response MUST expose each effective value, its environment
 baseline value, and its nullable stored override. Updates MUST use tri-state semantics for these four override
@@ -22,22 +22,6 @@ fields: an absent field MUST leave the stored override unchanged, a field with
 a numeric value MUST store that value as an override, and a field explicitly
 set to `null` MUST clear the stored override so the effective value inherits
 from the process environment.
-
-#### Scenario: Fresh settings row inherits the environment
-
-- **GIVEN** no settings row exists and the process environment stream cap is 13
-- **WHEN** the settings row is created
-- **THEN** the four stored capacity overrides are `NULL`
-- **AND** `GET /api/settings` reports the stream cap effective value 13, the
-  environment value 13, and a `null` override
-
-#### Scenario: Environment change is honoured while no override is stored
-
-- **GIVEN** a settings row whose stream-cap override is `NULL`
-- **WHEN** the process is restarted with a different
-  `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT`
-- **THEN** the effective stream cap follows the new environment value without
-  any change to the stored row
 
 #### Scenario: Explicit null clears a capacity override
 
@@ -111,3 +95,18 @@ from the process environment.
 - **WHEN** only the stream-limit override is explicitly cleared
 - **THEN** the settings API rejects the update before persistence
 - **AND** the stored stream-limit override remains 24
+
+#### Scenario: Environment change after first boot takes effect on a fresh install
+
+- **GIVEN** a fresh install whose settings row was created while `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT=8` was set and no operator has edited the stream cap
+- **WHEN** the process is restarted with `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT=12`
+- **THEN** new stream selection and lease decisions use a cap of 12
+- **AND** the settings API reports the stream cap as inherited from the environment
+
+#### Scenario: Fresh settings row inherits the environment
+
+- **GIVEN** no settings row exists and the process environment stream cap is 13
+- **WHEN** the settings row is created
+- **THEN** the four stored capacity overrides are `NULL`
+- **AND** `GET /api/settings` reports the stream cap effective value 13, the
+  environment value 13, and a `null` override

@@ -21,8 +21,8 @@
 
 ## 4. PR Readiness
 
-- [ ] 4.1 Confirm the PR body marks the `since` semantics change as **BREAKING**, references the new `conversations-api` capability, and notes that dashboard activity/trends agreement is a resolved inconsistency rather than a regression.
-- [ ] 4.2 Include before/after evidence (command output or dashboard screenshots) demonstrating a long-running conversation now appears in a recent window where it previously did not. Required because this is a dashboard-visible contract change.
+- [x] 4.1 Confirm the PR body marks the `since` semantics change as **BREAKING**, references the new `conversations-api` capability, and notes that dashboard activity/trends agreement is a resolved inconsistency rather than a regression. _(verification-only; struck at archive)_
+- [x] 4.2 Include before/after evidence (command output or dashboard screenshots) demonstrating a long-running conversation now appears in a recent window where it previously did not. Required because this is a dashboard-visible contract change. _(verification-only; struck at archive)_
 - [x] 4.3 Run the focused test suite: `uv run pytest tests/integration/test_conversations_api.py tests/unit/test_request_logs_repository.py tests/unit/test_request_logs_service.py -q` and ensure green.
 - [x] 4.4 Run `openspec validate --specs` to confirm the merged spec tree is well-formed before merge.
 

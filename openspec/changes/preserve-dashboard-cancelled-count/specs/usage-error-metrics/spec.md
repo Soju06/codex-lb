@@ -12,6 +12,14 @@ segment plus the raw tail, so it stays accurate across history already folded
 without the hourly `cancelled_count` measure. The dashboard frontend MUST
 preserve `cancelledCount` when parsing the overview response.
 
+#### Scenario: Dashboard overview reports the status breakdown
+
+- **GIVEN** a window containing 1 successful, 2 cancelled, and 1 error rows
+  that are partially folded into the rollups
+- **WHEN** the dashboard overview metrics are computed
+- **THEN** the metrics expose `requests=4`, `errorCount=1`, and
+  `cancelledCount=2`
+
 #### Scenario: Dashboard overview preserves the status breakdown
 
 - **GIVEN** the dashboard overview API returns `requests=4`, `errorCount=1`,

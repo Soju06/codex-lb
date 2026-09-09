@@ -37,10 +37,10 @@ to be rejected as a slot mismatch.
 - **WHEN** Force probe refreshes usage and the payload reports `plan_type` `plus`
 - **THEN** the account's stored `plan_type` becomes `plus` without reauthentication
 
-#### Scenario: Single Free downgrade observation without a workspace is not applied
+#### Scenario: Free downgrade without a workspace is rejected
 
 - **GIVEN** an active account with stored `plan_type` `business` and no `workspace_id`
-- **WHEN** background usage refresh returns one payload with `plan_type` `free` and no `workspace_id`
+- **WHEN** background usage refresh returns a payload with `plan_type` `free` and no `workspace_id`
 - **THEN** the account's stored `plan_type` stays `business` and no usage mutation is applied
 
 #### Scenario: Unrecognized workspace-less plan is rejected without confirmation

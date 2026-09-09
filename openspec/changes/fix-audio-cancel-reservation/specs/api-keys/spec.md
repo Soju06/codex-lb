@@ -8,6 +8,12 @@ reservation from the upstream OpenAI-compatible `usage` payload when the
 request completes.
 The finalized input, output, cached-input, and cost values MUST update the same
 API-key limit and usage-reporting paths used by subscription-backed requests.
+When cancellation interrupts source-routed `/v1/embeddings` upstream
+forwarding after reservation creation, the request owner MUST finish releasing
+that reservation exactly once despite active cancellation, and MUST then
+propagate the original cancellation. Stale-reservation reclamation MUST remain
+only a backstop and MUST NOT substitute for request-owned cancellation cleanup.
+
 When cancellation interrupts source-routed `/v1/audio/transcriptions` upstream
 forwarding after reservation creation, the request owner MUST finish a
 cancellation-deferring release attempt before propagating the original
@@ -36,6 +42,17 @@ substitute for normal request-owned cancellation cleanup.
 - **THEN** the system does not silently finalize zero usage
 - **AND** the request fails or is marked failed according to the source-routing
   error contract
+
+#### Scenario: Cancelled source embeddings forwarding releases its reservation
+
+- **GIVEN** a limited API key has created an owned reservation for a
+  source-routed `/v1/embeddings` request
+- **WHEN** cancellation interrupts the request while upstream embeddings
+  forwarding is in flight
+- **THEN** the request owner finishes releasing the reservation exactly once
+  despite active cancellation
+- **AND** the original cancellation propagates after cleanup completes
+- **AND** stale-reservation reclamation is not required for that request
 
 #### Scenario: Cancelled source audio forwarding releases its reservation
 

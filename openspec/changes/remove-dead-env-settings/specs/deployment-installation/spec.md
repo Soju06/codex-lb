@@ -1,11 +1,3 @@
-## REMOVED Requirements
-
-### Requirement: Removed tunables are fixed constants or derived values
-
-**Reason**: The requirement's scenarios pinned the removed-settings startup warning to the July 2026 phase 1-4 names (`CODEX_LB_AUTH_BASE_URL`, `CODEX_LB_QUOTA_PLANNER_TICK_SECONDS`, `CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS`, the prewarm canary variables). Their one-release warning window has passed (v1.22-v1.24 shipped), so those names are pruned from `_REMOVED_SETTINGS` and the scenarios can no longer hold as written.
-
-**Migration**: Replaced by "Removed tunables are fixed constants, derived values, or dashboard settings" below, which keeps every fixed/derived value list, generalizes the warning scenarios to the current batch, and adds the pruning rule and the dashboard-owned columns.
-
 ## ADDED Requirements
 
 ### Requirement: Removed tunables are fixed constants, derived values, or dashboard settings
@@ -193,3 +185,11 @@ enable switches.
   not been prewarmed
 - **THEN** the session prewarm is attempted for that request
 - **AND** no request is excluded by canary sampling or an allow/deny cohort
+
+## REMOVED Requirements
+
+### Requirement: Removed tunables are fixed constants or derived values
+
+**Reason**: The requirement's scenarios pinned the removed-settings startup warning to the July 2026 phase 1-4 names (`CODEX_LB_AUTH_BASE_URL`, `CODEX_LB_QUOTA_PLANNER_TICK_SECONDS`, `CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS`, the prewarm canary variables). Their one-release warning window has passed (v1.22-v1.24 shipped), so those names are pruned from `_REMOVED_SETTINGS` and the scenarios can no longer hold as written.
+
+**Migration**: Replaced by "Removed tunables are fixed constants, derived values, or dashboard settings" below, which keeps every fixed/derived value list, generalizes the warning scenarios to the current batch, and adds the pruning rule and the dashboard-owned columns.

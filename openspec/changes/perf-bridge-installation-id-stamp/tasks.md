@@ -23,6 +23,6 @@
   byte-for-byte across client_metadata position, id value and value types.
 - [x] 3.2 Run `tests/unit/test_proxy_http_bridge.py`, `tests/unit/test_proxy_utils.py`,
   ruff, ty, `scripts/check_proxy_architecture.py` and `openspec validate`.
-- [ ] 3.3 Post-deploy: `py-spy --gil` 60 s confirms the helper below 2% of GIL
+- [x] 3.3 _(post-deploy verification only; struck at archive — code landed in #2044)_ Post-deploy: `py-spy --gil` 60 s confirms the helper below 2% of GIL
   samples and count "Waiting for account capacity before retrying HTTP bridge
   submit" log lines per hour to confirm the resubmit-loop hypothesis.

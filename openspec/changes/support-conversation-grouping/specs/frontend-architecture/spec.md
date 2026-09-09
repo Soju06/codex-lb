@@ -1,5 +1,20 @@
 ## ADDED Requirements
 
+### Requirement: Conversation detail URLs preserve opaque identifiers
+
+The dashboard MUST construct conversation detail URLs so stored IDs equal to
+`.` or `..` cannot be normalized by the browser into collection or parent
+paths. The detail request MUST still resolve to the original conversation ID.
+
+#### Scenario: Dot-only IDs remain detail requests
+
+- **GIVEN** a conversation has the non-empty ID `.` or `..`
+- **WHEN** the operator opens its details
+- **THEN** the browser requests an opaque detail path
+- **AND** the API receives the original dot-only conversation ID
+
+## MODIFIED Requirements
+
 ### Requirement: Request details expose conversation filtering
 
 The request-details dialog MUST render Client IP and Conversation ID in one
@@ -9,7 +24,6 @@ existing request-log filters, set the clicked conversation ID as the active
 URL-backed conversation filter, and reset pagination.
 
 #### Scenario: Clicking a conversation filters the request log
-
 - **GIVEN** request details display conversation ID `conv-a` while other filters
   are active
 - **WHEN** the conversation ID is activated
@@ -36,7 +50,6 @@ contain only `requestCount` and `aggregatedCostUsd`; it MUST NOT duplicate the
 conversation ID because the active URL-backed filter already identifies it.
 
 #### Scenario: Dismissing the badge clears only conversation state
-
 - **GIVEN** the conversation badge and other request-log filters are active
 - **WHEN** the badge is dismissed
 - **THEN** only the conversation filter is cleared
@@ -44,7 +57,6 @@ conversation ID because the active URL-backed filter already identifies it.
 - **AND** the other filters remain active
 
 #### Scenario: Summary describes the active filtered conversation
-
 - **GIVEN** the active URL-backed conversation filter is `conv-a` and the
   filtered response contains
   `conversation: { requestCount: 12, aggregatedCostUsd: 1.23 }`, with timeframe
@@ -58,12 +70,20 @@ conversation ID because the active URL-backed filter already identifies it.
   `requestCount` and `aggregatedCostUsd`, with no ID field
 
 #### Scenario: Summary omits suffix without other filters
-
 - **GIVEN** the active URL-backed conversation filter is `conv-a` and no other
   non-conversation filter is active
 - **WHEN** the request-log page renders
 - **THEN** the summary contains the conversation sentence without an inline
   filter suffix
+
+#### Scenario: Conversation summary values use inline code formatting
+- **GIVEN** a filtered conversation has ID `ses_123`, request count `35`, and
+  formatted cost `$0.74`
+- **WHEN** the conversation summary box renders
+- **THEN** it uses the copy `The conversation ses_123 runs 35 request(s), cost =
+  $0.74`
+- **AND** the ID, count, and cost are separate styled inline-code values
+- **AND** literal backtick characters are absent
 
 ### Requirement: Dashboard and report metrics count distinct conversations
 
@@ -76,7 +96,6 @@ each applicable daily row and once in the report-wide total. Neither card MUST
 render a `{count} distinct` secondary label.
 
 #### Scenario: Dashboard count deduplicates IDs
-
 - **GIVEN** the selected dashboard timeframe contains repeated, null, and empty
   conversation IDs
 - **WHEN** overview metrics are rendered
@@ -84,7 +103,6 @@ render a `{count} distinct` secondary label.
 - **AND** the card is between Est. API Cost and Error Rate
 
 #### Scenario: Report summary and daily counts use distinct IDs
-
 - **GIVEN** one conversation has requests on two report days and another has
   requests on one day
 - **WHEN** report metrics are rendered
@@ -100,7 +118,6 @@ MUST preserve the distinct non-empty daily conversation counts, including
 zero-filled days.
 
 #### Scenario: Daily conversation values are sortable and exported
-
 - **GIVEN** daily report rows have different conversation counts, including a
   zero-count row
 - **WHEN** the Conversations column is sorted or CSV export is generated
@@ -119,7 +136,6 @@ total MUST remain the exact timeframe aggregate rather than a sum of trend
 points.
 
 #### Scenario: Conversation trend de-duplicates model groups
-
 - **GIVEN** one bucket contains the same conversation ID under two models and a
   second distinct conversation ID under one model
 - **WHEN** the dashboard overview trends are rendered
@@ -127,46 +143,7 @@ points.
 - **AND** the series contains one point per configured bucket
 
 #### Scenario: Empty conversation buckets are zero-filled
-
 - **GIVEN** the selected dashboard timeframe has no valid conversation IDs in
   one or more buckets
 - **WHEN** the dashboard overview response is built
 - **THEN** each empty bucket's conversation point is `0`
-
-#### Scenario: Conversation summary values use inline code formatting
-
-- **GIVEN** a filtered conversation has ID `ses_123`, request count `35`, and
-  formatted cost `$0.74`
-- **WHEN** the conversation summary box renders
-- **THEN** it uses the copy `The conversation ses_123 runs 35 request(s), cost =
-  $0.74`
-- **AND** the ID, count, and cost are separate styled inline-code values
-- **AND** literal backtick characters are absent
-
-### Requirement: Conversation membership windows stay live during polling
-
-The dashboard Conversations view MUST recompute the rolling `since` cutoff
-when its active query polls. A view left open across a cutoff boundary MUST
-not keep conversations that have aged out of the selected `1d`, `7d`, or `30d`
-window solely because its URL-backed filters are unchanged.
-
-#### Scenario: Polling refreshes a rolling conversation cutoff
-
-- **GIVEN** the Conversations view is open with a rolling timeframe
-- **WHEN** its 30-second poll runs after the cutoff has advanced
-- **THEN** the request sends a newly computed `since` value
-- **AND** the list membership uses the same current rolling-window basis as
-  the dashboard overview poll
-
-### Requirement: Conversation detail URLs preserve opaque identifiers
-
-The dashboard MUST construct conversation detail URLs so stored IDs equal to
-`.` or `..` cannot be normalized by the browser into collection or parent
-paths. The detail request MUST still resolve to the original conversation ID.
-
-#### Scenario: Dot-only IDs remain detail requests
-
-- **GIVEN** a conversation has the non-empty ID `.` or `..`
-- **WHEN** the operator opens its details
-- **THEN** the browser requests an opaque detail path
-- **AND** the API receives the original dot-only conversation ID

@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Conversations qualify by any in-window request
 
@@ -65,8 +65,7 @@ The membership rule used by `/api/conversations` (any in-window request qualifie
 
 ### Requirement: Conversation membership candidate discovery is bounded
 
-When the conversations list has an effective `since` value, the repository
-MUST discover qualifying conversation IDs from eligible rows with
+When the conversations list has an effective `since` value, the repository MUST discover qualifying conversation IDs from eligible rows with
 `requested_at >= since` before aggregating the list page. The candidate query
 MUST select distinct IDs and MUST include the active search predicate when a
 search term is supplied. The summary and facet aggregates MUST constrain their

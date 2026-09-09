@@ -1,11 +1,3 @@
-## REMOVED Requirements
-
-### Requirement: Retention is opt-in and validated
-
-**Reason**: The requirement encoded a three-layer precedence (dashboard value, deprecated env alias, disabled). The env aliases `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` / `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` were one-release deprecated aliases (v1.21.x) and have been removed after v1.22-v1.24 shipped; the env-specific scenarios can no longer hold.
-
-**Migration**: Replaced by "Retention is dashboard-configured, opt-in and validated" below. Operators still setting the env aliases see the removed-settings startup warning and set the window once from Settings -> Advanced -> Data retention.
-
 ## ADDED Requirements
 
 ### Requirement: Retention is dashboard-configured, opt-in and validated
@@ -86,19 +78,24 @@ without a process restart; ticks whose effective configuration disables
 retention MUST NOT run a pass.
 
 #### Scenario: Backlog is pruned incrementally
-
 - **GIVEN** more prunable rows than one batch
 - **WHEN** a retention pass runs
 - **THEN** rows are deleted across multiple bounded transactions until no prunable rows remain
 
 #### Scenario: Enabling retention from the dashboard needs no restart
-
 - **GIVEN** a running instance with retention disabled
 - **WHEN** an operator sets a dashboard retention window
 - **THEN** a subsequent scheduler tick runs a retention pass without a restart
 
 #### Scenario: Disabled effective retention skips the pass
-
 - **GIVEN** both dashboard retention windows resolve to 0 (stored 0 or NULL)
 - **WHEN** the scheduler ticks
 - **THEN** no retention pass runs
+
+## REMOVED Requirements
+
+### Requirement: Retention is opt-in and validated
+
+**Reason**: The requirement encoded a three-layer precedence (dashboard value, deprecated env alias, disabled). The env aliases `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` / `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` were one-release deprecated aliases (v1.21.x) and have been removed after v1.22-v1.24 shipped; the env-specific scenarios can no longer hold.
+
+**Migration**: Replaced by "Retention is dashboard-configured, opt-in and validated" below. Operators still setting the env aliases see the removed-settings startup warning and set the window once from Settings -> Advanced -> Data retention.

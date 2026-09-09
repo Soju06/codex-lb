@@ -13,6 +13,7 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 from sqlalchemy import select
 
+from app.core.clients import http as http_module
 from app.core.clients.http import get_http_client
 from app.core.utils.time import utcnow
 from app.db.models import ApiKeyUsageReservation, RequestLog
@@ -494,6 +495,14 @@ def _model_source_connections_acquired() -> int:
     return len(connector._acquired)
 
 
+def _active_http_client_leases() -> int:
+    """Generation leases held (``lease_model_source_session`` takes one per source exchange until released)."""
+
+    managed = http_module._http_client
+    assert managed is not None
+    return managed.active_leases
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_client_leaving_during_prompt_processing_releases_the_source(async_client, source_upstream):
     """Direct chat route: the ``200`` and headers reach the client at the source's headers (as on ``main``), so a
@@ -560,6 +569,80 @@ async def test_chat_stream_client_leaving_during_prompt_processing_releases_the_
         assert log.model_source_id == source_id
         assert log.status == "cancelled"
         assert log.error_code == "client_disconnected"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_client_leaving_before_the_body_starts_releases_the_source(async_client, source_upstream):
+    """Direct chat route, the pre-body window: the client is gone between the route returning the streaming response
+    and Starlette's first write, so ``http.response.start`` never completes and the settlement generator wrapped
+    around the source body never starts. The response's transport owner must close the source connection, return
+    the pooled lease and record the attempt as ``cancelled`` (``client_disconnected_before_body``); ``main`` left the
+    upstream response, the lease and the row to garbage collection."""
+
+    prepared = asyncio.Event()
+    release_token = asyncio.Event()
+    upstream: dict[str, int] = {"cancelled": 0, "finished": 0}
+
+    async def slow_prompt_processing(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        prepared.set()
+        try:
+            await release_token.wait()
+            await response.write(b'data: {"id":"chatcmpl_late","choices":[{"index":0,"delta":{"content":"x"}}]}\n\n')
+            await response.write_eof()
+        except asyncio.CancelledError:
+            upstream["cancelled"] += 1
+            raise
+        upstream["finished"] += 1
+        return response
+
+    base_url = await source_upstream(slow_prompt_processing, handler_cancellation=True, shutdown_timeout=1.0)
+    model = "source-pre-body-model"
+    source_id = await _create_model_source(async_client, name="pre-body", model=model, base_url=base_url)
+    leases_before = _active_http_client_leases()
+
+    stream = _AsgiStream(
+        app=async_client._transport.app,
+        path="/v1/chat/completions",
+        headers={},
+        body=json.dumps({"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True}).encode(),
+        stall_response_start=True,
+    )
+    runner = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(prepared.wait(), timeout=5)
+        await stream.wait_for_response_start(timeout=5)
+        assert stream.status == 200
+        # The route returned with the source exchange open: one pooled connection, one generation lease.
+        assert _model_source_connections_acquired() == 1
+        assert _active_http_client_leases() == leases_before + 1
+
+        left_at = time.monotonic()
+        stream.disconnect()
+        await asyncio.wait_for(runner, timeout=5)
+        assert time.monotonic() - left_at < 2.0
+
+        # Nothing was written after the response start: the body never ran.
+        assert stream.received() == b""
+        deadline = time.monotonic() + 5
+        while upstream["cancelled"] == 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert upstream["cancelled"] == 1, "the source connection was not closed when the client left"
+        assert upstream["finished"] == 0
+        assert _model_source_connections_acquired() == 0
+        assert _active_http_client_leases() == leases_before
+    finally:
+        release_token.set()
+        if not runner.done():
+            runner.cancel()
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.model_source_id == source_id
+        assert log.status == "cancelled"
+        assert log.error_code == "client_disconnected_before_body"
 
 
 async def _empty_2xx_chat_stream(request: web.Request) -> web.StreamResponse:

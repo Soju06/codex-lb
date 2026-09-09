@@ -246,7 +246,7 @@ async def test_limited_key_streams_live_and_settles_from_source_usage(async_clie
             _request_body(
                 model,
                 client_metadata={"harness": "codex"},
-                stream_options={"include_obfuscation": False},
+                stream_options={"include_obfuscation": False, "reasoning_summary_delivery": "interleaved"},
                 prompt_cache_key="thread-cache-1",
             )
         ).encode(),
@@ -265,7 +265,10 @@ async def test_limited_key_streams_live_and_settles_from_source_usage(async_clie
     assert text.index("response.output_text.delta") < text.index("response.completed")
 
     forwarded = state.requests[0]
-    assert "client_metadata" not in forwarded and "stream_options" not in forwarded
+    # Telemetry stripped at the stub: the Codex object whole, the Codex key out of
+    # the standard ``stream_options`` object (decision 52).
+    assert "client_metadata" not in forwarded
+    assert forwarded["stream_options"] == {"include_obfuscation": False}
     assert forwarded["prompt_cache_key"] == "thread-cache-1"
     assert forwarded["stream"] is True
 

@@ -16,7 +16,9 @@ Composition rules:
 * ``SourceStreamingResponse.__call__`` wraps the transport in
   ``try/finally: _await_cleanup_deferring_cancellation(owner.finalize_transport(), scheduler=owner.scheduler)``
   so a client that leaves before Starlette starts the body still reaches one
-  ``finish()``;
+  ``finish()``; the direct chat-completions stream route, which has no
+  dispatch owner, hands the same response class a ``SourceChatStreamOwner``
+  so its never-started body closes the source transport too;
 * the handler segment uses ``except BaseException -> abandon(); raise``
   (``CancelledError`` is a ``BaseException`` and is never caught by
   ``except Exception``);
@@ -53,7 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol, TypeVar
@@ -91,6 +93,7 @@ from app.modules.api_keys.service import (
 from app.modules.model_sources.catalog import source_model_cost_usd
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
+    SourceChatStream,
     SourceResponsesStream,
     SourceTimings,
     SourceUsage,
@@ -841,14 +844,81 @@ class SourceDispatch:
             await self.abandon(ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY)
 
 
+class TransportOwner(Protocol):
+    """Owner of a source transport whose ``finalize_transport()`` a ``SourceStreamingResponse`` always reaches.
+
+    ``body`` is the outermost iterator handed to Starlette (assigned by the
+    response); ``finalize_transport`` closes it and settles whatever a body that
+    never started could not settle itself. ``SourceDispatch`` implements it for
+    Responses dispatch, ``SourceChatStreamOwner`` for the direct chat route.
+    """
+
+    scheduler: Scheduler
+    body: AsyncIterator[Any] | None
+
+    async def finalize_transport(self) -> None: ...
+
+
+@dataclass(slots=True)
+class SourceChatStreamOwner:
+    """Transport owner for the direct chat-completions stream route, which has no dispatch owner.
+
+    The route's settlement generator wrapped around ``stream.body`` is the sole
+    body iterator: it releases the reservation and writes the row, but only
+    once Starlette iterates the body. Between the route returning and
+    ``http.response.start`` completing there is one await in which a client
+    departure (task cancellation) or a failed first write leaves the generator
+    never started, and ``aclose()`` on a never-started async generator skips
+    its ``finally`` -- the upstream response, the pooled lease and the
+    reservation were held until garbage collection. ``finalize_transport``
+    mirrors ``SourceDispatch.finalize_transport``: it closes the body (a
+    started body settles itself), then, when the generator never ran, closes
+    the source transport directly and runs ``on_abandoned_before_body`` (the
+    route's reservation release and ``cancelled`` row). Every await defers
+    cancellation; the finalizer is idempotent.
+    """
+
+    stream: SourceChatStream
+    # Route-owned: releases the reservation and writes the ``cancelled`` row
+    # with ``ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY`` (``api.py`` owns both).
+    on_abandoned_before_body: Callable[[], Awaitable[None]]
+    scheduler: Scheduler = REAL_SCHEDULER
+    # Outermost body iterator handed to ``SourceStreamingResponse`` (assigned by it).
+    body: AsyncIterator[bytes] | None = None
+    # Set by the settlement generator on entry: from then on it owns the outcome
+    # through its own except/finally paths, whether it completes, is cancelled
+    # mid-stream or is closed by the finalizer below.
+    body_started: bool = False
+    # Latch for the abandoned-before-body outcome recorded by the finalizer.
+    finished: bool = False
+
+    async def finalize_transport(self) -> None:
+        body = self.body
+        if body is not None:
+            aclose = getattr(body, "aclose", None)
+            if aclose is not None:
+                try:
+                    await _await_cleanup_deferring_cancellation(aclose(), scheduler=self.scheduler)
+                except Exception:
+                    logger.warning("source_chat_stream_body_close_failed", exc_info=True)
+        if self.body_started or self.finished:
+            return
+        self.finished = True
+        try:
+            await _await_cleanup_deferring_cancellation(self.stream.aclose(), scheduler=self.scheduler)
+        except Exception:
+            logger.warning("source_chat_stream_close_failed", exc_info=True)
+        await _await_cleanup_deferring_cancellation(self.on_abandoned_before_body(), scheduler=self.scheduler)
+
+
 class SourceStreamingResponse(StreamingResponse):
     """``StreamingResponse`` whose transport exit always reaches ``owner.finalize_transport()``."""
 
     def __init__(
         self,
-        content: AsyncIterator[str],
+        content: AsyncIterator[str] | AsyncIterator[bytes],
         *,
-        owner: SourceDispatch,
+        owner: TransportOwner,
         media_type: str = "text/event-stream",
         headers: Mapping[str, str] | None = None,
     ) -> None:

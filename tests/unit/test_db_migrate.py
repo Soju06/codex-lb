@@ -2543,6 +2543,23 @@ def test_dashboard_hot_path_postgresql_indexes_build_concurrently() -> None:
     assert "indisvalid" in source
 
 
+def test_request_logs_live_facet_postgresql_indexes_build_concurrently() -> None:
+    revision_path = (
+        Path(__file__).resolve().parents[2]
+        / "app/db/alembic/versions/20260909_130000_add_request_logs_live_facet_indexes.py"
+    )
+    source = revision_path.read_text(encoding="utf-8")
+
+    # Built outside the migration transaction so the proxy write path keeps
+    # inserting; leftover invalid indexes from an interrupted concurrent build
+    # are rebuilt instead of being silently accepted by IF NOT EXISTS.
+    assert "autocommit_block" in source
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS" in source
+    assert "DROP INDEX CONCURRENTLY IF EXISTS" in source
+    assert "indisvalid" in source
+    assert "deleted_at IS NULL" in source
+
+
 def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Path) -> None:
     db_path = tmp_path / "hot-path-redundant-indexes.db"
     url = _db_url(db_path)

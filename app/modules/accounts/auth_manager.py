@@ -36,6 +36,7 @@ from app.db.models import Account, AccountProxyBinding, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts.refresh_claims import RefreshClaimCoordinatorPort, get_refresh_claim_coordinator
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_eligibility import account_access_token_expires_at
 
 
 class AccountsRepositoryPort(Protocol):
@@ -164,6 +165,19 @@ _TOKEN_REFRESH_CLAIM_POLL_SECONDS = 0.25
 # token; it must fail closed and surface the terminal state instead.
 _TERMINAL_REFRESH_STATUSES = frozenset({AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
 
+# These describe the refresh credential, not an upstream rejection of the
+# access token or termination of the account/session. Only ordinary preflight
+# callers may try a still-unexpired access token after these failures.
+_REFRESH_CREDENTIAL_FAILURE_CODES = frozenset(
+    {
+        "refresh_token_expired",
+        "refresh_token_reused",
+        "refresh_token_invalidated",
+        "invalid_refresh_token",
+        "invalid_grant",
+    }
+)
+
 
 _RefreshSingleflightKey: TypeAlias = tuple[str, str]
 
@@ -288,10 +302,34 @@ class AuthManager:
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
         if force or (account.status != AccountStatus.REAUTH_REQUIRED and should_refresh(account.last_refresh)):
-            account = await _REFRESH_SINGLEFLIGHT.run(
-                _refresh_singleflight_key(self._encryptor, account),
-                lambda: self._run_refresh(account),
-            )
+            ordinary_active_preflight = not force and account.status == AccountStatus.ACTIVE
+            try:
+                account = await _REFRESH_SINGLEFLIGHT.run(
+                    _refresh_singleflight_key(self._encryptor, account),
+                    lambda: self._run_refresh(account),
+                )
+            except RefreshError as exc:
+                if (
+                    not ordinary_active_preflight
+                    or not exc.is_permanent
+                    or exc.code not in _REFRESH_CREDENTIAL_FAILURE_CODES
+                ):
+                    raise
+                # Keep recovery outside singleflight: a forced caller sharing
+                # this exchange must still fail after an upstream auth rejection.
+                # Re-read because the owned refresh task (or a peer) may have
+                # updated a different ORM instance. Never clear its warning.
+                latest = await self._repo.get_by_id_fresh(account.id)
+                if (
+                    latest is None
+                    or latest.status != AccountStatus.REAUTH_REQUIRED
+                    or latest.deactivation_reason != PERMANENT_FAILURE_CODES[exc.code]
+                ):
+                    raise
+                expires_at = account_access_token_expires_at(latest, self._encryptor)
+                if expires_at is None or expires_at <= time.time():
+                    raise
+                account = _adopt_account_row(account, latest)
         return await self._ensure_chatgpt_account_id(account)
 
     async def _run_refresh(self, account: Account) -> Account:

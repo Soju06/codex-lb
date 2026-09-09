@@ -119,13 +119,25 @@ def test_redundant_dashboard_home_entries_warn() -> None:
             "MIGRATING lists 'beta', but dashboard_settings.beta exists; drop the entry",
         ]
     )
-    # Field removed before its entry, column already dropped: still a warning, never an error.
+    # Redundant entries whose old target is gone or malformed: still warnings, never errors
+    # (field removed, field re-tiered, or a same-name column landed and the old column was dropped).
     stale_target_gone = checker.check_t3_dashboard_home(
-        FIELDS, TIER_MAP, {}, ["beta"], {"removed_field": "dashboard_settings.gone", "also_removed": "not-a-target"}
+        FIELDS,
+        TIER_MAP,
+        {},
+        ["beta"],
+        {
+            "removed_field": "dashboard_settings.gone",
+            "also_removed": "not-a-target",
+            "alpha": "dashboard_settings.gone",
+            "beta": "not-a-target",
+        },
     )
     assert stale_target_gone.errors == []
     assert stale_target_gone.warnings == [
+        "DASHBOARD_HOMES lists 'alpha', which is 'T0', not T3; drop the entry",
         "DASHBOARD_HOMES lists 'also_removed', which is no longer a Settings field; drop the entry",
+        "DASHBOARD_HOMES lists 'beta', but dashboard_settings.beta exists; drop the entry",
         "DASHBOARD_HOMES lists 'removed_field', which is no longer a Settings field; drop the entry",
     ]
     homed_and_migrating = checker.check_t3_dashboard_home(

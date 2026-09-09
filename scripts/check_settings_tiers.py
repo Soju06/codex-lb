@@ -120,23 +120,24 @@ def check_t3_dashboard_home(
     tables.setdefault(DASHBOARD_SETTINGS_TABLE, columns)
     field_set = set(fields)
     for name, target in sorted(homes.items()):
+        # Redundant entries (field gone, not T3, or a same-name column now exists)
+        # are classified first and only warn: the entry is due for deletion, so its
+        # target is moot even when the old column was dropped in the same change.
+        # Only an entry that actually serves as a live T3 field's home must resolve.
         if name not in field_set:
-            # Stale entry: the field is gone, so its target is moot even when the
-            # column was dropped too. Warn only, so removals can land in either order.
             report.warn(f"DASHBOARD_HOMES lists {name!r}, which is no longer a Settings field; drop the entry")
+            continue
+        if tiers.get(name) != "T3":
+            report.warn(f"DASHBOARD_HOMES lists {name!r}, which is {tiers.get(name)!r}, not T3; drop the entry")
+            continue
+        if name in columns:
+            report.warn(f"DASHBOARD_HOMES lists {name!r}, but {DASHBOARD_SETTINGS_TABLE}.{name} exists; drop the entry")
             continue
         match = _HOME_TARGET_RE.match(target)
         if match is None:
             report.error(f"DASHBOARD_HOMES[{name!r}] = {target!r} is not a 'table.column' target")
-            continue
-        table, column = match.groups()
-        if column not in tables.get(table, set()):
+        elif match.group(2) not in tables.get(match.group(1), set()):
             report.error(f"DASHBOARD_HOMES maps {name!r} to {target!r}, but no such database column exists")
-            continue
-        if tiers.get(name) != "T3":
-            report.warn(f"DASHBOARD_HOMES lists {name!r}, which is {tiers.get(name)!r}, not T3; drop the entry")
-        elif name in columns:
-            report.warn(f"DASHBOARD_HOMES lists {name!r}, but {DASHBOARD_SETTINGS_TABLE}.{name} exists; drop the entry")
     for name in sorted(field_set):
         if tiers.get(name) != "T3":
             continue

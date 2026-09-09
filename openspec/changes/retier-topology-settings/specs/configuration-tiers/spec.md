@@ -2,7 +2,7 @@
 
 ### Requirement: Every setting declares a tier
 
-`app/core/config/tiers.py` SHALL map every `Settings` field name to exactly one tier in `T0` (bootstrap), `T1` (instance topology), `T2` (secret), `T3` (behaviour tunable or feature flag), `T4` (incident debug). A T3 field that has no `dashboard_settings` column of the same name MUST either be mapped in `DASHBOARD_HOMES` to its existing database home as `table.column` or be listed in `MIGRATING` with its target dashboard home or `backlog`. `scripts/check_settings_tiers.py`, run by `make lint`, SHALL fail when a field has no tier, when a tier value is unknown, when a T3 field has none of a same-name `dashboard_settings` column, a `DASHBOARD_HOMES` mapping or a `MIGRATING` entry, or when a `DASHBOARD_HOMES` target is not of the form `table.column` or names a column that does not exist in the database metadata. A tier, `DASHBOARD_HOMES` or `MIGRATING` entry for a field that no longer exists (for `DASHBOARD_HOMES`, regardless of whether its target column still exists), a `MIGRATING` or `DASHBOARD_HOMES` entry whose field already has a same-name dashboard column, or a `MIGRATING` entry for a field that `DASHBOARD_HOMES` already maps, SHALL be reported as a warning and SHALL NOT fail the check.
+`app/core/config/tiers.py` SHALL map every `Settings` field name to exactly one tier in `T0` (bootstrap), `T1` (instance topology), `T2` (secret), `T3` (behaviour tunable or feature flag), `T4` (incident debug). A T3 field that has no `dashboard_settings` column of the same name MUST either be mapped in `DASHBOARD_HOMES` to its existing database home as `table.column` or be listed in `MIGRATING` with its target dashboard home or `backlog`. `scripts/check_settings_tiers.py`, run by `make lint`, SHALL fail when a field has no tier, when a tier value is unknown, when a T3 field has none of a same-name `dashboard_settings` column, a `DASHBOARD_HOMES` mapping or a `MIGRATING` entry, or when a `DASHBOARD_HOMES` target is not of the form `table.column` or names a column that does not exist in the database metadata. A tier, `DASHBOARD_HOMES` or `MIGRATING` entry for a field that no longer exists, a `MIGRATING` or `DASHBOARD_HOMES` entry whose field already has a same-name dashboard column or is no longer T3, or a `MIGRATING` entry for a field that `DASHBOARD_HOMES` already maps, SHALL be reported as a warning and SHALL NOT fail the check; a redundant `DASHBOARD_HOMES` entry is classified before its target is validated, so its target may be malformed or name a dropped column without failing the check.
 
 #### Scenario: New setting without a tier
 
@@ -17,7 +17,7 @@
 #### Scenario: Setting removed before its tier entry
 
 - **WHEN** a PR removes a `Settings` field but `SETTING_TIERS`, `DASHBOARD_HOMES` or `MIGRATING` still lists it
-- **THEN** the check passes with a warning naming the stale entry, even when the `DASHBOARD_HOMES` target column was dropped in the same change
+- **THEN** the check passes with a warning naming the stale entry, even when the `DASHBOARD_HOMES` target column was dropped in the same change; the same holds for a `DASHBOARD_HOMES` entry made redundant by a same-name column or a re-tier
 
 #### Scenario: Declared home must exist
 

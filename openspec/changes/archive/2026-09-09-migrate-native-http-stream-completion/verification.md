@@ -28,6 +28,29 @@ their previous owners. There is no throughput claim.
 - Built dashboard browser smoke: 5 passed.
 - `make lint`, full `uv run ty check`, and 64 strict OpenSpec specs passed.
 
+## Failure-path test evidence
+
+The following exact tests were repeated together with the release helper on
+`a365a1fd9f099a671af8db6da49e811760b1b120`: **21 passed** in 1.56 seconds.
+
+- `tests/unit/test_native_egress.py::test_interpreted_sse_rejects_invalid_metadata_without_replay`:
+  **15 passed**. The `events7` case ends an unfinished interpreted event before
+  its final fragment; `events9` through `events14` reject invalid completion
+  marker types, completion on an intermediate fragment, and completion on
+  nonterminal event types. Every case verifies a protocol error, removal of the
+  owned stream, and a single request sequence (no replay).
+- `tests/unit/test_native_egress.py::test_bounded_event_queue_trips_on_bytes_or_events_and_releases_bytes_on_get`:
+  **1 passed**. Both byte-budget and event-count overflow raise `QueueFull`;
+  draining releases bytes, including interpreted-event text and metadata.
+- `tests/unit/test_native_egress.py::test_client_close_does_not_hang_when_stream_queue_is_full`:
+  **1 passed**. A stalled consumer exceeds the shared adapter's per-request
+  byte budget, receives the bounded-queue transport error, and does not prevent
+  a healthy request on the same helper from completing or client cleanup.
+- `tests/integration/test_native_sse_egress.py::test_cancelling_native_stream_after_partial_event_keeps_peer_request_usable`:
+  **4 passed** (direct/routed, with/without an already-cancelled scope). The real
+  helper closes the cancelled upstream connection after a partial event while
+  its peer finishes on the same still-running helper process.
+
 ## Verification after updating to current main
 
 The PR branch was rebased onto `2a4303492f2c1fd209a7490cf1493c98b56ffde1`,
@@ -46,6 +69,30 @@ the implementation and regression tests were unchanged by the rebase.
 
 The full canonical unit run and other completed checks above were performed
 before this rebase; the selections here were repeated on the updated branch.
+
+## CI baseline update after the SQLite test fix
+
+CI run `34341623522` on the earlier PR head `50681965d` completed its
+integration-core-2 shard with 776 passed, 11 skipped, and one failure:
+`test_realtime_call_location_drives_supported_account_bound_sideband_routes[current-app-uppercase-uuid]`.
+The failure was `database is locked` while `TestClient` entered the application
+lifespan and inserted the `hard_sticky_outage_grace_seeded` sentinel. It occurred
+in the existing Realtime test's startup path, outside native HTTP Responses
+completion. The six cases of that test passed in a local reproduction attempt.
+
+Main then incorporated PR #2243, which moves blocking `TestClient` entry off the
+async test loop and drains deferred SQLite writers. This PR was rebased onto
+`88264ff8413ef1770cfec0aec516018fb23479bd` to include that fix. The rebase only
+reconciled independent additions to the outbound HTTP spec; native completion
+code and tests were unchanged. Checks repeated on the updated base:
+
+- Real release-helper integration selection: **332 passed, 1 warning**,
+  21.98 seconds (the same three native integration files listed above).
+- `tests/integration/test_proxy_realtime_live.py`,
+  `tests/integration/test_off_loop_test_client.py`, and
+  `tests/unit/test_native_egress.py`: **109 passed, 3 warnings**, 61.17 seconds.
+- Full `make lint`, `uv run ty check`, and strict OpenSpec validation passed
+  (**64 specs**).
 
 ## Broader suite and baseline comparison
 

@@ -11,7 +11,7 @@ from collections.abc import Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Literal, Mapping, TypeVar, cast
+from typing import Any, Final, Literal, Mapping, TypeVar, cast
 from urllib.parse import urlparse
 
 from app.core import shutdown as shutdown_state
@@ -213,8 +213,15 @@ _http_bridge_pending_count_warning_last_logged: dict[tuple[str, str, str], float
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 # A healthy upstream acknowledges response.create promptly. Keep the
 # Keep the owner-side watchdog within the client-safe contract while honoring
-# the configured stuck-gate threshold when it is shorter.
+# the fixed stuck-gate threshold when it is shorter.
 _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 60.0
+# Fixed bridge session lifecycle values (constantize-session-bridge-tunables).
+# These were never tuned in any deployment; tests monkeypatch the module
+# attribute, and every consumer reads it through this module at call time.
+HTTP_BRIDGE_IDLE_TTL_SECONDS: Final = 120.0
+HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS: Final = 900.0
+# Owner-side stuck handoff gate; anchored to the 300s wait Codex Desktop uses.
+HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS: Final = 300.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 # Keep process-local *uncaptured* entries bounded. A denied entry is retained
 # until the matching durable anchor is confirmed cleared; evicting it would let
@@ -795,8 +802,8 @@ def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     return payload
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    return cast(Callable[[Any | None], float], _service_global("_proxy_admission_wait_timeout_seconds"))(settings)
+def _proxy_admission_wait_timeout_seconds() -> float:
+    return cast(Callable[[], float], _service_global("_proxy_admission_wait_timeout_seconds"))()
 
 
 def _http_bridge_stale_inflight_seconds() -> float:
@@ -3664,8 +3671,8 @@ def _http_bridge_runtime_config(
 ) -> _HTTPBridgeRuntimeConfig:
     return _HTTPBridgeRuntimeConfig(
         enabled=app_settings.http_responses_session_bridge_enabled,
-        idle_ttl_seconds=app_settings.http_responses_session_bridge_idle_ttl_seconds,
-        codex_idle_ttl_seconds=app_settings.http_responses_session_bridge_codex_idle_ttl_seconds,
+        idle_ttl_seconds=HTTP_BRIDGE_IDLE_TTL_SECONDS,
+        codex_idle_ttl_seconds=HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS,
         max_sessions=app_settings.http_responses_session_bridge_max_sessions,
         queue_limit=app_settings.http_responses_session_bridge_queue_limit,
         prompt_cache_idle_ttl_seconds=float(
@@ -3691,18 +3698,16 @@ def _http_bridge_eventless_budget_seconds(settings: object, *, fallback_seconds:
     Before ``response.created`` the downstream event queue is silent by design,
     so ``stream_idle_timeout_seconds`` (a *post-start* inter-event budget) does
     not describe this phase at all. The honest bound is the owner-side stuck
-    gate: once ``http_responses_session_bridge_stuck_gate_retire_after_seconds``
-    retires the pending handoff there is nothing left for the client to wait
-    for. Clamp to the stream-idle and bridge-request budgets so the pre-response
-    watchdog can never outlive the request it guards.
+    gate: once ``HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS`` retires the
+    pending handoff there is nothing left for the client to wait for. Clamp to
+    the stream-idle and bridge-request budgets so the pre-response watchdog can
+    never outlive the request it guards.
 
     ``fallback_seconds`` is used when a caller's settings object does not carry
     ``stream_idle_timeout_seconds`` at all.
     """
 
-    stuck_gate_seconds = float(
-        getattr(settings, "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
-    )
+    stuck_gate_seconds = float(HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS)
     stream_idle_timeout_seconds = float(getattr(settings, "stream_idle_timeout_seconds", fallback_seconds))
     return max(
         0.001,

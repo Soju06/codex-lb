@@ -247,9 +247,7 @@ class TelemetrySnapshotBuilder:
             ),
             features=FeaturesSnapshot(
                 api_firewall=feature_counts.firewall_entries > 0,
-                quota_planner=(
-                    self._settings.quota_planner_scheduler_enabled and feature_counts.quota_planner_mode != "off"
-                ),
+                quota_planner=feature_counts.quota_planner_mode != "off",
                 sticky_sessions=dashboard_settings.sticky_threads_enabled,
                 conversation_archive=self._settings.conversation_archive_enabled,
                 automations=(self._settings.automations_scheduler_enabled and feature_counts.enabled_automations > 0),

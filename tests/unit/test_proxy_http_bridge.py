@@ -3575,10 +3575,8 @@ async def test_http_bridge_activity_snapshot_counts_pending_closed_detached_gene
 async def test_response_create_gate_timeout_retires_old_pending_without_upstream_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = _make_app_settings(
-        proxy_admission_wait_timeout_seconds=0.001,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
-    )
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     session = _make_bridge_session()
@@ -3684,10 +3682,8 @@ def test_stale_gate_cleanup_keeps_draining_sibling_active() -> None:
 async def test_response_create_gate_timeout_retires_closed_anchored_pending_without_upstream_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = _make_app_settings(
-        proxy_admission_wait_timeout_seconds=0.001,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
-    )
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     session = _make_bridge_session()
@@ -3756,10 +3752,8 @@ async def test_response_create_gate_timeout_retires_closed_anchored_pending_with
 async def test_response_create_gate_timeout_retires_old_precreated_request_after_rate_limit_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = _make_app_settings(
-        proxy_admission_wait_timeout_seconds=0.001,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
-    )
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     session = _make_bridge_session()
@@ -3865,10 +3859,8 @@ async def test_response_create_gate_timeout_does_not_retire_active_response_prog
     latency_response_created_ms: int | None,
     response_event_count: int,
 ) -> None:
-    settings = _make_app_settings(
-        proxy_admission_wait_timeout_seconds=0.001,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
-    )
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     session = _make_bridge_session()
@@ -8819,57 +8811,6 @@ async def test_http_bridge_startup_cooldown_terminal_spares_session_owned_by_adm
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_one_shot_hard_turn_requires_operation_ledger_for_cooldown_wait(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    session = _make_bridge_session(key_value="sid-hard-turn-no-ledger")
-    session.durable_session_id = "durable-hard-turn-no-ledger"
-    session.durable_owner_epoch = 11
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="req-hard-turn-no-ledger",
-        model="gpt-5.6",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=time.monotonic(),
-        event_queue=asyncio.Queue(),
-        transport="http",
-        session_id="turn-state-no-ledger",
-        hard_continuity_anchor=True,
-    )
-    submit = AsyncMock()
-    sleep = AsyncMock()
-    monkeypatch.setattr(
-        proxy_service,
-        "get_settings",
-        lambda: _make_app_settings(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_anchored_replay_once",
-            http_responses_session_bridge_operation_ledger_enabled=False,
-        ),
-    )
-    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
-    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
-    service._scheduler = _SleepThroughScheduler(sleep)
-
-    with pytest.raises(ProxyResponseError) as exc_info:
-        async for _ in service._stream_http_bridge_session_events(
-            session,
-            request_state=request_state,
-            text_data='{"type":"response.create"}',
-            queue_limit=8,
-            propagate_http_errors=True,
-            downstream_turn_state="turn-state-no-ledger",
-        ):
-            pass
-
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.payload["error"]["code"] == HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
-    submit.assert_not_awaited()
-    sleep.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_http_bridge_one_shot_hard_turn_cooldown_wait_rejects_when_queue_is_full(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9524,7 +9465,6 @@ async def test_http_bridge_idle_recovery_transport_failure_yields_terminal_event
             http_responses_stream_request_budget_seconds=60.0,
             sse_keepalive_interval_seconds=0.001,
             stream_idle_timeout_seconds=0.001,
-            http_responses_session_bridge_anchor_poison_failure_threshold=7,
         ),
     )
     monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
@@ -17853,7 +17793,6 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
                         openai_cache_affinity_max_age_seconds=1800,
                         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
                         http_responses_session_bridge_gateway_safe_mode=False,
-                        openai_prompt_cache_key_derivation_enabled=True,
                     )
                 )
             ),
@@ -20080,13 +20019,7 @@ async def _run_owner_forward_recovery_durable_anchor_stream(
             ),
         ),
     )
-    monkeypatch.setattr(
-        proxy_service,
-        "get_settings",
-        lambda: _make_app_settings(
-            http_responses_session_bridge_operation_ledger_enabled=False if real_submit else True,
-        ),
-    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(
         service._durable_bridge,
         "lookup_request_targets",
@@ -23278,7 +23211,7 @@ async def test_get_or_create_http_bridge_session_inflight_wait_times_out(
     inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
     service._http_bridge_inflight_sessions[key] = inflight_future
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -23606,7 +23539,7 @@ async def test_get_or_create_http_bridge_session_capacity_wait_times_out(
     inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
     service._http_bridge_inflight_sessions[inflight_key] = inflight_future
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_http_bridge_pending_count", AsyncMock(return_value=1))
@@ -24185,7 +24118,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-late-owner", None)
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     created = _make_bridge_session(key_value="sid-late-owner")
     created.key = key
     create_started = asyncio.Event()
@@ -29605,9 +29538,9 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
         sse_keepalive_interval_seconds=0.0,
         stream_idle_timeout_seconds=60.0,
         http_responses_session_bridge_request_budget_seconds=60.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.02)
     retry_precreated = AsyncMock(return_value=False)
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
@@ -29720,9 +29653,9 @@ async def test_http_bridge_stream_and_reader_count_one_eventless_send_once(
         sse_keepalive_interval_seconds=0.02,
         stream_idle_timeout_seconds=0.3,
         http_responses_session_bridge_request_budget_seconds=1.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.005,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.005)
     monkeypatch.setattr(http_bridge_streaming_module, "_stream_keepalive_max_count", lambda: 1)
     monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
@@ -29870,9 +29803,9 @@ async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_expi
         sse_keepalive_interval_seconds=0.0,
         stream_idle_timeout_seconds=60.0,
         http_responses_session_bridge_request_budget_seconds=60.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.02)
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
     monkeypatch.setattr(service, "_write_request_log", AsyncMock())
@@ -30000,9 +29933,9 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
         sse_keepalive_interval_seconds=0.0,
         stream_idle_timeout_seconds=60.0,
         http_responses_session_bridge_request_budget_seconds=60.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.02)
     retry_precreated = AsyncMock(return_value=False)
     process_text = AsyncMock()
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
@@ -30173,9 +30106,9 @@ async def test_http_bridge_eventless_timeout_yields_to_locked_send_failure_clean
     settings = _make_app_settings(
         stream_idle_timeout_seconds=60.0,
         http_responses_session_bridge_request_budget_seconds=60.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.01,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.01)
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
     monkeypatch.setattr(service, "_write_request_log", AsyncMock())
@@ -30374,7 +30307,8 @@ async def test_http_bridge_handoff_future_survives_same_key_and_capacity_timeout
     setattr(handoff_future, "_http_bridge_handoff", True)
     service._http_bridge_sessions[key] = session
     service._http_bridge_inflight_sessions[key] = handoff_future
-    settings = _make_app_settings(proxy_admission_wait_timeout_seconds=0.01)
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_http_bridge_pending_count", AsyncMock(return_value=1))
@@ -31648,11 +31582,8 @@ async def test_http_bridge_response_create_gate_timeout_logs_pending_bridge_cont
         queued_request_count=1,
     )
     session.response_create_gate = gate
-    monkeypatch.setattr(
-        proxy_service,
-        "get_settings",
-        lambda: _make_app_settings(proxy_admission_wait_timeout_seconds=0.001),
-    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
 
     with caplog.at_level(logging.WARNING):
         with pytest.raises(ProxyResponseError):
@@ -36744,9 +36675,9 @@ async def test_http_bridge_missing_created_timeout_records_eventless_quarantine_
         sse_keepalive_interval_seconds=0.0,
         stream_idle_timeout_seconds=60.0,
         http_responses_session_bridge_request_budget_seconds=60.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.02)
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
     monkeypatch.setattr(service, "_write_request_log", AsyncMock())
@@ -37402,7 +37333,7 @@ async def test_rejected_creator_does_not_release_the_registered_winners_durable_
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-rejected-creator", None)
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     stale_creator_session = _make_bridge_session(key_value="sid-rejected-creator")
     stale_creator_session.key = key
     registered_winner = _make_bridge_session(key_value="sid-rejected-creator-winner")
@@ -40130,9 +40061,7 @@ async def test_episode_consult_rechecks_after_the_durable_lookup() -> None:
         session_latest_continuity=AsyncMock(return_value=("resp_poisoned_anchor", None)),
     )
 
-    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
 
     assert owed is None, "the consult must re-check the live episode after its durable await"
 
@@ -40166,9 +40095,7 @@ async def test_poison_clear_is_fenced_on_the_anchor_captured_at_the_consult() ->
         clear_retry_circuit=AsyncMock(return_value=None),
     )
 
-    episode, captured = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    episode, captured = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
     assert episode is state
     assert captured == ("resp_poisoned_anchor", None)
 
@@ -40220,9 +40147,7 @@ async def test_poison_clear_fences_turn_state_only_continuity() -> None:
         clear_retry_circuit=AsyncMock(return_value=None),
     )
 
-    episode, captured = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    episode, captured = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
     assert episode is state
     assert captured == (None, "ts_poisoned_turn")
 
@@ -40266,9 +40191,7 @@ async def test_a_missing_session_row_refuses_the_poison_clear() -> None:
         clear_retry_circuit=AsyncMock(return_value=None),
     )
 
-    episode, captured = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    episode, captured = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
 
     assert episode is None
     assert captured is http_bridge_retry_circuit_module._POISON_ANCHOR_CAPTURE_UNAVAILABLE
@@ -40301,9 +40224,7 @@ async def test_an_empty_continuity_pair_owes_no_clear() -> None:
         clear_retry_circuit=AsyncMock(return_value=None),
     )
 
-    episode, captured = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    episode, captured = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
 
     assert episode is None, "an all-null continuity pair owes no abandonment"
     assert captured is http_bridge_retry_circuit_module._POISON_ANCHOR_CAPTURE_UNAVAILABLE
@@ -40565,18 +40486,6 @@ async def test_merged_cooldown_extends_an_already_armed_poison_quarantine() -> N
     assert entry.quarantined_until - now == pytest.approx(600.0 + lease, abs=2.0), (
         "the quarantine floor must be recomputed against the merged 600s cooldown, not left at the local 60s opening"
     )
-
-
-def test_effective_anchor_poison_threshold_is_capped_at_the_circuit_threshold() -> None:
-    # The quarantine armed at the circuit opening is process-local, so between
-    # the circuit threshold and a higher configured one the durable anchor would
-    # survive for another worker to plan. A lower configured value still wins.
-    effective = http_bridge_retry_circuit_module._http_bridge_effective_anchor_poison_threshold
-    circuit_threshold = http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
-    assert effective(7) == circuit_threshold
-    assert effective(circuit_threshold) == circuit_threshold
-    assert effective(1) == 1
-    assert effective(0) == 1
 
 
 @pytest.mark.asyncio
@@ -41312,18 +41221,13 @@ async def test_a_stale_load_after_settlement_does_not_resurrect_the_row() -> Non
 async def test_a_loaded_one_strike_poison_row_arms_at_threshold_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # With the abandonment threshold configured to 1, another replica's first
+    # With the poison (= circuit) threshold at 1, another replica's first
     # poison strike already owes its clear; a worker loading that one-failure
-    # row must arm its local quarantine at the effective configured
-    # threshold, not the circuit-opening threshold of 2, or it can re-inject
+    # row must arm its local quarantine at that threshold, or it can re-inject
     # the poisoned anchor while the clear is slow or failed.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-load-arm-threshold-one")
-    monkeypatch.setattr(
-        http_bridge_retry_circuit_module,
-        "_service_get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_anchor_poison_failure_threshold=1),
-    )
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD", 1)
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(
             return_value=SimpleNamespace(
@@ -41830,9 +41734,9 @@ async def test_the_stream_finalizer_holds_retirement_for_the_idle_settlement(
         sse_keepalive_interval_seconds=0.02,
         stream_idle_timeout_seconds=0.3,
         http_responses_session_bridge_request_budget_seconds=1.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.005,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.005)
     monkeypatch.setattr(http_bridge_streaming_module, "_stream_keepalive_max_count", lambda: 1)
     monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
@@ -44565,7 +44469,6 @@ async def test_the_consult_adopts_the_authorizing_rows_identity() -> None:
     episode, expected_anchor = await service._http_bridge_poison_anchor_clear_owed(
         session,
         consecutive_failures=2,
-        configured_threshold=2,
     )
 
     assert episode is state
@@ -44610,7 +44513,6 @@ async def test_the_consult_adopts_a_moved_row_over_a_stale_local_fence() -> None
     episode, _anchor = await service._http_bridge_poison_anchor_clear_owed(
         session,
         consecutive_failures=2,
-        configured_threshold=2,
     )
 
     assert episode is state
@@ -44696,18 +44598,13 @@ async def test_a_sticky_strike_cannot_strand_the_promotion() -> None:
 async def test_a_threshold_one_merge_arms_the_quarantine_on_a_clean_strike(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # With the poison threshold configured to one, a non-poison local
+    # With the poison (= circuit) threshold at one, a non-poison local
     # strike whose durable merge adopts a one-failure poison row must arm
-    # the quarantine at the effective threshold — comparing against the
-    # circuit threshold of two left the loaded-key cache handing the next
-    # request the dead anchor.
+    # the quarantine at that threshold, or the loaded-key cache hands the
+    # next request the dead anchor.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-threshold-one-merge-arm")
-    monkeypatch.setattr(
-        http_bridge_retry_circuit_module,
-        "_service_get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_anchor_poison_failure_threshold=1),
-    )
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD", 1)
     now_wall = time.time()
     merged = SimpleNamespace(
         consecutive_failures=1,
@@ -44792,16 +44689,12 @@ async def test_a_below_threshold_poison_strike_arms_no_owed_debt() -> None:
 async def test_a_threshold_one_poison_strike_arms_the_owed_debt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A configured anchor-poison threshold of one authorizes the abandonment
-    # at the first poison strike; if that clear fails, the debt must already
-    # be armed at count one. Gating the debt on the circuit threshold of two
-    # left no durable or local record to retry the clear from.
+    # A poison (= circuit) threshold of one authorizes the abandonment at the
+    # first poison strike; if that clear fails, the debt must already be
+    # armed at count one, or there is no durable or local record to retry
+    # the clear from.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    monkeypatch.setattr(
-        http_bridge_retry_circuit_module,
-        "_service_get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_anchor_poison_failure_threshold=1),
-    )
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD", 1)
     service._durable_bridge = SimpleNamespace(**_stateful_retry_circuit_persistence())
     owner = _make_eventless_http_bridge_owner(request_id="req-threshold-one-owed")
     session = _make_bridge_session(
@@ -46776,11 +46669,10 @@ async def test_poison_clear_settles_the_circuit_when_the_deque_was_already_drain
 async def test_waiterless_funnel_clears_the_anchor_at_the_capped_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The configured poison threshold defaults above the circuit's own
-    # threshold, and the circuit refuses the key for 60-600s per strike once it
-    # opens. Comparing the raw setting here left the durable anchor stored
-    # while the circuit was already cooling on it, so another replica (or this
-    # one after the quarantine lapsed) could inject it again.
+    # The poison threshold is the circuit threshold: the circuit refuses the
+    # key for 60-600s per strike once it opens, so the durable anchor must be
+    # cleared no later than the strike that opens it, or another replica (or
+    # this one after the quarantine lapsed) could inject it again.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     durable_bridge = SimpleNamespace(
         **_stateful_retry_circuit_persistence(),
@@ -46788,10 +46680,6 @@ async def test_waiterless_funnel_clears_the_anchor_at_the_capped_threshold(
     )
     service._durable_bridge = durable_bridge
     monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
-    assert proxy_service.get_settings().http_responses_session_bridge_anchor_poison_failure_threshold > 2, (
-        "this regression only means anything while the configured threshold is above the circuit threshold"
-    )
-
     for _failure_number in range(2):
         session = _make_bridge_session(
             key_value="bridge-capped-threshold-funnel",
@@ -46861,9 +46749,7 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
         session_latest_continuity=AsyncMock(return_value=("resp_poisoned_anchor", None)),
     )
 
-    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
     assert owed is None, "a settled episode owes nothing, whatever the stale strike captured"
 
     # A fresh sub-threshold episode registered after the settle owes nothing
@@ -46871,18 +46757,14 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
     state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
     state.consecutive_failures = 1
     cast(Any, service)._http_bridge_retry_circuits[session.key] = state
-    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
     assert owed is None
 
     # A live at-threshold episode without its durable row owes nothing
     # either: the row is the episode's replica-visible record, and the
     # completion that settled it elsewhere deleted the row with the reset.
     state.consecutive_failures = 2
-    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
     assert owed is None, "no durable row means the episode already ended durably"
 
     # A settle updates the row to zero rather than deleting it, so a reset
@@ -46893,9 +46775,7 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
         last_detail=None,
         updated_at_epoch=time.time(),
     )
-    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
     assert owed is None, "a row reset to zero proves the episode already ended"
 
     # A durable episode at threshold on clean_close is not poison evidence:
@@ -46908,9 +46788,7 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
         last_detail="clean_close",
         updated_at_epoch=time.time(),
     )
-    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
     assert owed is None, "a clean-close episode row is not proof of a poisoned anchor"
 
     durable_lookup.return_value = SimpleNamespace(
@@ -46919,9 +46797,7 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
         last_detail="stream_incomplete",
         updated_at_epoch=time.time(),
     )
-    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
-        session, consecutive_failures=2, configured_threshold=7
-    )
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(session, consecutive_failures=2)
     assert owed is state, "the consult returns the exact live episode that owes the clear"
 
 
@@ -46940,11 +46816,7 @@ async def test_threshold_one_quarantines_on_the_first_poison_strike(
         lookup_retry_circuit=AsyncMock(return_value=None),
         persist_retry_circuit=AsyncMock(return_value=None),
     )
-    monkeypatch.setattr(
-        http_bridge_retry_circuit_module,
-        "_service_get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_anchor_poison_failure_threshold=1),
-    )
+    monkeypatch.setattr(http_bridge_retry_circuit_module, "_HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD", 1)
 
     failures = await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
 
@@ -47795,3 +47667,28 @@ async def test_retry_http_bridge_precreated_request_refuses_a_third_send_after_a
     assert request_state.replay_count == 1
     assert request_state.clean_close_replay_count == 0
     assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+
+
+def test_http_bridge_runtime_config_reads_idle_ttl_constant_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The API idle TTL is a fixed module constant, not a Settings field. The
+    # runtime config must read it from the module at call time, so the test
+    # seam (and any future change of the constant) takes effect without
+    # rebuilding Settings.
+    dashboard_settings = cast(
+        Any,
+        SimpleNamespace(
+            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=1800,
+            http_responses_session_bridge_gateway_safe_mode=False,
+        ),
+    )
+    app_settings = _make_app_settings()
+
+    default_config = http_bridge_helpers_module._http_bridge_runtime_config(dashboard_settings, app_settings)
+    assert default_config.idle_ttl_seconds == 120.0
+
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_IDLE_TTL_SECONDS", 45.0)
+
+    runtime_config = http_bridge_helpers_module._http_bridge_runtime_config(dashboard_settings, app_settings)
+
+    assert runtime_config.idle_ttl_seconds == 45.0
+    assert runtime_config.codex_idle_ttl_seconds == 900.0

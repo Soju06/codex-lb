@@ -19,26 +19,23 @@ os.environ["CODEX_LB_DATABASE_URL"] = os.environ.get(
     "CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}"
 )
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
-os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
-os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
-os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
+# The HTTP responses session bridge is a request-path feature with a T4 env
+# kill switch (see app/core/config/tiers.py). The suite runs on the raw
+# upstream path by default; bridge suites opt in with explicit ``Settings``.
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
-os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
 # Route-resolution caching is opt-in per test (cache-specific tests set a TTL
 # explicitly); keeping it off preserves fresh-read semantics everywhere else.
 os.environ["CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS"] = "0"
-# The app-level automations scheduler ticks on the real clock; with leader
-# election enabled its startup tick runs as a background task and can land
-# inside a test that stages its own due-now jobs, racing the test's
-# claim_run. Tests drive automations via AutomationsService.run_due_jobs
-# with explicit clocks or construct AutomationsScheduler directly.
-os.environ["CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED"] = "false"
-# NOTE: Leader election is intentionally NOT disabled via an env override here.
-# It is default-enabled in production, and a global override would leak into
-# every ``Settings()`` constructed anywhere in the suite — breaking the
-# production-default assertion in test_settings_multi_replica.py. Instead the
-# ambient app lifespan's leader election is replaced with a no-op by the autouse
-# ``_disable_leader_election_startup`` fixture below (see its docstring).
+# NOTE: Background loops (model registry, sticky cleanup, quota planner,
+# automations, auth guardian, usage refresh, ...) and leader election are
+# intentionally NOT disabled via ``CODEX_LB_*_ENABLED`` env overrides here. They
+# are default-enabled in production, and a global override would leak into every
+# ``Settings()`` constructed anywhere in the suite — breaking production-default
+# assertions such as test_settings_multi_replica.py — while silently turning
+# into a no-op the day a toggle is constantized. Instead the ambient app
+# lifespan's scheduler builders are replaced with no-ops by the autouse
+# ``_disable_background_loop_schedulers`` fixture and its leader election by
+# ``_disable_leader_election_startup`` (see their docstrings below).
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
@@ -51,6 +48,33 @@ class _NoopScheduler:
 
     async def stop(self) -> None:
         return None
+
+
+# Every background loop the app lifespan builds through an ``app.main``
+# ``build_*_scheduler`` seam and then ``start()``s. The autouse
+# ``_disable_background_loop_schedulers`` fixture swaps each builder for a
+# ``_NoopScheduler`` factory so the ambient test lifespan never starts them; a
+# scheduler that does real work in the suite (external GitHub/npm lookups,
+# upstream usage polls, no-op planner decision rows, real-clock automation
+# ticks racing a test's own due-now jobs) shows up as SQLite lock flakes and
+# cross-test poisoning. tests/unit/test_background_loop_harness.py pins this
+# tuple against the builders ``app.main`` actually imports, so adding a loop
+# without classifying it here fails the suite instead of silently running.
+# Tests that exercise a scheduler construct it directly or patch the builder
+# themselves (e.g. test_otel, test_telemetry_consent,
+# test_model_registry_replication) and keep working.
+BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
+    "build_usage_refresh_scheduler",
+    "build_model_refresh_scheduler",
+    "build_sticky_session_cleanup_scheduler",
+    "build_quota_planner_scheduler",
+    "build_auth_guardian_scheduler",
+    "build_automations_scheduler",
+    "build_rate_limit_reset_credits_scheduler",
+    "build_account_usage_rollup_scheduler",
+    "build_data_retention_scheduler",
+    "build_telemetry_scheduler",
+)
 
 
 class _NoopLeaderElection:
@@ -164,7 +188,6 @@ async def app_instance(_reset_db_state, monkeypatch):
         return None
 
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
-    monkeypatch.setattr(main_module, "build_rate_limit_reset_credits_scheduler", lambda: _NoopScheduler())
     app = create_app()
     yield app
     await _reap_leaked_http_bridge_recovery_settlement_tasks(app)
@@ -192,38 +215,56 @@ def _disable_account_usage_summary_cache(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _disable_rate_limit_reset_credits_scheduler_startup(monkeypatch):
+def _disable_background_loop_schedulers(monkeypatch) -> tuple[str, ...]:
+    """Replace every ambient app-lifespan background loop with a no-op.
+
+    The lifespan in ``app.main`` resolves each ``build_*_scheduler`` name from
+    its own module globals at startup, so patching those names is enough to
+    keep the loops from ever starting — without touching ``Settings`` (unit
+    tests still observe the real production defaults such as
+    ``automations_scheduler_enabled is True``) and without depending on a
+    ``CODEX_LB_*_ENABLED`` env override that would silently stop working once
+    the toggle behind it is constantized. Returns the patched builder names so
+    the coverage test can assert the seam is complete.
+    """
     import app.main as main_module
 
-    monkeypatch.setattr(main_module, "build_rate_limit_reset_credits_scheduler", lambda: _NoopScheduler())
+    for builder_name in BACKGROUND_LOOP_BUILDERS:
+        monkeypatch.setattr(main_module, builder_name, lambda: _NoopScheduler())
+    return BACKGROUND_LOOP_BUILDERS
 
 
 @pytest.fixture(autouse=True)
-def _disable_account_usage_rollup_scheduler_startup(monkeypatch):
-    import app.main as main_module
+def _disable_request_path_usage_refresh(request, monkeypatch):
+    """Turn the request-path usage refreshes into no-ops.
 
-    monkeypatch.setattr(main_module, "build_account_usage_rollup_scheduler", lambda: _NoopScheduler())
+    Background usage refresh is always on in production (the env kill switch
+    was constantized; issue #1340), and it is not only the scheduler's loop:
+    ``UsageUpdater.refresh_accounts`` runs on account import and
+    ``UsageUpdater.request_refresh`` after a streamed ``usage_limit_reached``.
+    Left live, every imported account would fetch usage from the unreachable
+    test upstream (measured 20-30 s per import). Tests that exercise the
+    updater itself opt out with ``@pytest.mark.usage_refresh_request_path``.
+    """
+    if request.node.get_closest_marker("usage_refresh_request_path") is not None:
+        return
+    from app.modules.usage.updater import UsageUpdater
 
+    async def _noop_refresh_accounts(
+        self, accounts, latest_usage, *, own_singleflight_sessions=False, join_existing=None
+    ):
+        del self, accounts, latest_usage, own_singleflight_sessions, join_existing
+        return False
 
-@pytest.fixture(autouse=True)
-def _disable_data_retention_scheduler_startup(monkeypatch):
-    import app.main as main_module
-
-    monkeypatch.setattr(main_module, "build_data_retention_scheduler", lambda: _NoopScheduler())
-
-
-@pytest.fixture(autouse=True)
-def _disable_telemetry_scheduler_startup(monkeypatch):
-    import app.main as main_module
-
-    monkeypatch.setattr(main_module, "build_telemetry_scheduler", lambda: _NoopScheduler())
+    monkeypatch.setattr(UsageUpdater, "refresh_accounts", _noop_refresh_accounts)
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(lambda account_id: None))
 
 
 @pytest.fixture(autouse=True)
 def _disable_leader_election_startup(monkeypatch):
     """Replace the ambient app-lifespan leader election with a no-op.
 
-    Scoped exactly like the sibling ``_disable_*_scheduler_startup`` fixtures:
+    Scoped exactly like the sibling ``_disable_background_loop_schedulers`` fixture:
     it swaps what ``get_leader_election()`` resolves to (both the reference the
     app lifespan imported into ``app.main`` and the source-module singleton
     every scheduler resolves via ``importlib``), so the lifespan's release

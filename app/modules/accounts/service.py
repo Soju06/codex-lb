@@ -347,7 +347,7 @@ class AccountsService:
 
         usage_written = False
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
-            usage_written = await self._usage_updater.force_refresh(account, ignore_refresh_disabled=True)
+            usage_written = await self._usage_updater.force_refresh(account)
             if usage_written:
                 await refresh_usage_cap_caches_after_write()
             else:
@@ -724,10 +724,7 @@ class AccountsService:
 
         usage_refresh_fetch_succeeded: bool | None = None
         if self._usage_repo and self._usage_updater:
-            usage_refresh_result = await self._usage_updater.force_refresh_result(
-                probe_account,
-                ignore_refresh_disabled=True,
-            )
+            usage_refresh_result = await self._usage_updater.force_refresh_result(probe_account)
             usage_refresh_fetch_succeeded = usage_refresh_result.fetch_succeeded
             if usage_refresh_result.usage_written:
                 await refresh_usage_cap_caches_after_write()

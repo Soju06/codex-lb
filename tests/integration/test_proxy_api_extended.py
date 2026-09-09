@@ -3244,7 +3244,7 @@ async def test_wrap_source_responses_native_codex_preserves_codex_events_and_kee
             b'data: {"type":"response.completed","response":{"id":"resp_codex_src","output":[]}}\n\n'
         )
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0.01, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0.01)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
     monkeypatch.setattr(
         proxy_api_module,
@@ -3283,7 +3283,7 @@ async def test_wrap_source_responses_closes_source_on_early_error_and_client_clo
         finally:
             closed.append("source")
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3339,7 +3339,7 @@ async def test_wrap_source_responses_closes_raw_source_after_initial_heartbeat_d
         async def aclose(self) -> None:
             self.closed = True
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     raw_source = _RawSource()
@@ -3365,7 +3365,7 @@ async def test_source_stream_retry_control_block_keeps_truncation_failure(monkey
         yield b"retry: 1000\n\n"
         yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_ctrl"}}\n\n'
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3389,7 +3389,7 @@ async def test_source_stream_data_substring_in_field_value_keeps_truncation_fail
         yield b"id: data:1\n\n"
         yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_idfield"}}\n\n'
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3413,7 +3413,7 @@ async def test_source_stream_unicode_separator_in_field_value_keeps_truncation_f
         yield "id: metadata\u2028data:oops\n\n".encode("utf-8")
         yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_u2028"}}\n\n'
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3436,7 +3436,7 @@ async def test_source_stream_bare_data_field_suppresses_synthetic_terminal(monke
     async def bare_data_body():
         yield b"data\n\n"
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3468,7 +3468,7 @@ async def test_wrap_source_responses_preserves_crlf_framing_of_unchanged_events(
             b'data: {"type":"response.completed","response":{"id":"resp_crlf_frame","output":[]}}\n\n'
         )
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [

@@ -350,8 +350,7 @@ async def test_force_probe_advances_usage_freshness_without_changing_oauth_refre
         del self, access_token, chatgpt_account_id, model
         return 200
 
-    async def _force_refresh_with_new_snapshot(self, account, *, ignore_refresh_disabled=False):
-        assert ignore_refresh_disabled is True
+    async def _force_refresh_with_new_snapshot(self, account):
         await self._usage_repo.add_account_snapshot(
             account.id,
             [

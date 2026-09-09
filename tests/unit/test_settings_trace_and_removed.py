@@ -92,8 +92,10 @@ def test_removed_settings_tuple_covers_the_current_warning_batch():
     # Only the batches removed in the most recent release stay listed; names
     # whose one-release warning window has passed are pruned. Six names from
     # remove-dead-env-settings + CODEX_LB_UPSTREAM_STREAM_TRANSPORT
-    # (remove-upstream-stream-transport-env: the dashboard owns the value).
-    assert len(_REMOVED_SETTINGS) == 7
+    # (remove-upstream-stream-transport-env: the dashboard owns the value)
+    # + 27 never-tuned core tunables (constantize-core-tunables)
+    # + seven K2 bridge names (constantize-session-bridge-tunables).
+    assert len(_REMOVED_SETTINGS) == 34 + 7
     assert all(name.startswith("CODEX_LB_") for name in _REMOVED_SETTINGS)
     assert len(set(_REMOVED_SETTINGS)) == len(_REMOVED_SETTINGS)
 
@@ -166,3 +168,79 @@ def test_upstream_stream_transport_env_is_removed_and_ignored(monkeypatch):
     settings = Settings()
     assert not hasattr(settings, "upstream_stream_transport")
     assert "CODEX_LB_UPSTREAM_STREAM_TRANSPORT" in warn_removed_settings({"CODEX_LB_UPSTREAM_STREAM_TRANSPORT": "http"})
+
+
+CONSTANTIZED_CORE_TUNABLE_ENV_NAMES = (
+    "CODEX_LB_UPSTREAM_COMPACT_TIMEOUT_SECONDS",
+    "CODEX_LB_MAX_SSE_EVENT_BYTES",
+    "CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES",
+    "CODEX_LB_OAUTH_TIMEOUT_SECONDS",
+    "CODEX_LB_TOKEN_REFRESH_TIMEOUT_SECONDS",
+    "CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS",
+    "CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS",
+    "CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS",
+    "CODEX_LB_USAGE_FETCH_TIMEOUT_SECONDS",
+    "CODEX_LB_USAGE_FETCH_MAX_RETRIES",
+    "CODEX_LB_USAGE_REFRESH_ENABLED",
+    "CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS",
+    "CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS",
+    "CODEX_LB_LIVE_USAGE_INGESTION_ENABLED",
+    "CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS",
+    "CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED",
+    "CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED",
+    "CODEX_LB_MODEL_REGISTRY_ENABLED",
+    "CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES",
+    "CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES",
+    "CODEX_LB_IMAGE_INLINE_FETCH_ENABLED",
+    "CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS",
+    "CODEX_LB_IMAGES_DEFAULT_MODEL",
+    "CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED",
+    "CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT",
+    "CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT",
+    "CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT",
+)
+
+
+def test_constantized_core_tunables_are_listed_and_ignored(monkeypatch):
+    assert len(CONSTANTIZED_CORE_TUNABLE_ENV_NAMES) == 27
+    for name in CONSTANTIZED_CORE_TUNABLE_ENV_NAMES:
+        assert name in _REMOVED_SETTINGS
+        # Values that the removed validators used to reject must be inert now.
+        monkeypatch.setenv(name, "not-a-number")
+    settings = Settings()
+    for name in CONSTANTIZED_CORE_TUNABLE_ENV_NAMES:
+        assert not hasattr(settings, name.removeprefix("CODEX_LB_").lower())
+    # Kept on purpose: still a real setting (see the constantize-core-tunables change).
+    assert settings.token_refresh_interval_days == 8
+    assert settings.rate_limit_reset_credits_refresh_enabled is True
+    assert settings.proxy_response_create_limit == 256
+
+
+# K2 bridge (constantize-session-bridge-tunables)
+_K2_BRIDGE_REMOVED_NAMES = (
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ANCHOR_POISON_FAILURE_THRESHOLD",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED",
+)
+
+
+def test_constantized_bridge_tunables_are_listed_and_ignored(monkeypatch, caplog):
+    for name in _K2_BRIDGE_REMOVED_NAMES:
+        assert name in _REMOVED_SETTINGS
+        monkeypatch.setenv(name, "1")
+
+    settings = Settings()
+    for name in _K2_BRIDGE_REMOVED_NAMES:
+        assert not hasattr(settings, name.removeprefix("CODEX_LB_").lower())
+
+    with caplog.at_level(logging.WARNING, logger="app.core.config.settings"):
+        found = warn_removed_settings({name: "1" for name in _K2_BRIDGE_REMOVED_NAMES})
+
+    assert found == list(_K2_BRIDGE_REMOVED_NAMES)
+
+
+# end K2 bridge

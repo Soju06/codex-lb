@@ -451,11 +451,15 @@ class Settings(BaseSettings):
     leader_election_ttl_seconds: int = Field(default=60, ge=5)
 
     # Circuit breaker (failure threshold and recovery timeout are fixed
-    # constants in ``app/core/resilience/circuit_breaker.py``)
+    # constants in ``app/core/resilience/circuit_breaker.py``).
+    # T3 → dashboard (deprecated env alias, remove next minor): the
+    # ``dashboard_settings.circuit_breaker_enabled`` column wins when set.
     circuit_breaker_enabled: bool = False
 
     # Soft drain & deterministic failover (drain/probe thresholds are fixed
-    # constants in ``app/core/balancer/logic.py``)
+    # constants in ``app/core/balancer/logic.py``).
+    # T3 → dashboard (deprecated env alias, remove next minor): the same-name
+    # ``dashboard_settings`` columns win when set.
     soft_drain_enabled: bool = True
     deterministic_failover_enabled: bool = True
 

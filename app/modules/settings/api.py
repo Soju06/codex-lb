@@ -23,6 +23,7 @@ from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError, DashboardSettingsConflictError
+from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint, sends_plaintext_credentials
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
@@ -220,6 +221,10 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         usage_history_retention_days=settings.usage_history_retention_days,
         request_log_retention_override_days=settings.request_log_retention_override_days,
         usage_history_retention_override_days=settings.usage_history_retention_override_days,
+        # C2-3 resilience toggles
+        soft_drain_enabled=settings.soft_drain_enabled,
+        deterministic_failover_enabled=settings.deterministic_failover_enabled,
+        circuit_breaker_enabled=settings.circuit_breaker_enabled,
         version=settings.version,
         provenance={
             name: SettingProvenance(source=resolved.source, env_value=resolved.env_value, default=resolved.default)
@@ -956,6 +961,28 @@ async def update_settings(
                     "usage_history_retention_override_days" in payload.model_fields_set
                     and payload.usage_history_retention_override_days is None
                 ),
+                # C2-3 resilience toggles: tri-state via model_fields_set.
+                soft_drain_enabled=(
+                    payload.soft_drain_enabled if "soft_drain_enabled" in payload.model_fields_set else None
+                ),
+                clear_soft_drain_enabled=(
+                    "soft_drain_enabled" in payload.model_fields_set and payload.soft_drain_enabled is None
+                ),
+                deterministic_failover_enabled=(
+                    payload.deterministic_failover_enabled
+                    if "deterministic_failover_enabled" in payload.model_fields_set
+                    else None
+                ),
+                clear_deterministic_failover_enabled=(
+                    "deterministic_failover_enabled" in payload.model_fields_set
+                    and payload.deterministic_failover_enabled is None
+                ),
+                circuit_breaker_enabled=(
+                    payload.circuit_breaker_enabled if "circuit_breaker_enabled" in payload.model_fields_set else None
+                ),
+                clear_circuit_breaker_enabled=(
+                    "circuit_breaker_enabled" in payload.model_fields_set and payload.circuit_breaker_enabled is None
+                ),
             ),
             # CAS anchor: omitted fields above were merged from `current`
             # (version checked against expectedVersion when supplied), so the
@@ -1027,9 +1054,18 @@ async def update_settings(
             "limit_warmup_staggered_idle_enabled",
             "request_log_retention_override_days",
             "usage_history_retention_override_days",
+            # C2-3 resilience toggles
+            "soft_drain_enabled",
+            "deterministic_failover_enabled",
+            "circuit_breaker_enabled",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
+    # C2-3 resilience toggles: storing the inherited value (or clearing it)
+    # changes ownership without changing the effective value; audit that too.
+    for field_name in RESILIENCE_TOGGLE_SETTINGS:
+        if current.provenance[field_name] != updated.provenance[field_name] and field_name not in changed_fields:
+            changed_fields.append(field_name)
     capacity_override_fields = (
         "proxy_account_response_create_limit",
         "proxy_account_stream_limit",

@@ -21,6 +21,7 @@ import { GuestAccessSettings } from "@/features/settings/components/guest-access
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
+import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
@@ -217,6 +218,7 @@ export function SettingsPage() {
                 busy={controlsDisabled}
                 onSave={handleSave}
               />
+              <ResilienceSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               {upstreamProxyQuery.data ? (
                 <UpstreamProxySettings
                   admin={upstreamProxyQuery.data}

@@ -4,48 +4,20 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
 
+# Re-exported: the resolver lives in ``app.core.config.inheritable`` so hot
+# paths in ``app.core`` share it without importing this module.
+from app.core.config.inheritable import InheritableValue as InheritableValue
+from app.core.config.inheritable import SettingScalar as SettingScalar
+from app.core.config.inheritable import SettingSource as SettingSource
+from app.core.config.inheritable import resolve_inheritable as resolve_inheritable
 from app.core.config.settings import Settings, get_settings
+from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
     normalize_additional_quota_key,
 )
-
-type SettingSource = Literal["dashboard", "env", "default"]
-type SettingScalar = int | float | str | bool
-
-
-@dataclass(frozen=True, slots=True)
-class InheritableValue[T: SettingScalar]:
-    """Effective value of a dashboard-tier setting and where it came from.
-
-    ``source`` is ``"dashboard"`` when the dashboard column is non-NULL,
-    ``"env"`` when the column is NULL and the environment value differs from
-    the code default, and ``"default"`` otherwise. ``env_value`` is ``None``
-    for database-only settings that have no environment fallback.
-    """
-
-    value: T
-    source: SettingSource
-    env_value: T | None
-    default: T
-
-
-def resolve_inheritable[T: SettingScalar](
-    column_value: T | None, env_value: T | None, default: T
-) -> InheritableValue[T]:
-    """Resolve one inheritable setting as code default < environment < dashboard.
-
-    This is the only place that combines the three layers; call sites must not
-    re-implement the precedence (``configuration-tiers``).
-    """
-    if column_value is not None:
-        return InheritableValue(column_value, "dashboard", env_value, default)
-    if env_value is not None and env_value != default:
-        return InheritableValue(env_value, "env", env_value, default)
-    return InheritableValue(default, "default", env_value, default)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,10 +78,15 @@ class DashboardSettingsData:
     usage_history_retention_days: int
     request_log_retention_override_days: int | None
     usage_history_retention_override_days: int | None
+    # C2-3 resilience toggles: effective values (dashboard column, else the
+    # deprecated env alias, else the code default); provenance carries the source.
+    soft_drain_enabled: bool
+    deterministic_failover_enabled: bool
+    circuit_breaker_enabled: bool
     version: int
     # Effective value, source and fallbacks of every inheritable setting, keyed
     # by setting name; the settings API exposes it as ``provenance``.
-    provenance: Mapping[str, InheritableValue[int]] = field(default_factory=dict)
+    provenance: Mapping[str, InheritableValue[int] | InheritableValue[bool]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +151,14 @@ class DashboardSettingsUpdateData:
     usage_history_retention_override_days: int | None
     clear_request_log_retention_override: bool
     clear_usage_history_retention_override: bool
+    # C2-3 resilience toggles: tri-state (value = store, clear flag = back to
+    # NULL so the env alias / default applies again, neither = untouched).
+    soft_drain_enabled: bool | None = None
+    clear_soft_drain_enabled: bool = False
+    deterministic_failover_enabled: bool | None = None
+    clear_deterministic_failover_enabled: bool = False
+    circuit_breaker_enabled: bool | None = None
+    clear_circuit_breaker_enabled: bool = False
 
 
 class SettingsService:
@@ -259,6 +244,13 @@ class SettingsService:
             usage_history_retention_days=payload.usage_history_retention_override_days,
             clear_request_log_retention=payload.clear_request_log_retention_override,
             clear_usage_history_retention=payload.clear_usage_history_retention_override,
+            # C2-3 resilience toggles
+            soft_drain_enabled=payload.soft_drain_enabled,
+            clear_soft_drain_enabled=payload.clear_soft_drain_enabled,
+            deterministic_failover_enabled=payload.deterministic_failover_enabled,
+            clear_deterministic_failover_enabled=payload.clear_deterministic_failover_enabled,
+            circuit_breaker_enabled=payload.circuit_breaker_enabled,
+            clear_circuit_breaker_enabled=payload.clear_circuit_breaker_enabled,
         )
         return _settings_data(row)
 
@@ -286,14 +278,26 @@ def _resolve_environment_inheritable(row: DashboardSettings, name: str) -> Inher
     )
 
 
-def _resolve_inheritable_settings(row: DashboardSettings) -> dict[str, InheritableValue[int]]:
-    resolved = {name: _resolve_environment_inheritable(row, name) for name in _ENVIRONMENT_INHERITABLE_SETTINGS}
+def _resolve_environment_toggle(row: DashboardSettings, name: str) -> InheritableValue[bool]:
+    # C2-3 resilience toggles: same precedence as the integer caps, typed bool.
+    default = bool(Settings.model_fields[name].default)
+    return resolve_inheritable(getattr(row, name), bool(getattr(get_settings(), name, default)), default)
+
+
+def _resolve_inheritable_settings(
+    row: DashboardSettings,
+) -> dict[str, InheritableValue[int] | InheritableValue[bool]]:
+    resolved: dict[str, InheritableValue[int] | InheritableValue[bool]] = {
+        name: _resolve_environment_inheritable(row, name) for name in _ENVIRONMENT_INHERITABLE_SETTINGS
+    }
     resolved["request_log_retention_days"] = resolve_inheritable(
         row.request_log_retention_days, None, _RETENTION_DISABLED_DAYS
     )
     resolved["usage_history_retention_days"] = resolve_inheritable(
         row.usage_history_retention_days, None, _RETENTION_DISABLED_DAYS
     )
+    for name in RESILIENCE_TOGGLE_SETTINGS:  # C2-3 resilience toggles
+        resolved[name] = _resolve_environment_toggle(row, name)
     return resolved
 
 
@@ -364,6 +368,10 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         usage_history_retention_days=resolved["usage_history_retention_days"].value,
         request_log_retention_override_days=row.request_log_retention_days,
         usage_history_retention_override_days=row.usage_history_retention_days,
+        # C2-3 resilience toggles
+        soft_drain_enabled=bool(resolved["soft_drain_enabled"].value),
+        deterministic_failover_enabled=bool(resolved["deterministic_failover_enabled"].value),
+        circuit_breaker_enabled=bool(resolved["circuit_breaker_enabled"].value),
         version=row.version,
         provenance=resolved,
     )

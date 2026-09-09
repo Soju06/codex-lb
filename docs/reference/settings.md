@@ -165,11 +165,11 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_PROXY_ACCOUNT_INFLIGHT_PENALTY_PCT` | T3 | `float` | `2.5` |
 | `CODEX_LB_PROXY_ACCOUNT_LEASE_TOKEN_WEIGHT` | T3 | `float` | `1.0` |
 | `CODEX_LB_PROXY_ACCOUNT_LEASE_TTL_SECONDS` | T3 | `float` | `900.0` |
-| `CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT` | T3 | `int` | `4` |
-| `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT` | T3 | `int` | `8` |
-| `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` | T3 | `int` | `1` |
+| `CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT` | T3 (dashboard) | `int` | `4` |
+| `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT` | T3 (dashboard) | `int` | `8` |
+| `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` | T3 (dashboard) | `int` | `1` |
 | `CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS` | T3 | `float` | `10.0` |
-| `CODEX_LB_PROXY_API_KEY_FAIR_SHARE_CONGESTION_THRESHOLD_PCT` | T3 | `int` | `0` |
+| `CODEX_LB_PROXY_API_KEY_FAIR_SHARE_CONGESTION_THRESHOLD_PCT` | T3 (dashboard) | `int` | `0` |
 | `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT` | T3 | `int` | `64` |
 | `CODEX_LB_PROXY_DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT_SECONDS` | T3 | `float` | `120.0` |
 | `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` | T3 | `int` | `1800` |
@@ -293,11 +293,11 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS` | T1 | `int` | `0` |
 | `CODEX_LB_BULKHEAD_DASHBOARD_LIMIT` | T1 | `int` | `50` |
 | `CODEX_LB_BULKHEAD_PROXY_LIMIT` | T1 | `int` | `512` |
-| `CODEX_LB_CIRCUIT_BREAKER_ENABLED` | T3 | `bool` | `False` |
-| `CODEX_LB_DETERMINISTIC_FAILOVER_ENABLED` | T3 | `bool` | `True` |
+| `CODEX_LB_CIRCUIT_BREAKER_ENABLED` | T3 (dashboard) | `bool` | `False` |
+| `CODEX_LB_DETERMINISTIC_FAILOVER_ENABLED` | T3 (dashboard) | `bool` | `True` |
 | `CODEX_LB_MEMORY_REJECT_THRESHOLD_MB` | T1 | `int` | `0` |
 | `CODEX_LB_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` | T1 | `int` | `30` |
-| `CODEX_LB_SOFT_DRAIN_ENABLED` | T3 | `bool` | `True` |
+| `CODEX_LB_SOFT_DRAIN_ENABLED` | T3 (dashboard) | `bool` | `True` |
 
 ## Other
 

@@ -554,6 +554,9 @@ export function createDashboardSettings(
 		guestAccessEnabled: false,
 		guestPasswordConfigured: false,
 		limitWarmupStaggeredIdleEnabled: false,
+		softDrainEnabled: true,
+		deterministicFailoverEnabled: true,
+		circuitBreakerEnabled: false,
 		...overrides,
 	});
 }

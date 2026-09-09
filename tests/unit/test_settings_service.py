@@ -73,6 +73,11 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         "proxy_api_key_fair_share_congestion_threshold_pct": InheritableValue(0, "default", 0, 0),
         "request_log_retention_days": InheritableValue(30, "dashboard", None, 0),
         "usage_history_retention_days": InheritableValue(0, "default", None, 0),
+        # C2-3 resilience toggles: NULL columns, env double without the fields
+        # -> code defaults.
+        "soft_drain_enabled": InheritableValue(True, "default", True, True),
+        "deterministic_failover_enabled": InheritableValue(True, "default", True, True),
+        "circuit_breaker_enabled": InheritableValue(False, "default", False, False),
     }
     # The flat effective fields come from the same resolution.
     assert settings.proxy_account_stream_limit == 12
@@ -264,3 +269,52 @@ def test_dump_additional_quota_routing_policies_canonicalizes_keys_and_filters_i
         }
     )
     assert json.loads(dumped) == {"codex_spark": "burn_first"}
+
+
+# --- C2-3 resilience toggles -------------------------------------------------
+
+
+def test_resolve_inheritable_boolean_toggle_in_each_state() -> None:
+    # NULL column + env differs from the default -> env layer.
+    assert resolve_inheritable(None, False, True) == InheritableValue(False, "env", False, True)
+    # NULL column + env equals the default -> default layer.
+    assert resolve_inheritable(None, True, True) == InheritableValue(True, "default", True, True)
+    # Dashboard value wins, including an explicit False.
+    assert resolve_inheritable(False, True, True) == InheritableValue(False, "dashboard", True, True)
+    assert resolve_inheritable(True, False, False) == InheritableValue(True, "dashboard", False, False)
+
+
+@pytest.mark.asyncio
+async def test_settings_data_resolves_resilience_toggles_with_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = DashboardSettings()
+    row.soft_drain_enabled = None
+    row.deterministic_failover_enabled = None
+    row.circuit_breaker_enabled = True
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            proxy_account_response_create_limit=4,
+            proxy_account_stream_limit=8,
+            proxy_account_stream_recovery_reserve=1,
+            proxy_api_key_fair_share_congestion_threshold_pct=0,
+            soft_drain_enabled=True,
+            deterministic_failover_enabled=False,
+            circuit_breaker_enabled=False,
+        ),
+    )
+    service = SettingsService(cast(SettingsRepository, _Repository()))
+
+    data = await service.get_settings()
+
+    assert data.soft_drain_enabled is True
+    assert data.deterministic_failover_enabled is False
+    assert data.circuit_breaker_enabled is True
+    assert data.provenance["soft_drain_enabled"] == InheritableValue(True, "default", True, True)
+    assert data.provenance["deterministic_failover_enabled"] == InheritableValue(False, "env", False, True)
+    assert data.provenance["circuit_breaker_enabled"] == InheritableValue(True, "dashboard", False, False)

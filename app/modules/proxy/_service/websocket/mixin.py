@@ -89,6 +89,7 @@ from app.core.resilience.network_recovery import (
     ProcessNetworkRecovery,
     process_network_error_code,
 )
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
@@ -1456,6 +1457,9 @@ class _WebSocketMixin:
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         runtime_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
+        # C2-3 resilience toggles: bound for this connection's task; every
+        # upstream connect rebinds from a fresh snapshot.
+        bind_resilience_toggles(settings, startup_settings=runtime_settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         openai_cache_affinity_max_age_seconds = settings.openai_cache_affinity_max_age_seconds
@@ -3599,6 +3603,12 @@ class _WebSocketMixin:
                 request_state.conversation_id,
             ) = _request_log_client_fields(headers)
         base_settings = _facade().get_settings()
+        # C2-3 resilience toggles: fresh dashboard snapshot per upstream connect
+        # (before any runtime lock), bound for the client's breaker gate.
+        resilience = bind_resilience_toggles(
+            await _facade().get_settings_cache().get(),
+            startup_settings=base_settings,
+        )
         deadline = _websocket_connect_deadline(
             request_state,
             _facade()._stream_request_budget_seconds(
@@ -3845,7 +3855,7 @@ class _WebSocketMixin:
                         request_state=request_state,
                         attempt=attempt + 1,
                         max_attempts=max_attempts,
-                        deterministic_failover_enabled=getattr(base_settings, "deterministic_failover_enabled", True),
+                        deterministic_failover_enabled=resilience.deterministic_failover_enabled,
                         require_preferred_account=require_preferred_account,
                     )
                 if action == "failover_next":

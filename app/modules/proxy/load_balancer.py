@@ -58,6 +58,7 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
+from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
@@ -249,6 +250,9 @@ class _SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
+    # C2-3 resilience toggles: resolved once per selection from the dashboard
+    # snapshot passed to ``select_account``; None = inherit the env alias.
+    soft_drain_enabled: bool | None = None
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]:
@@ -577,6 +581,7 @@ class LoadBalancer:
         allow_usage_exhaustion_error: bool = True,
         api_key_id: str | None = None,
         api_key_stream_fair_share_threshold_pct: int = 0,
+        dashboard_settings: object | None = None,
     ) -> AccountSelection:
         if (required_account_is_ownership_constraint or required_continuity_owner) and required_account_id is None:
             raise ValueError("required account ownership flags require required_account_id")
@@ -585,8 +590,11 @@ class LoadBalancer:
         scoped_account_ids = None if account_ids is None else set(account_ids)
         owner_restricted_selection = required_account_is_ownership_constraint or required_continuity_owner
         sticky_selection_may_resolve_owner = sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION
+        # C2-3 resilience toggles: resolved from the caller's dashboard snapshot
+        # (the same one that produced ``concurrency_caps``), never re-read here.
+        resilience = resolve_resilience_toggles(dashboard_settings)
 
-        async def load_selection_inputs() -> _SelectionInputs:
+        async def load_unresolved_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 service_tier=service_tier,
@@ -707,9 +715,14 @@ class LoadBalancer:
                     )
             return selection_inputs
 
+        async def load_selection_inputs() -> _SelectionInputs:
+            # Applied after exclusion/security filtering and on every reload,
+            # so retries and filtered pools keep the dashboard soft-drain value.
+            return replace(await load_unresolved_selection_inputs(), soft_drain_enabled=resilience.soft_drain_enabled)
+
         selection_inputs = await load_selection_inputs()
         caps = concurrency_caps or effective_account_concurrency_caps()
-        circuit_breaker_open = _is_upstream_circuit_breaker_open()
+        circuit_breaker_open = _is_upstream_circuit_breaker_open(resilience.circuit_breaker_enabled)
         if circuit_breaker_open:
             set_degraded("upstream circuit breaker is open")
         elif (
@@ -1401,6 +1414,7 @@ class LoadBalancer:
         stream_reserve_slots: int = 0,
         service_tier: str | None = None,
         observe_only: bool = False,
+        dashboard_settings: object | None = None,
     ) -> AccountSelection:
         outcome = await run_opportunistic_admission(
             self,
@@ -1419,6 +1433,8 @@ class LoadBalancer:
                 record_account_cap_rejection=_record_account_cap_rejection,
                 build_states=_build_states,
                 observe_only=observe_only,
+                # C2-3 resilience toggles: from the caller's dashboard snapshot.
+                soft_drain_enabled=resolve_resilience_toggles(dashboard_settings).soft_drain_enabled,
             ),
         )
         return AccountSelection(
@@ -1565,6 +1581,7 @@ class LoadBalancer:
         *,
         required_account_id: str | None,
         redact_sensitive_details: bool,
+        soft_drain_enabled: bool | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]:
         self._reclaim_stale_account_leases_locked(
             redact_sensitive_details=redact_sensitive_details,
@@ -1580,6 +1597,13 @@ class LoadBalancer:
             routing_policy_override=selection_inputs.routing_policy_override,
             ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
             encryptor=self._encryptor,
+            # C2-3 resilience toggles: an explicit value (opportunistic admission)
+            # wins; selection carries it on its inputs.
+            soft_drain_enabled=(
+                soft_drain_enabled
+                if soft_drain_enabled is not None
+                else getattr(selection_inputs, "soft_drain_enabled", None)
+            ),
         )
         if required_account_id is None:
             return states, account_map
@@ -1818,6 +1842,8 @@ class LoadBalancer:
                 primary_used=normalized_usage.primary_used,
             )
             routing_policy = _normalize_account_routing_policy(account.routing_policy)
+        # C2-3 resilience toggles: one dashboard snapshot before the lock.
+        resilience = resolve_resilience_toggles(await get_settings_cache().get())
 
         async with lock:
             runtime = self._runtime.setdefault(account_id, RuntimeState())
@@ -1833,12 +1859,12 @@ class LoadBalancer:
                 secondary_entry=effective_secondary_entry,
                 runtime=replace(runtime),
                 now=now,
+                soft_drain_enabled=resilience.soft_drain_enabled,
             )
             account_status = normalized_state.status
             if account_status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED):
                 return
 
-            settings = get_settings()
             was_probe_eligible = runtime.health_tier == HEALTH_TIER_PROBING
             if was_probe_eligible and (runtime.error_count > 0 or runtime.last_error_at is not None):
                 runtime.error_count = 0
@@ -1854,7 +1880,7 @@ class LoadBalancer:
                 routing_policy=routing_policy,
                 runtime=runtime,
                 now=now,
-                soft_drain_enabled=getattr(settings, "soft_drain_enabled", True),
+                soft_drain_enabled=resilience.soft_drain_enabled,
             )
             if runtime.health_tier != HEALTH_TIER_PROBING:
                 return
@@ -1875,7 +1901,7 @@ class LoadBalancer:
                 routing_policy=routing_policy,
                 runtime=runtime,
                 now=now,
-                soft_drain_enabled=getattr(settings, "soft_drain_enabled", True),
+                soft_drain_enabled=resilience.soft_drain_enabled,
             )
 
     def _state_for(self, account: Account) -> AccountState:
@@ -2046,6 +2072,7 @@ def _build_states(
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
     encryptor: TokenEncryptor | None = None,
+    soft_drain_enabled: bool | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     now = REAL_CLOCK.time() if now is None else now
     states: list[AccountState] = []
@@ -2069,6 +2096,7 @@ def _build_states(
                 if account.status == AccountStatus.REAUTH_REQUIRED and encryptor is not None
                 else None
             ),
+            soft_drain_enabled=soft_drain_enabled,
             now=now,
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
@@ -2206,6 +2234,7 @@ def _state_from_account(
     runtime: RuntimeState,
     access_token_expires_at: float | None = None,
     now: float | None = None,
+    soft_drain_enabled: bool | None = None,
 ) -> AccountState:
     now = REAL_CLOCK.time() if now is None else now
     routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
@@ -2470,6 +2499,10 @@ def _state_from_account(
     )
 
     settings = get_settings()
+    if soft_drain_enabled is None:
+        # C2-3 resilience toggles: callers on the request path pass the
+        # dashboard value; anything else inherits the env alias / default.
+        soft_drain_enabled = resolve_resilience_toggles(None, startup_settings=settings).soft_drain_enabled
     new_tier = _sync_runtime_health_tier(
         account_id=account.id,
         status=status,
@@ -2478,7 +2511,7 @@ def _state_from_account(
         routing_policy=routing_policy,
         runtime=runtime,
         now=now,
-        soft_drain_enabled=getattr(settings, "soft_drain_enabled", True),
+        soft_drain_enabled=soft_drain_enabled,
     )
 
     inflight_pressure_pct = (runtime.inflight_response_creates + runtime.inflight_streams) * getattr(
@@ -2932,9 +2965,9 @@ def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
     return current_time - timedelta(seconds=interval_seconds)
 
 
-def _is_upstream_circuit_breaker_open() -> bool:
-    settings = get_settings()
-    if not getattr(settings, "circuit_breaker_enabled", False):
+def _is_upstream_circuit_breaker_open(circuit_breaker_enabled: bool) -> bool:
+    # C2-3 resilience toggles: the caller resolved the flag from its snapshot.
+    if not circuit_breaker_enabled:
         return False
     return are_all_account_circuit_breakers_open()
 

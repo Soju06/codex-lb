@@ -26,7 +26,7 @@ The remaining settings (timeouts, connection pools, bulkheads, session bridge, l
 - [Database backends](database.md)
 - [Troubleshooting](troubleshooting.md)
 
-Runtime behavior such as the routing strategy, upstream stream transport, and per-account limits is configured live in the dashboard under **Settings** — no restart required.
+Runtime behavior such as the routing strategy, upstream stream transport, and per-account limits is configured live in the dashboard under **Settings** — no restart required. The resilience toggles (soft drain, deterministic failover, circuit breaker) live there too, under **Settings → Advanced → Resilience**; their `CODEX_LB_*` variables remain a deprecated fallback for one release while the dashboard value is unset.
 
 ## Where settings live
 

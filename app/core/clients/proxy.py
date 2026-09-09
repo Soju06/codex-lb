@@ -99,6 +99,7 @@ from app.core.resilience.network_recovery import (
     is_proxy_endpoint_failure,
     process_network_error_code,
 )
+from app.core.resilience.toggles import current_resilience_toggles
 from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.usage.live_hub import publish_live_usage
@@ -365,6 +366,19 @@ def _codex_route_transport_error_message(
     return codex_transport_error_message(operation, endpoint_id, exc)
 
 
+def _account_circuit_breaker(account_id: str | None, settings: Settings) -> CircuitBreaker | None:
+    """Return the account's breaker when the dashboard toggle is on, else ``None``.
+
+    C2-3 resilience toggles: breakers are constructed unconditionally; *use* is
+    gated per request by ``circuit_breaker_enabled`` from the dashboard
+    snapshot the request path bound (``settings`` is only the env fallback for
+    an unbound task).
+    """
+    if not account_id or not current_resilience_toggles(startup_settings=settings).circuit_breaker_enabled:
+        return None
+    return get_circuit_breaker_for_account(account_id)
+
+
 @asynccontextmanager
 async def _service_circuit_breaker_context(
     cm: AsyncContextManager[aiohttp.ClientResponse],
@@ -374,7 +388,7 @@ async def _service_circuit_breaker_context(
 ) -> AsyncIterator[aiohttp.ClientResponse]:
     """Wrap an async context manager with circuit breaker protection."""
     effective_settings = settings or get_settings()
-    cb = get_circuit_breaker_for_account(account_id, effective_settings) if account_id else None
+    cb = _account_circuit_breaker(account_id, effective_settings)
     is_probe = False
     if cb is not None:
         try:
@@ -2503,7 +2517,7 @@ async def _open_upstream_websocket(
     hold_half_open_probe: bool = False,
 ) -> tuple[AsyncContextManager[aiohttp.ClientWebSocketResponse], aiohttp.ClientWebSocketResponse]:
     settings = get_settings()
-    circuit_breaker = get_circuit_breaker_for_account(account_id, settings) if account_id else None
+    circuit_breaker = _account_circuit_breaker(account_id, settings)
     is_probe = False
     if circuit_breaker is not None:
         is_probe = await circuit_breaker.pre_call_check()
@@ -2812,8 +2826,7 @@ async def _stream_responses_via_websocket(
     lifecycle_recorded = False
     seen_terminal = False
     settings = get_settings()
-    if account_id is not None:
-        circuit_breaker = get_circuit_breaker_for_account(account_id, settings)
+    circuit_breaker = _account_circuit_breaker(account_id, settings)
 
     async def _record_lifecycle_success() -> None:
         nonlocal lifecycle_recorded

@@ -1129,6 +1129,11 @@ class DashboardSettings(Base):
         Integer,
         nullable=True,
     )
+    # C2-3 resilience toggles: NULL inherits the deprecated ``CODEX_LB_*`` env
+    # alias (then the code default); a non-NULL value is dashboard-owned.
+    soft_drain_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    deterministic_failover_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    circuit_breaker_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     version: Mapped[int] = mapped_column(
         Integer,
         default=1,

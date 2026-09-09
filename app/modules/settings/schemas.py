@@ -117,6 +117,12 @@ class DashboardSettingsResponse(DashboardModel):
     additional_quota_policies: list[AdditionalQuotaPolicy] = Field(default_factory=list)
     guest_access_enabled: bool
     guest_password_configured: bool
+    # C2-3 resilience toggles: effective values; ``provenance[<name>]`` says
+    # whether each comes from the dashboard, the deprecated env alias or the
+    # code default.
+    soft_drain_enabled: bool
+    deterministic_failover_enabled: bool
+    circuit_breaker_enabled: bool
     version: int = Field(ge=1)
     # Provenance of every inheritable setting keyed by its setting name (the
     # ``dashboard_settings`` column / ``Settings`` field name). Additive: the
@@ -128,8 +134,9 @@ class DashboardSettingsResponse(DashboardModel):
 class DashboardSettingsUpdateRequest(DashboardModel):
     """Partial update of the dashboard settings.
 
-    Inheritable settings (the four account-capacity caps and the two retention
-    overrides) are tri-state, decided by ``model_fields_set``: a field that is
+    Inheritable settings (the four account-capacity caps, the two retention
+    overrides and the three resilience toggles) are tri-state, decided by
+    ``model_fields_set``: a field that is
     omitted is left unchanged, an explicit ``null`` clears the dashboard value
     so the setting returns to inheriting the environment value or code default
     (``provenance[<name>].source`` becomes ``"env"`` or ``"default"``), and a
@@ -199,6 +206,12 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     # value = store the override.
     request_log_retention_override_days: int | None = Field(default=None, ge=0, le=3650)
     usage_history_retention_override_days: int | None = Field(default=None, ge=0, le=3650)
+    # C2-3 resilience toggles: tri-state via ``model_fields_set`` (absent =
+    # unchanged, null = clear the dashboard value and inherit the deprecated
+    # env alias / code default, value = store).
+    soft_drain_enabled: bool | None = None
+    deterministic_failover_enabled: bool | None = None
+    circuit_breaker_enabled: bool | None = None
 
     @field_validator("request_log_retention_override_days")
     @classmethod

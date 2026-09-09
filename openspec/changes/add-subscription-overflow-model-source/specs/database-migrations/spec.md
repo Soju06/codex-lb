@@ -2,7 +2,7 @@
 
 ### Requirement: Subscription overflow schema
 
-The database SHALL persist the subscription-exhaustion overflow designation and pin state as ORM metadata and a single Alembic revision, `20260908_000000_add_subscription_overflow`, that sits on the current head and produces the same logical schema on SQLite and PostgreSQL. The revision MUST add two nullable `dashboard_settings` columns, `subscription_overflow_source_id` (string, no foreign key) and `subscription_overflow_drain_until` (naive UTC timestamp), and MUST create the `model_source_pins` table with `pin_key` as primary key, non-null `kind`, non-null `source_id` without a foreign key, nullable `api_key_id`, non-null timezone-aware `created_at`, `last_seen_at`, `expires_at`, and `purge_at`, and an index named `ix_model_source_pins_purge_at` on `purge_at`. The revision MUST NOT add server defaults, backfill, or seed rows; it MUST be idempotent against a partially applied schema; and its downgrade MUST remove the index, the table, and both columns. Until the overflow routing stages are specified, no request-path component MAY read or write the new columns or table; only dashboard settings workflows specified by the model-source-routing requirements may persist the designation and deadline or read pin counts.
+The database SHALL persist the subscription-exhaustion overflow designation and pin state as ORM metadata and through the canonical Alembic revision `20260908_000000_add_subscription_overflow`, producing the same logical schema on SQLite and PostgreSQL. The canonical revision MUST add two nullable `dashboard_settings` columns, `subscription_overflow_source_id` (string, no foreign key) and `subscription_overflow_drain_until` (naive UTC timestamp), and MUST create the `model_source_pins` table with `pin_key` as primary key, non-null `kind`, non-null `source_id` without a foreign key, nullable `api_key_id`, non-null timezone-aware `created_at`, `last_seen_at`, `expires_at`, and `purge_at`, and an index named `ix_model_source_pins_purge_at` on `purge_at`. It MUST NOT add server defaults, backfill, or seed rows; it MUST be idempotent against a partially applied schema; and its downgrade MUST remove the index, the table, and both columns. A forward repair descendant MUST replay the canonical overflow and transport upgrades for databases already stamped at the usage-cap revision before that revision was reparented behind them, and its downgrade MUST NOT remove schema owned by the canonical revisions. Until the overflow routing stages are specified, no request-path component MAY read or write the new columns or table; only dashboard settings workflows specified by the model-source-routing requirements may persist the designation and deadline or read pin counts.
 
 #### Scenario: Existing install is migrated
 
@@ -11,6 +11,14 @@ The database SHALL persist the subscription-exhaustion overflow designation and 
 - **THEN** `dashboard_settings` contains nullable `subscription_overflow_source_id` and `subscription_overflow_drain_until`
 - **AND** the existing row keeps both values NULL
 - **AND** `model_source_pins` exists, is empty, and carries `ix_model_source_pins_purge_at`
+
+#### Scenario: Reparented stamped database is repaired
+
+- **GIVEN** a database stamped at `20260907_000000_add_account_usage_caps` before the overflow and transport revisions became its ancestors
+- **WHEN** migrations run to head
+- **THEN** the missing overflow schema is created and the transport sentinel/default migration is applied
+- **AND** schema drift detection passes
+
 
 #### Scenario: Fresh SQLite and PostgreSQL databases converge on one head
 

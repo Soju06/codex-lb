@@ -4,6 +4,7 @@
 - [x] 1.2 Add Alembic revision `20260908_000000_add_subscription_overflow` on the current head with guarded, idempotent upgrade and full downgrade.
 - [x] 1.3 Cover upgrade/downgrade, idempotent re-run against a partially applied schema, and PostgreSQL invalid-index repair in `tests/integration/test_migrations.py`.
 - [x] 1.4 Run migration policy and drift checks on SQLite and PostgreSQL and strict OpenSpec validation.
+- [x] 1.5 Add a forward repair migration and regression for databases stamped at the usage-cap revision before it was reparented behind the overflow/transport merge.
 
 ## 2. Designation settings, preflight, drain deadline, dashboard (WP-B)
 

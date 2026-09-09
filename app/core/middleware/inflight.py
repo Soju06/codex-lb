@@ -6,6 +6,15 @@ from types import ModuleType
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.core.resilience.overload import (
+    deny_websocket_with_http_response,
+    is_proxy_path,
+    local_unavailable_error,
+    merge_retry_after_headers,
+)
+
+_DRAIN_MESSAGE = "Server is draining"
+
 _DRAIN_ALLOWED_HTTP_PATHS = frozenset(
     {
         "/health/live",
@@ -60,7 +69,21 @@ class InFlightMiddleware:
             shutdown_state.increment_in_flight()
             if shutdown_state.is_draining():
                 shutdown_state.decrement_in_flight()
-                await send({"type": "websocket.close", "code": 1013, "reason": "Server is draining"})
+                # ``websocket.close`` before the handshake is surfaced by ASGI
+                # servers as an opaque HTTP 403, which SDK clients treat as a
+                # terminal access error. Deny the upgrade with the same
+                # retryable 503 + Retry-After the overload bulkhead uses so the
+                # drain reads as transient on every client.
+                path = scope.get("path", "")
+                await deny_websocket_with_http_response(
+                    receive,
+                    send,
+                    status_code=503,
+                    payload=(
+                        local_unavailable_error(_DRAIN_MESSAGE) if is_proxy_path(path) else {"detail": _DRAIN_MESSAGE}
+                    ),
+                    headers=merge_retry_after_headers(),
+                )
                 return
 
             if scope.get("path", "") not in _IN_FLIGHT_WEBSOCKET_PATHS:
@@ -90,7 +113,7 @@ class InFlightMiddleware:
                     content={
                         "error": {
                             "type": "service_unavailable",
-                            "message": "Server is draining",
+                            "message": _DRAIN_MESSAGE,
                         }
                     },
                 )

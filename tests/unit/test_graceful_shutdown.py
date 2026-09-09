@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Iterator
 from importlib import import_module
+from typing import cast
 
 import pytest
 
@@ -899,7 +901,17 @@ async def test_in_flight_middleware_checks_websocket_drain_after_registration(
     await middleware({"type": "websocket", "path": "/v1/responses"}, ws_receive, ws_send)
 
     assert app_called is False
-    assert sent_messages == [{"type": "websocket.close", "code": 1013, "reason": "Server is draining"}]
+    # A pre-handshake ``websocket.close`` reaches the client as an opaque HTTP
+    # 403; the drain must deny the upgrade with a retryable 503 instead.
+    assert [message["type"] for message in sent_messages] == [
+        "websocket.http.response.start",
+        "websocket.http.response.body",
+    ]
+    assert sent_messages[0]["status"] == 503
+    assert dict(cast(list[tuple[bytes, bytes]], sent_messages[0]["headers"]))[b"retry-after"] == b"5"
+    payload = json.loads(cast(bytes, sent_messages[1]["body"]).decode("utf-8"))
+    assert payload["error"]["code"] == "proxy_unavailable"
+    assert payload["error"]["message"] == "Server is draining"
     assert shutdown_state.get_in_flight() == 0
 
 
@@ -947,7 +959,17 @@ async def test_in_flight_middleware_rejects_new_websocket_during_drain() -> None
     await middleware({"type": "websocket", "path": "/v1/responses"}, ws_receive, ws_send)
 
     assert app_called is False
-    assert sent_messages == [{"type": "websocket.close", "code": 1013, "reason": "Server is draining"}]
+    # A pre-handshake ``websocket.close`` reaches the client as an opaque HTTP
+    # 403; the drain must deny the upgrade with a retryable 503 instead.
+    assert [message["type"] for message in sent_messages] == [
+        "websocket.http.response.start",
+        "websocket.http.response.body",
+    ]
+    assert sent_messages[0]["status"] == 503
+    assert dict(cast(list[tuple[bytes, bytes]], sent_messages[0]["headers"]))[b"retry-after"] == b"5"
+    payload = json.loads(cast(bytes, sent_messages[1]["body"]).decode("utf-8"))
+    assert payload["error"]["code"] == "proxy_unavailable"
+    assert payload["error"]["message"] == "Server is draining"
     assert shutdown_state.get_in_flight() == 0
 
 

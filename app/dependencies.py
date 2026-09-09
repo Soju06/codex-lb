@@ -354,7 +354,5 @@ def get_automations_context(
     )
 
 
-def get_reports_caches(request: Request) -> ReportsCaches:
-    if not hasattr(request.app.state, "reports_caches"):
-        request.app.state.reports_caches = ReportsCaches()
+async def get_reports_caches(request: Request) -> ReportsCaches:
     return request.app.state.reports_caches

@@ -28,19 +28,30 @@ class ReportCache[T]:
         self._ttl = ttl_seconds
         self._capacity = max_entries
         self._entries: OrderedDict[ReportCacheKey, tuple[float, T]] = OrderedDict()
-        self._lock = asyncio.Lock()
+        self._compute_slot = asyncio.Semaphore(1)
+
+    def _cached(self, key: ReportCacheKey) -> tuple[float, T] | None:
+        # All state access runs synchronously on the application's event loop.
+        # No await occurs while inspecting, pruning or publishing entries.
+        now = monotonic()
+        for expired in [key for key, (expires, _) in self._entries.items() if expires <= now]:
+            del self._entries[expired]
+        if key in self._entries:
+            self._entries.move_to_end(key)
+            return self._entries[key]
+        return None
 
     async def get(self, key: ReportCacheKey, compute: Callable[[], Awaitable[T]]) -> T:
-        # No detached tasks or shared AsyncSession. Cancellation releases the
-        # lock; exceptions never enter the cache. Serial misses bound report
-        # DB concurrency even when callers choose many different filters.
-        async with self._lock:
-            now = monotonic()
-            for expired in [key for key, (expires, _) in self._entries.items() if expires <= now]:
-                del self._entries[expired]
-            if key in self._entries:
-                self._entries.move_to_end(key)
-                return self._entries[key][1]
+        cached = self._cached(key)
+        if cached is not None:
+            return cached[1]
+        # Cache hits bypass the compute limit. Misses recheck after admission
+        # so identical requests reuse the completed result. The caller owns
+        # computation and its AsyncSession; cancellation releases the slot.
+        async with self._compute_slot:
+            cached = self._cached(key)
+            if cached is not None:
+                return cached[1]
             value = await compute()
             self._entries[key] = (monotonic() + self._ttl, value)
             while len(self._entries) > self._capacity:

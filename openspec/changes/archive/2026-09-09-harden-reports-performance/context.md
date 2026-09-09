@@ -8,7 +8,7 @@ Folded middle buckets and raw edges/live tail share one SQL snapshot. The dynami
 
 Speed metrics remain exact for windows up to seven days, using the existing median implementation. Longer windows skip that SQL and expose `speedMetricsAvailable=false`, `speedMetricsMaxDays=7`; legacy numeric speed fields remain zero for compatibility. The UI hides those charts and explains the omission. This change does not rewrite the short-window median algorithm.
 
-The server keeps at most 64 successful report entries and 64 options entries for 60 seconds per process. Each cache serializes misses, so requests share completed work and do not create unbounded concurrent report computations. Cancellation/failure releases ownership without caching an error. Browser queries are fresh for five minutes, do not poll or retry automatically, and provide Refresh plus the server's generation timestamp. Refresh may return the same server snapshot within its 60-second TTL.
+The server keeps at most 64 successful report entries and 64 options entries for 60 seconds per process. Lifespan startup initializes the shared caches before requests are accepted. Each cache serializes misses through a compute semaphore, while cache hits return immediately without waiting for unrelated slow computations. State access is synchronous on the application event loop; requests share completed work without detached tasks or shared sessions. Cancellation/failure releases ownership without caching an error. Browser queries are fresh for five minutes, do not poll or retry automatically, and provide Refresh plus the server's generation timestamp. Refresh may return the same server snapshot within its 60-second TTL.
 
 ## Validation
 
@@ -18,12 +18,13 @@ The server keeps at most 64 successful report entries and 64 options entries for
 - Existing hourly/conversation rollup parity and fold suites: 39 tests passed. The retention parity scenario now also folds report history and verifies that daily row membership and filtered reports survive pruning.
 - Frontend: 137 reports tests passed, TypeScript check and production build passed. ESLint on changed report files passed.
 - The first PR CI run exposed three App-route integration tests that still mocked options through the full reports endpoint. Updated them to handle the dedicated options endpoint and verify both queries reject inverted dates, recover with one request each, and stay idle on account-only retry. All three tests, TypeScript and changed-file ESLint passed locally after the correction.
+- CodeRabbit follow-up: initialized caches during lifespan startup, allowed cached hits to bypass serialized miss computation, and guarded benchmark targets before writes. Eight SQLite cache/API tests and four PostgreSQL API tests passed, including concurrent first requests, cached hits during a blocked computation, compute limits and cancellation. Disposable PostgreSQL checks verified missing confirmation/non-benchmark names reject before connection, an empty confirmed target passes, and existing schema rejects before application DDL or inserts. Ruff, ty, architecture checks and all 64 strict specs passed.
 - Ruff, ty, architecture/cancellation/timing/settings checks and strict OpenSpec validation passed.
 - Playwright with mocked dashboard data: changing to 90d issued exactly one report request and one options request; long-window speed notice rendered. Screenshots are UI fixtures, not production measurements: [original error state](error-state.png), [90-day report](90-day-report.png).
 
 ## Synthetic performance evidence
 
-PostgreSQL 18, 300,000 synthetic requests spread across 90 days, 32 MB work_mem, 256 MB shared buffers, a two-hour raw live tail. Run script: [benchmark.py](benchmark.py). Disposable DB only; set `REPORT_BENCH_DATABASE_URL` explicitly. Data plus indexes occupied 409 MB. No production load was generated.
+PostgreSQL 18, 300,000 synthetic requests spread across 90 days, 32 MB work_mem, 256 MB shared buffers, a two-hour raw live tail. Run script: [benchmark.py](benchmark.py). Disposable DB only; set `REPORT_BENCH_DATABASE_URL` to a dedicated PostgreSQL database named `codex_lb_report_bench_*` and `REPORT_BENCH_CONFIRM_DISPOSABLE` to that exact database name. The script checks the connected database identity and absence of all user relations before DDL or inserts. Data plus indexes occupied 409 MB. No production load was generated.
 
 | Measurement | Raw source | Report rollup + tail |
 |---|---:|---:|

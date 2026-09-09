@@ -1,4 +1,4 @@
-"""Synthetic PostgreSQL benchmark. REPORT_BENCH_DATABASE_URL must point to an empty disposable DB."""
+"""Synthetic PostgreSQL benchmark; requires a confirmed, empty codex_lb_report_bench_* database."""
 # ruff: noqa: E402
 
 import asyncio
@@ -7,9 +7,21 @@ import os
 from datetime import date, datetime, timedelta
 from time import perf_counter
 
-os.environ["CODEX_LB_DATABASE_URL"] = os.environ["REPORT_BENCH_DATABASE_URL"]
-
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+benchmark_url = make_url(os.environ["REPORT_BENCH_DATABASE_URL"])
+if (
+    benchmark_url.get_backend_name() != "postgresql"
+    or not (benchmark_url.database or "").startswith("codex_lb_report_bench_")
+    or os.environ.get("REPORT_BENCH_CONFIRM_DISPOSABLE") != benchmark_url.database
+):
+    raise RuntimeError(
+        "Use a disposable PostgreSQL database named codex_lb_report_bench_* and set "
+        "REPORT_BENCH_CONFIRM_DISPOSABLE to its exact database name"
+    )
+os.environ["CODEX_LB_DATABASE_URL"] = os.environ["REPORT_BENCH_DATABASE_URL"]
 
 from app.db.models import Base
 from app.db.session import SessionLocal, engine
@@ -18,12 +30,26 @@ from app.modules.reports.rollup import fold_next_report_slice
 from app.modules.reports.service import ReportsService
 
 
+async def validate_target(conn: AsyncConnection) -> None:
+    database = (await conn.execute(text("SELECT current_database()"))).scalar_one()
+    populated = (
+        await conn.execute(
+            text("""
+            SELECT EXISTS (
+                SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema'
+            )
+            """)
+        )
+    ).scalar_one()
+    if database != benchmark_url.database or populated:
+        raise RuntimeError("Benchmark target must match the confirmed database and contain no user relations")
+
+
 async def main():
     async with engine.begin() as conn:
+        await validate_target(conn)
         await conn.run_sync(Base.metadata.create_all)
-        count = (await conn.execute(text("SELECT count(*) FROM request_logs"))).scalar_one()
-        if count:
-            raise RuntimeError("Benchmark requires an empty disposable database")
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_report_bench_time ON request_logs(requested_at, id)"))
         await conn.execute(
             text("""
@@ -87,4 +113,5 @@ async def main():
     await engine.dispose()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

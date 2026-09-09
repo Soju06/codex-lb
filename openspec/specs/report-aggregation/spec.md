@@ -38,6 +38,12 @@ Successful reports and options SHALL be cached for at most 60 seconds per normal
 - **WHEN** concurrent requests use the same report filters
 - **THEN** at most one aggregate computation SHALL populate their shared cache result
 
+#### Scenario: Cached result during an unrelated slow computation
+- **GIVEN** an unexpired cached result and an unrelated report computation in progress
+- **WHEN** the cached report is requested
+- **THEN** it SHALL return without waiting for the unrelated computation
+- **AND** uncached computations SHALL remain bounded across requests by a cache instance initialized before requests are accepted
+
 #### Scenario: Failed computation
 - **WHEN** a computation fails or is cancelled
 - **THEN** the next request SHALL be able to compute a fresh result

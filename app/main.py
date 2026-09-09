@@ -114,6 +114,7 @@ from app.modules.quota_planner import api as quota_planner_api
 from app.modules.quota_planner.scheduler import build_quota_planner_scheduler
 from app.modules.rate_limit_reset_credits import api as rate_limit_reset_credits_api
 from app.modules.reports import api as reports_api
+from app.modules.reports.cache import ReportsCaches
 from app.modules.request_logs import api as request_logs_api
 from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
@@ -471,6 +472,7 @@ async def _report_dashboard_timeout_overrides(settings: Settings) -> None:
 async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
 
+    app.state.reports_caches = ReportsCaches()
     shutdown_state = import_module("app.core.shutdown")
     # First app code on uvicorn's loop: mask credential-bearing object reprs
     # (aiohttp ConnectionKey proxy URLs, BasicAuth) before the default handler

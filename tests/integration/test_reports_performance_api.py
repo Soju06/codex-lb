@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock
 
@@ -10,8 +11,32 @@ from app.core.auth.dependencies import validate_dashboard_session
 from app.db.models import RequestLog
 from app.db.session import SessionLocal
 from app.modules.reports.repository import ReportsRepository
+from app.modules.reports.schemas import ReportsOptionsResponse
+from app.modules.reports.service import ReportsService
 
 pytestmark = pytest.mark.integration
+
+
+async def test_concurrent_options_requests_share_cache_initialized_at_startup(async_client, app_instance, monkeypatch):
+    caches = app_instance.state.reports_caches
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def compute(**kwargs):
+        entered.set()
+        await release.wait()
+        return ReportsOptionsResponse(models=["m1"], useragents=[])
+
+    compute_mock = AsyncMock(side_effect=compute)
+    monkeypatch.setattr(ReportsService, "get_options", compute_mock)
+    async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
+        requests = [tasks.create_task(async_client.get("/api/reports/options")) for _ in range(10)]
+        await entered.wait()
+        release.set()
+    assert app_instance.state.reports_caches is caches
+    assert all(request.result().status_code == 200 for request in requests)
+    assert all(request.result().json() == {"models": ["m1"], "useragents": []} for request in requests)
+    compute_mock.assert_awaited_once()
 
 
 async def test_options_are_scoped_without_full_report_or_speed_queries(async_client, db_setup, monkeypatch):

@@ -216,9 +216,7 @@ class _PureHelpers:
         monkeypatch.setattr(ws_overflow, "fresh_decline_reason", fresh_decline_reason)
         monkeypatch.setattr(ws_overflow, "select_overflow_model_source", select_overflow_model_source)
         monkeypatch.setattr(ws_overflow, "portability_decline", portability_decline)
-        monkeypatch.setattr(
-            ws_overflow, "get_overflow_pin_executor", lambda: SimpleNamespace(fast_decline=helpers.fast_decline)
-        )
+        monkeypatch.setattr(ws_overflow, "get_fast_decline_set", lambda: helpers.fast_decline)
         monkeypatch.setattr(ws_overflow, "get_source_breaker", lambda: helpers.breaker)
 
 

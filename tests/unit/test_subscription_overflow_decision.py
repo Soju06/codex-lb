@@ -811,11 +811,17 @@ async def test_drain_mode_never_dispatches_fresh(env: _Env) -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_previous_response_id_leaves_the_fail_closed_path_unchanged(env: _Env) -> None:
-    result = await env.resolve(SDK, _payload(store=None, previous_response_id="resp_unknown"), route=ROUTE_V1_RESPONSES)
+    request = _request(SDK)
+    result = await env.resolve(
+        SDK, _payload(store=None, previous_response_id="resp_unknown"), request=request, route=ROUTE_V1_RESPONSES
+    )
     assert result is None
-    # The fresh path ran and declined the history (previous_response_id is never portable).
+    # Design §4.2 (3): the continuation lives elsewhere, so today's owner fail-closed path answers
+    # unchanged -- the fresh pipeline never runs (no probe, no select) and no hint is left behind.
     assert env.outcomes == ["declined_not_portable_history"]
     assert env.pins.calls == [(anchor_pin_key(None, "resp_unknown"), True)]
+    assert env.probe_calls == 0 and env.select_calls == []
+    assert getattr(request.state, HINT_STATE_ATTRIBUTE, None) is None
 
 
 # --- cancellation and the fast-decline window -------------------------------------------------

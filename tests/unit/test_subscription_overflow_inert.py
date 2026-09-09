@@ -108,6 +108,7 @@ _API_OVERFLOW_NAMES = frozenset(
         "compact_pin_denial",
         "handshake_denial",
         "resolve_subscription_overflow",
+        "restore_client_store",
     }
 )
 _API_CALL_SITES = {

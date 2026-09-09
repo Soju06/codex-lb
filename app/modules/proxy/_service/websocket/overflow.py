@@ -38,7 +38,7 @@ import logging
 import sys
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from app.core.clock import clock_for, scheduler_for
 from app.core.errors import openai_error
@@ -61,7 +61,7 @@ from app.modules.proxy.overflow import (
     ROUTE_WEBSOCKET,
     WS_BOUNCE_CODE,
     fresh_decline_reason,
-    get_overflow_pin_executor,
+    get_fast_decline_set,
     get_source_breaker,
     overflow_thread_key,
     portability_decline,
@@ -135,11 +135,10 @@ def _request_id(request_state: _WebSocketRequestState) -> str:
 
 
 def _fast_decline_set() -> FastDeclineSet:
-    # Interface coupling with ``app.modules.proxy.overflow``: the process-wide
-    # overflow pin executor exposes the fast-decline set it marks on every
+    # The process-wide set the overflow pin executor marks on every
     # non-``written`` pin commit, so a thread that just failed to pin over HTTP
     # is not bounced back to it within the 60 s window.
-    return cast("FastDeclineSet", cast(Any, get_overflow_pin_executor()).fast_decline)
+    return get_fast_decline_set()
 
 
 def _aware_utc(value: datetime) -> datetime:

@@ -851,6 +851,12 @@ def normalize_responses_request_payload(
         responses = V1ResponsesRequest.model_validate(payload).to_responses_request()
     else:
         responses = ResponsesRequest.model_validate(payload)
+    # Both validators force ``store`` to ``False`` for the ChatGPT backend; the
+    # client's own value survives here for the overflow source body and the
+    # anchor rule (``app.modules.proxy.overflow``). A non-boolean is treated as
+    # omitted -- the validated field already rejected anything else.
+    client_store = payload.get("store")
+    responses._codex_lb_client_store = client_store if isinstance(client_store, bool) else None
     enforce_strict_text_format(responses)
     enforce_strict_function_tools_format(responses.tools)
     return responses

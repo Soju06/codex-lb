@@ -18,7 +18,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -53,7 +53,7 @@ def test_source_headers_are_exactly_accept_content_type_and_the_source_authoriza
 ) -> None:
     headers = forwarding._source_headers(
         _source(with_key=with_key),
-        encryptor=cast(Any, _encryptor()),
+        encryptor=_encryptor(),
         stream=stream,
         accept=accept,
         content_type=content_type,
@@ -103,12 +103,12 @@ def test_forwarding_has_no_access_to_inbound_request_headers() -> None:
     source = _FORWARDING_PATH.read_text(encoding="utf-8")
     assert "request.headers" not in source
     assert "websocket.headers" not in source
-    imported_modules = {
-        (node.module or "") if isinstance(node, ast.ImportFrom) else alias.name
-        for node in ast.walk(module)
-        if isinstance(node, ast.ImportFrom | ast.Import)
-        for alias in (node.names if isinstance(node, ast.Import) else [None])
-    }
+    imported_modules: set[str] = set()
+    for node in ast.walk(module):
+        if isinstance(node, ast.ImportFrom):
+            imported_modules.add(node.module or "")
+        elif isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
     assert not any(name.startswith(("fastapi", "starlette")) for name in imported_modules if name), sorted(
         imported_modules
     )

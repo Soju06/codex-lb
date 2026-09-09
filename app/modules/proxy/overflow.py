@@ -147,6 +147,7 @@ __all__ = [
     "anchor_requested",
     "apply_usage_limit_hint",
     "background_job_allowed",
+    "client_store_intent",
     "compact_pin_denial",
     "fresh_decline_reason",
     "get_fast_decline_set",
@@ -159,6 +160,7 @@ __all__ = [
     "record_overflow_outcome",
     "record_overflow_transport_decision",
     "resolve_subscription_overflow",
+    "restore_client_store",
     "try_claim_overflow",
 ]
 
@@ -791,16 +793,50 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
     return None
 
 
-def anchor_requested(payload: ResponsesRequest | ResponsesCompactRequest) -> bool:
-    """Whether the client left storage on, i.e. did not send ``store: false`` (design §7.2: anchor iff so).
+def client_store_intent(payload: ResponsesRequest) -> bool | None:
+    """The client's own ``store`` value: ``True``/``False`` when it sent one, ``None`` when it omitted the field.
 
     ``ResponsesRequest.store`` is forced to ``False`` by its validator for the
-    ChatGPT backend, so the client's own value survives only as presence in
-    ``model_fields_set``: Codex always sends ``store: false`` (never anchored),
-    SDK clients that omit ``store`` keep the API's default (anchored).
+    ChatGPT backend; ``normalize_responses_request_payload`` keeps the client's
+    value in ``_codex_lb_client_store``. A payload validated elsewhere (no
+    capture) falls back to ``model_fields_set``: a client-sent value the
+    validator collapsed can only be trusted as ``False`` (Codex's
+    ``store: false``), an absent field is the API default.
     """
 
-    return "store" not in payload.model_fields_set
+    captured = payload._codex_lb_client_store
+    if captured is not None:
+        return captured
+    return False if "store" in payload.model_fields_set else None
+
+
+def anchor_requested(payload: ResponsesRequest) -> bool:
+    """Whether the client left storage on, i.e. did not send ``store: false`` (design §7.2: anchor iff so).
+
+    Codex always sends ``store: false`` (never anchored); SDK clients that omit
+    ``store`` or send ``store: true`` keep their responses stored at the source
+    (anchored, so a ``previous_response_id`` follow-up returns to it).
+    """
+
+    return client_store_intent(payload) is not False
+
+
+def restore_client_store(body: dict[str, JsonValue], payload: ResponsesRequest) -> dict[str, JsonValue]:
+    """Put the client's own ``store`` back on the source-direction body, in place; returns ``body``.
+
+    The forwarding dump carries the ``store: false`` the ChatGPT validator
+    forced. A source honours the client's storage intent instead: the field is
+    dropped when the client omitted it (the source applies its default, which
+    is what an SDK ``previous_response_id`` chain relies on) and carried
+    verbatim when the client sent it. Direct source routing is untouched.
+    """
+
+    intent = client_store_intent(payload)
+    if intent is None:
+        body.pop("store", None)
+    else:
+        body["store"] = intent
+    return body
 
 
 def _settings_off(settings: DashboardSettings, clock: Clock) -> tuple[bool, datetime | None]:
@@ -836,9 +872,12 @@ def _handshake_denial_response() -> JSONResponse:
 
 
 def _source_body(payload: ResponsesRequest) -> dict[str, JsonValue]:
-    """The overflow source body: the forwarding dump with telemetry and ``service_tier`` stripped (§4.6, P9)."""
+    """The overflow source body: the forwarding dump with telemetry and ``service_tier`` stripped (§4.6, P9)
+    and the client's ``store`` restored (the route helper shapes the wire body the same way)."""
 
-    return strip_source_telemetry(payload.model_dump_for_forwarding(), strip_service_tier=True)
+    return restore_client_store(
+        strip_source_telemetry(payload.model_dump_for_forwarding(), strip_service_tier=True), payload
+    )
 
 
 _warned_at: dict[tuple[str, str], float] = {}
@@ -986,6 +1025,11 @@ async def resolve_subscription_overflow(
                 pinned_context = True
                 stage = "dispatch_anchor"
                 return await dispatch_anchor(decision, anchor.record, anchor.state)
+            # Unknown id: the continuation lives elsewhere -- today's owner
+            # fail-closed path answers unchanged (design §4.2 (3)); never the
+            # fresh pipeline, so no probe, no select and no history hint.
+            _decline(route, "not_portable_history", detail="previous_response_id:unanchored")
+            return None
         if designated is None:
             _decline(route, "drain_mode")
             return None

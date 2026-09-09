@@ -537,6 +537,7 @@ async def test_overflow_dispatch_streams_through_the_source_route_with_the_decis
     assert "service_tier" not in sent
     assert "client_metadata" not in sent
     assert "stream_options" not in sent
+    assert "store" not in sent, "a client that omitted ``store`` leaves the source its default (§7.2 anchors)"
     assert sent["prompt_cache_key"] == "pck_verbatim"
 
     # The decision's claims were taken over by the owner and released exactly once by it.
@@ -926,12 +927,12 @@ async def test_only_the_usage_limit_429_passes_through_the_hint_hook() -> None:
     assert len(calls) == 1
     assert calls[0][1] == envelope
     assert calls[0][2] == {"x-codex-primary-used-percent": "100"}
-    assert json.loads(hinted.body) == {**envelope, "hinted": True}
+    assert json.loads(bytes(hinted.body)) == {**envelope, "hinted": True}
     assert hinted.headers[HINT_HEADER] == HINT_NATIVE_TEXT
     assert hinted.headers["x-codex-primary-used-percent"] == "100"
     assert HINT_HEADER not in other_429.headers
     assert HINT_HEADER not in not_429.headers
-    assert json.loads(not_429.body) == envelope
+    assert json.loads(bytes(not_429.body)) == envelope
 
 
 @pytest.mark.asyncio
@@ -1099,6 +1100,7 @@ async def test_fresh_overflow_serves_the_codex_route_from_the_designated_source(
     assert "service_tier" not in sent
     assert "client_metadata" not in sent
     assert "stream_options" not in sent
+    assert sent["store"] is False, "Codex's own ``store: false`` reaches the source verbatim"
     assert sent["prompt_cache_key"] == "pck_codex_fresh"
 
     rows = await _all_rows()
@@ -1893,6 +1895,9 @@ async def test_anchor_row_follows_a_stored_sdk_response_and_routes_the_follow_up
     assert follow_up.status_code == 200, follow_up.text
     assert len(state.requests) == 2
     assert state.requests[1]["previous_response_id"] == "resp_anchor_1"
+    # The ChatGPT-forced ``store: false`` never reaches the source: the client omitted ``store``, so the
+    # source applies its default and the chain the anchor row points at actually exists there.
+    assert all("store" not in sent for sent in state.requests), state.requests
 
     # Drain mode: the setting is cleared, anchored chains keep resolving to their source.
     await _designate(async_client, None)
@@ -1927,6 +1932,33 @@ async def test_store_false_writes_no_anchor_row(async_client, source_upstream, m
 
     assert response.status_code == 200, response.text
     assert await _pin_rows() == []
+    assert state.requests[0]["store"] is False
+
+
+@pytest.mark.asyncio
+async def test_store_true_is_anchored_and_forwarded_verbatim(
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit ``store: true`` survives the ChatGPT validator's ``False`` on the source body and anchors."""
+
+    _forbid_subscription_stream(monkeypatch)
+    state = _StubState()
+    scene = await _exhausted_scene(
+        async_client,
+        source_upstream,
+        tag="store_true",
+        handler=_json_source_handler(state, response_id="resp_store_true"),
+    )
+
+    response = await async_client.post(V1_ROUTE, json={**_codex_body(), "stream": False, "store": True})
+    await _drain(async_client)
+
+    assert response.status_code == 200, response.text
+    assert state.requests[0]["store"] is True
+    pins = await _pin_rows()
+    assert [(pin.kind, pin.pin_key, pin.source_id) for pin in pins] == [
+        (PIN_KIND_ANCHOR, anchor_pin_key(None, "resp_store_true"), scene.source_id)
+    ]
 
 
 @pytest.mark.asyncio

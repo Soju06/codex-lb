@@ -631,9 +631,9 @@ def _snapshot(response) -> tuple[int, dict[str, str], bytes]:
 
 _NATIVE = {"user-agent": "codex_cli_rs/0.153.4 (Linux 6.8.0; x86_64) decline-golden", "originator": "codex_cli_rs"}
 _SDK = {"user-agent": "openai-python/1.99"}
-_PLAIN_INPUT = [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+_PLAIN_INPUT: list[dict[str, object]] = [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 # Prior reasoning (subscription ciphertext) makes the transcript non-portable: ``not_portable_history``.
-_HISTORY_INPUT = [
+_HISTORY_INPUT: list[dict[str, object]] = [
     {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
     {"type": "reasoning", "id": "rs_prior", "summary": [], "encrypted_content": "c2VjcmV0"},
 ]

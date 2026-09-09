@@ -79,7 +79,6 @@ from app.db.session import (
     SessionLocal,
     close_db,
     close_session,
-    engine,
     init_background_db,
     init_db,
     mark_sqlite_shutdown_clean,
@@ -97,7 +96,6 @@ from app.modules.automations.scheduler import build_automations_scheduler
 from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
-from app.modules.dashboard_roles.seed import ensure_preset_dashboard_roles
 from app.modules.firewall import api as firewall_api
 from app.modules.fleet import api as fleet_api
 from app.modules.health import api as health_api
@@ -511,8 +509,6 @@ async def lifespan(app: FastAPI):
     configure_replica_salt(settings.http_responses_session_bridge_instance_id)
     bridge_endpoint_base_url = settings.http_responses_session_bridge_advertise_base_url
     await init_db()
-    async with engine.begin() as connection:
-        await ensure_preset_dashboard_roles(connection)
     init_background_db()
     await verify_encryption_key_fingerprint()
     _auto_bootstrap_token = await ensure_auto_bootstrap_token()

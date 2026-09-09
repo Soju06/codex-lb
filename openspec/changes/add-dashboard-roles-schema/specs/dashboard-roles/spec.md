@@ -2,7 +2,7 @@
 
 ### Requirement: Dashboard roles are rows with stable preset identities
 
-The system SHALL store dashboard roles in a `dashboard_roles` table with columns `id`, `slug` (unique), `name`, `description`, `kind` (`preset` or `custom`), `assignable_to_users`, `cloned_from_role_id`, `permissions_version`, `created_at`, and `updated_at`. Five preset rows MUST exist with slugs `admin`, `operator`, `member`, `viewer`, and `guest`, `kind` `preset`, and ids equal to the UUIDv5 derived from the slug under the fixed preset namespace, so every install and replica uses identical identifiers. The `guest` preset MUST have `assignable_to_users` false; the other presets true. The preset rows MUST be seeded idempotently by the Alembic revision, at application startup after database initialisation, and by the test schema reset.
+The system SHALL store dashboard roles in a `dashboard_roles` table with columns `id`, `slug` (unique), `name`, `description`, `kind` (`preset` or `custom`), `assignable_to_users`, `cloned_from_role_id`, `permissions_version`, `created_at`, and `updated_at`. Five preset rows MUST exist with slugs `admin`, `operator`, `member`, `viewer`, and `guest`, `kind` `preset`, and ids equal to the UUIDv5 derived from the slug under the fixed preset namespace, so every install and replica uses identical identifiers. The `guest` preset MUST have `assignable_to_users` false; the other presets true. The preset rows MUST be seeded idempotently by the Alembic revision (re-run safe, insert-only) and by the test schema reset; the application MUST NOT rewrite preset rows at startup.
 
 #### Scenario: Fresh database has the five presets
 

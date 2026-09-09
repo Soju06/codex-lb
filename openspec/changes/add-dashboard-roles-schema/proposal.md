@@ -6,7 +6,7 @@ Per-user dashboard accounts (the next change) need a role to point at, and later
 
 - New tables `dashboard_roles` (id, slug, name, description, kind `preset|custom`, assignable_to_users, cloned_from_role_id, permissions_version, timestamps) and `dashboard_role_grants` (role_id, permission, scope) — one Alembic revision that also seeds the five preset rows (`admin`, `operator`, `member`, `viewer`, `guest`) with stable UUIDv5 ids and zero grant rows.
 - Code-defined grant tables for every preset (`PRESET_ROLE_GRANTS`; operator/member/viewer added next to the existing admin/guest), a preset registry (`PresetRoleSlug`, `PRESET_ROLE_IDS`, `ASSIGNABLE_PRESET_ROLES`), and a read-only `dashboard_roles` module (repository + `resolve_role_grants`) that resolves presets from code and custom roles from their grant rows, ignoring unknown permission strings.
-- Idempotent preset seeding shared by the migration, application startup, and the test schema reset.
+- Idempotent, insert-only preset seeding shared by the migration and the test schema reset (no startup reconciler).
 - No consumer changes: no route reads the new tables yet, the principal model is untouched, guest and admin behave exactly as before.
 
 ## Capabilities

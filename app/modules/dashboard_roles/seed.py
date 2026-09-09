@@ -1,15 +1,14 @@
 """Idempotent seeding of the preset ``dashboard_roles`` rows.
 
-The migration, application startup and the test schema reset all call this so
-the five preset rows exist wherever the table exists. Rows are inserted with
+The Alembic revision (with its own revision-pinned table definition) and the
+test schema reset (which builds the schema with ``create_all`` instead of
+Alembic) both call this so the five preset rows exist wherever the table does. Rows are inserted with
 "do nothing on conflict" semantics and are never updated: preset grants live
 in code (``PRESET_ROLE_GRANTS``), so there is nothing version-dependent to
 reconcile and a replica running older code can never strip a newer grant.
 """
 
 from __future__ import annotations
-
-from typing import cast
 
 from sqlalchemy import Table, select
 from sqlalchemy.dialects import postgresql, sqlite
@@ -21,10 +20,11 @@ from app.core.auth.dashboard_access import (
     PRESET_ROLE_IDS,
     PRESET_ROLE_NAMES,
     PresetRoleSlug,
+    RoleKind,
 )
+from app.db.models import Base, DashboardRoleRecord
 
-ROLE_KIND_PRESET = "preset"
-ROLE_KIND_CUSTOM = "custom"
+_ROLES_TABLE: Table = Base.metadata.tables[DashboardRoleRecord.__tablename__]
 
 _PRESET_DESCRIPTIONS: dict[PresetRoleSlug, str] = {
     PresetRoleSlug.ADMIN: "Everything: users, security settings, credentials export, conversations, audit.",
@@ -42,7 +42,7 @@ def preset_role_rows() -> list[dict[str, object]]:
             "slug": slug.value,
             "name": PRESET_ROLE_NAMES[slug],
             "description": _PRESET_DESCRIPTIONS[slug],
-            "kind": ROLE_KIND_PRESET,
+            "kind": RoleKind.PRESET.value,
             "assignable_to_users": slug in ASSIGNABLE_PRESET_ROLES,
             "permissions_version": 1,
         }
@@ -66,16 +66,14 @@ def _insert_ignore(connection: Connection, table: Table, rows: list[dict[str, ob
         connection.execute(table.insert().values(missing))
 
 
-def _model_table() -> Table:
-    from app.db.models import DashboardRoleRecord
+def seed_preset_dashboard_roles(connection: Connection, table: Table = _ROLES_TABLE) -> None:
+    """Insert any missing preset role row using a synchronous connection.
 
-    return cast(Table, DashboardRoleRecord.__table__)
+    The migration passes its own revision-pinned table so it stays frozen
+    when the ORM model evolves; every other caller uses the current model.
+    """
 
-
-def seed_preset_dashboard_roles(connection: Connection, table: Table | None = None) -> None:
-    """Insert any missing preset role row using a synchronous connection."""
-
-    _insert_ignore(connection, table if table is not None else _model_table(), preset_role_rows())
+    _insert_ignore(connection, table, preset_role_rows())
 
 
 async def ensure_preset_dashboard_roles(connection: AsyncConnection) -> None:

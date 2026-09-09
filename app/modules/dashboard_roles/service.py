@@ -11,10 +11,10 @@ from app.core.auth.dashboard_access import (
     Grants,
     Permission,
     PresetRoleSlug,
+    RoleKind,
     Scope,
 )
 from app.db.models import DashboardRoleGrant, DashboardRoleRecord
-from app.modules.dashboard_roles.seed import ROLE_KIND_PRESET
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +46,13 @@ def grants_from_rows(rows: Iterable[DashboardRoleGrant]) -> Grants:
 
 
 def resolve_role_grants(role: DashboardRoleRecord) -> Grants:
-    """Preset roles resolve from code; custom roles from their stored grant rows."""
+    """Preset roles resolve from code; custom roles from their stored grant rows.
 
-    if role.kind == ROLE_KIND_PRESET:
+    An unknown ``kind`` or an unknown preset slug raises: preset rows are only
+    written by the migration, so such a row is a provisioning error and must
+    not fall back to a quiet default.
+    """
+
+    if RoleKind(role.kind) is RoleKind.PRESET:
         return PRESET_ROLE_GRANTS[PresetRoleSlug(role.slug)]
     return grants_from_rows(role.grants)

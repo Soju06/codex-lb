@@ -6,7 +6,7 @@
 
 - [x] 2.1 Add `DashboardRoleRecord` (`dashboard_roles`) and `DashboardRoleGrant` (`dashboard_role_grants`) models with string-typed `kind`/`permission`/`scope`.
 - [x] 2.2 Add Alembic revision `20260909_000000_add_dashboard_roles` creating both tables (guarded, downgrade drops) and seeding the preset rows outside the guard.
-- [x] 2.3 Shared idempotent seeder (`app/modules/dashboard_roles/seed.py`) used by the migration, `app/main.py` startup, and `tests/conftest.py`.
+- [x] 2.3 Shared idempotent seeder (`app/modules/dashboard_roles/seed.py`) used by the migration and `tests/conftest.py` (no startup hook).
 
 ## 3. Read model
 

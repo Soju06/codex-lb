@@ -5,13 +5,13 @@ from anyio import to_thread
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.core.auth.dashboard_access import PRESET_ROLE_IDS, Permission, PresetRoleSlug, Scope
+from app.core.auth.dashboard_access import PRESET_ROLE_IDS, Permission, PresetRoleSlug, RoleKind, Scope
 from app.core.config.settings import get_settings
 from app.db.migrate import _build_alembic_config, inspect_migration_state, run_upgrade
 from app.db.models import DashboardRoleGrant, DashboardRoleRecord
 from app.db.session import SessionLocal
 from app.modules.dashboard_roles.repository import DashboardRolesRepository
-from app.modules.dashboard_roles.seed import ROLE_KIND_CUSTOM, ROLE_KIND_PRESET, ensure_preset_dashboard_roles
+from app.modules.dashboard_roles.seed import ensure_preset_dashboard_roles
 from app.modules.dashboard_roles.service import resolve_role_grants
 
 pytestmark = pytest.mark.integration
@@ -30,27 +30,36 @@ async def test_preset_rows_exist_after_schema_reset(db_setup) -> None:
     for slug in PresetRoleSlug:
         role = by_slug[slug.value]
         assert role.id == PRESET_ROLE_IDS[slug]
-        assert role.kind == ROLE_KIND_PRESET
+        assert role.kind == RoleKind.PRESET.value
         assert role.grants == []
     assert by_slug["guest"].assignable_to_users is False
 
 
 @pytest.mark.asyncio
-async def test_seeding_is_idempotent(db_setup) -> None:
+async def test_seeding_is_idempotent_and_never_updates_existing_rows(db_setup) -> None:
     from app.db.session import engine
 
     async with engine.begin() as connection:
+        # A missing row is re-inserted; an existing row is left untouched even
+        # when it differs from the code's definition (presets are insert-only).
+        await connection.execute(text("DELETE FROM dashboard_roles WHERE slug = 'viewer'"))
+        await connection.execute(text("UPDATE dashboard_roles SET name = 'Renamed operator' WHERE slug = 'operator'"))
         await ensure_preset_dashboard_roles(connection)
         await ensure_preset_dashboard_roles(connection)
     async with SessionLocal() as session:
-        count = (await session.execute(text("SELECT COUNT(*) FROM dashboard_roles"))).scalar_one()
-    assert count == len(PresetRoleSlug)
+        rows = (await session.execute(text("SELECT id, slug, name FROM dashboard_roles ORDER BY slug"))).all()
+    assert len(rows) == len(PresetRoleSlug)
+    by_slug = {row[1]: row for row in rows}
+    assert by_slug["viewer"][0] == PRESET_ROLE_IDS[PresetRoleSlug.VIEWER]
+    assert by_slug["operator"][2] == "Renamed operator"
 
 
 @pytest.mark.asyncio
 async def test_custom_role_grants_round_trip_and_presets_resolve_from_code(db_setup) -> None:
     async with SessionLocal() as session:
-        custom = DashboardRoleRecord(slug="ops-lite", name="Ops lite", kind=ROLE_KIND_CUSTOM, cloned_from_role_id=None)
+        custom = DashboardRoleRecord(
+            slug="ops-lite", name="Ops lite", kind=RoleKind.CUSTOM.value, cloned_from_role_id=None
+        )
         custom.grants = [
             DashboardRoleGrant(permission="dashboard:read", scope="all"),
             DashboardRoleGrant(permission="api_keys:read", scope="own"),
@@ -105,7 +114,7 @@ async def test_dashboard_roles_migration_upgrade_and_downgrade(tmp_path):
             grants = (await conn.execute(text("SELECT COUNT(*) FROM dashboard_role_grants"))).scalar_one()
         assert {row[1] for row in rows} == {slug.value for slug in PresetRoleSlug}
         assert {row[0] for row in rows} == set(PRESET_ROLE_IDS.values())
-        assert all(row[2] == ROLE_KIND_PRESET for row in rows)
+        assert all(row[2] == RoleKind.PRESET.value for row in rows)
         assert grants == 0
 
         config = _build_alembic_config(db_url)

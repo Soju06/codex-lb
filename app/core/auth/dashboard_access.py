@@ -110,6 +110,13 @@ _WRITE_ALIAS_PERMISSIONS: frozenset[Permission] = frozenset(
 )
 
 
+class RoleKind(StrEnum):
+    """``dashboard_roles.kind``: presets resolve from code, custom roles from grant rows."""
+
+    PRESET = "preset"
+    CUSTOM = "custom"
+
+
 class PresetRoleSlug(StrEnum):
     """The built-in roles. Their grants live in code, never in the database."""
 

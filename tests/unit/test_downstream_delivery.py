@@ -160,6 +160,147 @@ async def test_terminal_frame_split_across_chunks_is_recognised() -> None:
     assert response._terminal_type == "response.completed"
 
 
+_EVENT_LINE, _REST_OF_BLOCK = _COMPLETED.split("\n", 1)
+_CRLF_COMPLETED = "event: response.completed\r\ndata: {}\r\n\r\n"
+
+
+class _CommitRecordingResponse(DeliveryTracedStreamingResponse):
+    """Records ``_terminal_type`` as observed right after each non-empty body chunk's ``send`` returned."""
+
+    def __init__(self, content: AsyncIterator[str], *, surface: str) -> None:
+        super().__init__(content, surface=surface)
+        self.committed_after: list[str | None] = []
+
+    def _observe_body(self, body: bytes) -> bool:
+        result = super()._observe_body(body)
+        if body:
+            self.committed_after.append(self._terminal_type)
+        return result
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        # ``event:`` line alone, then ``data:`` + terminator.
+        [_EVENT_LINE + "\n", _REST_OF_BLOCK],
+        # ``event:`` line and ``data:`` line, blank-line terminator in its own chunk.
+        [_EVENT_LINE + "\n", _REST_OF_BLOCK[:-1], "\n"],
+        # LF terminator split byte by byte: ``...}\n`` | ``\n``.
+        [_COMPLETED[:-1], _COMPLETED[-1:]],
+        # CRLF terminator split ``\r\n\r`` | ``\n``.
+        [_CRLF_COMPLETED[:-1], _CRLF_COMPLETED[-1:]],
+        # CRLF terminator split ``\r\n`` | ``\r\n``.
+        [_CRLF_COMPLETED[:-2], _CRLF_COMPLETED[-2:]],
+        # Mixed framing: LF-terminated lines, CRLF blank line.
+        [_EVENT_LINE + "\n", "data: {}\n", "\r\n"],
+    ],
+    ids=["event-then-rest", "terminator-alone", "lf-split", "crlf-split-3-1", "crlf-split-2-2", "mixed-lf-crlf"],
+)
+async def test_split_terminal_block_is_committed_only_by_the_chunk_carrying_its_terminator(parts: list[str]) -> None:
+    response = _CommitRecordingResponse(_iter(_CREATED, *parts), surface="responses")
+    await _run(response)
+    assert response.outcome == OUTCOME_TERMINAL_WRITTEN
+    # ``_CREATED`` plus every part but the last leave the terminal uncommitted.
+    assert response.committed_after == [None] * len(parts) + ["response.completed"]
+
+
+async def test_split_terminal_frame_disconnect_before_its_payload_is_terminal_after_disconnect(
+    caplog: pytest.LogCaptureFixture, counter: _FakeCounter
+) -> None:
+    """The ``event:`` line reached the writer, the peer left, the ``data:`` + terminator chunk was dropped."""
+    response = DeliveryTracedStreamingResponse(_iter(_CREATED, _EVENT_LINE + "\n", _REST_OF_BLOCK), surface="responses")
+    with caplog.at_level(logging.DEBUG, logger=downstream_delivery.__name__):
+        sent = await _run(response, stamp_before_chunk=3)  # stamped right before the payload chunk's send
+
+    assert response.outcome == OUTCOME_TERMINAL_AFTER_DISCONNECT
+    assert counter.calls == [{"surface": "responses", "outcome": OUTCOME_TERMINAL_AFTER_DISCONNECT}]
+    assert _bodies(sent)[-3:] == [(_EVENT_LINE + "\n").encode(), _REST_OF_BLOCK.encode(), b""]
+    record = next(record for record in caplog.records if "responses_stream_terminal_delivery" in record.getMessage())
+    assert record.levelno == logging.WARNING
+    assert "outcome=terminal_after_disconnect terminal=response.completed chunks=3" in record.getMessage()
+
+
+async def test_split_terminal_frame_disconnect_before_its_terminator_is_terminal_after_disconnect() -> None:
+    # ``event:`` and ``data:`` lines were written; only the blank line was dropped.
+    response = DeliveryTracedStreamingResponse(_iter(_CREATED, _COMPLETED[:-1], "\n"), surface="responses")
+    await _run(response, stamp_before_chunk=3)
+    assert response.outcome == OUTCOME_TERMINAL_AFTER_DISCONNECT
+
+
+async def test_split_terminal_frame_server_cancel_before_its_terminator_is_cancelled_before_terminal(
+    caplog: pytest.LogCaptureFixture, counter: _FakeCounter
+) -> None:
+    event_line_sent = asyncio.Event()
+
+    async def body() -> AsyncIterator[str]:
+        yield _CREATED
+        yield _EVENT_LINE + "\n"
+        yield _REST_OF_BLOCK[:-1]  # ``data:`` line without the blank-line terminator
+        event_line_sent.set()
+        await asyncio.Event().wait()  # the terminator never comes
+        yield "\n"  # pragma: no cover
+
+    response = DeliveryTracedStreamingResponse(body(), surface="responses")
+    with caplog.at_level(logging.DEBUG, logger=downstream_delivery.__name__):
+        task = asyncio.create_task(_run(response))
+        await event_line_sent.wait()
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert response.outcome == OUTCOME_CANCELLED_BEFORE_TERMINAL
+    assert response._terminal_type is None
+    assert response._pending_terminal == "response.completed"
+    assert counter.calls == [{"surface": "responses", "outcome": OUTCOME_CANCELLED_BEFORE_TERMINAL}]
+    record = next(record for record in caplog.records if "responses_stream_terminal_delivery" in record.getMessage())
+    assert record.levelno == logging.INFO
+    assert "outcome=cancelled_before_terminal terminal=None chunks=3" in record.getMessage()
+    assert record.getMessage().endswith("exc=CancelledError")
+
+
+async def test_split_terminal_frame_client_disconnect_before_its_terminator_is_cancelled_before_terminal() -> None:
+    """Starlette's ASGI 2.3 path: ``http.disconnect`` lands between the ``event:`` line and the terminator."""
+    event_line_sent = asyncio.Event()
+
+    async def body() -> AsyncIterator[str]:
+        yield _CREATED
+        yield _EVENT_LINE + "\n"
+        event_line_sent.set()
+        await asyncio.Event().wait()
+        yield _REST_OF_BLOCK  # pragma: no cover
+
+    async def receive() -> dict[str, object]:
+        await event_line_sent.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        pass
+
+    response = DeliveryTracedStreamingResponse(body(), surface="responses")
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "method": "POST", "path": "/"}
+    await response(scope, cast(Any, receive), cast(Any, send))
+    assert response.outcome == OUTCOME_CANCELLED_BEFORE_TERMINAL
+    assert response._terminal_type is None
+
+
+async def test_stream_ending_inside_the_terminal_block_is_ended_without_terminal() -> None:
+    """An SSE client discards an unterminated event at EOF, so it is not a delivered terminal."""
+    response = DeliveryTracedStreamingResponse(_iter(_CREATED, _COMPLETED[:-1]), surface="responses")
+    await _run(response)
+    assert response.outcome == OUTCOME_ENDED_WITHOUT_TERMINAL
+    assert response._pending_terminal == "response.completed"
+
+
+async def test_blank_line_before_the_event_line_does_not_terminate_its_block() -> None:
+    # The previous frame's ``\n\n`` sits in the rolling tail right before the
+    # ``event:`` line; it must not be mistaken for the terminal block's end.
+    response = _CommitRecordingResponse(_iter(_CREATED + _EVENT_LINE, "\n" + _REST_OF_BLOCK[:-1]), surface="responses")
+    await _run(response)
+    assert response.committed_after == [None, None]
+    assert response.outcome == OUTCOME_ENDED_WITHOUT_TERMINAL
+
+
 async def test_terminal_type_inside_data_payload_does_not_count() -> None:
     # The event type only counts on an ``event:`` line; a delta whose text
     # mentions it (or a ``data:`` echo of it) is not a terminal frame.

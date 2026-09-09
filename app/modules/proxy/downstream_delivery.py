@@ -29,11 +29,16 @@ terminal frame and a ``success`` row.
   ``more_body=False`` sent, yet no terminal frame was seen.
 
 It never alters the forwarded bytes, never emits a synthetic frame, and does
-not touch request-log settlement. ``terminal_written`` means the frame was
-handed to the HTTP server's writer on a live connection — the transport buffer
-and any reverse proxy in front are not observed. ``chunks``/``bytes`` count the
-non-empty body chunks whose ``send`` returned (the empty ``more_body=False``
-message is not a chunk).
+not touch request-log settlement. ``terminal_written`` means the *complete*
+terminal block — ``event:`` line through the blank-line terminator — was handed
+to the HTTP server's writer on a live connection; the transport buffer and any
+reverse proxy in front are not observed. A terminal frame split across chunks
+is committed only by the chunk that carries its terminator, so a disconnect or
+cancellation between the ``event:`` line and the end of the block is reported
+as ``terminal_after_disconnect`` / ``cancelled_before_terminal``, never as a
+written terminal (an SSE client discards an unterminated event at EOF).
+``chunks``/``bytes`` count the non-empty body chunks whose ``send`` returned
+(the empty ``more_body=False`` message is not a chunk).
 
 The log line's ``request_id`` is the ingress request id
 (``RequestIdMiddleware`` contextvar, valid for the whole body stream because the
@@ -87,23 +92,45 @@ _EVENT_LINE_START = b"\nevent: "
 # Frames are normally one block per ASGI chunk, but nothing pins that, so the
 # last bytes of the previous chunk are re-scanned together with the current one
 # and a marker split across the boundary is still recognised. The longest marker
-# (``\nevent: response.incomplete\n``) is 28 bytes; keep a little more.
+# (``\nevent: response.incomplete\n``) is 28 bytes; keep a little more. The
+# same tail carries a block terminator split across chunks (``\r\n\r`` | ``\n``).
 _TAIL_BYTES = 64
 
 
-def _find_terminal_event(window: bytes) -> str | None:
-    """Return the terminal event type named on an ``event:`` line of ``window``, if any."""
+def _find_terminal_event(window: bytes) -> tuple[str, int] | None:
+    """Return ``(terminal event type, offset just past the type)`` for an ``event:`` line of ``window``."""
     if window.startswith(b"event: "):
         match = _TERMINAL_LINE_RE.match(window)
         if match is not None:
-            return match.group(1).decode("ascii")
+            return match.group(1).decode("ascii"), match.end()
     position = window.find(_EVENT_LINE_START)
     while position != -1:
         match = _TERMINAL_LINE_RE.match(window, position + 1)
         if match is not None:
-            return match.group(1).decode("ascii")
+            return match.group(1).decode("ascii"), match.end()
         position = window.find(_EVENT_LINE_START, position + 1)
     return None
+
+
+def _find_block_end(window: bytes) -> int:
+    """Return the offset just past the first SSE blank line in ``window``, or ``-1``.
+
+    A block ends at an empty line: a line terminator immediately followed by
+    another one. LF and CRLF framing (and either mixed) are recognised through
+    ``bytes.find`` on ``\n`` — a terminal ``response.completed`` frame carries
+    one very long ``data:`` line, so this loop runs two or three iterations,
+    never a regex walk. Bare-CR framing is not emitted or relayed by the proxy
+    and is not recognised.
+    """
+    position = window.find(b"\n")
+    while position != -1:
+        following = window[position + 1 : position + 3]
+        if following.startswith(b"\n"):
+            return position + 2
+        if following == b"\r\n":
+            return position + 3
+        position = window.find(b"\n", position + 1)
+    return -1
 
 
 class DeliveryTracedStreamingResponse(StreamingResponse):
@@ -128,12 +155,16 @@ class DeliveryTracedStreamingResponse(StreamingResponse):
         self._chunks = 0
         self._bytes = 0
         self._tail = b""
+        # ``_pending_terminal`` names the terminal whose ``event:`` line was
+        # handed over while the rest of its block is still outstanding;
+        # ``_terminal_type`` is set only once the block terminator was handed over.
+        self._pending_terminal: str | None = None
         self._terminal_type: str | None = None
         self._terminal_dropped = False
         self._final_sent = False
 
     def _observe_body(self, body: bytes) -> bool:
-        """Account a body chunk handed to the writer; return whether it completed the terminal frame."""
+        """Account a body chunk handed to the writer; return whether it completed the terminal block."""
         if not body:
             return False
         self._chunks += 1
@@ -141,11 +172,20 @@ class DeliveryTracedStreamingResponse(StreamingResponse):
         if self._terminal_type is not None:
             return False
         window = self._tail + body if self._tail else body
-        terminal = _find_terminal_event(window)
-        if terminal is None:
+        if self._pending_terminal is None:
+            found = _find_terminal_event(window)
+            if found is None:
+                self._tail = window[-_TAIL_BYTES:]
+                return False
+            self._pending_terminal, block_start = found
+            # Only bytes after the event line may terminate its block: the
+            # blank line that *preceded* it belongs to the previous frame.
+            window = window[block_start:]
+        block_end = _find_block_end(window)
+        if block_end == -1:
             self._tail = window[-_TAIL_BYTES:]
             return False
-        self._terminal_type = terminal
+        self._terminal_type = self._pending_terminal
         self._tail = b""
         return True
 
@@ -163,7 +203,8 @@ class DeliveryTracedStreamingResponse(StreamingResponse):
                 # uvicorn's ``send`` returns without writing once the cycle is
                 # disconnected; the protocol stamps that state synchronously in
                 # ``connection_lost``, before any task can resume, so a stamp
-                # visible here means the terminal frame never reached the writer.
+                # visible here means the chunk that completed the terminal
+                # block never reached the writer.
                 self._terminal_dropped = isinstance(state, dict) and HTTP_DISCONNECTED_STATE in state
             if not message.get("more_body", False):
                 self._final_sent = True
@@ -183,8 +224,11 @@ class DeliveryTracedStreamingResponse(StreamingResponse):
 
     def _classify(self, *, exc_name: str | None, cancelled: bool) -> str:
         if self._terminal_type is not None:
-            # A cancel or exception after the terminal was handed over does not
-            # unwrite it; the exception name stays visible in the log line.
+            # A cancel or exception after the complete terminal block was
+            # handed over does not unwrite it; the exception name stays visible
+            # in the log line. A block whose ``event:`` line went out but whose
+            # terminator did not (``_pending_terminal`` set, ``_terminal_type``
+            # unset) falls through to the no-terminal outcomes below.
             return OUTCOME_TERMINAL_AFTER_DISCONNECT if self._terminal_dropped else OUTCOME_TERMINAL_WRITTEN
         if exc_name is not None:
             return OUTCOME_EXCEPTION_BEFORE_TERMINAL

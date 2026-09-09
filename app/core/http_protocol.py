@@ -24,7 +24,9 @@ that purge idle connections with RST. See
 
 Their third job is observational: when a connection is lost while a response
 is still in flight, :func:`stamp_disconnect_into_scope` records the loss in
-that request's ASGI ``scope["state"]`` (key :data:`HTTP_DISCONNECTED_STATE`).
+that request's ASGI ``scope["state"]`` (key :data:`HTTP_DISCONNECTED_STATE`) —
+on a pipelined connection, in every request that is still open (the httptools
+subclass tracks the active cycle separately from uvicorn's ``self.cycle``).
 Uvicorn's ``send`` silently drops every message once the cycle is marked
 disconnected, and the ASGI ``receive()`` channel cannot tell a mid-stream loss
 from the ``http.disconnect`` it reports after every normal completion, so the
@@ -140,6 +142,10 @@ class UpgradeTolerantH11Protocol(H11Protocol):
         self._unset_keepalive_if_required()
         # super() marked the in-flight cycle disconnected and keeps self.cycle
         # referenced, so the stamp lands on the request that lost its peer.
+        # Unlike httptools, h11 never replaces ``self.cycle`` while a response
+        # is in flight: a pipelined follow-up stays unparsed inside the h11
+        # connection (``PAUSED``) until ``start_next_cycle``, so the newest
+        # cycle *is* the active one.
         stamp_disconnect_into_scope(self.cycle, exc)
 
     def _should_upgrade(self) -> bool:

@@ -173,6 +173,46 @@ describe("UpstreamTimeoutSettings", () => {
     );
   });
 
+  it("mirrors connect-within-bridge-budget and the stream budget admission-wait floor (M1)", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    // Environment already raises the sibling budgets, so only the bridge budget
+    // can be the one a 700 s connect timeout outgrows.
+    const settings = settingsWithProvenance(
+      {
+        proxyRequestBudgetSeconds: 5000,
+        compactRequestBudgetSeconds: 5000,
+        transcriptionRequestBudgetSeconds: 5000,
+      },
+      {
+        proxy_request_budget_seconds: { source: "env", envValue: 5000, default: 600 },
+        compact_request_budget_seconds: { source: "env", envValue: 5000, default: 180 },
+        transcription_request_budget_seconds: { source: "env", envValue: 5000, default: 120 },
+      },
+    );
+    render(<UpstreamTimeoutSettings settings={settings} busy={false} onSave={onSave} />);
+
+    await user.type(screen.getByRole("spinbutton", { name: "Upstream connect timeout" }), "700");
+    await user.type(screen.getByRole("spinbutton", { name: "Session bridge request budget" }), "650");
+    expect(
+      screen.getByText(
+        "The connect timeout (700 s) must not exceed the Session bridge request budget; the proxy clamps it to the budget anyway.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save timeouts" })).toBeDisabled();
+    await user.clear(screen.getByRole("spinbutton", { name: "Upstream connect timeout" }));
+    expect(screen.getByRole("button", { name: "Save timeouts" })).toBeEnabled();
+
+    // The stream budget must still cover the fixed 10 s admission wait.
+    await user.type(screen.getByRole("spinbutton", { name: "Responses stream request budget" }), "5");
+    expect(
+      screen.getByText(
+        "The Responses stream request budget (5 s) must be at least 10 s (the fixed admission-wait timeout).",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save timeouts" })).toBeDisabled();
+  });
+
   it("lets an unrelated edit through when the inherited values already violate an invariant", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

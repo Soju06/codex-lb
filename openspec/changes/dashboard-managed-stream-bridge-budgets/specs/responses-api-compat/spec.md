@@ -240,15 +240,15 @@ The pre-response silence budget MUST be a named quantity derived from
 configuration, not the implicit product of `_STREAM_KEEPALIVE_MAX_COUNT` and
 `sse_keepalive_interval_seconds`.
 
-The budget MUST be the minimum of
-`http_responses_session_bridge_stuck_gate_retire_after_seconds`,
-`stream_idle_timeout_seconds`, and
-`http_responses_session_bridge_request_budget_seconds` — each read as the
-effective dashboard-managed value from the snapshot bound to the request, a
-non-NULL `dashboard_settings` column overriding the environment value — so that
-the downstream
+The budget MUST be the minimum of the fixed owner-side stuck gate
+(`HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS`, 300 seconds; not a runtime
+setting), `stream_idle_timeout_seconds`, and
+`http_responses_session_bridge_request_budget_seconds`, so that the downstream
 pre-response watchdog can never outlive the owner-side stuck gate, the
-configured idle budget, or the request budget. The number of pre-response
+configured idle budget, or the request budget. The two settings-derived terms
+MUST be read as their effective dashboard-managed values from the snapshot
+bound to the request, a non-NULL `dashboard_settings` column of the same name
+overriding the environment value. The number of pre-response
 keepalive intervals waited MUST cover that budget. It MUST NOT drop below
 `_STREAM_KEEPALIVE_MAX_COUNT` when the budget spans at least that many
 keepalive intervals; when the configured budget is shorter, the count MUST
@@ -256,9 +256,8 @@ follow the budget instead, so the watchdog never outlives it.
 
 #### Scenario: Default settings align the budget with the stuck gate
 
-- **GIVEN** shipped defaults `sse_keepalive_interval_seconds=10`,
-  `http_responses_session_bridge_stuck_gate_retire_after_seconds=300`, and
-  `stream_idle_timeout_seconds=7200`
+- **GIVEN** shipped defaults `sse_keepalive_interval_seconds=10` and
+  `stream_idle_timeout_seconds=7200`, and the fixed `300` second stuck gate
 - **WHEN** the pre-response silence budget is computed
 - **THEN** the budget is `300` seconds
 - **AND** the pre-response keepalive count covers `300` seconds rather than the
@@ -274,7 +273,8 @@ follow the budget instead, so the watchdog never outlives it.
 
 - **GIVEN** the process environment sets a `7200` second bridge request budget
   and an operator has stored `650` through `PUT /api/settings`
-- **AND** `stream_idle_timeout_seconds=7200` and a `300` second stuck gate
+- **AND** `stream_idle_timeout_seconds=7200` and the fixed `300` second stuck
+  gate
 - **WHEN** the pre-response silence budget is computed for a request
 - **THEN** the bridge budget term is `650` seconds (the dashboard value)
 - **AND** the budget is `300` seconds

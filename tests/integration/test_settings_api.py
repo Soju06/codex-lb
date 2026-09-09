@@ -669,6 +669,26 @@ async def test_settings_api_rejects_stream_and_bridge_budgets_that_break_invaria
     assert response.status_code == 200
     assert response.json()["httpResponsesSessionBridgeRequestBudgetSeconds"] == 601.0
 
+    # The bridge path spends the connect timeout inside the bridge budget, so a
+    # connect timeout above it is rejected too. The sibling budgets are raised in
+    # the same PUT, leaving `upstream-connect-within-bridge-budget` as the only
+    # violation the change introduces.
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "upstreamConnectTimeoutSeconds": 700,
+            "proxyRequestBudgetSeconds": 5000,
+            "compactRequestBudgetSeconds": 5000,
+            "transcriptionRequestBudgetSeconds": 5000,
+            "httpResponsesSessionBridgeRequestBudgetSeconds": 650,
+        },
+    )
+    assert response.status_code == 400
+    message = response.json()["error"]["message"]
+    assert "upstream-connect-within-bridge-budget" in message
+    assert "upstream-connect-within-proxy-budget" not in message
+    assert "upstream-connect-within-stream-budget" not in message
+
     # Stream budget below the environment-only admission wait (10 s).
     response = await async_client.put("/api/settings", json={"httpResponsesStreamRequestBudgetSeconds": 5})
     assert response.status_code == 400

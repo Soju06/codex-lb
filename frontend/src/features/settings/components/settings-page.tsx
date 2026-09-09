@@ -273,6 +273,8 @@ export function SettingsPage() {
                   settings.proxyRequestBudgetSeconds,
                   settings.compactRequestBudgetSeconds,
                   settings.transcriptionRequestBudgetSeconds,
+                  settings.httpResponsesStreamRequestBudgetSeconds,
+                  settings.httpResponsesSessionBridgeRequestBudgetSeconds,
                   settings.streamIdleTimeoutSeconds,
                   settings.proxyDownstreamWebsocketIdleTimeoutSeconds,
                   settings.sseKeepaliveIntervalSeconds,

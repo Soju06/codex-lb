@@ -1284,6 +1284,7 @@
   "settings.upstreamTimeouts.bridgeBudget.label": "Session bridge request budget",
   "settings.upstreamTimeouts.bridgeBudget.description": "Total seconds an HTTP session bridge request may wait for and stream its upstream turn; ownerless ambiguous operations are abandoned only after at least this long.",
   "settings.upstreamTimeouts.bridgeBudgetTooLow": "The session bridge request budget ({{budget}} s) must exceed {{minimum}} s (twice the fixed 300 s stuck-gate threshold).",
+  "settings.upstreamTimeouts.streamBudgetBelowAdmissionWait": "The Responses stream request budget ({{budget}} s) must be at least {{minimum}} s (the fixed admission-wait timeout).",
   "settings.routing.accountCapacity.save": "Save capacity limits",
   "settings.routing.stickyThresholds.primaryLabel": "Sticky primary threshold",
   "settings.routing.stickyThresholds.primaryDescription": "Move sticky sessions off an account once more than this percent of its 5-hour (primary) window has been used.",

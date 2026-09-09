@@ -1284,6 +1284,7 @@
   "settings.upstreamTimeouts.bridgeBudget.label": "会话桥接请求预算",
   "settings.upstreamTimeouts.bridgeBudget.description": "HTTP 会话桥接请求等待并流式传输其上游轮次的总秒数；无所有者的不确定操作至少在此时长后才会被放弃。",
   "settings.upstreamTimeouts.bridgeBudgetTooLow": "会话桥接请求预算（{{budget}} 秒）必须大于 {{minimum}} 秒（固定 300 秒 stuck-gate 阈值的两倍）。",
+  "settings.upstreamTimeouts.streamBudgetBelowAdmissionWait": "Responses 流请求预算（{{budget}} 秒）必须至少为 {{minimum}} 秒（固定的 admission-wait 超时）。",
   "settings.routing.accountCapacity.save": "保存容量限制",
   "settings.routing.stickyThresholds.primaryLabel": "粘性主阈值",
   "settings.routing.stickyThresholds.primaryDescription": "当账户 5 小时（主）窗口的已用量超过此百分比时，将粘性会话迁移到其他账户。",

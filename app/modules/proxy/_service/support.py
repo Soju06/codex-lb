@@ -703,6 +703,8 @@ class _RefreshFailoverProxy(Protocol):
         http_status: int | None = None,
         *,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+        retry_after_seconds: float | None = None,
+        burst_cooldown_recorded: bool = False,
     ) -> Any: ...
 
 

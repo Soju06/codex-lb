@@ -7503,11 +7503,28 @@ async def _wait_for_first_stream_probe(
                         post_ready_timeout = max(0.0, timeout_seconds - (clock.monotonic() - ready_set_at))
                 if post_ready_timeout <= 0:
                     return False
-                post_ready_done, _pending = await scheduler.wait(
-                    {first_task},
-                    timeout=post_ready_timeout,
-                )
-                return bool(post_ready_done)
+                # The resumed upstream may reject again and park the stream on
+                # a further bounded wait (e.g. the same-account burst backoff).
+                # A newer wait marker supersedes this ready, so keep watching
+                # it and re-read the level state instead of handing off.
+                post_ready_wait_task = scheduler.create_task(capacity_wait_event.wait())
+                try:
+                    post_ready_done, _pending = await scheduler.wait(
+                        {first_task, post_ready_wait_task},
+                        timeout=post_ready_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    if not post_ready_wait_task.done():
+                        post_ready_wait_task.cancel()
+                    await asyncio.gather(post_ready_wait_task, return_exceptions=True)
+                if first_task in post_ready_done:
+                    if capacity_wait_event.is_set():
+                        capacity_wait_event.clear()
+                    return True
+                if post_ready_wait_task in post_ready_done:
+                    continue
+                return False
 
             marker_task = scheduler.create_task(capacity_wait_event.wait())
             ready_task = (

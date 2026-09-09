@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from app.core.config.context_window_overrides import (
@@ -47,4 +50,27 @@ def test_cache_rejects_non_positive_ttl_and_clear_forgets_snapshot() -> None:
     cache._cached_at = 1.0
     cache.clear()
     assert cache._cached is None
-    assert cache._cached_at == 0.0
+    assert cache._cached_at == float("-inf")
+
+
+def test_invalidate_expires_freshness_but_keeps_the_rows_as_a_fallback() -> None:
+    # Settings-namespace bumps are frequent and mostly unrelated to this table:
+    # forgetting the rows on every one of them would leave the catalog with no
+    # fallback the moment the next read fails.
+    cache = ModelContextWindowOverridesCache()
+    cache._cached = {"gpt-5.4": 515_000}
+    cache._cached_at = time.monotonic()
+
+    asyncio.run(cache.invalidate(propagate=False))
+
+    assert cache._cached == {"gpt-5.4": 515_000}
+    assert cache._cached_at == float("-inf")
+
+
+def test_a_fresh_process_does_not_read_an_expired_snapshot_as_fresh() -> None:
+    # `time.monotonic()` counts from boot, so an expiry marker of 0.0 would look
+    # fresh for the first TTL seconds of uptime.
+    cache = ModelContextWindowOverridesCache()
+    cache._cached = {"gpt-5.4": 515_000}
+    asyncio.run(cache.invalidate(propagate=False))
+    assert time.monotonic() - cache._cached_at >= 5.0

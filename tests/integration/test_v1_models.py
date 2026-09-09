@@ -1511,6 +1511,40 @@ async def test_dashboard_context_window_override_wins_over_environment_without_r
 
 
 @pytest.mark.asyncio
+async def test_catalog_serves_the_last_known_overrides_when_the_row_read_fails(async_client, monkeypatch):
+    """An invalidation expires the snapshot's freshness but keeps the rows, so a
+    catalog request during a database blip serves the last known window instead
+    of failing the request."""
+    registry = get_model_registry()
+    await registry.update({"pro": [_make_upstream_model("gpt-5.4")]})
+    await _put_context_window_override(async_client, "gpt-5.4", 515_000)
+
+    async def _native_window() -> int:
+        resp = await async_client.get("/backend-api/codex/models")
+        assert resp.status_code == 200
+        return next(model["context_window"] for model in resp.json()["models"] if model["slug"] == "gpt-5.4")
+
+    assert await _native_window() == 515_000
+
+    from app.core.config.context_window_overrides import get_model_context_window_overrides_cache
+    from app.modules.settings import repository as settings_repository_module
+
+    # Warm snapshot, then an unrelated settings bump plus an unreachable
+    # database: the catalog must still answer with the stored override.
+    await get_model_context_window_overrides_cache().invalidate(propagate=False)
+
+    class _UnreachableRepository:
+        def __init__(self, session) -> None:
+            self._session = session
+
+        async def by_slug(self) -> dict[str, int]:
+            raise RuntimeError("database unreachable")
+
+    monkeypatch.setattr(settings_repository_module, "ModelContextWindowOverridesRepository", _UnreachableRepository)
+    assert await _native_window() == 515_000
+
+
+@pytest.mark.asyncio
 async def test_model_context_window_no_override(async_client):
     registry = get_model_registry()
     models = [_make_upstream_model("gpt-5.4")]

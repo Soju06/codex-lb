@@ -79,12 +79,17 @@ class ModelContextWindowOverridesCache:
     ``settings`` namespace so every replica drops its snapshot at once.
     """
 
+    # An expired snapshot is never fresh, whatever ``time.monotonic()`` returns
+    # this early after boot; 0.0 would read as fresh for the first TTL seconds
+    # of process uptime.
+    _EXPIRED = float("-inf")
+
     def __init__(self, *, ttl_seconds: float = 5.0) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         self._ttl_seconds = ttl_seconds
         self._cached: dict[str, int] | None = None
-        self._cached_at = 0.0
+        self._cached_at = self._EXPIRED
         self._lock = anyio.Lock()
 
     async def get(self) -> Mapping[str, int]:
@@ -118,28 +123,36 @@ class ModelContextWindowOverridesCache:
             return rows
 
     def clear(self) -> None:
-        """Drop the snapshot without taking the lock.
+        """Forget the snapshot entirely, without taking the lock.
 
         Only for process-local resets with no concurrent load (test teardown);
-        every runtime path goes through ``invalidate``.
+        every runtime path goes through ``invalidate``, which keeps the last
+        known rows as a fallback.
         """
         self._cached = None
-        self._cached_at = 0.0
+        self._cached_at = self._EXPIRED
 
     async def invalidate(self, *, propagate: bool = True) -> None:
         """Drop the snapshot and, unless ``propagate`` is False, durably bump the
         cross-replica ``settings`` namespace before returning.
 
-        The clear happens under the lock, like ``SettingsCache``: a catalog build
-        already inside ``get`` and awaiting the database must finish before the
-        snapshot is dropped, otherwise it would install its pre-write rows
-        afterwards and keep serving the old window until the TTL expires. The
-        poller callback registered for the namespace passes ``propagate=False``
-        so a remote bump never re-bumps (feedback-loop prevention).
+        Only the snapshot's *freshness* is dropped, not the rows: the next
+        ``get`` always reloads, but a load that fails while the database is
+        briefly unreachable can still fall back to the last known rows instead
+        of failing the catalog request. Settings-namespace bumps are frequent
+        and mostly unrelated to this table, so forgetting the rows on every one
+        of them would make the fallback almost never available.
+
+        The expiry happens under the lock, like ``SettingsCache``: a catalog
+        build already inside ``get`` and awaiting the database must finish
+        before the snapshot is expired, otherwise it would install its pre-write
+        rows afterwards and keep serving the old window until the TTL expires.
+        The poller callback registered for the namespace passes
+        ``propagate=False`` so a remote bump never re-bumps (feedback-loop
+        prevention).
         """
         async with self._lock:
-            self._cached = None
-            self._cached_at = 0.0
+            self._cached_at = self._EXPIRED
         if propagate:
             poller = get_cache_invalidation_poller()
             if poller is not None:

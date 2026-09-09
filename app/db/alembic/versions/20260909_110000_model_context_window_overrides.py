@@ -1,7 +1,7 @@
 """dashboard-managed per-model context window overrides
 
 Revision ID: 20260909_110000_model_context_window_overrides
-Revises: 20260909_070000_automation_run_claim_budget
+Revises: 20260909_080000_dashboard_stream_bridge_budgets
 Create Date: 2026-09-09
 
 Adds the ``model_context_window_overrides`` table (M4 of the slop-removal
@@ -18,7 +18,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260909_110000_model_context_window_overrides"
-down_revision = "20260909_070000_automation_run_claim_budget"
+down_revision = "20260909_080000_dashboard_stream_bridge_budgets"
 branch_labels = None
 depends_on = None
 

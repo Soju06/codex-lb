@@ -54,6 +54,9 @@ const FIREWALL_LAYOUT_QUERY_KEYS = [
   ["accounts", "list"],
   ["settings", "upstream-proxy"],
   ["model-sources", "list"],
+  // M4 model catalogue: the card sits above Firewall and grows by a table row
+  // per override, so a late response would push a #firewall scroll out of view.
+  ["settings", "model-context-window-overrides"],
 ] as const;
 
 export function SettingsPage() {

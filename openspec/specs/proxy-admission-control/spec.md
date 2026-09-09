@@ -769,6 +769,8 @@ When multiple requests wait on one shared future (an inflight bridge session cre
 
 The same bounded-callback contract applies to waits that re-attach to one owned task repeatedly: defer-cancellation waits on owned cleanup tasks, repeated timed waits such as SSE keepalive ticks on a pending chunk task, and bounded teardown drains. A defer-cancellation wait MUST shield itself from level-cancelled scopes so re-delivered cancellation cannot busy-spin the wait loop, MUST keep the owned task's done-callback count bounded by a constant regardless of how many times the waiter is cancelled or times out, MUST NOT cancel the owned task, MUST defer the caller's cancellation until the owned task finishes and then surface it, and MUST propagate the owned task's cancellation and exceptions unchanged.
 
+Every defer-cancellation wait MUST route through the one canonical shared-future helper (or, where site-specific control flow forces an inline loop, wait through the shared-future fan-out mechanism inside that loop) rather than a hand-rolled `asyncio.shield` retry. The deferred-cancellation surfacing above applies uniformly: a caller consuming a boolean or exception marker from any defer-cancellation wait MUST receive the marker for a level-cancelled scope as well as for edge task cancellation, so cleanup-then-cancel sequencing does not depend on which copy of the wait a call site reached.
+
 #### Scenario: Waiter pile-up keeps the shared future's callback list constant
 
 - **WHEN** many requests wait on the same inflight bridge-session future
@@ -828,6 +830,22 @@ The same bounded-callback contract applies to waits that re-attach to one owned 
   cancelled
 - **AND** the pending chunk task's done-callback count does not grow with the
   number of elapsed ticks
+
+#### Scenario: Every defer-cancellation wait shares the canonical implementation
+
+- **WHEN** any module performs a defer-cancellation wait on an owned task
+- **THEN** the wait routes through the canonical shared-future helper (or the
+  shared-future fan-out mechanism inside a site-specific loop)
+- **AND** no hand-rolled `asyncio.shield` retry loop remains
+
+#### Scenario: Level cancellation surfaces through every marker shape
+
+- **GIVEN** a caller in a level-cancelled scope awaiting an owned cleanup via
+  a defer-cancellation wait that reports a boolean or exception marker
+- **WHEN** the owned cleanup completes
+- **THEN** the marker reports the deferred cancellation
+- **AND** the caller can re-raise it deterministically after cleanup instead
+  of being interrupted at an arbitrary later checkpoint
 
 ### Requirement: Fresh hard bridge requests may recover across accounts
 

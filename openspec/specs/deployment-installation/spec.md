@@ -664,3 +664,175 @@ advisories, licenses, wildcard dependencies, and non-approved sources.
 - **WHEN** Rust becomes the application owner
 - **THEN** the existing root workspace and crates remain at their canonical paths
 - **AND** the server application is added without relocating a temporary `rust/` or `native/` tree
+
+### Requirement: Compose Postgres service sizes /dev/shm for parallel query
+
+The Docker Compose `postgres` service MUST set an explicit `shm_size` of at
+least 1GB. Docker's default 64MB `/dev/shm` causes PostgreSQL parallel
+workers to fail with `could not resize shared memory segment ... No space
+left on device` once a parallel hash join spills past the segment.
+
+#### Scenario: Compose postgres service pins shm_size
+
+- **WHEN** `docker-compose.yml` is inspected
+- **THEN** the `postgres` service declares `shm_size` of at least 1GB
+
+#### Scenario: Parallel hash join spills past 64MB
+
+- **GIVEN** the Compose `postgres` service is running with the declared
+  `shm_size`
+- **WHEN** a parallel hash join spills more than 64MB of build tuples into
+  dynamic shared memory
+- **THEN** the query does not fail with `could not resize shared memory
+  segment`
+
+### Requirement: Timeout invariants are validated at startup and in CI
+
+The application SHALL define executable timeout-invariant rules over effective
+startup `Settings` fields and explicitly imported code constants for verified
+relationships between request budgets, TTLs, refresh deadlines, admission
+waits, retry jitter, fixed refresh cadence, and durable retry-circuit state.
+Each rule SHALL name the compared setting, constant, or expression; the
+relation; and a one-line rationale describing the runtime failure prevented.
+Unverified timeout inventory entries SHALL NOT be enforced until their code
+relationship is verified.
+
+At startup, the application SHALL validate the effective startup `Settings`
+object against the rule table. This validation SHALL NOT claim coverage for
+per-request `ContextVar` overrides, runtime clamps, derived effective values
+computed after startup, or database/API-key/model-source timeout values loaded
+after startup. By default, startup SHALL log every violation at CRITICAL and
+continue. When `timeout_invariant_validation_strict` is true, startup SHALL raise
+after logging the violations. The project SHALL expose a runnable CI entrypoint
+that validates the same rule table, defaults to non-strict reporting, and exits
+nonzero only when `--strict` is passed and any rule is violated.
+
+#### Scenario: Default settings satisfy timeout invariants
+
+- **WHEN** timeout-invariant validation runs against default settings
+- **THEN** every enforced rule passes
+- **AND** the CI entrypoint exits successfully
+
+#### Scenario: Non-strict startup reports violations without failing
+
+- **WHEN** effective settings violate one or more timeout-invariant rules
+- **AND** strict timeout-invariant validation is disabled
+- **THEN** startup validation logs every violated rule at CRITICAL
+- **AND** startup may continue
+
+#### Scenario: Strict startup rejects violations
+
+- **WHEN** effective settings violate one or more timeout-invariant rules
+- **AND** `timeout_invariant_validation_strict` is true
+- **THEN** startup validation raises an error that includes the violated rule ids
+
+### Requirement: External database network egress matches the connection source
+
+When bundled PostgreSQL is disabled and NetworkPolicy is enabled, the Helm chart MUST permit external PostgreSQL egress on every port selected by the database connection source. When `externalDatabase.url` is the active source, its authority port or supported SQLAlchemy query ports, including percent-encoded ASCII forms, MUST take precedence and render as unique decimal Kubernetes ports. Blank query items MUST be ignored, and portless query hosts including IPv6 literals MUST inherit the authority port before defaulting to 5432; a port outside 1 through 65535 MUST fail rendering. When an existing Secret or ExternalSecret is the active source, a stale direct URL MUST be ignored and egress MUST use `externalDatabase.port` because Helm cannot inspect the secret value. A chart-generated database URL MUST use `externalDatabase.port`, defaulting both URL and egress to 5432 when the operator does not override it. Bundled PostgreSQL egress MUST continue to target its chart-managed service on port 5432.
+
+#### Scenario: Custom external database port is rendered consistently
+
+- **WHEN** an operator disables bundled PostgreSQL, enables NetworkPolicy, and
+  sets `externalDatabase.port=6432`
+- **THEN** the chart-generated database URL uses port 6432
+- **AND** the external PostgreSQL NetworkPolicy egress rule permits TCP 6432
+
+#### Scenario: External database port retains its default
+
+- **WHEN** an operator disables bundled PostgreSQL and enables NetworkPolicy
+  without overriding `externalDatabase.port`
+- **THEN** the chart-generated database URL uses port 5432
+- **AND** the external PostgreSQL NetworkPolicy egress rule permits TCP 5432
+
+#### Scenario: Direct external database URL uses its explicit port
+
+- **WHEN** an operator disables bundled PostgreSQL, enables NetworkPolicy, and
+  sets `externalDatabase.url` with port 6432
+- **THEN** the chart-generated Secret retains the direct database URL
+- **AND** the external PostgreSQL NetworkPolicy egress rule permits TCP 6432
+
+#### Scenario: Direct external database URL without a port uses the PostgreSQL default
+
+- **WHEN** an operator disables bundled PostgreSQL, enables NetworkPolicy, and
+  sets `externalDatabase.url` without an explicit port
+- **THEN** the chart-generated Secret retains the direct database URL
+- **AND** the external PostgreSQL NetworkPolicy egress rule permits TCP 5432
+
+#### Scenario: Equivalent direct URL port forms are normalized
+
+- **WHEN** an active direct database URL supplies its effective port through an
+  authority with leading zeros, a URL-encoded query `port`, or a query `host`
+- **THEN** the external PostgreSQL NetworkPolicy egress rule permits the same
+  decimal TCP port used by SQLAlchemy
+
+#### Scenario: Portless query host inherits the authority port
+
+- **WHEN** an active direct database URL supplies an authority port and a
+  portless query `host`
+- **THEN** the external PostgreSQL NetworkPolicy egress rule permits the
+  authority TCP port used by SQLAlchemy
+
+#### Scenario: Portless IPv6 query host keeps the PostgreSQL default
+
+- **WHEN** an active direct database URL without an authority port supplies a
+  portless IPv6 query `host`
+- **THEN** the external PostgreSQL NetworkPolicy egress rule permits TCP 5432
+- **AND** no IPv6 hextet is interpreted as a port
+
+#### Scenario: Blank query items do not override effective ports
+
+- **WHEN** an active direct database URL contains blank `host` or `port` query
+  items beside a valid port source
+- **THEN** the blank items are ignored
+- **AND** the external PostgreSQL NetworkPolicy permits only the effective port
+
+#### Scenario: Multihost direct URL permits every failover port
+
+- **WHEN** an active direct database URL supplies multiple query hosts on
+  different valid ports
+- **THEN** the external PostgreSQL NetworkPolicy egress rule permits every
+  unique TCP port used by those hosts
+
+#### Scenario: Secret-backed database source ignores a stale direct URL
+
+- **WHEN** an existing Secret or ExternalSecret supplies the database URL
+- **AND** an inactive direct URL declares a different port
+- **THEN** the external PostgreSQL NetworkPolicy ignores the inactive URL
+- **AND** its egress rule uses `externalDatabase.port`
+
+#### Scenario: Invalid direct URL port fails rendering
+
+- **WHEN** an active direct database URL declares a port outside 1 through 65535
+- **THEN** Helm rendering fails before resources are applied
+
+#### Scenario: Bundled PostgreSQL egress is unchanged
+
+- **WHEN** bundled PostgreSQL and NetworkPolicy are enabled
+- **THEN** the PostgreSQL egress rule targets the chart-managed PostgreSQL pods
+- **AND** it permits TCP 5432
+
+### Requirement: Operator metrics and log configuration fails closed
+
+The application MUST accept `CODEX_LB_METRICS_PORT` only in inclusive
+`1..65535` and `CODEX_LB_LOG_FORMAT` only as `text` or `json`. Invalid values
+MUST produce field-specific validation errors before metrics startup or
+formatter selection. Existing main/metrics collision rejection MUST remain.
+
+Helm values schema MUST enforce the same metrics range and log-format set before
+rendering/install. Valid defaults/boundaries MUST remain unchanged.
+
+#### Scenario: Impossible metrics port is rejected
+
+- **WHEN** metrics port is zero, negative, or above 65535
+- **THEN** settings validation identifies `metrics_port`
+
+#### Scenario: Unknown log format is rejected
+
+- **WHEN** log format is not text or json
+- **THEN** settings validation identifies `log_format`
+
+#### Scenario: Helm rejects invalid operator values
+
+- **WHEN** Helm metrics/log values violate the same contract
+- **THEN** schema validation fails with the values path
+

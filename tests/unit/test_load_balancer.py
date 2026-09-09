@@ -3606,19 +3606,31 @@ def test_state_from_account_rate_limited_checks_primary_freshness(monkeypatch):
     assert state.status == AccountStatus.RATE_LIMITED
 
 
-@pytest.mark.parametrize("primary_used", [10.0, 100.0])
-def test_state_from_account_rate_limited_requires_available_primary(monkeypatch, primary_used):
+@pytest.mark.parametrize(
+    ("used_percent", "sample_reset_offset", "expected_status"),
+    [
+        pytest.param(10.0, 3600, AccountStatus.ACTIVE, id="available"),
+        pytest.param(100.0, 3600, AccountStatus.RATE_LIMITED, id="exhausted"),
+    ],
+)
+def test_state_from_account_rate_limited_early_recovery_requires_available_usage(
+    used_percent: float,
+    sample_reset_offset: int,
+    expected_status: AccountStatus,
+) -> None:
     now = 1_700_000_000.0
     blocked = now - 130.0
     future_reset = int(now + 3600)
-    monkeypatch.setattr("time.time", lambda: now)
-    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
-    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=future_reset,
+        blocked_at=int(blocked),
+    )
     fresh_primary = _make_test_usage(
         window="primary",
-        used_percent=primary_used,
-        reset_at=future_reset,
+        used_percent=used_percent,
+        reset_at=int(now + sample_reset_offset),
         recorded_at=_epoch_to_naive_utc(now - 10),
     )
 
@@ -3631,8 +3643,10 @@ def test_state_from_account_rate_limited_requires_available_primary(monkeypatch,
         primary_entry=fresh_primary,
         secondary_entry=None,
         runtime=runtime,
+        now=now,
     )
-    assert state.status == (AccountStatus.ACTIVE if primary_used < 100.0 else AccountStatus.RATE_LIMITED)
+    assert state.status == expected_status
+    assert state.reset_at == (future_reset if expected_status == AccountStatus.RATE_LIMITED else None)
 
 
 @pytest.mark.parametrize("primary_reset_offset", [None, -10, 3600])

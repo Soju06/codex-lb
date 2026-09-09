@@ -605,3 +605,61 @@ def _stop_leaked_live_usage_ingestor():
             "test leaked a live-usage ingestor whose task(s) already failed: " + "; ".join(failures),
             pytrace=False,
         )
+
+
+def _pending_audit_log_tasks() -> list[asyncio.Task[None]]:
+    from app.core.audit import service as audit_service
+
+    return [task for task in audit_service._AUDIT_LOG_TASKS if not task.done()]
+
+
+async def _reap_leaked_audit_log_tasks() -> None:
+    """Cancel audit-log tasks a test left behind and drop them from the registry.
+
+    Only tasks bound to the loop this coroutine runs on are cancelled and
+    awaited; a task that belongs to another (already closed) loop cannot be
+    reaped from here and is inert, so it is only removed from the registry.
+    Awaiting a cancelled task raises ``CancelledError`` in this coroutine
+    without cancelling it — the exception is the task's outcome, not ours.
+    """
+    from app.core.audit import service as audit_service
+
+    loop = asyncio.get_running_loop()
+    leaked = _pending_audit_log_tasks()
+    reapable = [task for task in leaked if task.get_loop() is loop]
+    for task in reapable:
+        task.cancel()
+    for task in reapable:
+        try:
+            await task
+        except (Exception, asyncio.CancelledError):
+            continue
+    for task in leaked:
+        audit_service._AUDIT_LOG_TASKS.discard(task)
+
+
+@pytest.fixture(autouse=True)
+def _reap_leaked_audit_log_tasks_fence():
+    """Fence the process-global audit-log task registry per test (issue #2209).
+
+    ``AuditService.log_async`` is fire-and-forget: it schedules the database
+    write as a task on the running loop and tracks it only in the module-global
+    ``_AUDIT_LOG_TASKS`` set. A test that drives a login or mutation path and
+    returns before that write is stepped (or without a provisioned schema for
+    it to ever complete against) leaves the task pending on the shared session
+    loop, where it survives into every later test. test_otel's lifespan drain
+    test asserts the registry is empty before it starts and then fails on a
+    leak it did not cause. Cancel and settle any leaked task after every test
+    so none crosses a test boundary.
+
+    Same shape as ``_stop_leaked_live_usage_ingestor`` above: a sync fixture
+    that only enters the event loop when a leak is actually present, because
+    spinning the loop after every test would call the loop clock while some
+    tests still hold finite ``time.monotonic`` fakes during teardown.
+    """
+    yield
+    if not _pending_audit_log_tasks():
+        return
+    loop = _session_loop
+    if loop is not None and not loop.is_closed() and not loop.is_running():
+        loop.run_until_complete(_reap_leaked_audit_log_tasks())

@@ -23233,6 +23233,11 @@ async def test_get_or_create_http_bridge_session_waiter_propagates_terminal_infl
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    # The registration gate consults ring membership through the real database;
+    # this test only exercises the in-memory inflight waiter, so pin the gate
+    # closed like the sibling inflight tests instead of depending on schema
+    # some earlier module happened to provision.
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
     monkeypatch.setattr(
         proxy_service,
@@ -28488,7 +28493,12 @@ async def test_create_http_bridge_session_does_not_classify_post_selection_failu
 @pytest.mark.asyncio
 async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_previous_response_owner_misses(
     monkeypatch: pytest.MonkeyPatch,
+    db_setup: bool,
 ) -> None:
+    # ``_pin_file_account`` writes through the real ``SessionLocal`` into
+    # ``file_account_pins``; ``db_setup`` provisions that schema instead of
+    # relying on an earlier module having reset the shared test database.
+    del db_setup
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     await service._pin_file_account("file_from_other_account", "acc-file")
     payload = proxy_service.ResponsesRequest.model_validate(

@@ -120,6 +120,11 @@ def check_t3_dashboard_home(
     tables.setdefault(DASHBOARD_SETTINGS_TABLE, columns)
     field_set = set(fields)
     for name, target in sorted(homes.items()):
+        if name not in field_set:
+            # Stale entry: the field is gone, so its target is moot even when the
+            # column was dropped too. Warn only, so removals can land in either order.
+            report.warn(f"DASHBOARD_HOMES lists {name!r}, which is no longer a Settings field; drop the entry")
+            continue
         match = _HOME_TARGET_RE.match(target)
         if match is None:
             report.error(f"DASHBOARD_HOMES[{name!r}] = {target!r} is not a 'table.column' target")
@@ -128,9 +133,7 @@ def check_t3_dashboard_home(
         if column not in tables.get(table, set()):
             report.error(f"DASHBOARD_HOMES maps {name!r} to {target!r}, but no such database column exists")
             continue
-        if name not in field_set:
-            report.warn(f"DASHBOARD_HOMES lists {name!r}, which is no longer a Settings field; drop the entry")
-        elif tiers.get(name) != "T3":
+        if tiers.get(name) != "T3":
             report.warn(f"DASHBOARD_HOMES lists {name!r}, which is {tiers.get(name)!r}, not T3; drop the entry")
         elif name in columns:
             report.warn(f"DASHBOARD_HOMES lists {name!r}, but {DASHBOARD_SETTINGS_TABLE}.{name} exists; drop the entry")

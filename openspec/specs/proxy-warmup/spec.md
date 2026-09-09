@@ -1,7 +1,7 @@
 # proxy-warmup Specification
 
 ## Purpose
-TBD - created by archiving change add-v1-warmup-endpoint. Update Purpose after archive.
+Governs `POST /v1/warmup`, which lets API-key clients warm the accounts in their pool before real traffic so first-request latency and upstream cold starts do not reach users. It defines target-pool derivation from key scope, deterministic `normal`/`strict`/`force` mode semantics, the minimal upstream request, and the rule that warmup traffic is visible in request logs but excluded from aggregate and API-key usage accounting.
 ## Requirements
 ### Requirement: Warmup endpoint is exposed on the v1 proxy surface
 The system SHALL expose `POST /v1/warmup` on the same authenticated proxy surface as other `/v1/*` routes. The endpoint SHALL accept a JSON body with `mode` and SHALL return HTTP 200 with a structured JSON summary of submitted, skipped, and failed account warmups for every valid execution. Per-account `ProxyAuthError` and `ProxyRateLimitError` failures SHALL be represented in the `failed` summary regardless of the number of target accounts.

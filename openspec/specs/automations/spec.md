@@ -1,7 +1,7 @@
 # automations Specification
 
 ## Purpose
-TBD - created by archiving change add-automations-scheduled-pings. Update Purpose after archive.
+Governs operator-defined automation jobs that send scheduled ping traffic from selected accounts and models for readiness checks and warm-up. It defines the dashboard API for managing jobs, daily schedules with timezone and weekday semantics, safe execution in multi-replica deployments, account failover within a run, and queryable run history. Automation traffic must never alter durable user continuity such as sticky sessions.
 ## Requirements
 ### Requirement: Automation jobs are manageable via dashboard APIs
 

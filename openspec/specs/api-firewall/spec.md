@@ -1,7 +1,7 @@
 # api-firewall Specification
 
 ## Purpose
-TBD - created by archiving change port-firewall-to-react. Update Purpose after archive.
+Governs the IP allowlist that gates the proxy surfaces (`/backend-api/codex/*`, `/v1/*`) and the dashboard API for managing it. Operators who expose codex-lb beyond a private network need to restrict which client addresses may reach the proxy, including deployments behind a reverse proxy where the client IP must be derived from trusted forwarding headers. This capability defines allowlist management, enforcement on protected paths, trusted-proxy header handling, and the safety defaults around header trust and cache TTL.
 ## Requirements
 ### Requirement: Firewall allowlist management API
 Dashboard API MUST expose firewall allowlist management endpoints at `/api/firewall/ips` for listing, creating, and deleting allowed client IP addresses.

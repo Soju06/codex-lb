@@ -1,7 +1,7 @@
 # audio-transcriptions-compat Specification
 
 ## Purpose
-TBD - created by archiving change add-transcription-proxy-compat. Update Purpose after archive.
+Governs the transcription proxy routes: the native Codex `POST /backend-api/transcribe` and the OpenAI-compatible `POST /v1/audio/transcriptions`. Codex voice input and OpenAI-style clients both send audio through these paths, so they must reuse the proxy's authentication, model restriction, rate-limit, account-selection, and retry behaviour with a fixed effective model, while keeping multipart uploads authorized and bounded.
 ## Requirements
 ### Requirement: Native transcription proxy endpoint
 The system SHALL expose `POST /backend-api/transcribe` for multipart audio transcription requests. The endpoint MUST accept a multipart `file` part and MAY accept a `prompt` part, and MUST forward requests to upstream `/transcribe` using selected account credentials. While forwarding multipart form data, the service MUST strip inbound `Content-Type` header values case-insensitively so the upstream client can generate a correct boundary. For a non-native Codex client, the upstream request MUST use canonical `codex_cli_rs` `User-Agent`, `originator`, and `version` values and MUST NOT forward OpenAI SDK fingerprint headers including `x-stainless-*`. A native Codex client MUST forward its inbound `User-Agent` unchanged and MUST NOT add canonical `originator` or `version` headers.

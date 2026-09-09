@@ -52,4 +52,3 @@ reasoning is redundant. Every affected turn MUST satisfy this proof independentl
 - **AND** a later reasoning block has no complete retained answer before the next user message
 - **WHEN** authentication recovery evaluates cross-account replay
 - **THEN** the entire replacement is rejected as unsafe
-

@@ -162,4 +162,3 @@ A permanent forced-refresh failure while serving a movable request MUST release 
 - **WHEN** an operator attempts to pause account A
 - **THEN** the request is rejected
 - **AND** account A remains `reauth_required`
-

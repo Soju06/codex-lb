@@ -48,6 +48,9 @@ ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 _TICK_JITTER_LOW = 0.9
 _TICK_JITTER_HIGH = 1.1
 _AUTO_REDEEM_WINDOW_SECONDS = 5 * 60
+# Polling cadence per replica (fixed; issue #1340 / PRINCIPLES.md P2). The
+# dataclass field stays so tests can inject a shorter interval.
+_REFRESH_INTERVAL_SECONDS = 60
 
 
 @dataclass(slots=True)
@@ -58,8 +61,8 @@ class RateLimitResetCreditsRefreshScheduler:
     not shared, so the loop MUST NOT be leader-gated). The randomized startup
     delay and per-tick jitter only spread replica ticks over the interval so
     N replicas do not hit upstream in lockstep; aggregate upstream fetch rate
-    still scales with replica count and is controlled by
-    ``rate_limit_reset_credits_refresh_interval_seconds``.
+    still scales with replica count (one fetch per account per
+    ``_REFRESH_INTERVAL_SECONDS`` per replica).
     """
 
     interval_seconds: int
@@ -397,7 +400,7 @@ async def _refresh_usage_after_auto_redeem(account: Account) -> None:
             accounts_repo,
             additional_usage_repo,
             auth_manager=AuthManager(accounts_repo),
-        ).force_refresh(current, ignore_refresh_disabled=True)
+        ).force_refresh(current)
         if not refreshed:
             raise RuntimeError(f"Forced usage refresh returned no update for account {account.id}")
         get_account_selection_cache().invalidate()
@@ -406,6 +409,6 @@ async def _refresh_usage_after_auto_redeem(account: Account) -> None:
 def build_rate_limit_reset_credits_scheduler() -> RateLimitResetCreditsRefreshScheduler:
     settings = get_settings()
     return RateLimitResetCreditsRefreshScheduler(
-        interval_seconds=settings.rate_limit_reset_credits_refresh_interval_seconds,
+        interval_seconds=_REFRESH_INTERVAL_SECONDS,
         enabled=settings.rate_limit_reset_credits_refresh_enabled,
     )

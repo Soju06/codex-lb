@@ -103,6 +103,7 @@ markers = [
     "e2e: end-to-end flow tests",
     "integration: tests that exercise multiple layers together",
     "unit: fast isolated tests",
+    "usage_refresh_request_path: keep UsageUpdater request-path refreshes live (see tests/conftest.py)",
 ]
 testpaths = ["tests"]
 filterwarnings = [

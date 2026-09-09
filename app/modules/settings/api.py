@@ -230,6 +230,11 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
         http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
+        # M3 codex prewarm
+        http_responses_session_bridge_codex_prewarm_enabled=(
+            settings.http_responses_session_bridge_codex_prewarm_enabled
+        ),
+        # end M3 codex prewarm
         sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
         sticky_reallocation_primary_budget_threshold_pct=settings.sticky_reallocation_primary_budget_threshold_pct,
         sticky_reallocation_secondary_budget_threshold_pct=settings.sticky_reallocation_secondary_budget_threshold_pct,
@@ -1021,6 +1026,14 @@ async def update_settings(
                     if payload.http_responses_session_bridge_gateway_safe_mode is not None
                     else current.http_responses_session_bridge_gateway_safe_mode
                 ),
+                # M3 codex prewarm: tri-state via model_fields_set.
+                http_responses_session_bridge_codex_prewarm_enabled=_dashboard_value(
+                    payload, "http_responses_session_bridge_codex_prewarm_enabled"
+                ),
+                clear_http_responses_session_bridge_codex_prewarm_enabled=_clears_dashboard_value(
+                    payload, "http_responses_session_bridge_codex_prewarm_enabled"
+                ),
+                # end M3 codex prewarm
                 sticky_reallocation_budget_threshold_pct=resolved_legacy_threshold,
                 sticky_reallocation_primary_budget_threshold_pct=resolved_primary_threshold,
                 sticky_reallocation_secondary_budget_threshold_pct=(
@@ -1211,6 +1224,7 @@ async def update_settings(
             "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
             "http_responses_session_bridge_gateway_safe_mode",
+            "http_responses_session_bridge_codex_prewarm_enabled",  # M3 codex prewarm
             "sticky_reallocation_budget_threshold_pct",
             "sticky_reallocation_primary_budget_threshold_pct",
             "sticky_reallocation_secondary_budget_threshold_pct",
@@ -1278,6 +1292,13 @@ async def update_settings(
         ):
             changed_fields.append(field_name)
     # end C2-2 routing/overload
+    # M3 codex prewarm: storing the inherited value (or clearing it) changes
+    # ownership without changing the effective value; audit that too.
+    if "http_responses_session_bridge_codex_prewarm_enabled" not in changed_fields and current.provenance.get(
+        "http_responses_session_bridge_codex_prewarm_enabled"
+    ) != updated.provenance.get("http_responses_session_bridge_codex_prewarm_enabled"):
+        changed_fields.append("http_responses_session_bridge_codex_prewarm_enabled")
+    # end M3 codex prewarm
     if upstream_route_inputs_changed:
         # Durably bump ``upstream_route`` (with the coalesced retry fallback)
         # rather than relying solely on the ``settings`` bump issued above:

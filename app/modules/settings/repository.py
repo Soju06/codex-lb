@@ -90,6 +90,8 @@ class SettingsRepository:
             soft_drain_enabled=None,
             deterministic_failover_enabled=None,
             circuit_breaker_enabled=None,
+            # M3 codex prewarm: NULL = inherit the env alias / default (off).
+            http_responses_session_bridge_codex_prewarm_enabled=None,
         )
         self._session.add(row)
         try:
@@ -198,6 +200,10 @@ class SettingsRepository:
         sse_keepalive_interval_seconds: float | None = None,
         clear_sse_keepalive_interval_seconds: bool = False,
         # end C2-1 timeouts
+        # M3 codex prewarm (tri-state like the resilience toggles)
+        http_responses_session_bridge_codex_prewarm_enabled: bool | None = None,
+        clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False,
+        # end M3 codex prewarm
         expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -301,6 +307,15 @@ class SettingsRepository:
             )
         if http_responses_session_bridge_gateway_safe_mode is not None:
             settings.http_responses_session_bridge_gateway_safe_mode = http_responses_session_bridge_gateway_safe_mode
+        # M3 codex prewarm: clear flag resets to NULL (inherit the env alias /
+        # code default); a non-None value is dashboard-owned.
+        if clear_http_responses_session_bridge_codex_prewarm_enabled:
+            settings.http_responses_session_bridge_codex_prewarm_enabled = None
+        elif http_responses_session_bridge_codex_prewarm_enabled is not None:
+            settings.http_responses_session_bridge_codex_prewarm_enabled = (
+                http_responses_session_bridge_codex_prewarm_enabled
+            )
+        # end M3 codex prewarm
         if sticky_reallocation_budget_threshold_pct is not None:
             settings.sticky_reallocation_budget_threshold_pct = sticky_reallocation_budget_threshold_pct
         if sticky_reallocation_primary_budget_threshold_pct is not None:

@@ -10,11 +10,11 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Protocol, cast
 
 from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
-from app.core.config.settings import get_settings
 from app.core.plan_types import normalize_account_plan_type
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.usage import capacity_for_plan
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
 from app.db.session import detach_session_objects, get_background_session
@@ -298,11 +298,7 @@ class UsageRefreshScheduler:
 
 
 def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
-    settings = get_settings()
-    return UsageRefreshScheduler(
-        interval_seconds=settings.usage_refresh_interval_seconds,
-        enabled=settings.usage_refresh_enabled,
-    )
+    return UsageRefreshScheduler(interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS, enabled=True)
 
 
 def _ordered_usage_refresh_accounts(accounts: list[Account]) -> list[Account]:

@@ -20,6 +20,8 @@ from app.core.clients.http import _safe_json, lease_retry_client
 from app.core.clients.proxy import _codex_response_status
 from app.core.clients.usage import (
     RETRYABLE_STATUS,
+    USAGE_FETCH_MAX_RETRIES,
+    USAGE_FETCH_TIMEOUT_SECONDS,
     _retry_delay_seconds,
     _retry_options,
     _safe_codex_json,
@@ -116,8 +118,8 @@ async def fetch_reset_credits(
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
     url = _reset_credits_url(usage_base)
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
-    retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS)
+    retries = max_retries if max_retries is not None else USAGE_FETCH_MAX_RETRIES
     headers = build_chatgpt_auth_headers(access_token, account_id)
     retry_options = _retry_options(retries + 1)
     require_route_or_direct_egress_opt_in(
@@ -132,7 +134,7 @@ async def fetch_reset_credits(
                 url=url,
                 route=route,
                 headers=headers,
-                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                 retries=retries,
                 codex_client=codex_client,
             )
@@ -184,7 +186,7 @@ async def consume_reset_credit(
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
     url = _consume_url(usage_base)
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS)
     # Consume is non-idempotent, so omitted max_retries must not inherit the
     # fetch retry budget and risk replaying a successful upstream redemption.
     retries = max_retries if max_retries is not None else 0
@@ -209,7 +211,7 @@ async def consume_reset_credit(
                 route=route,
                 headers=headers,
                 body=body,
-                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                 retries=retries,
                 codex_client=codex_client,
             )

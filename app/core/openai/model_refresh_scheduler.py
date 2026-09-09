@@ -420,8 +420,4 @@ async def _refresh_http_client_after_transport_error(account: Account, transport
 
 
 def build_model_refresh_scheduler() -> ModelRefreshScheduler:
-    settings = get_settings()
-    return ModelRefreshScheduler(
-        interval_seconds=_REFRESH_INTERVAL_SECONDS,
-        enabled=settings.model_registry_enabled,
-    )
+    return ModelRefreshScheduler(interval_seconds=_REFRESH_INTERVAL_SECONDS, enabled=True)

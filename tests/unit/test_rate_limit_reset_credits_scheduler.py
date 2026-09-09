@@ -915,11 +915,9 @@ def test_build_scheduler_wires_enabled_setting(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(
         scheduler_module,
         "get_settings",
-        lambda: SimpleNamespace(
-            rate_limit_reset_credits_refresh_enabled=False,
-            rate_limit_reset_credits_refresh_interval_seconds=123,
-        ),
+        lambda: SimpleNamespace(rate_limit_reset_credits_refresh_enabled=False),
     )
+    monkeypatch.setattr(scheduler_module, "_REFRESH_INTERVAL_SECONDS", 123)
 
     scheduler = scheduler_module.build_rate_limit_reset_credits_scheduler()
 

@@ -135,7 +135,6 @@ from app.modules.proxy._service.http_bridge.quarantine import (
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
-    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -978,7 +977,7 @@ class _HTTPBridgeStreamingMixin:
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             require_forwarded_file_owner=forwarded_request,
         )
-        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
+        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes()
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
             record_http_bridge_routing(stage="bypass", reason="payload_size")
             logger.info(
@@ -4180,7 +4179,6 @@ class _HTTPBridgeStreamingMixin:
                     "fail_closed",
                 )
                 in {"server_anchored_replay_once", "server_indefinite_recovery"}
-                and getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
                 and request_state.hard_continuity_anchor
                 and session.durable_session_id is not None
                 and session.durable_owner_epoch is not None
@@ -4357,12 +4355,11 @@ class _HTTPBridgeStreamingMixin:
             if observed_response_events > 0 or consecutive_failures is None:
                 return
 
-            # Same capped, fenced flow as the idle-recovery exhaustion: the
-            # consult applies the effective (circuit-capped) threshold and
-            # captures the continuity the abandonment fences on, so this
-            # retry-transport funnel can neither wait past the opened
-            # circuit for the raw configured threshold nor erase continuity
-            # a sibling registered during the window. Only the strike above
+            # Same fenced flow as the idle-recovery exhaustion: the consult
+            # applies the circuit threshold and captures the continuity the
+            # abandonment fences on, so this retry-transport funnel can
+            # neither wait past the opened circuit nor erase continuity a
+            # sibling registered during the window. Only the strike above
             # runs before publication; the consult and abandonment run as
             # an owned settlement task the stream finalizer awaits, so a
             # slow durable store never delays the client-visible terminal
@@ -4379,11 +4376,6 @@ class _HTTPBridgeStreamingMixin:
                 ) = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=consecutive_failures,
-                    configured_threshold=getattr(
-                        _service_get_settings(),
-                        "http_responses_session_bridge_anchor_poison_failure_threshold",
-                        _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
-                    ),
                 )
                 if poison_episode is None:
                     return
@@ -5090,11 +5082,6 @@ class _HTTPBridgeStreamingMixin:
                                             ) = await self._http_bridge_poison_anchor_clear_owed(
                                                 session,
                                                 consecutive_failures=idle_consecutive_failures,
-                                                configured_threshold=getattr(
-                                                    _service_get_settings(),
-                                                    "http_responses_session_bridge_anchor_poison_failure_threshold",
-                                                    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
-                                                ),
                                             )
                                             if poison_episode is None:
                                                 return

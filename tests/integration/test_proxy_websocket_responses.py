@@ -246,7 +246,6 @@ def _websocket_settings(**overrides):
         "prefer_earlier_reset_accounts": False,
         "sticky_threads_enabled": False,
         "openai_cache_affinity_max_age_seconds": 300,
-        "openai_prompt_cache_key_derivation_enabled": True,
         "routing_strategy": "usage_weighted",
         "proxy_request_budget_seconds": 75.0,
         "stream_idle_timeout_seconds": 300.0,
@@ -254,12 +253,9 @@ def _websocket_settings(**overrides):
         "http_responses_session_bridge_instance_id": "test-instance",
         "sse_keepalive_interval_seconds": 10.0,
         "trace_channels": frozenset(),
-        "proxy_token_refresh_limit": 32,
-        "proxy_upstream_websocket_connect_limit": 64,
         "proxy_account_stream_recovery_reserve": 1,
         "proxy_api_key_fair_share_congestion_threshold_pct": 0,
         "proxy_response_create_limit": 64,
-        "proxy_compact_response_create_limit": 16,
     }
     values.update(overrides)
     return SimpleNamespace(**values)

@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
-from app.core.clients.proxy import ProxyResponseError, apply_codex_installation_headers
+from app.core.clients.proxy import MAX_SSE_EVENT_BYTES, ProxyResponseError, apply_codex_installation_headers
 from app.core.clients.proxy_websocket import (
     RealtimeWebSocketProtocol,
     UpstreamWebSocket,
@@ -588,7 +588,7 @@ class _RealtimeLiveMixin:
             await _relay_live_websocket(
                 websocket,
                 relay_upstream,
-                max_message_bytes=settings.max_sse_event_bytes,
+                max_message_bytes=MAX_SSE_EVENT_BYTES,
                 close_timeout_seconds=upstream_close_timeout_seconds,
             )
             log_status = "success"

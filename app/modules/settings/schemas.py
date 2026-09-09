@@ -99,6 +99,10 @@ class DashboardSettingsResponse(DashboardModel):
     dashboard_session_ttl_seconds: int = Field(ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool
+    # M3 codex prewarm: effective value; ``provenance[<name>]`` says whether it
+    # comes from the dashboard, the deprecated env alias or the code default.
+    http_responses_session_bridge_codex_prewarm_enabled: bool
+    # end M3 codex prewarm
     sticky_reallocation_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
     sticky_reallocation_primary_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
     sticky_reallocation_secondary_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
@@ -157,7 +161,8 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     """Partial update of the dashboard settings.
 
     Inheritable settings (the four account-capacity caps, the two retention
-    overrides and the three resilience toggles) are tri-state, decided by
+    overrides, the three resilience toggles and the Codex prewarm switch) are
+    tri-state, decided by
     ``model_fields_set``: a field that is
     omitted is left unchanged, an explicit ``null`` clears the dashboard value
     so the setting returns to inheriting the environment value or code default
@@ -212,6 +217,11 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     dashboard_session_ttl_seconds: int | None = Field(default=None, ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool | None = None
+    # M3 codex prewarm: tri-state via ``model_fields_set`` (absent = unchanged,
+    # null = clear the dashboard value and inherit the deprecated env alias /
+    # code default, value = store).
+    http_responses_session_bridge_codex_prewarm_enabled: bool | None = None
+    # end M3 codex prewarm
     sticky_reallocation_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     sticky_reallocation_primary_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     sticky_reallocation_secondary_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)

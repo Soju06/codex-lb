@@ -96,6 +96,8 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         "soft_drain_enabled": InheritableValue(True, "default", True, True),
         "deterministic_failover_enabled": InheritableValue(True, "default", True, True),
         "circuit_breaker_enabled": InheritableValue(False, "default", False, False),
+        # M3 codex prewarm: NULL column, env double without the field -> off.
+        "http_responses_session_bridge_codex_prewarm_enabled": InheritableValue(False, "default", False, False),
         # C2-1 timeouts: NULL columns and a startup fake without the fields
         # resolve to the code default.
         **{
@@ -384,3 +386,50 @@ async def test_settings_data_resolves_resilience_toggles_with_provenance(monkeyp
     assert data.provenance["soft_drain_enabled"] == InheritableValue(True, "default", True, True)
     assert data.provenance["deterministic_failover_enabled"] == InheritableValue(False, "env", False, True)
     assert data.provenance["circuit_breaker_enabled"] == InheritableValue(True, "dashboard", False, False)
+
+
+# --- M3 codex prewarm --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("column_value", "env_value", "expected"),
+    [
+        # NULL column + env alias differs from the default -> env layer.
+        (None, True, InheritableValue(True, "env", True, False)),
+        # NULL column + env alias equals the default -> default layer.
+        (None, False, InheritableValue(False, "default", False, False)),
+        # Dashboard value wins in both directions, including an explicit False.
+        (False, True, InheritableValue(False, "dashboard", True, False)),
+        (True, False, InheritableValue(True, "dashboard", False, False)),
+    ],
+)
+async def test_settings_data_resolves_codex_prewarm_switch_with_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    column_value: bool | None,
+    env_value: bool,
+    expected: InheritableValue[bool],
+) -> None:
+    row = DashboardSettings()
+    row.http_responses_session_bridge_codex_prewarm_enabled = column_value
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            proxy_account_response_create_limit=4,
+            proxy_account_stream_limit=8,
+            proxy_account_stream_recovery_reserve=1,
+            proxy_api_key_fair_share_congestion_threshold_pct=0,
+            http_responses_session_bridge_codex_prewarm_enabled=env_value,
+        ),
+    )
+
+    data = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+
+    assert data.http_responses_session_bridge_codex_prewarm_enabled is expected.value
+    assert data.provenance["http_responses_session_bridge_codex_prewarm_enabled"] == expected

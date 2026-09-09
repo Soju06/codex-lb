@@ -21,9 +21,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 
+import app.core.middleware.dashboard_overrides as dashboard_overrides_middleware_module
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage as _FakeUpstreamMessage
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
 from app.core.utils.request_id import (
@@ -37,6 +39,7 @@ from app.db.models import Account, AccountStatus, DashboardSettings, HttpBridgeS
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import support as proxy_support
+from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
@@ -194,28 +197,21 @@ def _make_app_settings(
     enabled: bool,
     max_sessions: int = 128,
     queue_limit: int = 8,
-    admission_wait_timeout_seconds: float = 0.05,
-    codex_idle_ttl_seconds: float = 900.0,
     codex_prewarm_enabled: bool = False,
     instance_id: str = "instance-a",
     instance_ring: list[str] | None = None,
 ) -> Settings:
     return Settings(
         http_responses_session_bridge_enabled=enabled,
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=codex_idle_ttl_seconds,
         http_responses_session_bridge_codex_prewarm_enabled=codex_prewarm_enabled,
         http_responses_session_bridge_max_sessions=max_sessions,
         http_responses_session_bridge_queue_limit=queue_limit,
         http_responses_session_bridge_instance_id=instance_id,
         http_responses_session_bridge_instance_ring=list(instance_ring or []),
-        proxy_admission_wait_timeout_seconds=admission_wait_timeout_seconds,
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         stream_idle_timeout_seconds=300.0,
-        openai_prompt_cache_key_derivation_enabled=True,
     )
 
 
@@ -224,6 +220,7 @@ def _make_dashboard_settings(
     prefer_earlier_reset_accounts: bool = False,
     gateway_safe_mode: bool = False,
     prompt_cache_idle_ttl_seconds: int | float = 3600,
+    codex_prewarm_enabled: bool | None = None,
 ) -> DashboardSettings:
     return DashboardSettings(
         id=1,
@@ -240,6 +237,8 @@ def _make_dashboard_settings(
         api_key_auth_enabled=False,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=int(prompt_cache_idle_ttl_seconds),
         http_responses_session_bridge_gateway_safe_mode=gateway_safe_mode,
+        # M3 codex prewarm: NULL inherits the env alias passed to _make_app_settings.
+        http_responses_session_bridge_codex_prewarm_enabled=codex_prewarm_enabled,
         sticky_reallocation_budget_threshold_pct=95.0,
     )
 
@@ -249,9 +248,20 @@ def _install_proxy_settings(
     *,
     app_settings: Settings,
     dashboard_settings: DashboardSettings,
+    admission_wait_timeout_seconds: float = 0.05,
 ) -> None:
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(dashboard_settings))
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    # The request entry point binds the dashboard overlay from the settings-cache
+    # snapshot, and the proxy facade applies it to every ``Settings`` read; point
+    # the middleware at the same fake row so the dashboard-managed switches (M3
+    # codex prewarm) reach the bridge the way they do in production.
+    monkeypatch.setattr(
+        dashboard_overrides_middleware_module, "get_settings_cache", lambda: _SettingsCache(dashboard_settings)
+    )
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: with_dashboard_overrides(app_settings))
+    # The admission wait is a fixed constant (ADMISSION_WAIT_TIMEOUT_SECONDS); the
+    # bridge tests shorten it through the service's module-level seam.
+    monkeypatch.setattr(proxy_module, "_proxy_admission_wait_timeout_seconds", lambda: admission_wait_timeout_seconds)
 
 
 def _install_bridge_settings(monkeypatch: pytest.MonkeyPatch, *, enabled: bool) -> None:
@@ -268,19 +278,21 @@ def _install_bridge_settings_with_limits(
     codex_idle_ttl_seconds: float = 900.0,
     prompt_cache_idle_ttl_seconds: float = 3600.0,
     codex_prewarm_enabled: bool = False,
+    codex_prewarm_dashboard: bool | None = None,
     gateway_safe_mode: bool = False,
     prefer_earlier_reset_accounts: bool = False,
     instance_id: str = "instance-a",
     instance_ring: list[str] | None = None,
 ) -> None:
+    # The Codex idle TTL is a fixed module constant; the seam is the constant.
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", codex_idle_ttl_seconds)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=admission_wait_timeout_seconds,
         app_settings=_make_app_settings(
             enabled=enabled,
             max_sessions=max_sessions,
             queue_limit=queue_limit,
-            admission_wait_timeout_seconds=admission_wait_timeout_seconds,
-            codex_idle_ttl_seconds=codex_idle_ttl_seconds,
             codex_prewarm_enabled=codex_prewarm_enabled,
             instance_id=instance_id,
             instance_ring=instance_ring,
@@ -289,6 +301,7 @@ def _install_bridge_settings_with_limits(
             prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
             gateway_safe_mode=gateway_safe_mode,
             prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+            codex_prewarm_enabled=codex_prewarm_dashboard,
         ),
     )
 
@@ -2075,6 +2088,141 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
 
     assert select_calls == [(True, "priority")]
     await service._close_http_bridge_session(session)
+
+
+def _install_codex_prewarm_bridge_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    account: Account,
+    fake_upstream: _FakeBridgeUpstreamWebSocket,
+) -> None:
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+            preferred_account_id,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_codex_prewarm_dashboard_on_beats_env_off(async_client, monkeypatch):
+    """M3 codex prewarm: the dashboard switch (on) wins over the deprecated env
+    alias (off): the first turn of a new Codex session is preceded by exactly one
+    ``generate=false`` warm-up."""
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        codex_idle_ttl_seconds=600.0,
+        codex_prewarm_enabled=False,
+        codex_prewarm_dashboard=True,
+    )
+    account_id = await _import_account(
+        async_client, "acc_http_bridge_prewarm_dash_on", "http-bridge-prewarm-dash-on@example.com"
+    )
+    fake_upstream = _PrewarmingBridgeUpstreamWebSocket()
+    account = await _get_account(account_id)
+    _install_codex_prewarm_bridge_fakes(monkeypatch, account=account, fake_upstream=fake_upstream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"x-codex-turn-state": "turn_state_prewarm_dash_on"},
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_actual_2"
+    assert len(fake_upstream.sent_text) == 2
+    assert json.loads(fake_upstream.sent_text[0])["generate"] is False
+    assert "generate" not in json.loads(fake_upstream.sent_text[1])
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_codex_prewarm_dashboard_off_beats_env_on(async_client, monkeypatch):
+    """M3 codex prewarm: the dashboard switch (off) wins over the deprecated env
+    alias (on): no warm-up is sent, the visible turn is the only upstream request."""
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        codex_idle_ttl_seconds=600.0,
+        codex_prewarm_enabled=True,
+        codex_prewarm_dashboard=False,
+    )
+    account_id = await _import_account(
+        async_client, "acc_http_bridge_prewarm_dash_off", "http-bridge-prewarm-dash-off@example.com"
+    )
+    fake_upstream = _PrewarmingBridgeUpstreamWebSocket()
+    account = await _get_account(account_id)
+    _install_codex_prewarm_bridge_fakes(monkeypatch, account=account, fake_upstream=fake_upstream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"x-codex-turn-state": "turn_state_prewarm_dash_off"},
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_actual_1"
+    assert len(fake_upstream.sent_text) == 1
+    assert "generate" not in json.loads(fake_upstream.sent_text[0])
 
 
 @pytest.mark.asyncio
@@ -9482,7 +9630,7 @@ async def test_v1_responses_http_bridge_terminal_release_admits_second_session_b
     app_instance,
     monkeypatch,
 ):
-    app_settings = _make_app_settings(enabled=True, codex_idle_ttl_seconds=900.0).model_copy(
+    app_settings = _make_app_settings(enabled=True).model_copy(
         update={
             "proxy_account_stream_limit": 1,
             "proxy_account_stream_recovery_reserve": 0,
@@ -9723,7 +9871,7 @@ async def test_v1_responses_http_bridge_retries_unanchored_request_when_upstream
         monkeypatch,
         enabled=True,
     )
-    proxy_module.get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.01)
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_missing_created_retry",
@@ -10678,13 +10826,11 @@ async def test_http_bridge_stale_gate_retires_after_leading_rate_limit_telemetry
     app_instance,
     monkeypatch,
 ):
-    app_settings = _make_app_settings(
-        enabled=True,
-        admission_wait_timeout_seconds=0.001,
-    )
-    app_settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
+    app_settings = _make_app_settings(enabled=True)
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.01)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=0.001,
         app_settings=app_settings,
         dashboard_settings=_make_dashboard_settings(),
     )
@@ -10778,13 +10924,11 @@ async def test_http_bridge_stale_gate_direct_retirement_quarantines_wedged_reatt
     session directly (no partial cleanup, no reader-failure funnel). That
     direct retirement must still quarantine the key, or the next request
     rebuilds the identical anchored wedge."""
-    app_settings = _make_app_settings(
-        enabled=True,
-        admission_wait_timeout_seconds=0.001,
-    )
-    app_settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
+    app_settings = _make_app_settings(enabled=True)
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.01)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=0.001,
         app_settings=app_settings,
         dashboard_settings=_make_dashboard_settings(),
     )
@@ -10882,7 +11026,7 @@ async def test_codex_responses_http_bridge_replaces_retired_gate_without_client_
     # authoritative.
     dashboard_settings = await proxy_module.get_settings_cache().get()
     dashboard_settings.upstream_stream_transport = "websocket"
-    proxy_module.get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.01)
     account_id = await _import_account(
         async_client,
         "acc-http-bridge-retired-gate-replace",
@@ -11135,12 +11279,12 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -11239,13 +11383,13 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -11344,13 +11488,13 @@ async def test_v1_responses_http_bridge_inflight_waiter_rejects_service_tier_pro
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -11491,12 +11635,12 @@ async def test_v1_responses_http_bridge_waits_for_inflight_capacity_before_rate_
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=1,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -11594,13 +11738,13 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -11712,13 +11856,13 @@ async def test_v1_responses_http_bridge_reserved_handoff_forks_before_submit(
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -11785,13 +11929,13 @@ async def test_v1_responses_http_bridge_reused_unanchored_refresh_reserves_canon
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -11879,13 +12023,13 @@ async def test_v1_responses_http_bridge_cancellation_during_durable_refresh_rele
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -11941,13 +12085,13 @@ async def test_v1_responses_http_bridge_request_key_follower_isolates_different_
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -12043,13 +12187,13 @@ async def test_v1_responses_http_bridge_forks_follower_when_account_assignment_c
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -12190,13 +12334,13 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -12283,12 +12427,12 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -12378,12 +12522,12 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -12475,12 +12619,12 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),
@@ -12574,12 +12718,12 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
     service._http_bridge_inflight_sessions.clear()
     service._http_bridge_turn_state_index.clear()
 
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 120.0)
     _install_proxy_settings(
         monkeypatch,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
         ),

@@ -6,7 +6,6 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
@@ -195,8 +194,5 @@ class QuotaPlannerScheduler:
 
 
 def build_quota_planner_scheduler() -> QuotaPlannerScheduler:
-    settings = get_settings()
-    return QuotaPlannerScheduler(
-        interval_seconds=_TICK_SECONDS,
-        enabled=getattr(settings, "quota_planner_scheduler_enabled", True),
-    )
+    # ``quota_planner_settings.mode == "off"`` (dashboard) is the only switch.
+    return QuotaPlannerScheduler(interval_seconds=_TICK_SECONDS, enabled=True)

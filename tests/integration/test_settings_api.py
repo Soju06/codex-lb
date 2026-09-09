@@ -363,6 +363,8 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "soft_drain_enabled",
         "deterministic_failover_enabled",
         "circuit_breaker_enabled",
+        # M3 codex prewarm
+        "http_responses_session_bridge_codex_prewarm_enabled",
         # C2-1 timeouts
         "upstream_connect_timeout_seconds",
         "proxy_request_budget_seconds",
@@ -1959,3 +1961,77 @@ async def test_settings_api_reads_inherited_penalty_above_the_dashboard_write_ca
 
     rejected = await async_client.put("/api/settings", json={"proxyAccountInflightPenaltyPct": 150})
     assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_settings_api_codex_prewarm_round_trip_with_provenance(async_client, monkeypatch):
+    """M3 codex prewarm: default -> dashboard -> cleared/env -> unchanged on omit."""
+    from app.modules.settings import service as settings_service
+
+    name = "http_responses_session_bridge_codex_prewarm_enabled"
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["httpResponsesSessionBridgeCodexPrewarmEnabled"] is False
+    assert payload["provenance"][name] == {"source": "default", "envValue": False, "default": False}
+
+    stored = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": True})
+    assert stored.status_code == 200
+    assert stored.json()["httpResponsesSessionBridgeCodexPrewarmEnabled"] is True
+    assert stored.json()["provenance"][name]["source"] == "dashboard"
+
+    # Storing the inherited value (False is a value, not a clear) keeps the
+    # switch dashboard-owned.
+    stored_off = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": False})
+    assert stored_off.status_code == 200
+    assert stored_off.json()["httpResponsesSessionBridgeCodexPrewarmEnabled"] is False
+    assert stored_off.json()["provenance"][name] == {"source": "dashboard", "envValue": False, "default": False}
+
+    # Explicit null clears the column; with the deprecated env alias differing
+    # from the default the switch is inherited from the environment.
+    inherited = settings_service.get_settings().model_copy(update={name: True})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["httpResponsesSessionBridgeCodexPrewarmEnabled"] is True
+    assert cleared.json()["provenance"][name] == {"source": "env", "envValue": True, "default": False}
+
+    # Omitting the field (any unrelated save) leaves the switch inherited: the
+    # dashboard never copies the inherited value into the column.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["provenance"][name]["source"] == "env"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.http_responses_session_bridge_codex_prewarm_enabled is None
+
+
+@pytest.mark.asyncio
+async def test_settings_api_codex_prewarm_dashboard_value_reaches_the_bridge_resolver_without_restart(async_client):
+    """M3 codex prewarm: the bridge reads the switch off the ``Settings`` the
+    request entry point overlaid with the settings-cache snapshot, so a dashboard
+    PUT flips it for the next new Codex session with the process (and its startup
+    ``Settings``) untouched."""
+    from app.core.config.dashboard_overrides import effective_settings
+    from app.core.config.settings import get_settings
+    from app.modules.proxy._service.http_bridge.helpers import _http_bridge_prewarm_enabled
+
+    startup_settings = get_settings()
+
+    async def prewarm_enabled_for_the_next_request() -> bool:
+        # What ``DashboardOverridesMiddleware`` binds and the proxy facade
+        # applies, without standing up a request.
+        snapshot = await get_settings_cache().get()
+        return _http_bridge_prewarm_enabled(effective_settings(snapshot, startup_settings))
+
+    assert startup_settings.http_responses_session_bridge_codex_prewarm_enabled is False
+    assert await prewarm_enabled_for_the_next_request() is False
+
+    enabled = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": True})
+    assert enabled.status_code == 200
+    assert await prewarm_enabled_for_the_next_request() is True
+
+    cleared = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": None})
+    assert cleared.status_code == 200
+    assert await prewarm_enabled_for_the_next_request() is False

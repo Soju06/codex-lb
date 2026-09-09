@@ -381,7 +381,6 @@ class _StreamingRetryMixin:
                 payload
             ) or _facade()._responses_request_contains_input_image(payload)
             resolved_base_transport = _resolve_stream_transport(
-                settings=base_settings,
                 transport=configured_transport,
                 transport_override=None,
                 model=payload.model,

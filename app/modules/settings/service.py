@@ -65,6 +65,10 @@ class DashboardSettingsData:
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
+    # M3 codex prewarm: effective value (dashboard column, else the deprecated
+    # env alias, else the code default); provenance carries the source.
+    http_responses_session_bridge_codex_prewarm_enabled: bool
+    # end M3 codex prewarm
     sticky_reallocation_budget_threshold_pct: float
     sticky_reallocation_primary_budget_threshold_pct: float
     sticky_reallocation_secondary_budget_threshold_pct: float
@@ -212,6 +216,11 @@ class DashboardSettingsUpdateData:
     sse_keepalive_interval_seconds: float | None = None
     clear_sse_keepalive_interval_seconds: bool = False
     # end C2-1 timeouts
+    # M3 codex prewarm (tri-state: value = store, clear flag = back to NULL so
+    # the env alias / default applies again, neither = untouched).
+    http_responses_session_bridge_codex_prewarm_enabled: bool | None = None
+    clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False
+    # end M3 codex prewarm
 
 
 class SettingsService:
@@ -334,6 +343,14 @@ class SettingsService:
             sse_keepalive_interval_seconds=payload.sse_keepalive_interval_seconds,
             clear_sse_keepalive_interval_seconds=payload.clear_sse_keepalive_interval_seconds,
             # end C2-1 timeouts
+            # M3 codex prewarm
+            http_responses_session_bridge_codex_prewarm_enabled=(
+                payload.http_responses_session_bridge_codex_prewarm_enabled
+            ),
+            clear_http_responses_session_bridge_codex_prewarm_enabled=(
+                payload.clear_http_responses_session_bridge_codex_prewarm_enabled
+            ),
+            # end M3 codex prewarm
         )
         return _settings_data(row)
 
@@ -355,6 +372,9 @@ _ENVIRONMENT_INHERITABLE_SETTINGS = (
     "proxy_account_lease_token_weight",
     "proxy_account_lease_ttl_seconds",
     # end C2-2 routing/overload
+    # M3 codex prewarm: bool; a NULL column inherits the deprecated env alias.
+    "http_responses_session_bridge_codex_prewarm_enabled",
+    # end M3 codex prewarm
 )
 # Retention has no environment fallback: NULL = never set from the dashboard =
 # disabled; 0 = explicitly disabled.
@@ -458,6 +478,11 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
             row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
         ),
         http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
+        # M3 codex prewarm
+        http_responses_session_bridge_codex_prewarm_enabled=bool(
+            resolved["http_responses_session_bridge_codex_prewarm_enabled"].value
+        ),
+        # end M3 codex prewarm
         sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
         sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
         sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,

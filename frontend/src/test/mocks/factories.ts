@@ -562,6 +562,7 @@ export function createDashboardSettings(
 		softDrainEnabled: true,
 		deterministicFailoverEnabled: true,
 		circuitBreakerEnabled: false,
+		httpResponsesSessionBridgeCodexPrewarmEnabled: false,
 		...overrides,
 	});
 }

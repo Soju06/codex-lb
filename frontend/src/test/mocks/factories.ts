@@ -30,6 +30,12 @@ import { ModelSourceSchema } from "@/features/model-sources/schemas";
 import type { AccessSummary, AuthSession, AuthSessionUser } from "@/features/auth/schemas";
 import { AuthSessionSchema } from "@/features/auth/schemas";
 import type {
+	DashboardRole,
+	DashboardUser,
+	PendingInvite,
+	PermissionDescriptor,
+} from "@/features/access/api";
+import type {
 	DashboardOverview,
 	DashboardProjections,
 	RequestLog,
@@ -558,6 +564,183 @@ export function createAccessSummary(overrides: Partial<AccessSummary> = {}): Acc
 		scimTokens: 0,
 		auditSinks: 0,
 		localLoginPolicy: "enabled",
+		...overrides,
+	};
+}
+
+// ── Dashboard users / roles (people tab) ──
+
+export const PRESET_ROLE_IDS = {
+	admin: "role_admin",
+	operator: "role_operator",
+	member: "role_member",
+	viewer: "role_viewer",
+	guest: "role_guest",
+} as const;
+
+export const ASSIGNABLE_ROLE_IDS: string[] = [
+	PRESET_ROLE_IDS.admin,
+	PRESET_ROLE_IDS.operator,
+	PRESET_ROLE_IDS.viewer,
+];
+
+const ALL_PERMISSIONS = [
+	"accounts:export",
+	"accounts:read",
+	"accounts:write",
+	"api_keys:assign",
+	"api_keys:read",
+	"api_keys:write",
+	"audit:read",
+	"conversations:read",
+	"dashboard:read",
+	"ops:write",
+	"roles:manage",
+	"security:write",
+	"users:manage",
+];
+
+function grantsOf(permissions: string[], scope: "all" | "own" = "all") {
+	return permissions.map((permission) => ({ permission, scope }));
+}
+
+export function createDashboardRole(overrides: Partial<DashboardRole> = {}): DashboardRole {
+	return {
+		id: PRESET_ROLE_IDS.viewer,
+		slug: "viewer",
+		name: "Viewer",
+		description: "Read-only access to the dashboard.",
+		kind: "preset",
+		locked: true,
+		assignableToUsers: true,
+		grants: grantsOf(["accounts:read", "dashboard:read"]),
+		usersCount: 0,
+		...overrides,
+	};
+}
+
+export function createDefaultDashboardRoles(): DashboardRole[] {
+	return [
+		createDashboardRole({
+			id: PRESET_ROLE_IDS.admin,
+			slug: "admin",
+			name: "Admin",
+			description: "Everything.",
+			grants: grantsOf(ALL_PERMISSIONS),
+			usersCount: 1,
+		}),
+		createDashboardRole({
+			id: PRESET_ROLE_IDS.guest,
+			slug: "guest",
+			name: "Guest",
+			description: "Anonymous read-only access.",
+			assignableToUsers: false,
+		}),
+		createDashboardRole({
+			id: PRESET_ROLE_IDS.member,
+			slug: "member",
+			name: "Member",
+			description: "Own API keys and own usage.",
+			assignableToUsers: false,
+			grants: grantsOf(["api_keys:read", "api_keys:write", "dashboard:read"], "own"),
+		}),
+		createDashboardRole({
+			id: PRESET_ROLE_IDS.operator,
+			slug: "operator",
+			name: "Operator",
+			description: "Accounts, API keys and operations.",
+			grants: grantsOf([
+				"accounts:read",
+				"accounts:write",
+				"api_keys:assign",
+				"api_keys:read",
+				"api_keys:write",
+				"dashboard:read",
+				"ops:write",
+			]),
+			usersCount: 1,
+		}),
+		createDashboardRole(),
+	];
+}
+
+export function createPermissionDescriptors(): PermissionDescriptor[] {
+	const descriptions: Record<string, string> = {
+		"accounts:export": "Export upstream account credentials.",
+		"accounts:read": "See upstream accounts and their usage windows.",
+		"accounts:write": "Add, edit, pause and remove upstream accounts and their routing.",
+		"api_keys:assign": "Assign upstream accounts, model sources and owners to API keys.",
+		"api_keys:read": "See API keys, their policies and their usage.",
+		"api_keys:write": "Create, edit, rotate and delete API keys.",
+		"audit:read": "Read the audit log.",
+		"conversations:read": "Read conversation contents and archives.",
+		"dashboard:read": "Read the dashboard overview, reports, request logs and the model catalog.",
+		"ops:write": "Change operational settings such as model sources, automations and the quota planner.",
+		"roles:manage": "Create, edit and delete custom roles.",
+		"security:write": "Change security settings: guest access, firewall, upstream proxy credentials.",
+		"users:manage": "Invite, edit, disable and remove dashboard accounts.",
+	};
+	return ALL_PERMISSIONS.map((permission) => ({
+		permission,
+		description: descriptions[permission] ?? permission,
+		implies: [],
+		ownSupported: ["dashboard:read", "api_keys:read", "api_keys:write"].includes(permission),
+		privileged: false,
+	}));
+}
+
+export function createDashboardUser(overrides: Partial<DashboardUser> = {}): DashboardUser {
+	return {
+		id: "user_admin",
+		username: "admin",
+		displayName: null,
+		email: null,
+		role: { id: PRESET_ROLE_IDS.admin, slug: "admin", name: "Admin", kind: "preset" },
+		roleSource: "manual",
+		status: "active",
+		isBreakGlass: true,
+		totpConfigured: true,
+		hasPassword: true,
+		createdAt: "2026-01-01T00:00:00Z",
+		lastLoginAt: "2026-01-31T17:00:00Z",
+		pendingInvite: null,
+		...overrides,
+	};
+}
+
+export function createDefaultDashboardUsers(): DashboardUser[] {
+	return [
+		createDashboardUser(),
+		createDashboardUser({
+			id: "user_ops",
+			username: "ops",
+			displayName: "Sarah Kim",
+			role: { id: PRESET_ROLE_IDS.operator, slug: "operator", name: "Operator", kind: "preset" },
+			isBreakGlass: false,
+			totpConfigured: false,
+			lastLoginAt: "2026-01-30T09:00:00Z",
+		}),
+		createDashboardUser({
+			id: "user_invited",
+			username: "lee",
+			role: { id: PRESET_ROLE_IDS.viewer, slug: "viewer", name: "Viewer", kind: "preset" },
+			status: "invited",
+			isBreakGlass: false,
+			totpConfigured: false,
+			hasPassword: false,
+			lastLoginAt: null,
+			pendingInvite: { expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString() },
+		}),
+	];
+}
+
+export function createPendingInvite(overrides: Partial<PendingInvite> = {}): PendingInvite {
+	return {
+		userId: "user_invited",
+		username: "lee",
+		roleId: PRESET_ROLE_IDS.viewer,
+		expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString(),
+		createdByUserId: "user_admin",
 		...overrides,
 	};
 }

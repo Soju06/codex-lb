@@ -47,6 +47,8 @@ type AuthState = {
   totpEnrollmentRequired: boolean;
   loginHint: LoginHint;
   accessSummary: AccessSummary | null;
+  /** Role ids this account may hand out (`assignable_role_ids`); empty without `users:manage`. */
+  assignableRoleIds: string[];
   tier: DisclosureTier;
   adminLoginRequested: boolean;
   loading: boolean;
@@ -75,13 +77,22 @@ const DEFAULT_LOGIN_HINT: LoginHint = LoginHintSchema.parse({});
 // response says so.
 const LEAST_PRIVILEGE_ACCESS: Pick<
   AuthState,
-  "role" | "permissions" | "canWrite" | "user" | "accessSummary" | "tier" | "mustChangePassword" | "totpEnrollmentRequired"
+  | "role"
+  | "permissions"
+  | "canWrite"
+  | "user"
+  | "accessSummary"
+  | "assignableRoleIds"
+  | "tier"
+  | "mustChangePassword"
+  | "totpEnrollmentRequired"
 > = {
   role: "guest",
   permissions: [],
   canWrite: false,
   user: null,
   accessSummary: null,
+  assignableRoleIds: [],
   tier: "individual",
   mustChangePassword: false,
   totpEnrollmentRequired: false,
@@ -127,6 +138,7 @@ function applySession(set: (next: Partial<AuthState>) => void, session: AuthSess
     totpEnrollmentRequired: session.totpEnrollmentRequired ?? false,
     loginHint: session.login ?? DEFAULT_LOGIN_HINT,
     accessSummary: session.accessSummary ?? null,
+    assignableRoleIds: session.assignableRoleIds,
     tier: resolveDisclosureTier(session.accessSummary ?? null, session.user ?? null),
     adminLoginRequested: false,
     initialized: true,

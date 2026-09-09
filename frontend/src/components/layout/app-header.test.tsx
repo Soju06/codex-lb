@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppHeader } from "@/components/layout/app-header";
@@ -15,6 +15,11 @@ import {
   createDashboardSettings,
   createSessionUser,
 } from "@/test/mocks/factories";
+
+function LocationProbe() {
+  const { pathname, hash } = useLocation();
+  return <div data-testid="location">{`${pathname}${hash}`}</div>;
+}
 
 function renderHeader(initialEntry = "/dashboard", onLogout = vi.fn()) {
   const queryClient = new QueryClient({
@@ -29,6 +34,7 @@ function renderHeader(initialEntry = "/dashboard", onLogout = vi.fn()) {
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[initialEntry]}>
         <AppHeader onLogout={onLogout} />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -192,12 +198,33 @@ describe("AppHeader", () => {
       await user.click(chip);
       expect(await screen.findByRole("menuitem", { name: "My password" })).toBeInTheDocument();
       expect(screen.getByRole("menuitem", { name: "My two-factor" })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: "Invite teammate" })).toBeInTheDocument();
       expect(screen.getByRole("menuitem", { name: "Log out everywhere" })).toBeInTheDocument();
       expect(screen.getByRole("menuitem", { name: "Logout" })).toBeInTheDocument();
-      expect(screen.queryByRole("menuitem", { name: /Invite/ })).not.toBeInTheDocument();
     });
 
-    it("offers My two-factor only when the Settings page would show the TOTP card", async () => {
+    it("deep-links Invite teammate to the People tab and My two-factor to the Access card", async () => {
+      const user = userEvent.setup();
+      useAuthStore.setState({
+        user: createSessionUser(),
+        tier: "team",
+        canWrite: true,
+        passwordManagementEnabled: true,
+        passwordSessionActive: true,
+      });
+
+      renderHeader();
+
+      await user.click(screen.getByRole("button", { name: /admin\s*·\s*Admin/ }));
+      await user.click(await screen.findByRole("menuitem", { name: "Invite teammate" }));
+      expect(screen.getByTestId("location")).toHaveTextContent("/settings#access-people");
+
+      await user.click(screen.getByRole("button", { name: /admin\s*·\s*Admin/ }));
+      await user.click(await screen.findByRole("menuitem", { name: "My two-factor" }));
+      expect(screen.getByTestId("location")).toHaveTextContent("/settings#access");
+    });
+
+    it("offers My two-factor only when the Settings page would show the TOTP card, and Invite teammate only with users:manage", async () => {
       const user = userEvent.setup();
       useAuthStore.setState({
         permissions: OPERATOR_PERMISSIONS,
@@ -213,6 +240,7 @@ describe("AppHeader", () => {
       await user.click(screen.getByRole("button", { name: /ops\s*·\s*Operator/ }));
       expect(await screen.findByRole("menuitem", { name: "My password" })).toBeInTheDocument();
       expect(screen.queryByRole("menuitem", { name: "My two-factor" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("menuitem", { name: "Invite teammate" })).not.toBeInTheDocument();
     });
 
     it("is keyboard operable: Enter opens the menu and the arrow keys reach the items", async () => {
@@ -225,6 +253,8 @@ describe("AppHeader", () => {
       await user.keyboard("{Enter}");
       const first = await screen.findByRole("menuitem", { name: "My password" });
       await waitFor(() => expect(first).toHaveFocus());
+      await user.keyboard("{ArrowDown}");
+      expect(screen.getByRole("menuitem", { name: "Invite teammate" })).toHaveFocus();
       await user.keyboard("{ArrowDown}");
       expect(screen.getByRole("menuitem", { name: "Log out everywhere" })).toHaveFocus();
     });

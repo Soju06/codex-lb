@@ -94,6 +94,10 @@ vi.mock("@/features/settings/components/background-jobs-settings", () => ({
   BackgroundJobsSettings: () => <div>Background Jobs Settings</div>,
 }));
 
+vi.mock("@/features/settings/components/totp-settings", () => ({
+  TotpSettings: () => <div>TOTP Settings</div>,
+}));
+
 vi.mock("@/features/settings/components/data-retention-settings", () => ({
   DataRetentionSettings: (props: unknown) => {
     dataRetentionSettingsMock(props);
@@ -361,6 +365,26 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Upstream Proxy Settings")).toBeInTheDocument();
     expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
     expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+  });
+
+  it("folds guest access, password, session and TOTP into the Access card in today's order", async () => {
+    useAuthStore.setState({ passwordSessionActive: true });
+    renderSettings();
+
+    const card = document.getElementById("access");
+    expect(card).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Access" })).toBeInTheDocument();
+    await screen.findByText("TOTP Settings");
+    const labels = ["Guest Access Settings", "Password Settings", "Session Settings", "TOTP Settings"].map(
+      (label) => screen.getByText(label),
+    );
+    expect(labels.every((node) => card?.contains(node))).toBe(true);
+    // Each control follows the previous one: today's order, nothing reshuffled.
+    expect(
+      labels.slice(1).every((node, index) => Boolean(labels[index].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)),
+    ).toBe(true);
+    // Cards outside the Access card keep their place: Access sits between Reset credits and API keys.
+    expect(screen.getByText("API Keys Section").compareDocumentPosition(card!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
   });
 
   it("keeps guest access settings available for writable sessions", async () => {

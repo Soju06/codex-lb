@@ -1,4 +1,4 @@
-import { Suspense, lazy, useState } from "react";
+import { useState } from "react";
 import { Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useLocation } from "react-router-dom";
@@ -14,20 +14,18 @@ import { useModelSources } from "@/features/model-sources/hooks/use-model-source
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
+import { AccessCard } from "@/features/settings/components/access/access-card";
 import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ConversationArchiveSettings } from "@/features/settings/components/conversation-archive-settings";
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
-import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { ModelCatalogueSettings } from "@/features/settings/components/model-catalogue-settings";
-import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
 import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
 import { SessionBridgeSettings } from "@/features/settings/components/session-bridge-settings";
 import { BackgroundJobsSettings } from "@/features/settings/components/background-jobs-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
-import { SessionSettings } from "@/features/settings/components/session-settings";
 import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream-timeout-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
@@ -37,10 +35,6 @@ import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
-
-const TotpSettings = lazy(() =>
-  import("@/features/settings/components/totp-settings").then((m) => ({ default: m.TotpSettings })),
-);
 
 // C2-2 routing/overload: a layer move (dashboard <-> inherited) without a
 // value change must still reset the routing form's drafts.
@@ -71,8 +65,6 @@ export function SettingsPage() {
   const { accountsQuery } = useAccounts();
   const { modelSourcesQuery } = useModelSources();
   const authMode = useAuthStore((state) => state.authMode);
-  const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
-  const passwordSessionActive = useAuthStore((state) => state.passwordSessionActive);
   const canWrite = useAuthStore((state) => state.canWrite);
   // API keys, upstream-proxy administration, and sticky sessions are write-only
   // reads on the backend (403 for guests), so they are not mounted or fetched
@@ -175,22 +167,15 @@ export function SettingsPage() {
             <AppearanceSettings />
             <ImportSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
             <ResetCreditSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+            {/* Guest access, password, session and TOTP live inside the Access
+                card; guests (no `write`) never saw them and still do not. */}
             {canWrite ? (
-              <GuestAccessSettings
+              <AccessCard
                 settings={settings}
                 busy={busy}
                 onSave={handleSave}
                 onRefresh={() => settingsQuery.refetch()}
               />
-            ) : null}
-            {canWrite ? <PasswordSettings disabled={busy} /> : null}
-            {canWrite && passwordManagementEnabled ? (
-              <SessionSettings settings={settings} busy={busy} onSave={handleSave} />
-            ) : null}
-            {canWrite && passwordManagementEnabled && passwordSessionActive ? (
-              <Suspense fallback={null}>
-                <TotpSettings settings={settings} disabled={busy} onSave={handleSave} />
-              </Suspense>
             ) : null}
 
             {canWrite ? (

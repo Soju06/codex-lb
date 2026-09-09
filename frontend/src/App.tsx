@@ -38,6 +38,9 @@ const ApisPage = lazy(() => import("@/features/apis/components/apis-page").then(
 const SettingsPage = lazy(() =>
   import("@/features/settings/components/settings-page").then((m) => ({ default: m.SettingsPage })),
 );
+const AccessPage = lazy(() =>
+  import("@/features/settings/components/access/access-page").then((m) => ({ default: m.AccessPage })),
+);
 
 // Route guard: a page whose nav item the session cannot use is not rendered.
 // `/dashboard` is the fallback (every assignable role holds `dashboard:read`);
@@ -109,6 +112,7 @@ export default function App() {
               <Route path="/automations" element={<AutomationsPage />} />
               <Route path="/apis" element={<ApisPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/settings/access" element={<AccessPage />} />
             </Route>
             <Route path="/firewall" element={<Navigate to="/settings?advanced=1#firewall" replace />} />
             <Route path="*" element={<NotFoundPage />} />

@@ -1,4 +1,4 @@
-import { KeyRound, LogOut, ShieldCheck, type LucideIcon } from "lucide-react";
+import { KeyRound, LogOut, ShieldCheck, UserPlus, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
@@ -12,12 +12,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
+import { ACCESS_HASH, ACCESS_PEOPLE_HASH } from "@/features/settings/advanced-settings-deeplink";
 import { PasswordChangeDialog } from "@/features/settings/components/password-change-dialog";
 import { cn } from "@/lib/utils";
 
-// Deep link to the TOTP card on the Settings page (`<section id="totp">`).
-const TOTP_SETTINGS_PATH = "/settings#totp";
+// Deep links into the Settings Access card: `#access` opens the person's own
+// controls (where the TOTP card lives), `#access-people` the People tab.
+const MY_SIGN_IN_PATH = `/settings${ACCESS_HASH}`;
+const PEOPLE_PATH = `/settings${ACCESS_PEOPLE_HASH}`;
 
 type AccountMenuItem = {
   key: string;
@@ -34,6 +37,7 @@ function useAccountMenuItems(onOpenPasswordDialog: () => void): AccountMenuItem[
   const canManageTotp = useAuthStore(
     (state) => state.canWrite && state.passwordManagementEnabled && state.passwordSessionActive,
   );
+  const canManageUsers = usePermission("users:manage");
   const logout = useAuthStore((state) => state.logout);
   const logoutEverywhere = useAuthStore((state) => state.logoutEverywhere);
 
@@ -45,7 +49,15 @@ function useAccountMenuItems(onOpenPasswordDialog: () => void): AccountMenuItem[
       key: "two-factor",
       label: t("nav.account.myTwoFactor"),
       icon: ShieldCheck,
-      onSelect: () => navigate(TOTP_SETTINGS_PATH),
+      onSelect: () => navigate(MY_SIGN_IN_PATH),
+    });
+  }
+  if (canManageUsers) {
+    items.push({
+      key: "invite",
+      label: t("nav.account.inviteTeammate"),
+      icon: UserPlus,
+      onSelect: () => navigate(PEOPLE_PATH),
     });
   }
   items.push(
@@ -83,7 +95,7 @@ export function AccountMenu() {
             type="button"
             size="sm"
             variant="ghost"
-            className="press-scale hidden h-8 gap-2 rounded-lg pr-2.5 pl-1 text-xs text-muted-foreground hover:text-foreground sm:inline-flex"
+            className="press-scale hidden h-8 min-w-0 max-w-[14rem] shrink gap-2 rounded-lg pr-2.5 pl-1 text-xs text-muted-foreground hover:text-foreground sm:inline-flex"
           >
             <span
               aria-hidden="true"
@@ -91,7 +103,7 @@ export function AccountMenu() {
             >
               {initialsOf(user.username)}
             </span>
-            <span className="max-w-[12rem] truncate">
+            <span className="min-w-0 max-w-[12rem] truncate">
               {user.username}
               {" · "}
               <span className="text-muted-foreground/70">{user.role.name}</span>

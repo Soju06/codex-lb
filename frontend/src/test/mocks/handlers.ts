@@ -2,6 +2,7 @@ import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
 import type { InviteDescription } from "@/features/auth/schemas";
+import type { DashboardRole, DashboardUser } from "@/features/access/api";
 
 import {
   LIMIT_TYPES,
@@ -22,6 +23,9 @@ import {
   createConversationDetails,
   createConversationsResponse,
   createDashboardAuthSession,
+  createDefaultDashboardRoles,
+  createDefaultDashboardUsers,
+  createPermissionDescriptors,
   createSessionUser,
   OPERATOR_PERMISSIONS,
   createDashboardOverview,
@@ -65,6 +69,19 @@ const STATUS_ORDER = ["ok", "cancelled", "rate_limit", "quota", "error"] as cons
 // ── Zod schemas for mock request bodies ──
 
 export const MOCK_INVITE_TOKEN = "invite-token-valid";
+
+export const MOCK_ISSUED_INVITE_TOKEN = "invite-token-issued";
+
+const DashboardUserCreatePayloadSchema = z.looseObject({
+  username: z.string(),
+  displayName: z.string().optional(),
+  roleId: z.string(),
+});
+
+const DashboardUserUpdatePayloadSchema = z.looseObject({
+  roleId: z.string().optional(),
+  status: z.enum(["active", "disabled"]).optional(),
+});
 
 const InviteAcceptPayloadSchema = z.looseObject({
   token: z.string(),
@@ -274,6 +291,8 @@ type MockState = {
   conversationDetails: ConversationDetails[];
   authSession: DashboardAuthSession;
   inviteDescription: InviteDescription;
+  dashboardUsers: DashboardUser[];
+  dashboardRoles: DashboardRole[];
   settings: DashboardSettings;
   telemetryConsent: TelemetryConsent;
   quotaPlannerSettings: QuotaPlannerSettings;
@@ -375,6 +394,8 @@ function createInitialState(): MockState {
       usernameLocked: false,
       expiresAt: "2026-02-01T18:00:00Z",
     },
+    dashboardUsers: createDefaultDashboardUsers(),
+    dashboardRoles: createDefaultDashboardRoles(),
     settings: createDashboardSettings(),
     telemetryConsent: createTelemetryConsent(),
     quotaPlannerSettings: createQuotaPlannerSettings(),
@@ -2220,6 +2241,202 @@ export const handlers = [
       login: { usernameField: "shown", providers: [{ kind: "password", label: "Password", loginUrl: null }], localLogin: "enabled" },
     });
     return HttpResponse.json(state.authSession);
+  }),
+
+  // ── Dashboard users / roles (`users:manage`) ──
+  // Refusals mirror the service invariants the People tab has to surface.
+
+  http.get("/api/dashboard-users", () => {
+    return HttpResponse.json(state.dashboardUsers);
+  }),
+
+  http.post("/api/dashboard-users", async ({ request }) => {
+    const payload = await parseJsonBody(request, DashboardUserCreatePayloadSchema);
+    if (!payload) {
+      return HttpResponse.json({ error: { code: "validation_error", message: "Invalid payload" } }, { status: 422 });
+    }
+    if (state.dashboardUsers.some((user) => user.username === payload.username)) {
+      return HttpResponse.json(
+        { error: { code: "username_taken", message: "Username is already taken" } },
+        { status: 409 },
+      );
+    }
+    const role = state.dashboardRoles.find((candidate) => candidate.id === payload.roleId);
+    if (!role || !role.assignableToUsers) {
+      return HttpResponse.json(
+        { error: { code: "role_not_assignable", message: "Role cannot be assigned" } },
+        { status: 422 },
+      );
+    }
+    const expiresAt = new Date(Date.now() + 24 * 3600_000).toISOString();
+    const user: DashboardUser = {
+      id: `user_${payload.username}`,
+      username: payload.username,
+      displayName: payload.displayName ?? null,
+      email: null,
+      role: { id: role.id, slug: role.slug, name: role.name, kind: role.kind },
+      roleSource: "manual",
+      status: "invited",
+      isBreakGlass: false,
+      totpConfigured: false,
+      hasPassword: false,
+      createdAt: new Date().toISOString(),
+      lastLoginAt: null,
+      pendingInvite: { expiresAt },
+    };
+    state.dashboardUsers = [...state.dashboardUsers, user];
+    return HttpResponse.json({ user, invite: { token: MOCK_ISSUED_INVITE_TOKEN, expiresAt } }, { status: 201 });
+  }),
+
+  http.get("/api/dashboard-users/invites", () => {
+    return HttpResponse.json(
+      state.dashboardUsers
+        .filter((user) => user.status === "invited" && user.pendingInvite)
+        .map((user) => ({
+          userId: user.id,
+          username: user.username,
+          roleId: user.role.id,
+          expiresAt: user.pendingInvite?.expiresAt,
+          createdByUserId: "user_admin",
+        })),
+    );
+  }),
+
+  http.patch("/api/dashboard-users/:userId", async ({ params, request }) => {
+    const payload = await parseJsonBody(request, DashboardUserUpdatePayloadSchema);
+    const user = state.dashboardUsers.find((candidate) => candidate.id === params.userId);
+    if (!user || !payload) {
+      return HttpResponse.json({ error: { code: "user_not_found", message: "User not found" } }, { status: 404 });
+    }
+    const changesAccess = Boolean(payload.roleId && payload.roleId !== user.role.id) || Boolean(payload.status);
+    if (user.username === "admin" && changesAccess) {
+      return HttpResponse.json(
+        { error: { code: "compat_user_locked", message: "The migrated 'admin' account keeps its role and status" } },
+        { status: 409 },
+      );
+    }
+    if (user.id === state.authSession.user?.id && changesAccess) {
+      return HttpResponse.json(
+        { error: { code: "self_modification_forbidden", message: "You cannot change your own account" } },
+        { status: 409 },
+      );
+    }
+    if (user.status === "invited" && payload.status) {
+      return HttpResponse.json(
+        { error: { code: "invite_pending", message: "This account has not accepted its invite yet" } },
+        { status: 409 },
+      );
+    }
+    const otherActiveAdmins = state.dashboardUsers.filter(
+      (candidate) => candidate.id !== user.id && candidate.status === "active" && candidate.role.slug === "admin",
+    );
+    const demotes = user.role.slug === "admin" && ((payload.roleId && payload.roleId !== user.role.id) || payload.status === "disabled");
+    if (demotes && otherActiveAdmins.length === 0) {
+      return HttpResponse.json(
+        { error: { code: "last_admin_protected", message: "At least one active admin must remain" } },
+        { status: 409 },
+      );
+    }
+    const role = payload.roleId ? state.dashboardRoles.find((candidate) => candidate.id === payload.roleId) : null;
+    const updated: DashboardUser = {
+      ...user,
+      role: role ? { id: role.id, slug: role.slug, name: role.name, kind: role.kind } : user.role,
+      status: payload.status ?? user.status,
+    };
+    state.dashboardUsers = state.dashboardUsers.map((candidate) => (candidate.id === user.id ? updated : candidate));
+    return HttpResponse.json(updated);
+  }),
+
+  http.delete("/api/dashboard-users/:userId", ({ params }) => {
+    const user = state.dashboardUsers.find((candidate) => candidate.id === params.userId);
+    if (!user) {
+      return HttpResponse.json({ error: { code: "user_not_found", message: "User not found" } }, { status: 404 });
+    }
+    if (user.id === state.authSession.user?.id) {
+      return HttpResponse.json(
+        { error: { code: "self_modification_forbidden", message: "You cannot delete your own account" } },
+        { status: 409 },
+      );
+    }
+    if (user.username === "admin") {
+      return HttpResponse.json(
+        { error: { code: "compat_user_locked", message: "The migrated 'admin' account cannot be deleted" } },
+        { status: 409 },
+      );
+    }
+    const otherActiveAdmins = state.dashboardUsers.filter(
+      (candidate) => candidate.id !== user.id && candidate.status === "active" && candidate.role.slug === "admin",
+    );
+    if (user.status === "active" && user.role.slug === "admin" && otherActiveAdmins.length === 0) {
+      return HttpResponse.json(
+        { error: { code: "last_admin_protected", message: "At least one active admin must remain" } },
+        { status: 409 },
+      );
+    }
+    state.dashboardUsers = state.dashboardUsers.filter((candidate) => candidate.id !== user.id);
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post("/api/dashboard-users/:userId/invite", ({ params }) => {
+    const user = state.dashboardUsers.find((candidate) => candidate.id === params.userId);
+    if (!user || user.status !== "invited") {
+      return HttpResponse.json(
+        { error: { code: "invite_not_pending", message: "No pending invite" } },
+        { status: 409 },
+      );
+    }
+    const expiresAt = new Date(Date.now() + 24 * 3600_000).toISOString();
+    state.dashboardUsers = state.dashboardUsers.map((candidate) =>
+      candidate.id === user.id ? { ...candidate, pendingInvite: { expiresAt } } : candidate,
+    );
+    return HttpResponse.json({ token: MOCK_ISSUED_INVITE_TOKEN, expiresAt });
+  }),
+
+  http.delete("/api/dashboard-users/:userId/invite", ({ params }) => {
+    const user = state.dashboardUsers.find((candidate) => candidate.id === params.userId);
+    if (!user || user.status !== "invited") {
+      return HttpResponse.json(
+        { error: { code: "invite_not_pending", message: "No pending invite" } },
+        { status: 409 },
+      );
+    }
+    state.dashboardUsers = state.dashboardUsers.filter((candidate) => candidate.id !== user.id);
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post("/api/dashboard-users/:userId/reset-totp", ({ params }) => {
+    const user = state.dashboardUsers.find((candidate) => candidate.id === params.userId);
+    if (!user) {
+      return HttpResponse.json({ error: { code: "user_not_found", message: "User not found" } }, { status: 404 });
+    }
+    if (user.id === state.authSession.user?.id) {
+      return HttpResponse.json(
+        { error: { code: "self_modification_forbidden", message: "Disable your own TOTP from Settings" } },
+        { status: 409 },
+      );
+    }
+    if (user.username === "admin" && state.settings.totpRequiredOnLogin) {
+      return HttpResponse.json(
+        { error: { code: "compat_user_locked", message: "Resetting the migrated admin's TOTP would lock it out" } },
+        { status: 409 },
+      );
+    }
+    state.dashboardUsers = state.dashboardUsers.map((candidate) =>
+      candidate.id === params.userId ? { ...candidate, totpConfigured: false } : candidate,
+    );
+    return HttpResponse.json({ status: "ok" });
+  }),
+
+  http.post("/api/dashboard-users/:userId/revoke-sessions", () => {
+    return HttpResponse.json({ status: "ok" });
+  }),
+
+  http.get("/api/dashboard-roles", () => {
+    return HttpResponse.json(state.dashboardRoles);
+  }),
+
+  http.get("/api/dashboard-roles/permissions", () => {
+    return HttpResponse.json(createPermissionDescriptors());
   }),
 
   http.get("/api/models", () => {

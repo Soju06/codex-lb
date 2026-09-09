@@ -53,6 +53,32 @@ describe("installAccessCacheEviction", () => {
     unsubscribe();
   });
 
+  it("removes the people and roles lists when users:manage is lost or another account signs in", () => {
+    const client = new QueryClient();
+    useAuthStore.setState({ permissions: ["read", "write", "users:manage:all"], user: { id: "u1", username: "admin", displayName: null, role: { id: "r1", slug: "admin", name: "Admin", kind: "preset" } } });
+    const unsubscribe = installAccessCacheEviction(client);
+    const seedPeople = () => {
+      client.setQueryData(["dashboard-users", "list"], [{ id: "u1" }]);
+      client.setQueryData(["dashboard-roles", "list"], [{ id: "r1" }]);
+    };
+
+    seedPeople();
+    useAuthStore.setState({ permissions: ["read", "write"] });
+    expect(client.getQueryData(["dashboard-users", "list"])).toBeUndefined();
+    expect(client.getQueryData(["dashboard-roles", "list"])).toBeUndefined();
+
+    useAuthStore.setState({ permissions: ["read", "write", "users:manage:all"] });
+    seedPeople();
+    useAuthStore.setState({ user: { id: "u2", username: "ops", displayName: null, role: { id: "r2", slug: "operator", name: "Operator", kind: "preset" } } });
+    expect(client.getQueryData(["dashboard-users", "list"])).toBeUndefined();
+
+    seedPeople();
+    useAuthStore.setState({ role: "admin" });
+    expect(client.getQueryData(["dashboard-users", "list"])).toEqual([{ id: "u1" }]);
+    unsubscribe();
+    useAuthStore.setState({ user: null, permissions: ["read", "write"] });
+  });
+
   it("stops watching after unsubscribe", () => {
     const client = new QueryClient();
     seed(client);

@@ -1,6 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { hasPermission, useAuthStore } from "@/features/auth/hooks/use-auth";
 import { queryClient as defaultQueryClient } from "@/lib/query-client";
 
 /**
@@ -22,11 +22,30 @@ export function evictWriteOnlyQueries(client: QueryClient = defaultQueryClient):
   }
 }
 
-/** Installs the write-access watcher; returns the unsubscribe function. */
+/**
+ * Query keys served only to `users:manage` holders (the people/roles lists).
+ * Removed when that permission is lost or when a different account signs in,
+ * so one account never sees a list fetched by another.
+ */
+export const USERS_MANAGE_QUERY_KEYS: readonly (readonly string[])[] = [["dashboard-users"], ["dashboard-roles"]];
+
+export function evictUsersManageQueries(client: QueryClient = defaultQueryClient): void {
+  for (const queryKey of USERS_MANAGE_QUERY_KEYS) {
+    client.removeQueries({ queryKey: [...queryKey] });
+  }
+}
+
+/** Installs the access watchers; returns the unsubscribe function. */
 export function installAccessCacheEviction(client: QueryClient = defaultQueryClient): () => void {
   return useAuthStore.subscribe((state, previous) => {
     if (previous.canWrite && !state.canWrite) {
       evictWriteOnlyQueries(client);
+    }
+    const lostUsersManage =
+      hasPermission(previous.permissions, "users:manage") && !hasPermission(state.permissions, "users:manage");
+    const accountChanged = (previous.user?.id ?? null) !== (state.user?.id ?? null);
+    if (lostUsersManage || accountChanged) {
+      evictUsersManageQueries(client);
     }
   });
 }

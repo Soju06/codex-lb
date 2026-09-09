@@ -277,7 +277,6 @@ from app.modules.proxy._service.streaming.helpers import (
     _observe_terminal_stream_error_frame,
     _openai_error_fields,
     _publish_http_response_owner,
-    _raw_stream_error_code_or_upstream,
     _rewrite_malformed_stream_error_event,
     _stream_transport_failure_event_or_raise,
 )

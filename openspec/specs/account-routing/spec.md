@@ -1,11 +1,8 @@
 # account-routing Specification
 
 ## Purpose
-<<<<<<< HEAD
 Defines how the proxy chooses which account serves a request and how upstream feedback changes that choice. It covers the selection strategies operators can pick (relative availability, sequential and reset drain, single-account, manual and additional-quota policies, reset-window preference), how rate-limit, overload, and error signals scope penalties to the responsible account, and which of those signals must be shared across replicas versus kept replica-local. The goal is to spend pooled quota deliberately while never leaving a request routed to an account that cannot serve it.
-=======
 Define account eligibility, routing strategy, health recovery, and continuation ownership for proxy requests.
->>>>>>> be8805a8 (fix(routing): retain cooldown while refreshed usage is exhausted)
 ## Requirements
 ### Requirement: Relative availability routing
 

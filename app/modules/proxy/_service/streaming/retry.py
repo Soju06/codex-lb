@@ -34,7 +34,7 @@ from app.core.resilience.network_recovery import (
     NetworkRecoveryDecision,
     ProcessNetworkRecovery,
 )
-from app.core.resilience.toggles import bind_resilience_toggles
+from app.core.resilience.toggles import bind_resilience_toggles, set_resilience_toggles
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.retry import backoff_seconds
@@ -320,7 +320,9 @@ class _StreamingRetryMixin:
         base_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
         # C2-3 resilience toggles: resolved from this request's snapshot and
-        # bound to the task so the upstream client gates its breaker the same way.
+        # bound to the task so the upstream client gates its breaker the same
+        # way; rebound before every upstream attempt because a keepalive yield
+        # can move this generator to another task (ContextVars follow tasks).
         resilience = bind_resilience_toggles(settings, startup_settings=base_settings)
         concurrency_caps = _facade().effective_account_concurrency_caps(settings)
         deadline = start + _facade()._stream_request_budget_seconds(
@@ -877,6 +879,9 @@ class _StreamingRetryMixin:
 
             while True:
                 settlement.reset()
+                # Rebind per attempt: a capacity keepalive may have handed this
+                # generator to another task since the request-entry binding.
+                set_resilience_toggles(resilience)
                 stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
                     proxy._remaining_budget_seconds(deadline)
                 )
@@ -2090,6 +2095,7 @@ class _StreamingRetryMixin:
                     transient_retries = 0
                     allow_retry_flag = attempt < max_attempts - 1
                     while True:
+                        set_resilience_toggles(resilience)  # rebind per attempt (task handoff)
                         stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
                             proxy._remaining_budget_seconds(deadline),
                         )

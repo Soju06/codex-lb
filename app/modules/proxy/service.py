@@ -122,6 +122,7 @@ from app.core.openai.requests import (
 from app.core.resilience.network_recovery import (
     ProcessNetworkRecovery as ProcessNetworkRecovery,
 )
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.upstream_proxy.resolver import (
@@ -983,6 +984,7 @@ class ProxyService(
         base_settings = get_settings()
         deadline = start + base_settings.proxy_request_budget_seconds
         settings = await get_settings_cache().get()
+        bind_resilience_toggles(settings, startup_settings=base_settings)  # C2-3 resilience toggles
         affinity = _sticky_key_for_thread_goal_request(
             payload, headers, codex_session_affinity, settings.openai_cache_affinity_max_age_seconds
         )

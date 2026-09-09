@@ -94,6 +94,18 @@ def bind_resilience_toggles(
     return toggles
 
 
+def set_resilience_toggles(toggles: ResilienceToggles) -> ResilienceToggles:
+    """Bind already-resolved toggles to the current task.
+
+    ContextVars follow tasks, not generators: a streaming generator whose first
+    item is produced by one task (startup probe) and whose upstream attempt runs
+    in another must rebind, in the attempting task, the toggles its request
+    path resolved.
+    """
+    _CURRENT_RESILIENCE_TOGGLES.set(toggles)
+    return toggles
+
+
 def current_resilience_toggles(*, startup_settings: object | None = None) -> ResilienceToggles:
     """Return the toggles bound to the current task, or the environment layer when unbound."""
     bound = _CURRENT_RESILIENCE_TOGGLES.get()

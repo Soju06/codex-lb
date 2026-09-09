@@ -14,6 +14,7 @@ from app.core.resilience.toggles import (
     bind_resilience_toggles,
     current_resilience_toggles,
     resolve_resilience_toggles,
+    set_resilience_toggles,
 )
 
 pytestmark = pytest.mark.unit
@@ -83,3 +84,24 @@ def test_breaker_registry_is_constructed_regardless_of_the_toggle() -> None:
     # so re-enabling the breaker never needs a restart.
     breaker = get_circuit_breaker_for_account("acc-c2-3")
     assert get_circuit_breaker_for_account("acc-c2-3") is breaker
+
+
+@pytest.mark.asyncio
+async def test_generator_resumed_by_another_task_rebinds_resolved_toggles() -> None:
+    """ContextVars follow tasks, not generators (codex review, streaming startup probe)."""
+    snapshot = SimpleNamespace(
+        soft_drain_enabled=True, deterministic_failover_enabled=True, circuit_breaker_enabled=True
+    )
+
+    async def request_stream():
+        resolved = bind_resilience_toggles(snapshot, startup_settings=_ENV)
+        yield "keepalive"  # first item, driven by the startup-probe task
+        # Upstream attempt, driven by whichever task resumed the generator.
+        set_resilience_toggles(resolved)
+        yield current_resilience_toggles(startup_settings=_ENV).circuit_breaker_enabled
+
+    stream = request_stream()
+    assert await asyncio.create_task(stream.__anext__()) == "keepalive"
+    # Without the rebind the resuming task would see the environment layer (off).
+    assert await asyncio.create_task(stream.__anext__()) is True
+    await stream.aclose()

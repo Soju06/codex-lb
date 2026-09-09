@@ -59,6 +59,7 @@ from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.resilience.circuit_breaker import CircuitState
 from app.core.resilience.overload import local_overload_error
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
@@ -7238,6 +7239,7 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         traffic_class=proxy_service.TRAFFIC_CLASS_FOREGROUND,
         concurrency_caps=ANY,
         redact_sensitive_details=False,
+        dashboard_settings=ANY,
     )
 
 
@@ -10672,6 +10674,8 @@ async def test_stream_responses_via_websocket_preserves_raw_error_when_sdk_contr
 
     monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
     monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: _CircuitBreakerStub())
+    # Breaker use is gated by the dashboard toggle the request path binds.
+    bind_resilience_toggles(SimpleNamespace(circuit_breaker_enabled=True))
 
     events = [
         event

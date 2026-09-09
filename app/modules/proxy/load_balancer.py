@@ -594,7 +594,7 @@ class LoadBalancer:
         # (the same one that produced ``concurrency_caps``), never re-read here.
         resilience = resolve_resilience_toggles(dashboard_settings)
 
-        async def load_selection_inputs() -> _SelectionInputs:
+        async def load_unresolved_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 service_tier=service_tier,
@@ -715,8 +715,12 @@ class LoadBalancer:
                     )
             return selection_inputs
 
+        async def load_selection_inputs() -> _SelectionInputs:
+            # Applied after exclusion/security filtering and on every reload,
+            # so retries and filtered pools keep the dashboard soft-drain value.
+            return replace(await load_unresolved_selection_inputs(), soft_drain_enabled=resilience.soft_drain_enabled)
+
         selection_inputs = await load_selection_inputs()
-        selection_inputs = replace(selection_inputs, soft_drain_enabled=resilience.soft_drain_enabled)
         caps = concurrency_caps or effective_account_concurrency_caps()
         circuit_breaker_open = _is_upstream_circuit_breaker_open(resilience.circuit_breaker_enabled)
         if circuit_breaker_open:

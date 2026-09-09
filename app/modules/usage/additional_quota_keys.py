@@ -327,6 +327,16 @@ def get_additional_quota_definition(quota_key: str | None) -> AdditionalQuotaDef
     return by_quota_key.get(resolved_key)
 
 
+def normalize_additional_quota_key(raw_quota_key: str) -> str | None:
+    """Canonicalize a user-supplied quota key and require a registered definition."""
+    canonical_key = canonicalize_additional_quota_key(quota_key=raw_quota_key, limit_name=raw_quota_key)
+    if canonical_key is None:
+        return None
+    if get_additional_quota_definition(canonical_key) is None:
+        return None
+    return canonical_key
+
+
 def get_additional_quota_query_scope(
     *,
     quota_key: str | None = None,

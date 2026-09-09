@@ -27,6 +27,12 @@ from app.core.balancer import (
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
+from app.core.clients.proxy import (
+    _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE as _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE,
+)
+from app.core.clients.proxy import (
+    _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE as _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE,
+)
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy as CodexControlRequestPrivacyPolicy
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
@@ -44,6 +50,30 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     push_compact_timeout_overrides,
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
+)
+from app.core.clients.proxy import (
+    _is_inline_image_reference as _is_inline_image_reference,
+)
+from app.core.clients.proxy import (
+    _response_create_inline_image_notice_item as _response_create_inline_image_notice_item,
+)
+from app.core.clients.proxy import (
+    _response_create_inline_image_notice_part as _response_create_inline_image_notice_part,
+)
+from app.core.clients.proxy import (
+    _response_create_recent_suffix_start as _response_create_recent_suffix_start,
+)
+from app.core.clients.proxy import (
+    _response_create_too_large_error_envelope as _response_create_too_large_error_envelope,
+)
+from app.core.clients.proxy import (
+    _should_slim_historical_tool_output as _should_slim_historical_tool_output,
+)
+from app.core.clients.proxy import (
+    _slim_historical_response_content as _slim_historical_response_content,
+)
+from app.core.clients.proxy import (
+    _slim_historical_response_content_part as _slim_historical_response_content_part,
 )
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
@@ -366,6 +396,9 @@ from app.modules.proxy._service.refresh import (
     ensure_fresh_with_budget as _recover_fresh_account,
 )
 from app.modules.proxy._service.request_log import (
+    _normalize_session_id as _normalize_session_id,
+)
+from app.modules.proxy._service.request_log import (
     _RequestLogMixin,
 )
 from app.modules.proxy._service.response_create import (
@@ -382,12 +415,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE as _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE,
-)
-from app.modules.proxy._service.response_create import (
-    _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE as _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE,
-)
-from app.modules.proxy._service.response_create import (
-    _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE as _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE,
 )
 from app.modules.proxy._service.response_create import (
     _UPSTREAM_RESPONSE_CREATE_MAX_BYTES as _UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
@@ -417,9 +444,6 @@ from app.modules.proxy._service.response_create import (
     _input_part_is_image as _input_part_is_image,
 )
 from app.modules.proxy._service.response_create import (
-    _is_inline_image_reference as _is_inline_image_reference,
-)
-from app.modules.proxy._service.response_create import (
     _json_size_bytes as _json_size_bytes,
 )
 from app.modules.proxy._service.response_create import (
@@ -441,15 +465,6 @@ from app.modules.proxy._service.response_create import (
     _response_create_history_omission_notice_item as _response_create_history_omission_notice_item,
 )
 from app.modules.proxy._service.response_create import (
-    _response_create_inline_image_notice_item as _response_create_inline_image_notice_item,
-)
-from app.modules.proxy._service.response_create import (
-    _response_create_inline_image_notice_part as _response_create_inline_image_notice_part,
-)
-from app.modules.proxy._service.response_create import (
-    _response_create_recent_suffix_start as _response_create_recent_suffix_start,
-)
-from app.modules.proxy._service.response_create import (
     _response_create_text as _response_create_text,
 )
 from app.modules.proxy._service.response_create import (
@@ -457,9 +472,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _response_create_text_with_size_guard as _response_create_text_with_size_guard,
-)
-from app.modules.proxy._service.response_create import (
-    _response_create_too_large_error_envelope as _response_create_too_large_error_envelope,
 )
 from app.modules.proxy._service.response_create import (
     _response_output_item_done_tool_call as _response_output_item_done_tool_call,
@@ -475,15 +487,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _should_dump_oversized_response_create as _should_dump_oversized_response_create,
-)
-from app.modules.proxy._service.response_create import (
-    _should_slim_historical_tool_output as _should_slim_historical_tool_output,
-)
-from app.modules.proxy._service.response_create import (
-    _slim_historical_response_content as _slim_historical_response_content,
-)
-from app.modules.proxy._service.response_create import (
-    _slim_historical_response_content_part as _slim_historical_response_content_part,
 )
 from app.modules.proxy._service.response_create import (
     _slim_historical_response_input_item as _slim_historical_response_input_item,
@@ -600,6 +603,9 @@ from app.modules.proxy._service.support import (
 )
 from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
+)
+from app.modules.proxy._service.support import (
+    _raise_proxy_unavailable_for_account as _raise_proxy_unavailable_for_account,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -2109,13 +2115,6 @@ def _message_mentions_previous_response_id(message: str | None, previous_respons
     )
 
 
-def _normalize_session_id(session_id: str | None) -> str | None:
-    if not isinstance(session_id, str):
-        return None
-    stripped = session_id.strip()
-    return stripped or None
-
-
 _MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES = (
     "no tool output found for function call call_",
     "no tool output found for custom tool call call_",
@@ -2385,15 +2384,6 @@ def _raise_proxy_unavailable(message: str) -> NoReturn:
 
 
 _FAILED_ACCOUNT_ATTR = "_codex_lb_failed_account"
-
-
-def _raise_proxy_unavailable_for_account(message: str, account: Account) -> NoReturn:
-    exc = ProxyResponseError(
-        502,
-        openai_error("upstream_unavailable", message),
-    )
-    setattr(exc, _FAILED_ACCOUNT_ATTR, account)
-    raise exc
 
 
 def _proxy_response_failed_account(exc: ProxyResponseError, fallback: Account) -> Account:

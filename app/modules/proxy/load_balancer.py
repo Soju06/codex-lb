@@ -162,8 +162,8 @@ from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
-    get_additional_quota_definition,
     get_additional_quota_routing_policy,
+    normalize_additional_quota_key,
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 
@@ -2178,15 +2178,6 @@ def _additional_quota_routing_policy_override(limit_name: str | None, policies: 
     return policy
 
 
-def _normalize_additional_quota_key(raw_quota_key: str) -> str | None:
-    canonical_key = canonicalize_additional_quota_key(quota_key=raw_quota_key, limit_name=raw_quota_key)
-    if canonical_key is None:
-        return None
-    if get_additional_quota_definition(canonical_key) is None:
-        return None
-    return canonical_key
-
-
 def _parse_additional_quota_routing_policies(raw_policies: str) -> dict[str, str]:
     if not raw_policies:
         return {}
@@ -2200,7 +2191,7 @@ def _parse_additional_quota_routing_policies(raw_policies: str) -> dict[str, str
     for quota_key, policy in parsed.items():
         if not isinstance(quota_key, str) or not isinstance(policy, str):
             continue
-        normalized_key = _normalize_additional_quota_key(quota_key)
+        normalized_key = normalize_additional_quota_key(quota_key)
         normalized_policy = policy.strip().lower()
         if normalized_key and normalized_policy in _ADDITIONAL_QUOTA_ROUTING_POLICIES:
             policies[normalized_key] = normalized_policy

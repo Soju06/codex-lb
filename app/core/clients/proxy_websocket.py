@@ -47,12 +47,12 @@ from app.core.clients.proxy import (
     _is_native_codex_request,
     _is_upstream_edge_challenge,
     _normalize_non_native_upstream_fingerprint,
+    _openai_error_detail,
     filter_inbound_headers,
 )
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
-from app.core.openai.models import OpenAIError
+from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.parsing import parse_error_payload
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
@@ -1389,22 +1389,3 @@ def _try_parse_handshake_error_payload(
     if error is None:
         return None
     return {"error": _openai_error_detail(error)}
-
-
-def _openai_error_detail(error: OpenAIError) -> OpenAIErrorDetail:
-    detail: OpenAIErrorDetail = {}
-    if error.message is not None:
-        detail["message"] = error.message
-    if error.type is not None:
-        detail["type"] = error.type
-    if error.code is not None:
-        detail["code"] = error.code
-    if error.param is not None:
-        detail["param"] = error.param
-    if error.plan_type is not None:
-        detail["plan_type"] = error.plan_type
-    if error.resets_at is not None:
-        detail["resets_at"] = error.resets_at
-    if error.resets_in_seconds is not None:
-        detail["resets_in_seconds"] = error.resets_in_seconds
-    return detail

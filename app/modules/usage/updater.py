@@ -30,7 +30,7 @@ from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
-from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager, _clean_optional
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
@@ -1182,13 +1182,6 @@ def _plan_downgrade_observation_store() -> PlanDowngradeObservationStorePort:
 
 async def _clear_workspace_less_free_plan_observations(account_id: str) -> None:
     await _plan_downgrade_observation_store().clear(account_id)
-
-
-def _clean_optional(value: str | None) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip()
-    return cleaned or None
 
 
 def _usage_entry_written(entry: UsageHistory | None) -> bool:

@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_MODEL_REGISTRY, get_cache_invalidation_poller
@@ -25,6 +22,7 @@ from app.core.openai.model_registry_store import (
     persist_registry_snapshot,
     reconcile_model_registry_from_store,
 )
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
@@ -41,13 +39,6 @@ logger = logging.getLogger(__name__)
 _REFRESH_INTERVAL_SECONDS = 300
 
 
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
 @dataclass(slots=True)
 class _TransportRecoveryState:
     attempted: bool = False
@@ -57,11 +48,6 @@ class _TransportRecoveryState:
 class _FetchResult:
     models: list[UpstreamModel]
     account_models: dict[str, tuple[str, list[UpstreamModel]]]
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 async def _warm_codex_version_cache() -> None:

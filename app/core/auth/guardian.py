@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import random
 import time
@@ -10,9 +9,15 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol, TypeVar, cast
+from typing import Protocol, cast
 
 from app.core.auth.refresh import RefreshError
+from app.core.scheduling.leader_election_handle import (
+    LeaderElectionLike as _LeaderElectionLike,
+)
+from app.core.scheduling.leader_election_handle import (
+    get_leader_election as _get_leader_election,
+)
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
@@ -37,13 +42,6 @@ _FAILURE_BACKOFF_MAX_SECONDS = 3600.0
 # RATE_LIMITED and QUOTA_EXCEEDED recover to ACTIVE through usage-refresh
 # reconciliation, then become guardian-eligible within the max-age window.
 _AUTH_GUARDIAN_ELIGIBLE_STATUSES = frozenset({AccountStatus.ACTIVE, AccountStatus.PAUSED})
-
-
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 class _AccountsRepositoryLike(Protocol):
@@ -299,11 +297,6 @@ def _auth_guardian_account_is_stale_eligible(
         return False
     age = to_utc_naive(now) - to_utc_naive(account.last_refresh)
     return age > timedelta(seconds=max_age_seconds)
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 async def _count_live_bridge_ring_members() -> int:

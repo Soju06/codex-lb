@@ -19,6 +19,7 @@ from aiohttp_retry import RetryClient
 from aiohttp_socks import ProxyConnector
 
 from app.core.config.settings import Settings, get_settings
+from app.core.types import JsonObject
 
 logger = logging.getLogger(__name__)
 
@@ -487,3 +488,12 @@ def get_http_client() -> HttpClient:
     if _http_client is None:
         raise RuntimeError("HTTP client not initialized")
     return _http_client.client
+
+
+async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
+    try:
+        data = await resp.json(content_type=None)
+    except Exception:
+        text = await resp.text()
+        return {"error": {"message": text.strip()}}
+    return data if isinstance(data, dict) else {"error": {"message": str(data)}}

@@ -766,6 +766,33 @@ def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
 
 
+def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether the one permitted server-side anchored replay is unused."""
+    settings = _service_get_settings()
+    return (
+        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
+        in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and (
+            request_state.replay_count == 0
+            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+            == "server_indefinite_recovery"
+        )
+    )
+
+
+def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    payload = openai_error(
+        "previous_response_not_found",
+        "Previous response was not found; retry without previous_response_id.",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+    return payload
+
+
 def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
     return cast(Callable[[Any | None], float], _service_global("_proxy_admission_wait_timeout_seconds"))(settings)
 

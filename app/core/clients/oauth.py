@@ -19,7 +19,7 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
-from app.core.clients.http import lease_http_session
+from app.core.clients.http import _safe_json, lease_http_session
 from app.core.config.settings import (
     AUTH_BASE_URL,
     OAUTH_CLIENT_ID,
@@ -368,15 +368,6 @@ def _parse_tokens(payload: OAuthTokenPayload) -> OAuthTokens:
         refresh_token=payload.refresh_token,
         id_token=payload.id_token,
     )
-
-
-async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
-    try:
-        data = await resp.json(content_type=None)
-    except Exception:
-        text = await resp.text()
-        return {"error": {"message": text.strip()}}
-    return data if isinstance(data, dict) else {"error": {"message": str(data)}}
 
 
 async def _codex_post(

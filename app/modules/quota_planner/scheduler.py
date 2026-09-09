@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import to_utc_naive
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -25,18 +23,6 @@ logger = logging.getLogger(__name__)
 # keeps ``interval_seconds`` as a constructor field so tests can exercise the
 # loop with a short interval.
 _TICK_SECONDS = 300
-
-
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 class QuotaPlannerScheduler:

@@ -7,8 +7,7 @@ from datetime import datetime
 from app.core.config.settings import get_settings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
-    canonicalize_additional_quota_key,
-    get_additional_quota_definition,
+    normalize_additional_quota_key,
 )
 
 
@@ -388,15 +387,6 @@ def _effective_retention_days(value: int | None) -> int:
     return 0 if value is None else value
 
 
-def _normalize_additional_quota_key(raw_quota_key: str) -> str | None:
-    canonical_key = canonicalize_additional_quota_key(quota_key=raw_quota_key, limit_name=raw_quota_key)
-    if canonical_key is None:
-        return None
-    if get_additional_quota_definition(canonical_key) is None:
-        return None
-    return canonical_key
-
-
 def _parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
     if not raw:
         return {}
@@ -410,7 +400,7 @@ def _parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
     for quota_key, policy in parsed.items():
         if not isinstance(quota_key, str) or not isinstance(policy, str):
             continue
-        normalized_quota_key = _normalize_additional_quota_key(quota_key)
+        normalized_quota_key = normalize_additional_quota_key(quota_key)
         policy = policy.strip().lower()
         if normalized_quota_key and policy in _ROUTING_POLICIES:
             policies[normalized_quota_key] = policy
@@ -422,7 +412,7 @@ def _dump_additional_quota_routing_policies(policies: dict[str, str]) -> str:
     for quota_key, policy in policies.items():
         if not isinstance(quota_key, str) or not isinstance(policy, str):
             continue
-        normalized_quota_key = _normalize_additional_quota_key(quota_key)
+        normalized_quota_key = normalize_additional_quota_key(quota_key)
         normalized_policy = policy.strip().lower()
         if normalized_quota_key is not None and normalized_policy in _ROUTING_POLICIES:
             normalized[normalized_quota_key] = normalized_policy

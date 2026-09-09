@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Protocol, TypeVar, cast
+from typing import Any, AsyncIterator, Protocol, cast
 
 from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
 from app.core.config.settings import get_settings
 from app.core.plan_types import normalize_account_plan_type
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.usage import capacity_for_plan
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
@@ -40,18 +40,11 @@ _RECOVERABLE_ACCOUNT_STATUSES = frozenset({AccountStatus.RATE_LIMITED, AccountSt
 _BLOCK_RESET_MATCH_TOLERANCE_SECONDS = 5
 
 
-_T = TypeVar("_T")
-
-
 @dataclass(frozen=True, slots=True)
 class _MonthlyResetEvidence:
     baseline: UsageHistory
     before: UsageHistory
     after: UsageHistory
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 class _RecoverableAccountsRepository(Protocol):
@@ -135,11 +128,6 @@ class _BackgroundRequestLogsRepository:
     async def add_log(self, *args: Any, **kwargs: Any) -> object:
         async with get_background_session() as session:
             return await RequestLogsRepository(session).add_log(*args, **kwargs)
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 @dataclass(slots=True)

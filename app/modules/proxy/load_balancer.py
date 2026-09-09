@@ -132,6 +132,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
 from app.modules.proxy._load_balancer.sticky_selection import (
     _state_above_sticky_budget_threshold as _state_above_sticky_budget_threshold,
 )
+from app.modules.proxy._load_balancer.ttft_cohort import apply_ttft_cohort_weights
 from app.modules.proxy._load_balancer.tunables import (
     RoutingTunables,
     account_lease_stale_ttl_seconds,
@@ -2111,6 +2112,7 @@ def _build_states(
     encryptor: TokenEncryptor | None = None,
     routing_tunables: RoutingTunables | None = None,
     soft_drain_enabled: bool | None = None,
+    log_weight_transitions: bool = True,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     now = REAL_CLOCK.time() if now is None else now
     # Request and background callers pass their snapshot's values; None (tests, tools) = environment layer.
@@ -2145,6 +2147,7 @@ def _build_states(
         state.ignore_standard_quota = account.id in ignore_standard_quota_account_ids
         states.append(state)
         account_map[account.id] = account
+    apply_ttft_cohort_weights(states, runtime, now=now, log_transitions=log_weight_transitions)
     return states, account_map
 
 

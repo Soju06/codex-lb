@@ -233,6 +233,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "latency_first_upstream_event_ms": None,
             "latency_response_create_gate_wait_ms": None,
             "latency_bridge_queue_wait_ms": None,
+            "upstream_retried": False,
             "prewarm_status": None,
             "prewarm_latency_ms": None,
             "session_previous_gap_ms": None,

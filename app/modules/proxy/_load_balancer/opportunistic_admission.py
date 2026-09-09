@@ -75,6 +75,7 @@ class StatesBuilder(Protocol):
         encryptor: TokenEncryptor | None = None,
         routing_tunables: RoutingTunables | None = None,
         soft_drain_enabled: bool | None = None,
+        log_weight_transitions: bool = True,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
 
@@ -159,6 +160,7 @@ def detached_runtime_snapshot(
                 if runtime.outcome_buckets is None
                 else {bucket: list(counts) for bucket, counts in runtime.outcome_buckets.items()}
             ),
+            ttft_samples=None if runtime.ttft_samples is None else list(runtime.ttft_samples),
         )
         for lease in list((detached.leases or {}).values()):
             if now - lease.acquired_at >= stale_lease_ttl_seconds(lease.kind):
@@ -228,6 +230,9 @@ def _observe_selection_states(
         encryptor=owner._encryptor,
         routing_tunables=routing_tunables,
         soft_drain_enabled=soft_drain_enabled,
+        # The snapshot's ttft_weight is discarded with it; logging from here
+        # would repeat the transition on the next live build.
+        log_weight_transitions=False,
     )
 
 

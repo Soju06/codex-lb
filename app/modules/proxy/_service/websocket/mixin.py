@@ -6567,6 +6567,12 @@ class _WebSocketMixin:
                     latency_first_upstream_event_ms=request_state.latency_first_upstream_event_ms,
                     latency_response_create_gate_wait_ms=request_state.latency_response_create_gate_wait_ms,
                     latency_bridge_queue_wait_ms=request_state.latency_bridge_queue_wait_ms,
+                    # TTFT is measured from started_at, so a retried send or a
+                    # capacity wait leaves the failed attempt inside it.
+                    upstream_retried=(
+                        request_state.response_create_attempt_count > 1
+                        or request_state.account_capacity_wait_started_at is not None
+                    ),
                     prewarm_status=request_state.prewarm_status,
                     prewarm_latency_ms=request_state.prewarm_latency_ms,
                     session_previous_gap_ms=request_state.session_previous_gap_ms,

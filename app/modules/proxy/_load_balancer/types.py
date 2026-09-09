@@ -48,6 +48,11 @@ class RuntimeState:
     # minute bucket -> [successes, failures], pruned to the configured window.
     # Feeds the selection weight multiplier; replica-local, never persisted.
     outcome_buckets: dict[int, list[int]] | None = None
+    # Recent eligible first-token latencies (see ``_load_balancer/ttft_cohort.py``):
+    # ``(recorded_at, ttft_ms)`` pruned to the window/cap, and the last applied
+    # cohort multiplier (transition-log gate). Replica-local, never persisted.
+    ttft_samples: list[tuple[float, int]] | None = None
+    ttft_weight: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)

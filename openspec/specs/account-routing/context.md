@@ -45,6 +45,32 @@ delete-plus-upsert sequence into one atomic upsert. Reserve/release remains sepa
 health-observation version used by Force Probe settlement. Recovery therefore
 needs no scheduler, random sampling, or operator setting.
 
+## Relative first-token latency weighting
+
+The weighted strategies discount an account whose recent first-token latency
+on small, low-effort, unqueued, single-attempt `normal` turns sits above the
+fleet by more than a deadband (retried or capacity-waited WebSocket/bridge rows
+are skipped because their latency would charge a failed attempt, and possibly
+another account's, to the destination). The signal is fleet-relative rather than an absolute threshold so
+that an upstream-wide slowdown stays neutral and no operator has to know what
+"slow" means for a given model or hour. It is a soft weight floored at 0.5,
+never an exclusion: a slow account keeps at least half of its share so the
+window keeps sampling it and the discount lifts within the hour once it
+recovers. There is no setting because the weight is self-calibrating and
+bounded; the alternative available today, `routing_policy=preserve` on the
+slow accounts, is a hard exclusion that idles their capacity and goes stale as
+cohort membership drifts. The per-account estimate trims the slowest decile
+before averaging: the slow cohort is bimodal (a large share of its turns reason
+before the first token), so a median would sit on the fast mode and miss the
+share, while a plain mean would follow a single stall. Established sticky and
+continuity owners never move because of the weight; only fresh weighted draws
+and the destinations of reroutes that already exist are affected.
+
+Example: eleven accounts answer in about 1.7 s and nine in about 2.0 s with a
+40% share of 6 s reasoning turns. The fleet reference is 1.7 s, the slow
+cohort's trimmed mean is about 3.3 s, so each slow account is drawn with half
+of its credit weight while conversations already bound to it stay put.
+
 ## Constraints and failure modes
 
 - Eligibility, quota, cooldown, model, security, and local concurrency-cap

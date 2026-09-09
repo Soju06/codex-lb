@@ -21,7 +21,6 @@ from app.modules.telemetry.schemas import (
     TelemetryConsentResponse,
     TelemetryConsentUpdate,
     TelemetryPreview,
-    TelemetrySnapshotEnvelope,
     build_snapshot_envelope,
 )
 from app.modules.telemetry.sender import TelemetrySender
@@ -92,7 +91,7 @@ async def _response(
     *,
     include_preview: bool,
 ) -> TelemetryConsentResponse:
-    preview: TelemetrySnapshotEnvelope | None = None
+    preview: TelemetryPreview | None = None
     if include_preview:
         identity = await store.get_or_create_identity()
         snapshot_consent = "enabled" if consent.state == "disabled" else consent.state

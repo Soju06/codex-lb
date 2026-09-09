@@ -1649,8 +1649,14 @@ response for the selected account, the proxy MUST attempt one forced token
 refresh and retry the compact request on that same account. If the refreshed
 retry also returns `401`, the proxy MUST classify and record the account
 failure, exclude that account from the current compact request, and try another
-eligible account when one is available. The proxy MUST NOT surface the repeated
-account-local `401` to the compact client before exhausting eligible accounts.
+eligible account when one is available. If the forced refresh itself confirms
+a permanent credential failure, the proxy MUST mark the selected account for
+re-authentication, exclude it from the current compact request, and try another
+eligible account when account ownership permits. The proxy MUST NOT surface an
+account-local `401` before exhausting eligible accounts, and MUST NOT move a
+file-pinned or continuity-pinned compact request to another account. When no
+safe replacement is available, the proxy MUST preserve the terminal auth error
+and settlement behavior.
 
 #### Scenario: Refreshed compact auth failure uses another account
 
@@ -1674,6 +1680,24 @@ account-local `401` to the compact client before exhausting eligible accounts.
 - **WHEN** low-level compact transport receives HTTP 401 from upstream
 - **THEN** the service-level auth refresh/failover path handles it
 - **AND** the low-level compact transport does not mark it as a generic same-contract transport retry
+
+#### Scenario: Permanent forced-refresh failure uses another account
+
+- **GIVEN** at least two accounts are eligible for an account-neutral compact request
+- **AND** the selected account returns an upstream authentication failure
+- **WHEN** its forced refresh reports a permanent revoked-credential failure
+- **THEN** the selected account is marked `reauth_required` and excluded
+- **AND** the compact request succeeds from another eligible account when it completes
+- **AND** the selected account's authentication error is not surfaced to the client
+
+#### Scenario: Permanent forced-refresh failure preserves an account pin
+
+- **GIVEN** a compact request is pinned to an account by file or continuity ownership
+- **AND** that account returns an upstream authentication failure
+- **WHEN** its forced refresh reports a permanent credential failure
+- **THEN** the account is marked `reauth_required`
+- **AND** the request is not sent to another account
+- **AND** the terminal authentication error is surfaced after settlement
 
 ### Requirement: Pre-visible proxy auth failures fail over after forced refresh
 
@@ -2419,37 +2443,92 @@ requests MUST NOT wait on an orphaned creation future that can never complete.
 
 ### Requirement: Codex compaction triggers are bridged into compact output
 
-When `POST /backend-api/codex/responses` receives a request whose top-level `input` array contains exactly one `{"type":"compaction_trigger"}` item as its final element, the proxy SHALL remove that trigger before calling upstream compaction handling and SHALL emit a raw SSE stream that contains exactly one compaction output item.
+When `POST /backend-api/codex/responses` receives a request whose top-level `input` array contains exactly one `{"type":"compaction_trigger"}` item as its final element, the proxy SHALL remove that trigger before calling upstream compaction handling and SHALL emit a raw SSE stream that contains exactly one compaction output item. The internal compact request built for that flow MUST contain exactly one terminal `compaction_trigger` item on the compact wire, and the proxy MUST reject duplicate or non-terminal top-level `compaction_trigger` placement locally with HTTP 400 `invalid_request_error` before any upstream compact handling.
 
-The stream MUST emit `response.created`, `response.output_item.added`, `response.output_item.done`, and `response.completed` in that order with monotonically increasing sequence numbers. The added event MUST expose the selected compaction item as in progress. The done event and terminal completed response MUST carry the same terminal `compaction` item. When the selected encrypted upstream compaction item carries a non-empty `id` or `status`, the synthetic stream MUST preserve those values with its `encrypted_content`; it MUST NOT generate a replacement item ID.
+The stream MUST emit `response.created`, `response.output_item.added`, `response.output_item.done`, and `response.completed` in that order with monotonically increasing sequence numbers. The added event MUST expose the selected compaction item as in progress. The done event and terminal completed response MUST carry the same terminal `compaction` item. When the selected encrypted upstream compaction item carries a valid `cmp_` ID or status, the synthetic stream MUST preserve those values with its `encrypted_content`; it MUST NOT generate or rewrite a replacement item ID. A malformed, empty, or non-`cmp_` ID MUST be omitted while the opaque encrypted content remains unchanged.
 
-For Codex-affinity standalone compact requests, `POST /backend-api/codex/responses/compact` SHALL normalize an upstream remote-compaction-v2 response that includes historical message output plus a compaction summary into the single compact output item required by Codex clients. A non-empty upstream compaction item `id` or `status` MUST be preserved in that normalized output item.
+Codex compact flows SHALL send the upstream compact request to `POST /backend-api/codex/responses` with `stream=true` and `store=false`, accept the upstream SSE response, and reconstruct one normalized compact response item from the terminal response lifecycle; they MUST NOT require the legacy `/backend-api/codex/responses/compact` upstream route to be available.
 
-OpenAI-style `/v1/responses/compact` is unchanged by this requirement.
+For Codex-affinity standalone compact requests, `POST /backend-api/codex/responses/compact` SHALL remain available as a compatibility endpoint with its subscription-backed compact routing contract, and SHALL normalize an upstream remote-compaction-v2 response that includes historical message output plus a compaction summary into the single compact output item required by Codex clients. A valid upstream `cmp_` compaction item `id` and any non-empty `status` MUST be preserved in that normalized output item. An empty, non-string, or non-`cmp_` ID MUST be omitted rather than rewritten; encrypted content MUST remain unchanged.
+
+OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement; when it receives duplicate top-level `compaction_trigger` items, codex-lb preserves the existing compatibility behavior and the forwarded compact input contains one terminal trigger.
 
 #### Scenario: terminal trigger emits a complete compact lifecycle
+
 - **WHEN** a `POST /backend-api/codex/responses` request ends with exactly one top-level `compaction_trigger`
 - **THEN** the proxy strips the trigger and invokes compact handling
 - **AND** it emits created, added, done, and completed events in that order
 - **AND** their sequence numbers increase monotonically from zero
 - **AND** the done event and completed response contain the same single terminal compaction item
 
+#### Scenario: terminal trigger becomes one compact-wire trigger
+
+- **WHEN** a `POST /backend-api/codex/responses` request ends with exactly one
+  top-level `compaction_trigger`
+- **THEN** the proxy strips that trigger before compact-input preparation
+- **AND** the internal compact request contains exactly one terminal
+  `compaction_trigger` item on its `input` array
+
 #### Scenario: encrypted compaction item identity survives trigger streaming
+
 - **WHEN** compaction handling for a terminal trigger returns encrypted content with a non-empty upstream `cmp_*` ID and terminal status
 - **THEN** the added event exposes that ID with in-progress status
 - **AND** the done event and completed response preserve the exact upstream ID, terminal status, and encrypted content
 - **AND** the proxy does not synthesize a replacement item ID
 
 #### Scenario: malformed trigger placement is rejected
-- **WHEN** a `POST /backend-api/codex/responses` request contains a duplicated or non-terminal top-level `compaction_trigger` item
+
+- **WHEN** a `POST /backend-api/codex/responses` or
+  `POST /backend-api/codex/responses/compact` request contains duplicate or
+  non-terminal top-level `compaction_trigger` items
 - **THEN** the proxy returns HTTP 400 with `invalid_request_error`
-- **AND** it does not attempt upstream compaction handling
+- **AND** it does not attempt upstream compact handling
+
+#### Scenario: Codex compact transport uses the Responses stream
+
+- **WHEN** a valid terminal compaction trigger is submitted through a Codex
+  compact flow
+- **THEN** the proxy sends the compact request to
+  `POST /backend-api/codex/responses` with `stream=true` and `store=false`
+- **AND** it accepts the upstream SSE response and reconstructs one normalized
+  compact response item from the terminal response lifecycle
+- **AND** it does not require the legacy `/backend-api/codex/responses/compact`
+  upstream route to be available
+
+#### Scenario: Legacy message-shaped compact output does not get a rewritten item ID
+
+- **WHEN** the upstream compact response exposes the encrypted compact payload
+  as a legacy `message` item with a non-empty ID that does not begin with `cmp_`
+- **THEN** the proxy converts that item to `type="compaction"` and omits the
+  malformed ID
+- **AND** the proxy preserves the encrypted content unchanged
+- **AND** an existing ID that begins with `cmp_` is preserved byte-for-byte
+- **AND** the proxy does not synthesize a `cmp_msg_...` ID
+- **AND** ordinary message items outside the compact-output conversion remain
+  unchanged
+
+#### Scenario: Standalone Codex compact remains a compatibility endpoint
+
+- **WHEN** a client calls `POST /backend-api/codex/responses/compact`
+- **THEN** codex-lb preserves the endpoint and its subscription-backed compact
+  routing contract
+- **AND** malformed duplicate or non-terminal top-level triggers are rejected
+  locally before any upstream compact attempt
 
 #### Scenario: Codex-affinity standalone compact normalizes remote v2 output
+
 - **WHEN** a Codex-affinity `POST /backend-api/codex/responses/compact` request receives upstream output that contains historical message items and one compaction summary item
 - **THEN** the JSON response body contains exactly one `output` item for that compaction summary
-- **AND** the normalized item preserves the compaction summary's non-empty upstream ID and status
+- **AND** the normalized item preserves the compaction summary's valid `cmp_`-prefixed upstream ID and status
 - **AND** it does not expose historical message items as standalone compact output
+
+#### Scenario: OpenAI-compatible compact normalizes duplicate triggers
+
+- **WHEN** a client calls `POST /v1/responses/compact` with duplicate
+  top-level `compaction_trigger` items
+- **THEN** codex-lb preserves the existing compatibility behavior and returns
+  HTTP 200 when the compact operation succeeds
+- **AND** the forwarded compact input contains one terminal trigger
 
 ### Requirement: Request logs expose upstream Responses transport
 For streaming Responses proxy requests, persisted request logs MUST distinguish the downstream client transport from the upstream egress transport by recording the upstream transport in `request_logs.upstream_transport` while preserving `request_logs.transport` as the downstream client transport.
@@ -4478,15 +4557,23 @@ When upstream returns a temporary model-capacity failure whose message says that
 
 ### Requirement: HTTP bridge model-capacity retry waits preserve stream contracts
 
-The proxy MUST wait before replaying a pre-created HTTP bridge request with a selected-model capacity failure only
-when the failure happened before any downstream-visible response event and the request is still replayable as a fresh
-request.
+The proxy MUST wait before replaying an HTTP bridge request with a selected-model capacity failure only when the
+failure happened before any downstream-visible model output and the request is still replayable as a fresh request.
+An already-forwarded `response.created` or `response.in_progress` does not disqualify the replay; the replay's
+duplicate lifecycle prelude MUST be suppressed so the client observes exactly one `response.created`.
 
 #### Scenario: Public propagated-error streams do not receive pre-retry keepalives
 
 - **WHEN** a `/v1/responses`-compatible HTTP bridge stream is configured to propagate startup HTTP errors
 - **AND** upstream returns a selected-model capacity error before `response.created`
 - **THEN** the proxy MUST NOT emit `codex.keepalive` or account-capacity wait events before the retry completes.
+
+#### Scenario: Accepted public streams are replayed without keepalives
+
+- **WHEN** a `/v1/responses`-compatible HTTP bridge stream has already forwarded `response.created`
+- **AND** upstream fails the response output-free with a selected-model capacity error
+- **THEN** the proxy MUST replay the request within the single lifecycle without emitting `codex.keepalive` frames
+- **AND** the proxy MUST NOT re-signal the pre-response startup wait for that request.
 
 #### Scenario: Replay waits remain bounded by the original bridge deadline
 
@@ -4507,6 +4594,14 @@ request.
 - **THEN** the proxy MUST apply the model-capacity wait before stripping the injected anchor and replaying the fresh
   request.
 
+#### Scenario: Accepted client-anchored requests forward the capacity message without waiting
+
+- **WHEN** an accepted request (`response.created` forwarded) carries a `previous_response_id` the client supplied,
+  even with a retry-safe fresh body retained
+- **AND** upstream returns a selected-model capacity error before visible output
+- **THEN** the proxy MUST NOT reserve, stage, or wait for that request
+- **AND** the upstream terminal MUST be forwarded unchanged, exactly as the bare transparent-code branch forwards it.
+
 #### Scenario: Remote-owner relay preserves the hidden startup wait
 
 - **WHEN** an origin replica forwards a bridge request to its remote owner
@@ -4523,7 +4618,17 @@ request.
   upstream reader is sleeping
 - **AND** the proxy MUST release account-level and shared response-create capacity during the wait
 - **AND** the proxy MUST reacquire both capacity leases before sending the replay
-- **AND** the proxy MUST skip the replay if that queued request detaches before the wait completes.
+- **AND** the proxy MUST skip the replay if that queued request detaches before the wait completes
+- **AND** when the wait branch gives that pending ownership up without a successful replay (the replay was refused or
+  failed, or the session gate could not be re-claimed) it MUST record the request's terminal settlement claim, so an
+  abort before finalization still settles the API-key reservation through the shielded abort settlement instead of
+  orphaning the reservation, its heartbeat, and the re-claimed session gate.
+
+#### Scenario: Accepted requests re-claim the session gate before waiting
+
+- **WHEN** the selected-model capacity failure belongs to a request that already forwarded `response.created`
+- **THEN** the proxy MUST re-claim the session response-create gate without waiting before it waits and replays
+- **AND** if another `response.create` holds that gate the proxy MUST forward the upstream terminal unchanged.
 
 ### Requirement: WebSocket stale-anchor failures include diagnostic metadata
 When a direct Responses WebSocket request fails closed because upstream rejects `previous_response_id` with `previous_response_not_found`, the service MUST emit stale-anchor diagnostic metadata in operator logs and request-log failure metadata. The metadata MUST distinguish `previous_response_source` (`client_supplied`, `proxy_injected`, or `unknown`), whether a fresh no-anchor replay body was available, owner lookup outcome/source, whether the matched previous response belongs to the same Codex session when known, and the previous-response age in seconds when known. The metadata MUST NOT expose raw `previous_response_id` values or request payload content.
@@ -5158,6 +5263,23 @@ ordinary selection, and MUST NOT reclassify local capacity or overload codes
 - **THEN** the proxy reports the structured usage-limit failure immediately
 - **AND** it does not enter an account-capacity recovery wait for the
   remaining request budget before reporting it
+
+#### Scenario: HTTP bridge retry loops do not wait on the usage-limit retry hint
+
+- **GIVEN** HTTP bridge session creation or submission fails with
+  `usage_limit_reached` whose message carries the selector's capped retry hint
+  (`Rate limit exceeded. Try again in Ns`) because the exhausted pool's
+  earliest reset is known
+- **WHEN** the bridge retry loop evaluates its account-capacity wait plan
+- **THEN** it derives no wait from that hint, keyed on the structured error
+  code rather than the message text
+- **AND** it emits no `codex.keepalive` with status
+  `waiting_for_account_capacity` and consumes none of the bridge request budget
+- **AND** it returns the HTTP `429` `usage_limit_reached` envelope immediately
+  with `error.resets_at` and without a `Retry-After` header
+- **AND** recoverable codes such as upstream `rate_limit_exceeded`, local
+  account caps, and `response_create_gate_timeout` keep their bounded
+  account-capacity wait
 
 #### Scenario: Local capacity codes keep their rate-limit contract
 
@@ -5932,6 +6054,17 @@ request logging behavior around that request. This requirement does not change
 the `/v1/responses` subscription compatibility path, which MAY aggregate an
 upstream stream when required by the configured ChatGPT Codex backend.
 
+When the completed HTTP exchange returns a canonical background acknowledgement
+with `object = response`, a non-empty response ID without surrounding
+whitespace, status `queued` or
+`in_progress` matching the event type, and `output = []`, the proxy MUST treat
+the transport as successful: the request log MUST use `status=success` without
+`stream_incomplete`, account health MUST take the successful-request path, and
+the account MUST NOT receive a transient error-health penalty. This transport
+classification MUST NOT make malformed or partial response objects successful
+and MUST NOT make `response.queued` or `response.in_progress` terminal for SSE
+streams.
+
 #### Scenario: Backend stream false stays false upstream
 
 - **GIVEN** a client sends `POST /backend-api/codex/responses` with
@@ -5947,6 +6080,37 @@ upstream stream when required by the configured ChatGPT Codex backend.
 - **WHEN** codex-lb completes the backend non-streaming request
 - **THEN** the downstream response MUST have an `application/json` content type
 - **AND** its Response fields MUST preserve the upstream values.
+
+#### Scenario: Accepted background JSON settles successfully
+
+- **GIVEN** a backend Responses request has `stream: false`
+- **AND** upstream returns one valid Response object with status `queued` or
+  `in_progress`
+- **AND** the object has a non-empty, unpadded ID and an empty output list
+- **WHEN** codex-lb finishes reading that HTTP response
+- **THEN** the Response object is returned unchanged
+- **AND** the request log records success without `stream_incomplete`
+- **AND** the request log stores the returned response ID for later owner lookup
+- **AND** account health records success without an error penalty
+
+#### Scenario: Malformed background object retains error settlement
+
+- **GIVEN** a backend non-streaming response reports queued or in-progress
+- **BUT** its response object is missing canonical acknowledgement fields or
+  contains malformed output items
+- **WHEN** codex-lb validates the response
+- **THEN** the external contract error is returned
+- **AND** request-log and account-health settlement MUST remain on the error
+  path
+
+#### Scenario: Streaming progress EOF remains truncated
+
+- **GIVEN** a Responses request uses streaming transport
+- **AND** upstream emits `response.queued` or `response.in_progress`
+- **WHEN** the stream ends before a terminal Responses event
+- **THEN** settlement remains `stream_incomplete`
+- **AND** existing request-log and account-health error handling remains
+  unchanged
 
 ### Requirement: Native Codex HTTP attempts preserve client transport choice
 
@@ -7341,4 +7505,1672 @@ be starved by a protected prefix.
   without a `previous_response_id` parameter
 - **AND** the error instructs Codex to discard the hard continuity anchor and
   resend full history
+
+### Requirement: Suppressed duplicate side-effect replays receive a dedicated terminal failure
+
+When a replayed side-effecting tool call is suppressed and its upstream turn subsequently reports `response.completed`, the proxy MUST deliver a `response.failed` terminal with code `duplicate_tool_call_replay_suppressed`. It MUST use the downstream response id, treat the request as non-success, and MUST NOT count this intentionally fenced terminal as an HTTP bridge retry circuit failure.
+
+#### Scenario: Direct SSE reports the dedicated terminal
+
+- **GIVEN** a direct SSE request suppresses a replayed side-effecting tool call
+- **WHEN** the upstream emits `response.completed` for that replay
+- **THEN** the client receives `response.failed` with code `duplicate_tool_call_replay_suppressed`
+- **AND** the request log records `duplicate_tool_call_replay_suppressed`, not `stream_incomplete`
+
+#### Scenario: HTTP bridge reports the dedicated terminal without retry-circuit failure
+
+- **GIVEN** an HTTP bridge request suppresses a replayed side-effecting tool call
+- **WHEN** the upstream emits `response.completed` for that replay
+- **THEN** the client receives `response.failed` with code `duplicate_tool_call_replay_suppressed`
+- **AND** the request log records `duplicate_tool_call_replay_suppressed`
+- **AND** the HTTP bridge retry circuit is not incremented for that terminal
+
+#### Scenario: WebSocket reports the dedicated terminal
+
+- **GIVEN** a WebSocket request suppresses a replayed side-effecting tool call
+- **WHEN** the upstream emits `response.completed` for that replay
+- **THEN** the downstream terminal uses `duplicate_tool_call_replay_suppressed`
+- **AND** the upstream account is not penalized for the intentionally suppressed replay
+
+### Requirement: Source-routed Responses streaming stays alive and transport-aware
+
+Streaming source-routed `POST /v1/responses` MUST reassemble upstream byte chunks into complete SSE event blocks, MUST apply public Responses stream normalization, and MUST inject SSE comment keepalives so idle upstream gaps do not trip front-door proxy timeouts. Native Codex clients that select a model source MUST keep `codex.*` events unfiltered and MUST receive `codex.keepalive` heartbeat framing, including an initial heartbeat, matching the subscription path.
+
+#### Scenario: Keepalive precedes a slow first upstream event
+
+- **WHEN** a source-routed `/v1/responses` stream is open and the upstream source has not yet produced its first event within the keepalive interval
+- **THEN** the client receives an SSE comment keepalive frame before the first upstream event
+
+#### Scenario: Native Codex source stream keeps vendor framing
+
+- **WHEN** a native Codex client streams a source-routed response
+- **THEN** `codex.*` events are forwarded rather than dropped
+- **AND** heartbeats use `codex.keepalive` data framing with an initial heartbeat
+
+### Requirement: Source SSE reassembly is byte-faithful and memory-bounded
+
+Source-routed SSE reassembly MUST recognize blank-line event separators built from any two consecutive SSE line endings (CR, LF, or CRLF, including mixed pairs), MUST preserve the original terminator bytes of events the proxy does not rewrite, MUST preserve multi-byte UTF-8 sequences and CRLF pairs split across chunk boundaries, and MUST bound the reassembled event size by the configured maximum, closing the stream when the bound is exceeded. Data blocks the proxy cannot parse MUST be forwarded byte-identically, and after raw source data has been forwarded the proxy MUST NOT synthesize a terminal event for that stream. The shared separator scan MUST locate line-ending candidates with C-level search rather than per-byte iteration in Python.
+
+#### Scenario: Mixed line endings dispatch complete events
+
+- **WHEN** a source terminates an SSE event with CR-only, CRLF, or mixed blank-line separators, possibly split across chunk boundaries
+- **THEN** the complete event is dispatched without waiting for additional upstream data
+- **AND** events the proxy does not rewrite keep their original terminator bytes
+
+#### Scenario: Oversized source event fails closed
+
+- **WHEN** a reassembled source SSE event exceeds the configured maximum event size
+- **THEN** the stream is closed with an event-too-large failure instead of buffering without bound
+
+#### Scenario: Unparseable source data passes through
+
+- **WHEN** a source emits a data block that is not parseable JSON
+- **THEN** the block reaches the client byte-identically
+- **AND** the proxy does not append a synthesized terminal event to that stream
+
+### Requirement: Source stream settlement and cleanup are deterministic
+
+Source-routed Responses streaming MUST keep API-key reservation settlement outermost so an early normalization return still settles the reservation without recording a client disconnect, and MUST close the stream iterator and its owning stream deterministically on completion, failure, or cancellation, including when iterator creation or iterator close raises.
+
+#### Scenario: Error frame still settles the reservation
+
+- **WHEN** normalization ends a source-routed stream early on an upstream error frame
+- **THEN** the API-key reservation settles
+- **AND** the request is not recorded as a client disconnect
+
+#### Scenario: Stream resources close after cancellation
+
+- **WHEN** a source-routed stream ends by completion, failure, or client cancellation
+- **THEN** the stream iterator and its owning stream are both closed
+
+### Requirement: Durable recovery transcripts use an explicit storage format
+
+Each durable HTTP bridge operation MUST identify its transcript storage format.
+Existing operations and new operations created before the chunk-writer cutover
+MUST use `rows_v1`. A dual-reader release MUST replay both `rows_v1` event rows
+and `chunks_v2` event chunks without changing the public SSE blocks or their
+order. This expand release MUST continue writing `rows_v1` so rolling
+deployments do not expose chunk-only data to an older replica.
+
+#### Scenario: Historical row transcript remains replayable
+
+- **GIVEN** an existing completed operation whose format is `rows_v1`
+- **WHEN** recovery loads its transcript after the schema expansion
+- **THEN** it receives the same ordered SSE blocks as before the migration
+
+#### Scenario: Chunk transcript replays exact events
+
+- **GIVEN** a completed `chunks_v2` operation with valid contiguous chunks
+- **WHEN** recovery loads its transcript
+- **THEN** every original SSE block is returned byte-for-byte in sequence order
+
+#### Scenario: Expand release keeps the legacy writer
+
+- **WHEN** the dual-reader release records or appends an ordinary operation
+- **THEN** it persists the operation and events in `rows_v1` format
+
+### Requirement: Chunk transcript decoding fails closed
+
+Chunk decoding MUST enforce the operation's logical transcript byte bound and
+the 65,536-event operation-wide chunk transcript limit. The chunk writer MUST
+reject transcript growth beyond that same limit. Chunk decoding MUST reject
+unknown codecs, decompression beyond the declared bound, hash or
+byte-count mismatch, non-hexadecimal or incorrectly sized hashes, malformed
+framing, invalid UTF-8, incorrect event count,
+non-contiguous sequence ranges, and trailing bytes. Any rejected chunk MUST
+make the transcript ineligible for recovery and MUST NOT produce a partial
+replay or a new upstream dispatch.
+
+#### Scenario: Corrupt chunk produces no partial transcript
+
+- **GIVEN** a chunk payload whose hash, framing, or declared counts are invalid
+- **WHEN** recovery loads the operation
+- **THEN** the transcript is ineligible and no prefix is replayed
+
+#### Scenario: Sequence gap produces no partial transcript
+
+- **GIVEN** individually valid chunks whose sequence ranges contain a gap or
+  overlap
+- **WHEN** recovery loads the operation
+- **THEN** the transcript is ineligible
+
+#### Scenario: Logical event byte mismatch produces no transcript
+
+- **GIVEN** decoded events do not total the operation's persisted `event_bytes`
+- **WHEN** recovery loads either storage format
+- **THEN** the transcript is ineligible
+
+### Requirement: Transcript lifecycle handles both storage formats
+
+Spool reset, failed-operation retry, rollback-before-dispatch, and retention
+cleanup MUST inspect or delete both legacy event rows and event chunks under
+the existing owner and operation fences. A format transition MUST NOT leave
+stale transcript material that a later retry can mix into a fresh response.
+Any path that clears all transcript material for a retry MUST reset the format
+to `rows_v1` in the same transaction so the expand release remains a usable
+rollback writer.
+
+#### Scenario: Retry clears both transcript stores
+
+- **GIVEN** an operation has legacy or chunk transcript material
+- **WHEN** an owner-fenced retry resets the spool
+- **THEN** both event stores are empty before new output is accepted
+
+#### Scenario: Rollback refuses an operation with chunk evidence
+
+- **GIVEN** an operation has a persisted chunk
+- **WHEN** rollback-before-dispatch checks whether upstream work exists
+- **THEN** it preserves the operation instead of deleting its durable fence
+
+### Requirement: Chunk transcript writes require an explicit rollout selection
+
+The durable HTTP bridge transcript writer MUST support `rows_v1` and
+`chunks_v2` selection through one canonical setting and MUST default to
+`rows_v1`. Enabling `chunks_v2` MUST NOT change public SSE output, replay
+eligibility, logical byte caps, or owner fencing. A v2 writer MUST atomically
+select `chunks_v2` on the first successful append only when the operation has
+no legacy row or chunk material and no logical event bytes. A format conflict
+MUST fail closed without persisting mixed material. Before compression, the
+writer MUST validate owner fencing, logical byte capacity, and the reader's
+cumulative transcript event-count limit. It MUST NOT mark a transcript complete
+when the reader would reject its event count.
+
+#### Scenario: Default release keeps writing rows
+
+- **WHEN** no writer-format setting is provided
+- **THEN** new durable transcript events are written as `rows_v1`
+
+#### Scenario: First v2 append selects chunk format atomically
+
+- **GIVEN** an owner-fenced operation with no persisted transcript material
+- **AND** the writer format is `chunks_v2`
+- **WHEN** its first event batch is persisted
+- **THEN** the operation format and first chunk commit together
+
+#### Scenario: Existing row transcript cannot switch formats
+
+- **GIVEN** an operation already has a legacy event row or logical event bytes
+- **WHEN** a v2 writer attempts to append
+- **THEN** the append fails without writing a chunk or changing the format
+
+#### Scenario: Rejected batch is not compressed
+
+- **GIVEN** a batch exceeds the logical byte cap or fails owner fencing
+- **WHEN** the v2 writer handles the batch
+- **THEN** it rejects the batch before zlib compression
+
+### Requirement: Chunk writer preserves batch and terminal settlement semantics
+
+When `chunks_v2` is enabled, each successful nonterminal batch flush MUST
+persist one ordered chunk containing the exact queued SSE blocks. The terminal
+path MUST first drain pending chunks and then atomically persist the terminal
+one-event chunk, authoritative operation state, optional response identifier,
+and complete-spool marker. A size-cap failure or persistence error MUST leave
+the transcript incomplete and use the existing terminal settlement fallback.
+
+#### Scenario: Batch becomes one replay-equivalent chunk
+
+- **WHEN** the in-memory batcher flushes multiple nonterminal events in v2 mode
+- **THEN** one chunk is persisted
+- **AND** replay returns every original event in the same order
+
+#### Scenario: Terminal chunk and state commit together
+
+- **WHEN** a terminal event fits inside the remaining logical byte budget
+- **THEN** the terminal chunk, terminal operation state, response identifier,
+  and complete marker commit atomically
+
+#### Scenario: Oversized terminal event settles without complete transcript
+
+- **WHEN** a terminal event exceeds the remaining logical byte budget
+- **THEN** no terminal chunk is written
+- **AND** the operation reaches its authoritative terminal state with an
+  incomplete spool
+
+#### Scenario: Event-count overflow settles without complete transcript
+
+- **GIVEN** appending the terminal event would exceed the reader's cumulative
+  transcript event-count limit
+- **WHEN** the terminal path runs
+- **THEN** no terminal chunk is written
+- **AND** the operation reaches its authoritative terminal state with an
+  incomplete spool
+
+### Requirement: Connect-phase websocket transport failures surface without account penalty
+
+The direct upstream websocket open MUST stamp host-scoped transport
+provenance on the failures that prove the websocket transport itself did not
+come up: a connect timeout, an invalid handshake, a 5xx upgrade rejection,
+and a connect-phase network error other than host-wide network loss. It MUST
+NOT stamp that provenance on failures that are scoped to something narrower
+than the transport — credential-scoped handshake rejections (401, 403, 429
+and any other sub-5xx status), TLS verification failures, host-wide network
+loss, and every routed-proxy open, which proves nothing beyond the health of
+one account's proxy endpoint.
+
+When a Responses websocket upstream connect attempt fails carrying that
+transport provenance, and the failure is not confirmed pre-dispatch route
+evidence, the proxy MUST surface the classified failure to the client on that
+attempt. It MUST NOT record account failure health for the selected account
+and MUST NOT rotate to another account, because the failure is evidence about
+the websocket transport, not the account, and penalizing the account starves
+hard-affinity selection for the client's HTTP retry of the same turn.
+
+Classification MUST key on that provenance rather than on the sanitized error
+code, which cannot carry it in either direction: the Responses policy
+preserves the upstream handshake body, so a direct 5xx upgrade rejection
+surfaces as `upstream_error` or whatever code the edge returned, while OAuth
+refresh transport errors, routed handshakes and TLS failures all share the
+`upstream_unavailable` envelope. Failures without transport provenance MUST
+retain the existing classify-penalize-failover behavior.
+
+#### Scenario: websocket connect timeout surfaces without penalty
+
+- **GIVEN** a direct Responses websocket connect series selected an account
+- **WHEN** the upstream websocket open fails with a 5xx classified `upstream_unavailable` transport error carrying connect provenance
+- **THEN** the failure surfaces to the client on the first attempt
+- **AND** no transient account error is recorded for the selected account
+- **AND** no other account is consumed by failover for that attempt
+
+#### Scenario: OAuth refresh transport failure keeps account failover
+
+- **GIVEN** a direct Responses websocket connect series selected an account
+- **WHEN** the account's token refresh fails with a transport error converted to a 502 `upstream_unavailable` without connect provenance
+- **THEN** the failure is classified and recorded against the account
+- **AND** the connect series proceeds with its existing failover decision toward healthy accounts
+
+#### Scenario: account-scoped connect failure keeps the failover path
+
+- **GIVEN** a direct Responses websocket connect series selected an account
+- **WHEN** the upstream connect fails with an account-scoped error such as HTTP 401
+- **THEN** the failure is classified and recorded against the account
+- **AND** the connect series proceeds with its existing failover decision
+
+#### Scenario: direct 5xx handshake rejection is transport evidence
+
+- **GIVEN** a direct Responses websocket connect series selected an account
+- **WHEN** the upstream rejects the upgrade with HTTP 503 and an unstructured body, which the client converts to code `upstream_error`
+- **THEN** the failure carries websocket transport provenance
+- **AND** it surfaces without an account penalty despite not matching a websocket-specific error code
+
+#### Scenario: routed handshake failure keeps account failover
+
+- **GIVEN** accounts reach upstream through different proxy routes
+- **WHEN** one account's routed websocket open fails with an HTTP 5xx handshake
+- **THEN** the failure carries no websocket transport provenance
+- **AND** the connect series proceeds with its existing account/route failover decision instead of denying handshakes instance-wide
+
+#### Scenario: TLS verification failure stays out of the transport fallback
+
+- **GIVEN** a Responses websocket connect series selected an account
+- **WHEN** the upstream websocket open fails TLS certificate verification
+- **THEN** the failure carries no websocket transport provenance
+- **AND** handshakes are not denied, because a raw HTTP retry reaches the same invalid TLS configuration
+
+### Requirement: Websocket handshake denial steers Codex clients to HTTP during websocket outages
+
+Codex clients activate their session-scoped HTTP transport fallback only when
+the websocket handshake is rejected with HTTP 426 (`Upgrade Required`);
+in-band error events — regardless of embedded status — retry on the websocket
+transport. After a websocket connect failure carrying transport provenance,
+or after a websocket open consumes the request budget once the direct
+upstream connector itself has begun, the proxy MUST deny new Responses
+websocket handshakes with HTTP 426 for a bounded window (60 seconds), and
+MUST clear that denial state on the next successful direct upstream
+websocket connect so the websocket transport resumes automatically. Clearing
+is direct-scoped for the same reason arming is: a routed success proves only
+that one account's proxy endpoint is healthy and MUST NOT readmit handshakes
+during a direct-upstream outage. A deployment whose accounts are all routed
+therefore never arms or clears the state, and a mixed one still expires it on
+the bounded window. A request budget
+that expires before the direct connector begins MUST NOT arm the denial
+state: while the open is still waiting on local websocket-connect admission
+or resolving the account's route that is local contention, and forcing every
+client onto HTTP would amplify the overload it came from; and a stalled
+routed open is route-scoped for the same reason a routed handshake failure
+is, with no error for the routed exclusion to act on because the budget
+cancels the open rather than failing it. While `upstream_stream_transport` is pinned to `"http"`, the
+proxy MUST deny Responses websocket handshakes with HTTP 426 unconditionally.
+The denial MUST NOT apply to the realtime websocket surfaces, whose upstream
+is distinct, nor to a handshake carrying a required-capability header:
+capability routing resolves only on this transport, so the downgrade would
+send the session to an HTTP path that rejects the same capability, and the
+client treats the switch as session-scoped and never returns.
+
+Because a required capability may also be carried in a `response.create`
+`client_metadata` field, which no handshake can observe, the HTTP responses
+path MUST reject a capability signal found there with the same
+transport-unsupported error it returns for the header. Capability resolution
+fails closed to security-work-authorized accounts on the websocket path and
+has no equivalent constraint on the HTTP path, so a metadata-only signal that
+reached HTTP would otherwise enter ordinary account selection unconstrained.
+
+#### Scenario: handshake denied while the transport-failure marker is armed
+
+- **GIVEN** a connect-phase websocket transport failure occurred within the denial window
+- **WHEN** a client opens a new Responses websocket handshake
+- **THEN** the handshake is denied with HTTP 426
+- **AND** the client's session-scoped HTTP transport fallback can activate
+
+#### Scenario: budget-exhausted websocket open arms the denial state
+
+- **GIVEN** the request budget expires while the upstream websocket connector is stalled
+- **WHEN** the budget-exhausted failure is emitted to the client
+- **THEN** the transport-failure denial state is armed for subsequent handshakes
+
+#### Scenario: budget exhausted in local admission does not arm the denial state
+
+- **GIVEN** the request budget is shorter than the local websocket-connect admission wait
+- **WHEN** the budget expires before the upstream connector begins
+- **THEN** the failure surfaces as local admission evidence
+- **AND** the transport-failure denial state is not armed
+
+#### Scenario: budget exhausted in a routed connector does not arm the denial state
+
+- **GIVEN** an account resolves to a proxy route and its routed websocket open stalls
+- **WHEN** the request budget expires while that routed connector is running
+- **THEN** the transport-failure denial state is not armed, because only that account's proxy endpoint was shown unhealthy
+
+#### Scenario: handshake accepted after the denial window expires
+
+- **GIVEN** the last connect-phase websocket transport failure is older than the denial window
+- **WHEN** a client opens a new Responses websocket handshake
+- **THEN** the handshake is accepted and the websocket transport is probed again
+
+#### Scenario: a routed success does not clear the denial state
+
+- **GIVEN** the transport-failure denial state is armed by direct-upstream evidence
+- **WHEN** an account whose route resolves to a proxy endpoint opens its upstream websocket successfully
+- **THEN** the denial state stays armed until a direct upstream connect succeeds or the bounded window expires
+
+#### Scenario: pinned HTTP upstream transport denies websocket handshakes
+
+- **GIVEN** `upstream_stream_transport` is pinned to `"http"`
+- **WHEN** a client opens a Responses websocket handshake
+- **THEN** the handshake is denied with HTTP 426
+
+#### Scenario: capability handshakes are never downgraded
+
+- **GIVEN** the transport-failure denial state is armed
+- **WHEN** a client opens a Responses websocket handshake carrying a required-capability header
+- **THEN** the handshake is accepted rather than denied with 426, because capability routing exists only on this transport
+
+#### Scenario: a metadata-only capability signal is rejected over HTTP
+
+- **GIVEN** a Responses request arrives on the HTTP path carrying a required capability only in `client_metadata`
+- **WHEN** the request is admitted
+- **THEN** it is rejected with the transport-unsupported error rather than entering ordinary account selection without the authorization constraint
+
+### Requirement: HTTP responses paths degrade to raw HTTP while the websocket transport is unavailable
+
+The HTTP responses bridge holds upstream websocket sessions, so a pinned
+`"http"` upstream transport MUST bypass the bridge and stream over raw HTTP.
+While the websocket transport-failure denial state is armed, bridged and raw
+HTTP Responses requests MUST pin the upstream transport to `"http"` and MUST
+bypass the bridge, so a sticky follow-up that a client moved to the HTTP
+route cannot resolve back onto the unavailable websocket upstream.
+
+When bridge session creation fails carrying pre-submit session-creation
+provenance **and** the same websocket transport provenance the failover
+decision classifies on, before any line reached the client and with no
+unsettled API-key usage reservation, the proxy MUST retry the turn over raw
+HTTP with the upstream transport pinned to `"http"` for that request. That
+decision MUST use the transport provenance rather than the sanitized error
+code, which a direct 5xx bridge connect surfaces as `upstream_error` or
+whatever the edge returned. A pre-submit failure without transport
+provenance — an exhausted token-refresh loop or a routed handshake failure in
+particular — is account or route evidence and MUST propagate unchanged.
+
+Bridge session creation runs its own pre-dispatch failover and never reaches
+the websocket failover decision, so when that fallback accepts a failure the
+websocket transport classifier also recognizes, the proxy MUST arm the
+transport-failure denial state; otherwise bridge-only traffic leaves it clear
+and every later request re-attempts the unavailable websocket bridge before
+falling back.
+
+The raw-HTTP replay carries the incoming payload, not the bridge's prepared
+payload, and the raw path never injects a response anchor. When bridge
+session creation prepared a continuity anchor the incoming payload does not
+carry, the proxy MUST NOT replay the turn over raw HTTP: doing so would send
+the new turn alone and silently drop the prior conversation. The fallback
+MUST NOT replay a failure without pre-submit provenance (the turn may already
+have dispatched upstream), MUST NOT run after any line reached the client,
+MUST NOT run while an API-key usage reservation is unsettled (reservation
+settlement owns that path), and MUST NOT absorb non-transient failures.
+
+When the bridge retry circuit's pre-dispatch submission gate suppresses a
+request whose state is provably undispatched — no client or proxy-injected
+continuation identity, no payload `conversation`, no file account pin, no
+send attempt recorded for the request, and none of the unambiguous-boundary
+markers (`response_id`, response events, downstream visibility, or a prior
+replay) — the resulting
+cooldown failure MUST carry the same pre-submit provenance and degrade to the
+raw-HTTP fallback instead of a bounded 503. That undispatched proof MUST come
+from state that is false before an actual send; a marker set optimistically
+at request construction proves nothing and would make the fallback
+unreachable. A cooldown suppression of an ambiguous continuation MUST keep
+the bounded 503 with its retry hint.
+
+That suppression MUST be identified by provenance the gate attaches, never by
+its error code. An ordinary pre-submit budget exhaustion emits the same
+`upstream_request_timeout` and collects the same pre-submit provenance while
+session creation unwinds, but it is admission-queue or host-network evidence:
+replaying it would double every request exactly when the instance is
+saturated, and would feed a doomed raw-HTTP attempt into its own
+process-network recovery wait. A budget exhaustion MUST therefore propagate
+unchanged, and a cooldown suppression MUST NOT arm the websocket
+transport-failure denial state, being bridge-scoped rather than transport
+evidence.
+
+#### Scenario: pinned HTTP upstream transport bypasses the bridge
+
+- **GIVEN** the HTTP responses bridge is enabled and `upstream_stream_transport` is pinned to `"http"`
+- **WHEN** the proxy receives a bridged Responses request
+- **THEN** the bridge is bypassed and the request streams over raw HTTP
+
+#### Scenario: armed transport-failure marker forces the HTTP upstream
+
+- **GIVEN** the websocket transport-failure denial state is armed
+- **WHEN** the proxy receives a Responses request on the HTTP route
+- **THEN** the bridge is bypassed and the upstream transport is pinned to `"http"` for that request
+
+#### Scenario: pre-submit bridge session-creation failure falls back to raw HTTP
+
+- **GIVEN** the HTTP responses bridge is enabled with the default upstream transport
+- **WHEN** bridge session creation fails with a 5xx classified `upstream_unavailable` error carrying pre-submit provenance before any line reached the client
+- **THEN** the turn is retried over raw HTTP with the upstream transport pinned to `"http"`
+
+#### Scenario: direct 5xx bridge connect falls back on its provenance
+
+- **GIVEN** bridge session creation fails on a direct 5xx handshake, whose preserved upstream envelope carries the code `upstream_error`
+- **WHEN** the failure reaches the bridge wrapper before any line reached the client
+- **THEN** the turn is retried over raw HTTP, because the transport provenance and not the sanitized code decides
+
+#### Scenario: routed bridge connect failures propagate unchanged
+
+- **GIVEN** bridge session creation fails on a routed proxy handshake, which carries no transport provenance
+- **WHEN** the failure reaches the bridge wrapper
+- **THEN** the failure propagates without an HTTP replay and the denial state stays clear
+
+#### Scenario: bridge connect fallback arms the denial state
+
+- **GIVEN** bridge session creation fails with a websocket connect failure carrying transport provenance
+- **WHEN** the turn is retried over raw HTTP
+- **THEN** the transport-failure denial state is armed
+- **AND** subsequent HTTP requests bypass the bridge and the next websocket handshake is denied with HTTP 426
+
+#### Scenario: bridge-prepared continuity anchors are not replayed over raw HTTP
+
+- **GIVEN** an incoming Responses request carries no `previous_response_id` and the bridge injected the durable session anchor into its prepared payload
+- **WHEN** bridge session creation then fails pre-submit with a transient `upstream_unavailable` error
+- **THEN** the failure propagates without an HTTP replay, because the incoming payload alone would drop the prior conversation
+
+#### Scenario: refresh-provenance failures propagate unchanged
+
+- **GIVEN** bridge session creation exhausts token refresh for the selected account and surfaces a pre-submit 502 `upstream_unavailable` without connect provenance
+- **WHEN** the failure reaches the bridge wrapper
+- **THEN** the failure propagates without an HTTP replay
+
+#### Scenario: replay-safe cooldown suppression falls back to raw HTTP
+
+- **GIVEN** the bridge retry circuit is cooling down and a fresh turn with no continuation identity and no dispatch markers is suppressed at the pre-dispatch submission gate
+- **WHEN** the cooldown failure reaches the bridge wrapper before any line reached the client
+- **THEN** the turn is retried over raw HTTP with the upstream transport pinned to `"http"`
+
+#### Scenario: pre-submit budget exhaustion is not a cooldown suppression
+
+- **GIVEN** bridge session creation exhausts the request budget and surfaces `upstream_request_timeout` with pre-submit provenance but no cooldown marker
+- **WHEN** the failure reaches the bridge wrapper
+- **THEN** the failure propagates without an HTTP replay, and the transport-failure denial state stays clear
+
+#### Scenario: ambiguous cooldown suppression keeps the bounded 503
+
+- **GIVEN** the bridge retry circuit is cooling down and a continuation whose delivery is ambiguous is suppressed
+- **WHEN** the cooldown failure reaches the bridge wrapper
+- **THEN** the bounded 503 with its retry hint propagates without an HTTP replay
+
+#### Scenario: a conversation-scoped suppression keeps the bounded 503
+
+- **GIVEN** a suppressed request carries a non-empty payload `conversation` but no anchor, turn-state key, file pin, or dispatch marker
+- **WHEN** the cooldown failure reaches the bridge wrapper
+- **THEN** the bounded 503 propagates, because `conversation` has no owner index and a raw-HTTP replay could not prove the bridge session's owner
+
+#### Scenario: post-submit transient failures are not replayed
+
+- **GIVEN** a bridged Responses request fails with a transient `upstream_unavailable` error without pre-submit session-creation provenance
+- **WHEN** the failure reaches the bridge wrapper
+- **THEN** the failure propagates without an HTTP replay
+
+#### Scenario: partially streamed bridge turns are not replayed
+
+- **GIVEN** a bridged Responses request already streamed at least one line to the client
+- **WHEN** the bridge fails with a transient `upstream_unavailable` error
+- **THEN** the failure propagates without an HTTP replay
+
+#### Scenario: unsettled API-key reservations propagate bridge failures
+
+- **GIVEN** a bridged Responses request holds an unsettled API-key usage reservation
+- **WHEN** bridge session creation fails with a transient `upstream_unavailable` error
+- **THEN** the failure propagates and reservation settlement proceeds through its existing owner
+
+### Requirement: Namespaced agent-control tool-call outputs survive historical slimming
+
+Every live upstream path MUST preserve a historical `function_call_output` or
+`custom_tool_call_output`
+unchanged before forwarding an oversized Responses `response.create` when
+its non-empty `call_id` matches a historical `function_call` or
+`custom_tool_call` whose namespace is exactly `collaboration` or
+`multi_agent_v1`. The service MUST determine this from the historical prefix of
+the original request input before outbound payload normalization removes replay
+namespaces, and use namespace and call ID rather than the tool name alone. A
+recent namespaced call MUST NOT protect a historical output that reuses its
+call ID. When historical calls of the same protocol reuse one call ID, the
+service MUST pair each output with its nearest preceding unmatched call of
+the same protocol and call ID, preserving the output only when that paired
+call is namespaced; a historical output with no such preceding call MUST
+remain eligible for the normal omission policy. Historical outputs
+without such a matching call, including an unnamespaced user tool named
+`wait_agent` or `send_input`, MUST remain eligible for the normal omission
+policy.
+
+#### Scenario: Agent wait output is retained while unrelated outputs are slimmed
+- **WHEN** a historical `multi_agent_v1` `function_call` for `wait_agent` has
+  a large matching `function_call_output` and the request also has a large
+  shell output before the latest user turn
+- **THEN** both the bridge/service and direct WebSocket paths preserve the
+  agent wait output unchanged
+- **AND** both paths replace the shell output with the historical tool-output
+  omission notice
+
+#### Scenario: A bare-name user tool is not exempt
+- **WHEN** a historical unnamespaced `function_call` is named `wait_agent` or
+  `send_input` and has a large matching `function_call_output`
+- **THEN** each live slimming path leaves that output eligible for the normal
+  historical tool-output omission policy
+
+#### Scenario: Namespaced custom tool output is retained after wire normalization
+- **WHEN** a historical `collaboration` `custom_tool_call` has a large
+  matching `custom_tool_call_output`, and another custom call uses a namespace
+  outside the agent-control allowlist
+- **THEN** HTTP bridge and WebSocket bridge forwarding preserve the
+  agent-control custom output even though both outbound payloads omit replay
+  namespaces
+- **AND** the unrelated custom output remains eligible for the historical
+  tool-output omission policy
+
+#### Scenario: Recent calls do not protect reused historical IDs
+- **WHEN** a historical unrelated output reuses the call ID of an
+  agent-control call that appears only after the latest user item
+- **THEN** every live slimming path leaves the historical output eligible for
+  the normal omission policy
+
+#### Scenario: Same-protocol reused call IDs pair by occurrence
+- **WHEN** a historical namespaced `function_call` and an ordinary
+  `function_call` reuse one call ID, each followed by a large matching
+  `function_call_output`
+- **THEN** both the bridge/service and direct WebSocket paths preserve the
+  namespaced pair's output unchanged
+- **AND** both paths replace the ordinary pair's output with the historical
+  tool-output omission notice
+
+#### Scenario: Orphan outputs do not consume namespaced pairings
+- **WHEN** a historical `function_call_output` precedes every matching call
+  because its own call was trimmed from replay, and a later namespaced
+  `function_call` reusing the same call ID is followed by its own large
+  matching output
+- **THEN** every live slimming path replaces the orphan output with the
+  historical tool-output omission notice
+- **AND** preserves the namespaced pair's output unchanged
+
+### Requirement: Eventless server-owned bridge recovery is bounded
+
+The proxy MUST retry server-owned HTTP bridge recovery only up to the
+configured `http_responses_session_bridge_server_recovery_max_attempts`
+setting (default 6) after consecutive eligible eventless failures for an
+anchored continuation. Once
+that budget is exhausted, the proxy MUST stop recovering and emit a terminal
+`response.failed` event.
+
+That terminal event MUST include a stable `response.id` even when upstream
+never emitted `response.created` or another response envelope before the
+failure. Public `/v1/responses` normalization depends on that envelope to
+synthesize the required leading `response.created` event without producing an
+SDK parser failure.
+
+#### Scenario: Exhausted eventless recovery terminates with one response id
+
+- **GIVEN** an anchored HTTP bridge continuation is eligible for server-owned
+  recovery
+- **AND** each upstream attempt fails before any downstream `response.*` event
+- **WHEN** the bridge reaches its configured eventless recovery attempt cap
+- **THEN** it emits one terminal `response.failed` event instead of continuing
+  recovery indefinitely
+- **AND** that terminal event includes a stable `response.id`
+
+### Requirement: Stale bridge retirement rechecks liveness after suspension
+
+Before closing and unregistering a stale HTTP bridge session, the service MUST re-sample pending request liveness after retry-circuit bookkeeping awaits. A response event, response id, or equivalent response-created signal newly observed after the caller's pre-suspension snapshot MUST prevent stale retirement. A session that remains eventless MUST still be retired. Retirement entered from the reader-failure funnel, or for a session that was already closed when its last admission waiter cancelled, MUST NOT be revived by post-suspension signals: its pending turns were already terminally failed and its reader is condemned, and the completed-response anchor can be moved by durable-anchor rehydration without any upstream evidence.
+
+#### Scenario: First response event arrives during retry-circuit suspension
+
+- **WHEN** stale retirement samples zero response events and then suspends for retry-circuit bookkeeping
+- **AND** a pending turn receives its first response event before the close decision
+- **THEN** the final decision samples pending state under `session.pending_lock`
+- **AND** makes the registry decision under `_http_bridge_lock`
+- **AND** the session remains registered, open, and reusable
+
+#### Scenario: Detached generation is not revived by post-suspension liveness
+
+- **WHEN** stale retirement observes post-suspension liveness for a session
+- **AND** the acquisition loop has already detached that session from the registry during the suspension
+- **THEN** the final decision does not clear the detached generation's retirement flags
+- **AND** the detached generation still receives its bounded close so its socket, leases, and capacity slot are released
+
+#### Scenario: Fence raised during suspension survives post-suspension liveness
+
+- **WHEN** stale retirement suspends for retry-circuit bookkeeping
+- **AND** a fence owner sets reconnect-requested or retire-after-drain on the still-registered session during the suspension while also advancing the event generation
+- **THEN** the final decision does not clear the fence
+- **AND** the session is unregistered and receives its bounded close instead of being revived
+
+#### Scenario: Prelude-only upstream event during retry-circuit suspension
+
+- **WHEN** stale retirement samples zero response events and then suspends for retry-circuit bookkeeping
+- **AND** an upstream event that advances only the session event generation arrives during the suspension
+- **THEN** the final decision observes the generation change against the entry-time baseline
+- **AND** the session remains registered, open, and reusable
+
+#### Scenario: Reader-failure retirement is not revived by durable-anchor rehydration
+
+- **WHEN** the reader-failure funnel retires a session whose pending turns were already terminally failed
+- **AND** a concurrent durable-anchor rehydration moves the session's completed-response anchor during the retirement suspension
+- **THEN** the final decision does not treat the anchor movement as liveness
+- **AND** the session is unregistered and receives its bounded close
+
+#### Scenario: Session remains eventless during retry-circuit suspension
+
+- **WHEN** stale retirement samples zero response events and suspends for retry-circuit bookkeeping
+- **AND** no pending turn receives a response or response-created signal
+- **THEN** the final decision retires and unregisters the session
+
+### Requirement: Explicit upstream previous-response denials retire proxy-injected anchors
+
+When upstream answers an HTTP bridge request with a `previous_response_not_found` terminal frame, and the `previous_response_id` on that request was injected by the proxy onto a full-resend-shaped payload, the proxy MUST retire that anchor on the first denial rather than waiting for the eventless-failure poison threshold. Retirement MUST clear the durable anchor only when the denied id is still the durable latest response and the session owner fence still matches; the write MUST clear the four anchor-bound fields and delete only the matching response-id alias, preserving turn-state and sibling response aliases. The proxy MUST clear the in-memory session carrier even if durable cleanup or alias unregistering fails.
+
+Before awaiting durable cleanup, the proxy MUST publish the denied id to the live session. Publication MUST be serialized with the submitter's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. Immediately before dispatch, any already-prepared request carrying that id as a proxy-injected anchor MUST fail closed without sending another upstream frame. This revalidation MUST close the retirement/dispatch race; it MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
+
+The proxy MUST also retain the denied-id generation in a bounded process-local ledger independent of the canonical live-session registry. A request that captured the durable anchor before a live session existed MUST fail closed when that generation advances during owner lookup or successor session creation. Active requests MUST pin their ledger entries until finalization so pruning cannot remove a fence that is still needed.
+
+When a request captures a proxy-injected anchor after this process has already recorded a denial for that id, the request MUST retain that denial observation and fail closed before dispatch even when the captured generation equals the current denial generation. Owner-forward recovery that injects a durable anchor MUST perform the same capture and denial observation; it MUST NOT rely on provenance copied from an initially unanchored request.
+
+The proxy MUST NOT retire the anchor when:
+
+- the anchor was supplied by the client, because removing it changes the meaning of the client's own request;
+- the anchor was injected onto a payload that is not full-resend shaped, because a delta-only request has no other way to convey prior context once its anchor is gone;
+- the session's current anchor is no longer the denied id, because a concurrent request may have completed and advanced it.
+
+When a durable clear raises, the proxy MUST NOT report the anchor as retired, MUST still clear the in-memory anchor, and MUST retain the bounded cleanup retry so a transient failure is not lost. When the durable clear returns no matching row, the proxy MUST treat that no-match as a terminal fenced outcome for this cleanup attempt and MUST NOT spend the retry budget on it; it MUST preserve the local alias and denial fence because the durable owner or latest anchor may have advanced. A durable record that still carries the denied id can then be retired by the matching owner rather than by a stale epoch.
+
+Retirement is bookkeeping and MUST NOT change how the denial is delivered downstream. A failure while retiring MUST NOT propagate into terminal-event handling.
+
+A denial that settles several requests sharing one anchor MUST retire that anchor once, on the same terms.
+
+The downstream error contract is unchanged: the denial is still reported to the client as `stream_incomplete`, so the client retains its own anchor and is not driven into a full-history resend.
+
+#### Scenario: A denied proxy-injected anchor is retired immediately
+
+- **GIVEN** an HTTP bridge session whose stored anchor was injected by the proxy
+- **WHEN** upstream answers the anchored request with `previous_response_not_found`
+- **THEN** the proxy clears the durable continuity record under the session's owner epoch
+- **AND** clears the in-memory session anchor and its stored input count and prefix fingerprint
+- **AND** the next turn on that session dispatches without a `previous_response_id`
+
+#### Scenario: The following turn is not trimmed against a denied anchor
+
+- **GIVEN** a proxy-injected anchor was denied by upstream on the previous turn
+- **WHEN** the client sends a full resend of the conversation on the next turn
+- **THEN** the request MUST NOT be trimmed against the denied anchor's stored prefix
+- **AND** upstream receives the resent conversation rather than a suffix of it
+
+#### Scenario: A concurrent completion protects the current anchor
+
+- **GIVEN** a proxy-injected anchor is denied by upstream
+- **AND** another request on the same session completed first and advanced the session anchor to a different response id
+- **WHEN** the denial is handled
+- **THEN** the proxy MUST NOT clear the session anchor
+- **AND** it MUST still tombstone the denied id so an already-prepared proxy-injected request cannot dispatch it
+
+#### Scenario: Client-supplied anchors are left alone
+
+- **GIVEN** an HTTP bridge request carries a `previous_response_id` the client supplied
+- **WHEN** upstream answers it with `previous_response_not_found`
+- **THEN** the proxy MUST NOT retire the anchor on the client's behalf
+
+#### Scenario: A delta-only payload keeps its injected anchor
+
+- **GIVEN** the proxy injected an anchor onto a payload that is not full-resend shaped
+- **WHEN** upstream answers that request with `previous_response_not_found`
+- **THEN** the proxy MUST NOT clear the anchor
+- **AND** the request keeps the only reference it has to its prior context
+
+#### Scenario: A fan-out denial retires the shared anchor once
+
+- **GIVEN** several pending requests on one session share a proxy-injected anchor
+- **WHEN** upstream answers with a single `previous_response_not_found` that settles all of them together
+- **THEN** the proxy retires that anchor before the grouped settlement completes
+
+#### Scenario: A prepared denied anchor is rejected before dispatch
+
+- **GIVEN** a request was prepared with a proxy-injected anchor
+- **AND** another request receives `previous_response_not_found` for that anchor before the prepared request reaches the upstream send
+- **WHEN** the prepared request reaches its final dispatch check
+- **THEN** the proxy fails it closed as `stream_incomplete`
+- **AND** the proxy MUST NOT send that denied anchor upstream again
+
+#### Scenario: Denial publication wins against a prepared dispatch
+
+- **GIVEN** a request is prepared with a proxy-injected anchor while another request receives `previous_response_not_found` for that anchor
+- **WHEN** denial publication acquires session lifecycle ownership before the prepared request's final send section
+- **THEN** the denied id is tombstoned before the prepared request revalidates
+- **AND** the prepared request fails closed without sending an upstream frame
+
+#### Scenario: A detached predecessor fences an absent-session capture
+
+- **GIVEN** a request captures a proxy-injected durable anchor before a canonical live session exists
+- **AND** a detached predecessor receives `previous_response_not_found` for that anchor while the request is resolving ownership
+- **WHEN** successor session creation completes and the request reaches final dispatch
+- **THEN** the process-local denial generation MUST fail the request closed as `stream_incomplete`
+- **AND** the successor MUST NOT send the denied anchor upstream
+
+#### Scenario: A stale durable recapture remains fenced after cleanup failure
+
+- **GIVEN** a detached predecessor records a denial for a proxy-injected anchor
+- **AND** durable anchor cleanup fails, leaving the durable row unchanged
+- **WHEN** a later request captures that same durable anchor after the denial was recorded
+- **THEN** the request MUST retain the existing denial observation
+- **AND** it MUST fail closed as `stream_incomplete` before dispatch
+
+#### Scenario: Owner-forward recovery observes an existing denial
+
+- **GIVEN** owner-forward recovery injects a durable proxy anchor into a successor request
+- **AND** this process has already recorded a denial for that anchor
+- **WHEN** the recovery retry request state is prepared
+- **THEN** the retry MUST retain the denial observation
+- **AND** it MUST fail closed before sending the denied anchor upstream
+
+#### Scenario: Sibling response aliases survive retirement
+
+- **GIVEN** a session has a denied response alias and another valid response alias
+- **WHEN** the denied anchor is retired
+- **THEN** only the denied response alias is removed
+- **AND** the valid response alias and turn-state aliases remain routable
+
+#### Scenario: An unconfirmed durable clear still drops the in-memory anchor
+
+- **GIVEN** a denied proxy-injected anchor whose durable clear is fenced or fails
+- **WHEN** the denial is handled
+- **THEN** the proxy MUST clear the in-memory session anchor
+- **AND** MUST NOT report the anchor as retired
+
+If alias unregistering raises after the durable clear, the same in-memory cleanup MUST still occur.
+
+The process-local denial fence MUST retain its positive generation while any
+request still pins the denied id, even after durable cleanup succeeds. Such a
+prepared request MUST remain fenced until its final pin is released; the fence
+may then be removed. Fence state MUST be bounded to one current denial slot per
+active durable or local owner plus active request pins, and a session close or
+durable-owner epoch change MUST retire the old owner's unpinned slot without
+clearing a successor epoch's slot. A close MAY retain an otherwise unpinned
+durable denial slot while that session still records an unresolved durable
+cleanup, so a stale row cannot be recaptured; the slot MUST be retired when
+cleanup succeeds or the durable row is confirmed absent.
+
+When several late predecessor denials arrive for one durable owner, only the
+newest unpinned predecessor slot MUST be retained while its durable cleanup is
+unresolved. Older predecessor slots MUST remain fenced while request pins are
+active, then MUST be retired when those pins release or when a newer owner
+confirms durable cleanup. This keeps predecessor churn bounded without
+allowing an already-prepared request to redispatch a denied anchor.
+
+#### Scenario: Late predecessor churn remains bounded
+
+- **GIVEN** one durable owner advances through more than the process-local
+  denial-ledger bound
+- **AND** each successor denial is followed by a late predecessor denial
+- **WHEN** no predecessor request retains an active ledger pin
+- **THEN** the ledger retains the current denial and at most the newest
+  unresolved predecessor denial for that owner
+- **AND** a current-owner durable clear retires the unresolved predecessor
+  slot
+
+#### Scenario: Pinned predecessor survives bounded churn until release
+
+- **GIVEN** a late predecessor denial still has an active prepared-request pin
+- **WHEN** a newer predecessor denial is recorded for the same durable owner
+- **THEN** the pinned predecessor remains fenced until its request finalizes
+- **AND** releasing the final pin removes that superseded predecessor slot
+
+#### Scenario: A retirement failure cannot change the denial delivered downstream
+
+- **GIVEN** the bookkeeping performed while retiring a denied anchor raises
+- **WHEN** the denial is handled
+- **THEN** the error MUST NOT propagate into terminal-event handling
+
+#### Scenario: Durable cleanup preserves a prepared request's denial fence
+
+- **GIVEN** a request has pinned a proxy-injected anchor while another request receives `previous_response_not_found`
+- **WHEN** the durable clear succeeds
+- **THEN** the denied fence keeps its positive generation until the prepared request releases its pin
+- **AND** the prepared request remains fenced during that interval
+- **AND** the fence is removed after the final pin is released
+
+#### Scenario: A successor epoch survives predecessor fence cleanup
+
+- **GIVEN** a successor owns the same durable session id at a newer epoch
+- **WHEN** the predecessor closes or its durable clear completes
+- **THEN** cleanup removes only the predecessor's unpinned fence state
+- **AND** the successor's current denial slot remains active
+
+### Requirement: Anchored recovery retries retain the provenance of the anchor they replay
+
+When the HTTP bridge dispatches an anchored recovery retry that replays a `previous_response_id` the proxy injected, the retry request state MUST record that the anchor is proxy-injected. A recovery path that dispatches without an anchor MUST leave that provenance false, because there is no anchor for it to describe.
+When a hard turn-state operation-ledger lookup injects an anchor after the request state was initially prepared without a `previous_response_id`, the request state MUST preserve the original payload's full-resend classification and use it when deciding whether a later denial may retire that injected anchor.
+
+#### Scenario: An anchored recovery retry is attributable to the proxy
+
+- **GIVEN** a request whose `previous_response_id` was injected by the proxy fails and enters anchored recovery
+- **WHEN** the recovery retry replays the same anchor
+- **THEN** the retry request state records the anchor as proxy-injected
+- **AND** continuity diagnostics for the retry report `previous_response_source=proxy_injected` rather than `client_supplied`
+
+#### Scenario: Anchor-free recovery retries claim no provenance
+
+- **GIVEN** a recovery path dispatches without a `previous_response_id`
+- **WHEN** the retry request state is prepared
+- **THEN** it MUST NOT record a proxy-injected anchor
+
+### Requirement: Denied proxy-injected bridge anchors have fenced lifecycle cleanup
+
+When upstream rejects a proxy-injected `previous_response_id` with
+`previous_response_not_found`, the HTTP bridge MUST publish a positive
+process-local denial generation before any cleanup await. A prepared request
+that captured that anchor before the denial MUST fail closed without another
+upstream dispatch, including when the request was admitted before its session
+was closed. The generation MUST remain available while any request pins it.
+
+An owner transition MUST NOT allow a stale predecessor to replace a newer
+durable owner's denial fence. An ownerless or process-local predecessor MUST
+NOT overwrite a durable owner entry for the same response id. When local alias
+cleanup fails without a durable owner, the bridge MUST retain a tracked retry
+that can remove the alias and fence rather than abandoning an unbounded local
+tombstone.
+
+An unpinned stale-predecessor denial fence MUST remain available until a
+current owner confirms that the matching durable anchor has been cleared;
+releasing the stale request's final pin alone MUST NOT drop that fence.
+
+When a sibling has already advanced the current response, its denial fence is
+historical rather than unresolved cleanup. Closing the session MUST retire an
+unpinned historical fence once durable ownership is released (including an
+ownerless release result), while preserving unresolved current-anchor cleanup
+and any pinned generations for their final request release.
+
+#### Scenario: An admitted denial still cleans up after session close
+
+- **GIVEN** a request was admitted with a proxy-injected anchor
+- **AND** the bridge session is marked closed before upstream returns
+  `previous_response_not_found`
+- **WHEN** the terminal denial is handled
+- **THEN** the denial generation is published and the request receives the
+  existing downstream error contract
+- **AND** the denied anchor is not re-injected by a later request
+
+#### Scenario: A stale local predecessor cannot replace a durable fence
+
+- **GIVEN** a durable owner holds a positive denial fence for response id `A`
+- **WHEN** a late process-local predecessor records denial for the same `A`
+- **THEN** the durable owner and generation remain authoritative
+- **AND** the predecessor does not remove the durable owner mapping
+
+#### Scenario: Local alias cleanup failure remains tracked
+
+- **GIVEN** a denied anchor belongs only to a process-local session
+- **WHEN** local alias unregistering fails transiently
+- **THEN** the bridge tracks a bounded cleanup retry
+- **AND** a successful retry removes the local alias and denial fence
+
+#### Scenario: Sibling-advanced fence retires on ownerless close
+
+- **GIVEN** a denial arrives after a sibling has advanced the session's current
+  response
+- **AND** no request still pins the denied generation
+- **WHEN** closing the session releases durable ownership with no owner
+- **THEN** the historical denial fence and owner mapping are removed
+- **AND** unresolved current-anchor cleanup fences remain retained
+
+### Requirement: Pre-response-start bridge silence has its own classification
+
+The HTTP responses session bridge MUST NOT report a failure that occurs before
+the request's first response event as `stream_idle_timeout`. Every terminal the
+bridge produces while `response.created` has not been observed and no response
+event has been counted MUST use the distinct code `bridge_eventless_timeout`.
+
+That classification MUST appear in the bridge's own log line, in the durable
+request-log failure metadata (`failure_detail` = `bridge_eventless_timeout`,
+`failure_phase` = `bridge`), in the HTTP bridge retry-circuit `last_detail`, and
+in the client-visible error payload. The retry-circuit detail MUST NOT be
+aliased onto `stream_idle_timeout`.
+
+The client-visible error MUST remain retryable: HTTP status `503` and a message
+that states no response was created upstream and the request is safe to repeat.
+The message MUST NOT attribute the failure to the upstream.
+
+`stream_idle_timeout` remains the classification for a stream that produced at
+least one response event and then went silent for `stream_idle_timeout_seconds`.
+
+#### Scenario: Pre-response silence is reported as an eventless bridge timeout
+
+- **GIVEN** an HTTP bridge request whose downstream event queue has produced no
+  response events
+- **WHEN** the pre-response silence budget expires
+- **THEN** the emitted `response.failed` event carries code
+  `bridge_eventless_timeout`
+- **AND** the request log records `failure_detail=bridge_eventless_timeout` and
+  `failure_phase=bridge`
+- **AND** the hard-affinity retry circuit records `last_detail` of
+  `bridge_eventless_timeout`
+- **AND** the error message does not mention the upstream
+- **AND** the equivalent HTTP error status is `503`
+
+#### Scenario: Post-response idle keeps the stream idle classification
+
+- **GIVEN** an HTTP bridge request that already received a response event
+- **WHEN** the stream stays silent past `stream_idle_timeout_seconds`
+- **THEN** the emitted `response.failed` event carries code
+  `stream_idle_timeout`
+- **AND** no `bridge_eventless_timeout` request-log detail is recorded
+
+### Requirement: The pre-response silence budget is settings-derived
+
+The pre-response silence budget MUST be a named quantity derived from
+configuration, not the implicit product of `_STREAM_KEEPALIVE_MAX_COUNT` and
+`sse_keepalive_interval_seconds`.
+
+The budget MUST be the minimum of
+`http_responses_session_bridge_stuck_gate_retire_after_seconds`,
+`stream_idle_timeout_seconds`, and
+`http_responses_session_bridge_request_budget_seconds`, so that the downstream
+pre-response watchdog can never outlive the owner-side stuck gate, the
+configured idle budget, or the request budget. The number of pre-response
+keepalive intervals waited MUST cover that budget. It MUST NOT drop below
+`_STREAM_KEEPALIVE_MAX_COUNT` when the budget spans at least that many
+keepalive intervals; when the configured budget is shorter, the count MUST
+follow the budget instead, so the watchdog never outlives it.
+
+#### Scenario: Default settings align the budget with the stuck gate
+
+- **GIVEN** shipped defaults `sse_keepalive_interval_seconds=10`,
+  `http_responses_session_bridge_stuck_gate_retire_after_seconds=300`, and
+  `stream_idle_timeout_seconds=7200`
+- **WHEN** the pre-response silence budget is computed
+- **THEN** the budget is `300` seconds
+- **AND** the pre-response keepalive count covers `300` seconds rather than the
+  previous implicit `60` seconds
+
+#### Scenario: A shorter idle timeout clamps the budget
+
+- **GIVEN** `stream_idle_timeout_seconds=45` and a `300` second stuck gate
+- **WHEN** the pre-response silence budget is computed
+- **THEN** the budget is `45` seconds
+
+### Requirement: Unmatched live upstream frames are recorded as liveness
+
+The bridge MUST record an upstream text frame that matches no pending request,
+while pending requests exist, as unmatched upstream liveness: an
+`unmatched_upstream_liveness` bridge-event marker and a per-session counter. A subsequent `bridge_eventless_timeout` MUST report that counter so a
+local matching wedge is distinguishable from a genuinely silent upstream.
+
+Frames the bridge injects into its own downstream streams, in particular
+`codex.keepalive`, MUST NOT be counted as upstream liveness.
+
+#### Scenario: An unmatched upstream event is marked as liveness
+
+- **GIVEN** an HTTP bridge session with one pending request
+- **WHEN** an upstream response event arrives that matches no pending request
+- **THEN** an `unmatched_upstream_liveness` bridge event is logged
+- **AND** the session's unmatched upstream liveness counter increases
+
+#### Scenario: A local keepalive frame is not upstream liveness
+
+- **GIVEN** an HTTP bridge session with one pending request
+- **WHEN** a `codex.keepalive` frame is processed
+- **THEN** no `unmatched_upstream_liveness` bridge event is logged
+- **AND** the session's unmatched upstream liveness counter is unchanged
+
+### Requirement: Local bridge resets are reported as local
+
+The bridge MUST identify local recovery resets as local bridge resets. When it
+tears down and rebuilds its own upstream session (durable fresh replay,
+context-overflow fresh turn, context-overflow rollover, or local
+previous-response rebind), the terminal error message it settles pending
+requests with MUST NOT claim the upstream websocket closed.
+
+Reporting a local reset MUST remain account-health neutral for anchored
+`stream_incomplete` settlements, exactly as the upstream-close wording was.
+
+#### Scenario: Local recovery does not report an upstream close
+
+- **GIVEN** the bridge performs any local reset-and-retry recovery
+- **WHEN** it settles the pending requests of the session it is discarding
+- **THEN** the settled error message says the bridge reset the session locally
+- **AND** the message does not contain `Upstream websocket closed`
+- **AND** the settlement does not mark the account unhealthy
+
+### Requirement: Verified same-owner stale-anchor replacement remains owner-bound
+
+When an HTTP-bridge continuation has a verified, prefix-safe full resend that
+is not account-neutral because its retained tool or file context is owner-bound,
+and the continuity owner explicitly rejects `previous_response_id` before
+producing any response output, the proxy MUST remove only that rejected anchor
+and attempt the bounded unanchored replacement on the proven owner account.
+If a preferred owner account is available in this recovery path, admission MUST
+set `fallback_on_preferred_account_unavailable` to false. If that owner cannot
+accept the replacement, the proxy MUST fail closed rather than selecting an
+alternate account. The replacement MUST retain the existing operation fence,
+settlement, one-shot replay, and retry-circuit rules.
+
+#### Scenario: Owner-bound replacement stays on the rejecting owner
+
+- **GIVEN** a verified full resend contains retained owner-bound tool history
+- **AND** upstream explicitly rejects its `previous_response_id` before output
+- **WHEN** the proxy prepares the one-shot unanchored replacement
+- **THEN** the replacement omits the rejected `previous_response_id`
+- **AND** it is admitted with the proven owner as `preferred_account_id`
+- **AND** preferred-owner fallback is disabled
+- **AND** the replacement does not migrate accounts
+
+#### Scenario: Unavailable owner fails closed
+
+- **GIVEN** the owner-bound replacement has a proven preferred account
+- **AND** that account is unavailable or saturated during replacement admission
+- **WHEN** the proxy selects a bridge session
+- **THEN** the request fails with the existing retryable owner-unavailable result
+- **AND** no alternate account receives the retained owner-bound context
+
+#### Scenario: Account-neutral replay remains independent
+
+- **GIVEN** an explicit stale-anchor rejection passes the existing account-neutral
+  full-resend proof
+- **WHEN** the proxy performs account-neutral recovery
+- **THEN** its existing owner-exclusion and account-neutral selection behavior
+  remains unchanged
+
+#### Scenario: Other recovery paths remain unchanged
+
+- **WHEN** a request is delta-only, prefix-unverified, transport-only, or has no
+  explicit stale-anchor rejection
+- **THEN** the proxy does not use this owner-bound replacement rule
+- **AND** its existing fail-closed or anchored recovery behavior remains in
+  force
+
+### Requirement: A disabled model source refuses its models instead of falling through
+
+The system SHALL NOT dispatch to a subscription account a request whose model
+is served by an OpenAI-compatible model source that an operator has switched
+off. It SHALL refuse such a request with HTTP status `503` and error code
+`model_source_disabled`.
+
+"Switched off" covers both a disabled source row and a disabled model row on an
+enabled source. The refusal SHALL apply on `/v1/chat/completions`,
+`/v1/responses`, and `/backend-api/codex/responses`.
+
+The refusal SHALL be decided by the ordinary source-selection rules with the
+enabled-state filter inverted and nothing else changed: same candidate list
+(raw client alias and normalized model), same API key model allowlist, same
+source assignment scope, same subscription-registry precedence, same route
+shape, same streaming requirement. A request that the ordinary lookup would
+have missed for any reason other than enabled state MUST keep its existing
+behaviour, including a model no source exposes, a source the API key is not
+assigned to, a chat-only source asked for a Responses route, and a
+subscription-registry slug that an unscoped API key never source-routes.
+
+Requests excluded from source routing — a terminal `compaction_trigger`, and
+Responses requests pinned to the subscription account that received an uploaded
+file — MUST NOT be refused, and MUST proceed to subscription routing as before.
+
+The WebSocket transport cannot forward to a model source, so its
+source-ownership guards SHALL treat a model owned only by a switched-off source
+as source-owned: the turn fails with the existing service-level
+`model_source_requires_http_transport` refusal instead of dispatching to a
+subscription account, and the client's HTTP fallback then meets the
+`model_source_disabled` refusal above. The guards' existing exclusions — a
+structurally excluded request and a recorded previous-response subscription
+owner — keep bypassing the guard unchanged.
+
+The refusal MUST happen before any usage reservation is taken, so a refused
+request strands no reservation, and MUST NOT create a request log entry for a
+dispatch that never happened.
+
+#### Scenario: Chat request for a disabled source's model is refused
+
+- **GIVEN** an OpenAI-compatible model source exposes model `m` and is disabled
+- **WHEN** a client calls `POST /v1/chat/completions` with model `m`
+- **THEN** the response is `503` with error code `model_source_disabled`
+- **AND** no subscription account is selected for the request
+- **AND** no usage reservation is left held
+
+#### Scenario: Responses request for a disabled source's model is refused
+
+- **GIVEN** a Responses-capable OpenAI-compatible model source exposes model `m` and is disabled
+- **WHEN** a client calls `POST /v1/responses` or `POST /backend-api/codex/responses` with model `m`
+- **THEN** the response is `503` with error code `model_source_disabled`
+- **AND** no subscription account is selected for the request
+
+#### Scenario: A disabled model on an enabled source is refused
+
+- **GIVEN** an enabled OpenAI-compatible model source whose model row for `m` is disabled
+- **WHEN** a client calls `POST /v1/chat/completions` with model `m`
+- **THEN** the response is `503` with error code `model_source_disabled`
+
+#### Scenario: A model no source exposes is unaffected
+
+- **GIVEN** no model source exposes model `m`, enabled or disabled
+- **WHEN** a client calls `POST /v1/chat/completions` with model `m`
+- **THEN** subscription routing proceeds exactly as it did before this requirement
+
+#### Scenario: A WebSocket turn for a disabled source's model bounces to HTTP
+
+- **GIVEN** a Responses-capable OpenAI-compatible model source exposes model `m` and is disabled
+- **WHEN** a client requests model `m` over the WebSocket transport, at connect time or on a later turn over an already-open socket
+- **THEN** the turn is refused with the service-level `model_source_requires_http_transport` failure that makes Codex clients retry over the HTTP transport
+- **AND** the turn is not forwarded to a subscription account upstream
+
+#### Scenario: A subscription slug shadowed by a disabled source is unaffected
+
+- **GIVEN** a disabled OpenAI-compatible model source lists a slug the subscription model registry already serves
+- **AND** an API key without source assignment scoping
+- **WHEN** the key requests that slug
+- **THEN** the request is not refused with `model_source_disabled`
+- **AND** subscription routing proceeds unchanged
+
+### Requirement: Stale-anchor error parameters preserve presence and fail closed
+
+When the proxy parses an upstream Responses or Chat Completions error, it MUST
+distinguish an absent `param` from a present malformed value. A present
+non-string, null, blank, or whitespace-only `param` MUST NOT authorize
+previous-response recovery, full-history replay, account migration, or any
+other proof-gated retry. A valid string parameter MAY be normalized by trimming
+surrounding whitespace before public serialization.
+
+#### Scenario: malformed parameter cannot authorize recovery
+
+- **GIVEN** an anchored request receives a canonical stale-anchor code or
+  previous-response-not-found message with `param = null`, a non-string value,
+  or blank whitespace
+- **WHEN** the proxy evaluates replay eligibility
+- **THEN** the request fails closed and remains in the existing terminal path
+- **AND** no unanchored replay or account switch is authorized
+
+#### Scenario: absent parameter keeps the narrow parameterless classifier
+
+- **GIVEN** an anchored request receives `code = invalid_request_error`, no
+  `param`, and the exact normalized `Invalid previous_response_id.` message
+- **WHEN** the proxy evaluates continuity recovery
+- **THEN** the existing parameterless previous-response classifier may match
+- **AND** unrelated invalid-request messages remain unmatched
+
+### Requirement: Public error serializers omit malformed parameter metadata
+
+When a public WebSocket or HTTP Responses serializer emits an error containing
+a present malformed `param`, it MUST omit that field. It MUST preserve the
+native event envelope and MUST NOT expose a raw stale `previous_response_id`.
+A valid string parameter MUST remain available in trimmed form. This
+sanitization applies regardless of the error code or message; only an error
+that has no `param` metadata is left unchanged. When stale-anchor masking
+applies, its generic terminal envelope takes precedence and may remove even a
+valid `previous_response_id` parameter.
+
+The Chat Completions adapter MUST apply the same parameter sanitization to the
+nested error detail, but it MUST retain the documented Chat Completions error
+envelope rather than forwarding the native Responses event type or outer
+`response` object.
+
+#### Scenario: native malformed error is sanitized without changing its shape
+
+- **GIVEN** a native terminal `error` or `response.failed` frame contains a
+  present malformed `param`
+- **WHEN** the native stream is serialized for the client
+- **THEN** the error retains its event type and other fields
+- **AND** the malformed `param` is omitted
+
+#### Scenario: Chat Completions errors keep their adapter envelope
+
+- **GIVEN** a Chat Completions stream receives a native terminal error with a
+  present malformed `param`
+- **WHEN** the Chat adapter serializes the error
+- **THEN** it emits the documented `{"error": ...}` Chat Completions shape
+- **AND** the nested malformed `param` is omitted
+- **AND** native Responses-only fields are not forwarded
+
+#### Scenario: public stale-anchor error remains generic
+
+- **GIVEN** a public `/v1/responses` stream receives a stale-anchor error,
+  including a typeless or nested `response.failed` shape
+- **WHEN** the API normalizes the stream
+- **THEN** it emits the existing `stream_incomplete` envelope
+- **AND** it removes the stale anchor metadata while preserving the nested
+  response id when one was supplied
+
+### Requirement: Typeless terminal errors retain settlement and correlation data
+
+The streaming normalizers MUST classify a payload with a dictionary `error`
+and no string `type` as an `error` event for terminal settlement. A nested
+`response.failed` error MUST retain its outer response identifier when its
+error details are masked or sanitized. A valid native error frame that needs no
+sanitization MUST remain byte-identical.
+
+#### Scenario: typeless error flushes pending terminal-adjacent state
+
+- **GIVEN** a stream has buffered reasoning-summary data followed by a typeless
+  error payload
+- **WHEN** the normalizer processes the error
+- **THEN** it flushes the buffered data before forwarding the terminal error
+
+#### Scenario: nested terminal masking preserves response id
+
+- **GIVEN** a `response.failed` payload has an outer `response.id` and a stale
+  previous-response error
+- **WHEN** the public normalizer masks the stale error
+- **THEN** the terminal event keeps the same `response.id`
+- **AND** the error details are the generic `stream_incomplete` shape
+
+### Requirement: Optional recovery-spool cleanup MUST remain optional
+
+For an anchored local HTTP bridge recovery that has not dispatched its
+replacement request, the implementation MUST attempt the operation-spool
+cleanup while the failed durable session still holds the operation owner fence.
+If that cleanup is unavailable, refuses the owner, or raises, the optional
+cleanup MUST NOT replace the original recovery path with a
+`bridge_continuity_persistence_failed` response. The existing durable operation
+rebind remains responsible for clearing stale attempt material before the
+replacement dispatch.
+
+#### Scenario: Optional reset refusal does not abort local recovery
+
+- **GIVEN** an anchored operation belongs to the failed durable session
+- **AND** local recovery has not dispatched a replacement request
+- **WHEN** the optional spool reset returns `False`
+- **THEN** recovery continues with the same operation identity
+- **AND** the replacement is allowed to reach the normal fenced operation
+  rebind path.
+
+#### Scenario: Optional reset exception does not mask the upstream failure
+
+- **GIVEN** the same anchored local recovery path
+- **WHEN** the optional spool reset raises
+- **THEN** the exception is handled as optional cleanup failure
+- **AND** recovery does not emit a new continuity-persistence error solely for
+  that cleanup failure.
+
+### Requirement: Required replay-spool cleanup MUST fail closed
+
+Before an account-neutral or owner-bound unanchored stale-anchor replay, the
+implementation MUST keep the operation fence and required spool reset strict.
+An unavailable or refused required reset, or a required reset operation that
+raises an exception, MUST return the typed `bridge_continuity_persistence_failed`
+error and MUST NOT dispatch the unanchored replacement request.
+
+#### Scenario: Required reset refusal blocks unanchored replay
+
+- **GIVEN** a verified stale-anchor full-resend replay
+- **WHEN** the required operation-spool reset is unavailable or returns
+  `False`
+- **THEN** the request fails with `bridge_continuity_persistence_failed`
+- **AND** no unanchored replacement request is sent.
+
+### Requirement: classify edge challenge 403 narrowly
+
+The proxy MUST classify a WebSocket handshake as an edge challenge only when
+the response status is 403 and the response carries explicit challenge
+evidence (`cf-mitigated: challenge`, or a Cloudflare-identified HTML body
+containing known challenge markers). Structured JSON permission errors, local
+`ip_forbidden`, ordinary reverse-proxy HTML, and missing evidence MUST remain
+non-challenge failures.
+
+#### Scenario: Cloudflare challenge is recognized
+
+- **WHEN** a WebSocket handshake returns 403 with `cf-mitigated: challenge`
+- **THEN** the response is classified as an edge challenge
+
+#### Scenario: ordinary permission denial is not a challenge
+
+- **WHEN** a WebSocket handshake returns structured JSON
+  `permission_error` with status 403
+- **THEN** the response remains a non-challenge permission failure
+
+#### Scenario: unmarked reverse-proxy HTML is not a challenge
+
+- **WHEN** a WebSocket handshake returns an HTML 403 from Nginx without
+  challenge evidence
+- **THEN** the response remains a non-challenge upstream failure
+
+### Requirement: classified edge challenges are websocket transport failures
+
+A direct-connect WebSocket handshake rejected with a classified edge
+challenge MUST carry the same transport-failure provenance as a connect
+timeout or 5xx upgrade rejection: the failure MUST surface without recording
+an account-health penalty and MUST arm the bounded handshake-denial marker so
+Codex clients are steered to the HTTP transport. Routed-proxy handshake
+challenges MUST NOT arm the instance-wide marker.
+
+#### Scenario: direct edge challenge steers clients to HTTP
+
+- **WHEN** a direct upstream WebSocket handshake returns a classified edge
+  challenge before any response event
+- **THEN** the failure surfaces without an account penalty
+- **AND** the next Responses WebSocket handshake is denied with HTTP 426
+  while the marker is armed
+
+#### Scenario: automatic transport falls back in-request
+
+- **WHEN** the raw streaming path selects the websocket transport in `auto`
+  mode
+- **AND** the upstream handshake is rejected with a classified edge challenge
+- **THEN** the proxy retries the request once over HTTP on the same account
+
+#### Scenario: forced WebSocket preserves the challenge error
+
+- **WHEN** upstream transport is forced to WebSocket
+- **AND** the handshake returns an edge challenge
+- **THEN** the proxy does not retry over HTTP
+
+### Requirement: OpenAI error path families include their exact roots
+
+Locally generated HTTP errors for exact `/v1` and `/backend-api` requests MUST
+use the same OpenAI-compatible external error envelope as requests under
+`/v1/` and `/backend-api/`. Exact roots, trailing-slash roots, and unknown child
+paths MUST preserve equivalent HTTP status, error type, error code, and message
+semantics. This classification MUST NOT change dashboard, static-asset, health,
+or other non-OpenAI route error formats.
+
+#### Scenario: Exact OpenAI family roots are not found
+
+- **WHEN** a client sends `GET /v1` or `GET /backend-api`
+- **THEN** the service returns HTTP 404
+- **AND** the body is an OpenAI error envelope with
+  `error.type = invalid_request_error`, `error.code = not_found`, and
+  `error.message = Not Found`
+
+#### Scenario: Equivalent OpenAI family paths remain consistent
+
+- **WHEN** a client requests a trailing-slash root or unknown child under
+  `/v1/` or `/backend-api/`
+- **THEN** the service returns the same 404 OpenAI error contract as the exact
+  family root
+
+#### Scenario: Non-OpenAI routes retain their native error formats
+
+- **WHEN** a request fails on a dashboard, static-asset, health, or other
+  non-OpenAI route
+- **THEN** the service retains that route family's existing external error
+  format
+
+### Requirement: HTTP bridge relays unchanged upstream events as their upstream JSON text
+
+When an HTTP bridge session relays an upstream Responses event to a pending
+request's downstream SSE stream and the proxy did not change the event's JSON
+value (no downstream response-id alignment, tool-call rewrite, or error
+masking applied), the relayed `data:` line MAY be the upstream JSON text
+verbatim instead of a proxy re-serialization. The relayed block MUST use the
+canonical framing `event: <type>\ndata: <json>\n\n` when the payload carries a
+non-empty string `type`, and data-only framing `data: <json>\n\n` otherwise.
+Any SSE-compliant parser MUST obtain the identical JSON value from the relayed
+block that it would obtain from the proxy's re-serialized form. Events whose
+JSON value the proxy changed MUST continue to be re-serialized from the
+rewritten payload.
+
+#### Scenario: Unchanged event with non-ASCII text is relayed as upstream UTF-8
+
+- **GIVEN** an HTTP bridge request whose upstream response id already matches
+  its downstream response id
+- **WHEN** the upstream emits a single-line `response.output_text.delta` event
+  whose `delta` contains Korean text and U+2028
+- **THEN** the downstream block is `event: response.output_text.delta` followed
+  by a `data:` line containing the upstream JSON text unchanged
+- **AND** parsing the block yields the same JSON value as parsing the proxy's
+  re-serialized form of that event
+
+#### Scenario: Unchanged ASCII event is byte-identical to re-serialization
+
+- **WHEN** the upstream emits a compact, ASCII-only event that the proxy does not
+  rewrite
+- **THEN** the relayed block is byte-identical to the block the proxy would have
+  produced by re-serializing the parsed payload
+
+#### Scenario: Rewritten event is re-serialized
+
+- **GIVEN** an HTTP bridge request whose downstream response id differs from the
+  upstream response id
+- **WHEN** the upstream emits an event carrying the upstream response id
+- **THEN** the relayed block is re-serialized from the rewritten payload and
+  carries the downstream response id
+- **AND** the upstream JSON text does not appear in the relayed block
+
+#### Scenario: In-place trimmed parallel tool uses are re-serialized
+
+- **GIVEN** an HTTP bridge request that already relayed a
+  `response.output_item.done` `multi_tool_use.parallel` call containing a
+  side-effect tool use
+- **WHEN** the upstream emits a second `response.output_item.done`
+  `multi_tool_use.parallel` call whose tool uses only partially repeat the first
+- **THEN** the relayed block is re-serialized from the trimmed payload and
+  carries only the non-duplicate tool uses
+- **AND** the untrimmed upstream JSON text does not appear in the relayed block
+
+#### Scenario: Typeless error frame stays data-only
+
+- **WHEN** an upstream frame is a JSON object without a string `type` field
+- **THEN** the relayed framing derived from that payload has no `event:` line
+
+### Requirement: Per-request detached-session retire sweep bounds its lock wait
+
+The fail-safe sweep that reconsiders detached HTTP-bridge generations on every bridge request MUST bound how long it waits for any single detached session's `pending_lock`. When the bound elapses the sweep MUST skip that session for the current pass, emit a warning, leave the session tracked and its lock state untouched, and continue. Session lifecycle owners (drain, close, cooldown-suppression retirement) MUST keep waiting for the lock without a bound so retirement decisions stay authoritative.
+
+#### Scenario: Busy detached lock does not park the request path
+
+- **GIVEN** a detached session flagged `retire_after_drain` whose `pending_lock` is held by another task for longer than the bound
+- **WHEN** a request runs the fail-safe sweep
+- **THEN** the sweep returns after the bound without closing the session
+- **AND** a warning names the skipped session
+- **AND** the lock remains owned by its holder with no stranded waiter
+
+#### Scenario: Free detached lock still retires
+
+- **GIVEN** a detached session flagged `retire_after_drain` whose `pending_lock` is free and which no turn owns
+- **WHEN** a request runs the fail-safe sweep
+- **THEN** the session is retired exactly as before
+
+#### Scenario: Lifecycle owners keep the unbounded wait
+
+- **GIVEN** a drain or close path calls the retire check without a bound while another task briefly holds the lock
+- **WHEN** the holder releases
+- **THEN** the retire check proceeds and retires the session
+
+### Requirement: Cancelled streamed responses do not re-cancel deferred startup work every loop iteration
+
+When a streamed Responses body is cancelled by its response scope (client disconnect or request teardown) while the startup-probe first-item task or the SSE keepalive chunk task is still running cancellation-deferring cleanup, the proxy MUST NOT re-deliver cancellation to that task on every event-loop iteration. The body MUST await such tasks through a per-waiter proxy future so the level cancellation is absorbed by the proxy and the awaited task receives at most one explicit teardown cancellation. Teardown MUST still wait for that task to settle before closing the iterator chain it drives, so no `aclose()` is attempted on a running async generator and the task's eventual exception is retrieved.
+
+#### Scenario: Probe task is cancelled once while its cleanup is blocked
+
+- **GIVEN** a streamed response whose startup-probe task is waiting on cancellation-deferring cleanup that has not completed
+- **WHEN** the response scope is cancelled and the event loop runs many iterations
+- **THEN** the probe task's cancellation count stays at the single explicit teardown cancel
+- **AND** the deferred cleanup task is not cancelled
+- **AND** the response body task finishes once the cleanup settles, without spinning the loop meanwhile
+
+#### Scenario: Keepalive teardown waits for the chunk task without respinning it
+
+- **GIVEN** the SSE keepalive injector's pending chunk task is still driving a cancellation-deferring source when the consumer is cancelled
+- **WHEN** the event loop runs many iterations before that source's cleanup settles
+- **THEN** the chunk task is cancelled at most once
+- **AND** the source iterator is not closed while the chunk task drives it
+- **AND** the source iterator is closed exactly once after the chunk task settles
+
+### Requirement: Accepted output-free capacity failures are replayed within a single response lifecycle
+
+When a native Codex HTTP bridge or direct WebSocket `response.create` has been accepted upstream — `response.created` and optionally `response.in_progress` were forwarded downstream and no output item, text or tool delta, reasoning prelude, or tool call has been observed — and the turn then fails output-free, the proxy MUST re-send the request exactly once and the client MUST observe a single response lifecycle: exactly one `response.created`, no duplicated `response.in_progress`, and every later frame (including `response.completed` or a second terminal failure) carrying the response id the client already read. The bounded clean-close retry that pre-created requests receive MUST NOT extend an accepted lifecycle to a third send.
+
+An output-free failure is either a terminal `error` / `response.failed` whose normalized code is `server_is_overloaded`, `overloaded_error`, or `model_at_capacity`, or whose message names the selected-model capacity, or a transport close that is not account-neutral. The terminal MUST NOT name another response and MUST NOT report output items or billed output or reasoning tokens. Quota and rate-limit codes after acceptance MUST keep their stronger classification and MUST NOT be replayed. Anchored continuations without a retry-safe fresh payload, requests sharing the socket with another pending request, and requests whose replay budget is consumed MUST NOT be replayed. The other-pending check MUST be evaluated under the pending lock at the moment the replay is decided, after every await the terminal handling performs, never from a snapshot taken before such an await. The requirement "Direct WebSocket replay never mixes numeric response sequences" is unchanged: a direct WebSocket request whose forwarded prelude carried a finite integer `sequence_number` MUST NOT be replayed, and its capacity terminal or transport close keeps the existing fail-closed handling.
+
+The replay MUST capture the client-visible response id and arm prelude suppression before the request's upstream response id is cleared. On the HTTP bridge the replay MUST re-claim the session response-create gate without waiting; when another request holds the gate the upstream terminal MUST be forwarded unchanged. The replay MUST re-acquire shared work admission before sending, and when the request body is account-neutral the failing account MUST be excluded from the replacement selection on the HTTP bridge and on a direct WebSocket whose affinity cannot resolve to a hard sticky owner. A replay that swaps a retry-safe fresh body in for an anchored one MUST re-derive its owner requirement from the fresh body (an account-neutral body releases the anchor owner's pin; an account-bound body keeps it), and the failing account MUST NOT be excluded while the replay is still required to reconnect to it. On the direct WebSocket surface the failing account MUST NOT be excluded either when the request's affinity may resolve to a hard `CODEX_SESSION` owner the request state does not carry -- a `CODEX_SESSION` affinity (bare session header or turn state) or any affinity that consults a raw legacy compatibility row (`legacy_selection_key`) -- because a resolved hard row narrows selection to its owner and excluding that owner fails every re-selection with `hard_affinity_saturated`; such a replay reconnects through selection without an exclusion, exactly as the created-only transport-close replay did before this change. When the fresh body cannot release that pin -- the client supplied the anchor, or the fresh body names an account-scoped upload -- a capacity terminal MUST re-send the anchored body to the account that accepted it and MUST NOT fail the turn closed as `previous_response_owner_unavailable`. The classified capacity code an accepted terminal is replayed under MUST be a transparent replay code (`model_at_capacity` is reported as `server_is_overloaded`). When the request is API-key-backed, the failing account's health write MUST wait for the request's reservation settlement, as for pre-created replays. On the HTTP bridge only a terminal transport message (close or error) MAY replay an accepted turn.
+
+#### Scenario: Bridge terminal capacity error after acceptance is retried on another account
+
+- **GIVEN** the HTTP responses session bridge is enabled and two accounts are selectable
+- **AND** upstream delivers `response.created` and `response.in_progress` for a native Codex request and then an `error` with `code = "server_is_overloaded"` or `code = "model_at_capacity"` and no output
+- **WHEN** the bridge processes that terminal
+- **THEN** the request is re-sent once on the other account
+- **AND** the client observes exactly one `response.created`
+- **AND** the `response.completed` the client receives carries that `response.created` id
+
+#### Scenario: Bridge bare overload code after an accepted anchored follow-up is replayed
+
+- **GIVEN** an HTTP bridge follow-up turn whose `previous_response_id` the proxy injected and whose full resend is retained as a retry-safe fresh body
+- **AND** upstream accepted it (`response.created` forwarded) and produced no output
+- **WHEN** upstream then emits an `error` with code `server_is_overloaded` or `overloaded_error` whose message does not name the selected-model capacity
+- **THEN** the bridge stages the single-lifecycle replay and hands the request to the pre-created retry exactly as it does after the selected-model capacity message (owner-switch prep with the fresh body, or the anchored body to its owner)
+- **AND** a client-supplied anchor is forwarded unchanged, because the bridge's pre-created retry only re-sends proxy-injected anchors
+
+#### Scenario: Bridge abrupt close after acceptance is retried on another account
+
+- **GIVEN** an unanchored native Codex bridge request whose `response.created` and `response.in_progress` were forwarded
+- **WHEN** the upstream websocket closes with a non-account-neutral close before any output
+- **THEN** the request is re-sent once on another account within the same single response lifecycle
+
+#### Scenario: WebSocket accepted capacity failures are retried within one lifecycle
+
+- **GIVEN** a direct `/backend-api/codex/responses` WebSocket request whose `response.created` and `response.in_progress` were forwarded
+- **AND** the connection carries no Codex session affinity that may resolve to a hard sticky owner (no `CODEX_SESSION` kind and no raw legacy compatibility lookup)
+- **WHEN** upstream then emits an output-free capacity `error` or closes the transport abruptly
+- **THEN** the proxy reconnects excluding the failing account and re-sends the request once
+- **AND** the client observes exactly one `response.created` and one `response.in_progress` and a `response.completed` carrying that id
+
+#### Scenario: A sequenced direct WebSocket prelude keeps the existing fail-closed contract
+
+- **GIVEN** a direct `/backend-api/codex/responses` WebSocket request whose forwarded `response.created` (0) and `response.in_progress` (1) carried finite integer `sequence_number` values
+- **WHEN** upstream then emits an output-free capacity `error`
+- **THEN** the proxy MUST NOT reconnect or re-send the request and MUST finalize and surface that terminal unchanged
+- **WHEN** upstream instead closes the transport abruptly before any output
+- **THEN** the proxy MUST record the request as `stream_incomplete` without emitting a synthetic terminal under the visible id and MUST close the downstream WebSocket with code 1011
+- **AND** in both cases no replacement account is connected
+
+#### Scenario: Output before the capacity failure disables the replay
+
+- **WHEN** any `response.output_item.added`, text or tool delta, or buffered reasoning prelude was observed before the capacity terminal or transport close
+- **THEN** the proxy MUST NOT replay the request and MUST forward the terminal unchanged
+
+#### Scenario: Terminals reporting output are not replayed
+
+- **WHEN** the capacity terminal payload carries a non-empty `output` list, `usage.output_tokens > 0`, or `usage.output_tokens_details.reasoning_tokens > 0`
+- **THEN** the proxy MUST NOT replay the request
+
+#### Scenario: Quota and rate-limit codes after acceptance stay fail-closed
+
+- **WHEN** an accepted request fails with `rate_limit_exceeded`, `usage_limit_reached`, `insufficient_quota`, `usage_not_included`, or `quota_exceeded`, even with the selected-model capacity message
+- **THEN** the proxy MUST forward the terminal without replaying
+
+#### Scenario: Anchored continuations without a retry-safe fresh payload are not replayed
+
+- **WHEN** the accepted request carries `previous_response_id` and no retry-safe fresh payload is retained
+- **THEN** the proxy MUST forward the failure without replaying
+
+#### Scenario: A second capacity failure surfaces one terminal under the visible id
+
+- **WHEN** the replayed request also fails output-free, including a clean upstream close before the replay's `response.created`
+- **THEN** the proxy MUST NOT attempt a third send
+- **AND** the client observes one terminal failure with no second `response.created` or `response.in_progress`
+
+#### Scenario: An anchored accepted follow-up is replayed with its fresh body on another account
+
+- **GIVEN** a direct WebSocket follow-up turn whose `previous_response_id` the proxy injected and whose full resend is retained as a retry-safe, account-neutral fresh body
+- **AND** the connection carries no Codex session affinity that may resolve to a hard sticky owner
+- **AND** upstream accepted the turn (`response.created` and `response.in_progress` forwarded) on the anchor's owner
+- **WHEN** upstream then emits an output-free capacity `error` with code `server_is_overloaded` or `model_at_capacity`, or closes the transport abruptly
+- **THEN** the proxy re-sends the fresh body without `previous_response_id` on another account, excluding the owner
+- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id
+
+#### Scenario: An account-bound accepted replay reconnects to its owner
+
+- **WHEN** an accepted replay's body still requires one account (bound replay owner, uploaded file, anchored owner, or turn-state owner)
+- **THEN** the proxy MUST NOT exclude that account and MUST reconnect to it
+
+#### Scenario: A Codex-session accepted replay keeps its hard sticky owner eligible
+
+- **GIVEN** a direct WebSocket connection whose `session_id` (or thread) header selects a `CODEX_SESSION` affinity, so selection consults the raw legacy compatibility row for that key
+- **AND** that raw row names one account as the hard owner while the request state carries no owner pin (unanchored, account-neutral turn)
+- **AND** upstream accepted the turn on that owner (`response.created` and `response.in_progress` forwarded) and then emitted an output-free capacity `error` or closed the transport abruptly
+- **WHEN** the proxy replays the turn
+- **THEN** the proxy MUST NOT exclude the owner or request a sticky reallocation, and MUST reconnect through selection so the hard row resolves to the owner again
+- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id, never a connect failure after `hard_affinity_saturated`
+- **AND** the owner still receives the capacity health penalty (deferred behind API-key settlement when the request is keyed)
+- **AND** a request whose affinity cannot resolve to a hard owner (no `CODEX_SESSION` kind, no raw legacy lookup) is still excluded and moved
+
+#### Scenario: A transport close of a client-anchored accepted turn reconnects to its owner
+
+- **GIVEN** a direct WebSocket accepted turn (`response.created` and `response.in_progress` forwarded) whose `previous_response_id` the client supplied and whose full resend is retained as a retry-safe fresh body
+- **WHEN** upstream closes the transport abruptly before any output
+- **THEN** the proxy re-sends the fresh body once to the account that accepted it, keeping the owner pin the client's anchor established and without excluding that account
+- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id
+
+#### Scenario: A turn-state session re-sends an accepted replay to its owner
+
+- **GIVEN** a direct WebSocket connection whose `x-codex-turn-state` resolves to an owner account (the native Codex flow: the handshake token of the previous connection is echoed and the proxy injects the completed id as `previous_response_id`, retaining the full resend as a retry-safe fresh body)
+- **AND** upstream accepted the follow-up on that owner and then emitted an output-free capacity `error` or closed the transport abruptly
+- **WHEN** the proxy replays the turn with the fresh body
+- **THEN** the turn-state owner pin survives the fresh-body install (it is a session pin, not a body pin) and the proxy MUST NOT exclude the owner
+- **AND** the proxy reconnects to the owner on a fresh socket and re-sends the fresh body once
+- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id, never `previous_response_owner_unavailable`
+- **AND** a pre-created owner replay in the same session (capacity code before `response.created`) is likewise re-sent to the owner instead of excluding it
+
+#### Scenario: A capacity terminal of an anchored accepted turn that cannot leave its owner is re-sent to that owner
+
+- **GIVEN** a direct WebSocket accepted turn (`response.created` and `response.in_progress` forwarded) that carries `previous_response_id` and retains a retry-safe fresh body
+- **AND** the fresh body cannot release the anchor owner's pin: the client supplied the anchor, or the fresh body names an account-scoped uploaded file
+- **WHEN** upstream emits an output-free capacity `error`
+- **THEN** the proxy re-sends the anchored body once to the account that accepted it, without excluding it
+- **AND** the client observes exactly one `response.created` and a `response.completed` carrying that id
+- **AND** the proxy MUST NOT rewrite the terminal into `previous_response_owner_unavailable`
+- **AND** for an API-key-backed request the owner's health write waits for the reservation settlement
+
+#### Scenario: Accepted replay health writes wait for API-key settlement
+
+- **GIVEN** an API-key-backed accepted request that fails output-free and is replayed
+- **WHEN** the replay reaches its terminal
+- **THEN** the failing account's health write is applied only after the request's reservation settlement commits
+
+#### Scenario: Another pending request or a busy create gate forwards the original error
+
+- **WHEN** another request is pending on the same upstream socket, or another `response.create` holds the bridge session response-create gate
+- **THEN** the proxy MUST forward the upstream terminal unchanged and MUST NOT modify the accepted request's identity
+
+#### Scenario: A younger turn admitted while the accepted terminal is handled forwards the original error
+
+- **GIVEN** a direct WebSocket accepted request (`response.created` and `response.in_progress` forwarded) that released the session response-create gate at `response.created`
+- **AND** the sender admits and sends a younger `response.create` on the same upstream socket while the reader awaits the accepted request's thread-affinity refresh for its output-free capacity terminal
+- **WHEN** the reader decides whether to replay the accepted request
+- **THEN** the other-pending guard MUST observe the younger request
+- **AND** the proxy MUST forward the upstream terminal unchanged, MUST NOT modify the accepted request's identity, and MUST NOT retire the shared socket under the younger request
+
+#### Scenario: A transport close while another response shares the bridge socket replays nothing
+
+- **GIVEN** an HTTP bridge upstream socket carrying an accepted, output-free request and a sibling: either a response the client is already reading, or a pre-created `response.create` that has not seen its `response.created` yet and still holds the session response-create gate
+- **WHEN** the upstream socket closes abruptly
+- **THEN** the proxy MUST NOT reconnect the accepted request alone, and MUST NOT reconnect the pre-created sibling alone either
+- **AND** both pending requests fail closed with `stream_incomplete` promptly
+- **AND** for the visible-sibling shape this is exactly what happened before accepted replays existed; for the pre-created-sibling shape it replaces the earlier behaviour of retrying the pre-created sibling alone while the accepted request stayed bound to the dead upstream until the stale pending sweep -- the pre-created sibling gives up its lone retry so no request is stranded
+
+#### Scenario: A binary frame does not replay an accepted turn
+
+- **WHEN** the bridge upstream socket yields a protocol-invalid binary frame while an accepted request is pending
+- **THEN** the proxy MUST NOT replay the accepted request
 

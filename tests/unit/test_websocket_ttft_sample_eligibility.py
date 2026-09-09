@@ -1,11 +1,14 @@
-"""WebSocket-path regressions for the TTFT cohort sample eligibility.
+"""WebSocket-path regressions for the latency cohort sample eligibility.
 
-The sampler unit tests (``test_ttft_cohort_weighting.py``) cover the filter
-itself; these tests pin the two WebSocket seams that feed it: the finalizer's
+The sampler unit tests (``test_ttft_cohort_weighting.py``,
+``test_throughput_cohort_weighting.py``) cover the filters themselves; these
+tests pin the WebSocket seams that feed them: the finalizer's
 ``upstream_retried`` flag (transparent direct-WebSocket replays bump
-``replay_count``, not the bridge's attempt count) and the global
-response-create admission wait, which a direct WebSocket turn spends with no
-bridge-queue measurement and which must therefore land in the gate wait.
+``replay_count``, not the bridge's attempt count), the global response-create
+admission wait, which a direct WebSocket turn spends with no bridge-queue
+measurement and which must therefore land in the gate wait, and the throughput
+clock, which must stop at the upstream terminal event rather than after the
+API-key settlement the finalizer awaits.
 """
 
 from __future__ import annotations
@@ -90,11 +93,16 @@ def _direct_turn(request_id: str, **overrides: Any) -> _WebSocketRequestState:
     return _WebSocketRequestState(**kwargs)
 
 
-async def _finalize(service: _FunnelWebSocketService, request_state: _WebSocketRequestState) -> None:
+async def _finalize(
+    service: _FunnelWebSocketService, request_state: _WebSocketRequestState, *, output_tokens: int = 40
+) -> None:
     event = OpenAIEvent.model_validate(
         {
             "type": "response.completed",
-            "response": {"id": request_state.response_id, "usage": {"input_tokens": 3_000, "output_tokens": 40}},
+            "response": {
+                "id": request_state.response_id,
+                "usage": {"input_tokens": 3_000, "output_tokens": output_tokens},
+            },
         }
     )
     await service._finalize_websocket_request_state(
@@ -176,3 +184,40 @@ async def test_direct_websocket_global_admission_wait_is_recorded_into_the_gate_
     assert request_state.latency_response_create_gate_wait_ms == 2_500
     request_state.response_create_admission.release()
     response_create_gate.release()
+
+
+class _DelayedSettlementService(_FunnelWebSocketService):
+    """Finalizer double whose keyed API-key settlement takes ``settlement_seconds`` of virtual time."""
+
+    settlement_seconds = 10.0
+
+    async def _settle_stream_api_key_usage(self, *_args: object, **_kwargs: object) -> bool:
+        self._clock.advance(self.settlement_seconds)
+        return True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stamped_at_parse", [True, False], ids=["terminal_stamped_by_reader", "finalizer_entry"])
+async def test_websocket_throughput_sample_stops_at_the_upstream_terminal_not_settlement(
+    stamped_at_parse: bool,
+) -> None:
+    clock = VirtualClock(epoch_value=_NOW)
+    service = _DelayedSettlementService(clock)
+    # 2 s to the first token, 400 tokens streamed by t=12 s: 40 tok/s of generation.
+    request_state = _direct_turn("slow_settlement", model="gpt-5.6-sol", latency_first_token_ms=2_000)
+    clock.advance(12.0)
+    if stamped_at_parse:
+        # What the upstream reader records when it parses ``response.completed``.
+        request_state.upstream_terminal_at = clock.monotonic()
+
+    await _finalize(service, request_state, output_tokens=400)
+    await service.drain_persistence_tasks(1.0)
+
+    # The 10 s settlement wait is local DB contention: the persisted row keeps
+    # it (wall latency), the throughput sample does not (20 tok/s would be the
+    # diluted figure).
+    (row,) = service.request_logs.rows
+    assert row["latency_ms"] == 22_000
+    ((recorded_at, tokens_per_second),) = service.runtime["acc-ws"].tps_samples["gpt-5.6-sol"]
+    assert tokens_per_second == pytest.approx(40.0)
+    assert recorded_at == _NOW + 22.0

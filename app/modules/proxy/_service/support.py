@@ -986,6 +986,12 @@ class _WebSocketRequestState:
     latency_first_upstream_event_ms: int | None = None
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
+    # Monotonic instant the upstream terminal event (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed for
+    # this turn, before terminal bookkeeping, API-key settlement and cleanup.
+    # The throughput cohort sample ends its generation span here; the row's
+    # ``latency_ms`` keeps measuring to the end of the finalizer.
+    upstream_terminal_at: float | None = None
     response_create_gate_wait_started_at: float | None = None
     # Monotonic time immediately before the current upstream response.create
     # send. Retries replace this value so admission wait and prior attempts do

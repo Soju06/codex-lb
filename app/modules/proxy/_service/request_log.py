@@ -203,6 +203,12 @@ class _RequestLogMixin:
         # (bridge retry or direct WebSocket replay) or an account-capacity
         # wait. Not persisted; it only keeps the row out of the latency cohort samples.
         upstream_retried: bool = False,
+        # Start-to-upstream-terminal latency for transports whose ``latency_ms``
+        # keeps running through settlement and cleanup (WebSocket / bridge
+        # finalizer). Not persisted; it is the end of the throughput sample's
+        # span. ``None`` means ``latency_ms`` already stops at the terminal
+        # (the HTTP stream writes its row before settling).
+        latency_upstream_terminal_ms: int | None = None,
     ) -> None:
         task = scheduler_for(self).create_task(
             self._persist_request_log(
@@ -327,7 +333,7 @@ class _RequestLogMixin:
             status=status,
             request_kind=request_kind,
             model=model,
-            latency_ms=latency_ms,
+            latency_ms=latency_ms if latency_upstream_terminal_ms is None else latency_upstream_terminal_ms,
             latency_first_token_ms=latency_first_token_ms,
             output_tokens=output_tokens,
             queued_wait_ms=queued_wait_ms,

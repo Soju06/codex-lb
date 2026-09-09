@@ -1178,6 +1178,11 @@ async def test_permanent_refresh_failure_preserves_proven_access_rejection():
         auth_manager_module._refresh_token_material_fingerprint(encryptor, account.refresh_token_encrypted),
     )
     assert repo.status_payload is not None
+    assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED
+    assert (
+        repo.status_payload["deactivation_reason"]
+        == auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+    )
     assert account.deactivation_reason == auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
 
 

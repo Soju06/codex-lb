@@ -12683,6 +12683,7 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
     selection_requirements: list[bool] = []
     opened_account_ids: list[str] = []
     opened_headers: list[dict[str, str]] = []
+    capped_account_ids: set[str] = set()
 
     class _FakeSettingsCache:
         async def get(self):
@@ -12741,6 +12742,11 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(
+        websocket_mixin_module,
+        "is_account_usage_capped",
+        lambda account_id: account_id in capped_account_ids,
+    )
+    monkeypatch.setattr(
         proxy_module.ProxyService,
         "_refresh_websocket_api_key_policy",
         keep_authenticated_api_key_policy,
@@ -12777,6 +12783,7 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
             ordinary_websocket.send_text(json.dumps(_websocket_response_create("ordinary first frame")))
             ordinary_created = json.loads(ordinary_websocket.receive_text())
             ordinary_completed = json.loads(ordinary_websocket.receive_text())
+            capped_account_ids.add("acct_ws_capability_ordinary_1")
 
             marker_request = _websocket_response_create("establish requirement")
             marker_request["client_metadata"] = {

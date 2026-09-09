@@ -127,6 +127,19 @@ def test_weekly_pace_rebases_runway_onto_capped_capacity() -> None:
     assert pace.reset_events[0].credits_returned == 60_000
 
 
+def test_weekly_pace_ignores_weekly_cap_for_non_weekly_secondary_window() -> None:
+    summary = _summary("acc-daily", used_percent=60.0, reset_in_hours=5.0, capacity=100_000).model_copy(
+        update={"usage_cap_weekly_percent": 80, "window_minutes_secondary": 1_440}
+    )
+    pace = _build(
+        [summary],
+        {"acc-daily": _three_hour_history("acc-daily", final_used_percent=60.0, hourly_delta=5.0)},
+    )
+
+    assert pace.total_full_credits == 100_000
+    assert pace.total_actual_remaining_credits == 40_000
+
+
 def test_weekly_pace_relief_clusters_resets_within_one_hour() -> None:
     summaries = [
         _summary("acc-first", used_percent=96.0, reset_in_hours=2.0),

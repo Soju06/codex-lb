@@ -401,6 +401,15 @@ describe("buildWeeklyCreditPace", () => {
     expect(pace?.totalActualRemainingCredits).toBe(20_000);
   });
 
+  it("keeps full capacity for a capped non-weekly secondary window", () => {
+    const pace = buildWeeklyCreditPace([weeklyAccount({
+      accountId: "capped-daily", fullCredits: 100_000, remainingCredits: 40_000,
+      usageCapWeeklyPercent: 80, windowMinutesSecondary: 1_440, timeLeftPercent: 50,
+    })], now);
+    expect(pace?.totalFullCredits).toBe(100_000);
+    expect(pace?.totalActualRemainingCredits).toBe(40_000);
+  });
+
   it("marks over-schedule weekly usage as ahead before hard shortfall states", () => {
     expect(weeklyCreditPaceStatus(6, 0)).toBe("ahead");
     expect(weeklyCreditPaceStatus(6, 1)).toBe("danger");

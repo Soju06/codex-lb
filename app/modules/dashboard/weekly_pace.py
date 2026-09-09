@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from math import ceil, isfinite
 from typing import Literal
 
+from app.core import usage as usage_core
 from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
 from app.core.usage.depletion import EWMAState, ewma_update
 from app.core.utils.time import naive_utc_to_epoch
@@ -124,7 +125,11 @@ def build_weekly_credit_pace(
             continue
 
         provider_full_credits, provider_remaining_credits, effective_reset_at_ms, window_ms = timing
-        cap_percent = account.usage_cap_weekly_percent
+        cap_percent = (
+            account.usage_cap_weekly_percent
+            if usage_core.is_weekly_window_minutes(summary.window_minutes_secondary)
+            else None
+        )
         full_credits = provider_full_credits if cap_percent is None else provider_full_credits * cap_percent / 100.0
         reserved_credits = provider_full_credits - full_credits
         actual_remaining_credits = max(0.0, provider_remaining_credits - reserved_credits)

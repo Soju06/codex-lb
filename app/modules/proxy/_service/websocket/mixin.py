@@ -2197,22 +2197,6 @@ class _WebSocketMixin:
                     payload = None
                     continue
 
-                if request_state is not None and account is not None and is_account_usage_capped(account.id):
-                    await proxy._release_websocket_request_state_reservation(request_state)
-                    await proxy._emit_websocket_terminal_error(
-                        websocket,
-                        client_send_lock=client_send_lock,
-                        request_state=request_state,
-                        error_code="account_usage_cap_reached",
-                        error_message="Account usage cap reached",
-                        error_type="rate_limit_error",
-                        downstream_activity=downstream_activity,
-                    )
-                    request_state = None
-                    text_data = None
-                    payload = None
-                    continue
-
                 if (
                     request_state is not None
                     and upstream is not None
@@ -2371,6 +2355,26 @@ class _WebSocketMixin:
                                 if key.lower() != "x-codex-turn-state"
                             }
 
+                if (
+                    request_state is not None
+                    and upstream is not None
+                    and account is not None
+                    and is_account_usage_capped(account.id)
+                ):
+                    await proxy._release_websocket_request_state_reservation(request_state)
+                    await proxy._emit_websocket_terminal_error(
+                        websocket,
+                        client_send_lock=client_send_lock,
+                        request_state=request_state,
+                        error_code="account_usage_cap_reached",
+                        error_message="Account usage cap reached",
+                        error_type="rate_limit_error",
+                        downstream_activity=downstream_activity,
+                    )
+                    request_state = None
+                    text_data = None
+                    payload = None
+                    continue
                 if (
                     request_state is not None
                     and upstream is not None

@@ -9,6 +9,7 @@ from app.core.usage.types import UsageWindowRow
 from app.db.models import Account, UsageHistory
 from app.db.session import detach_session_objects
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
+from app.modules.proxy.account_cache import refresh_usage_cap_caches_after_write
 from app.modules.proxy.helpers import (
     _credits_headers,
     _credits_snapshot,
@@ -197,12 +198,14 @@ class _RateLimitMixin:
             BackgroundAccountsRepository(),
             BackgroundAdditionalUsageRepository(),
         )
-        await updater.refresh_accounts(
+        usage_written = await updater.refresh_accounts(
             accounts,
             latest_usage,
             own_singleflight_sessions=True,
             join_existing=True,
         )
+        if usage_written:
+            await refresh_usage_cap_caches_after_write()
 
     async def _latest_usage_rows(
         self,

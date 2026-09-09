@@ -86,6 +86,10 @@ describe("Usage caps", () => {
     if (surface === "dashboard-list") render(<AccountList accounts={[account]} />);
     expect(screen.getByRole("img", { name: "Cap: 80% used (20% remaining)" })).toHaveStyle({ width: "20%" });
     expect(screen.getByRole("img", { name: "Cap: 50% used (50% remaining)" })).toHaveStyle({ width: "50%" });
+    for (const marker of screen.getAllByRole("img")) {
+      expect(marker).toHaveClass("bg-zinc-500");
+      expect(marker.style.backgroundImage).toContain("rgba(255, 255, 255, 0.3)");
+    }
     const accountPageValues = surface === "detail" || surface === "dashboard-card";
     expect(screen.getByText(accountPageValues ? "46% (26% usable)" : "46% (26%)")).toBeInTheDocument();
     expect(screen.getByText(accountPageValues ? "70% (20% usable)" : "70% (20%)")).toBeInTheDocument();

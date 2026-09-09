@@ -699,7 +699,10 @@ export function buildWeeklyCreditPace(
       continue;
     }
     const adjusted = cappedCredits(
-      rawRemainingCredits, rawFullCredits, account.usageCapWeeklyPercent ?? null, null,
+      rawRemainingCredits,
+      rawFullCredits,
+      windowMinutes === 10_080 ? account.usageCapWeeklyPercent ?? null : null,
+      null,
     );
     const fullCredits = rawFullCredits - adjusted.reserved;
     const remainingCredits = adjusted.remaining;

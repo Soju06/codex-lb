@@ -14,7 +14,10 @@ export function UsageCapMarker({ cap }: { cap?: number | null }) {
       aria-label={label}
       title={label}
       className="absolute inset-y-0 left-0 z-10 border-r-2 border-background bg-zinc-500"
-      style={{ width: `${remaining}%` }}
+      style={{
+        width: `${remaining}%`,
+        backgroundImage: "repeating-linear-gradient(135deg, transparent 0 4px, rgb(255 255 255 / 0.3) 4px 6px)",
+      }}
     />
   );
 }

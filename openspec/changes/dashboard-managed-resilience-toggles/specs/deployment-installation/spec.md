@@ -1,16 +1,21 @@
 ## MODIFIED Requirements
 
-### Requirement: Removed tunables are fixed constants or derived values
+### Requirement: Removed tunables are fixed constants, derived values, or dashboard settings
 
 Values that are protocol constants or internal tuning details SHALL NOT be
-operator-configurable. When a previously supported `CODEX_LB_*` setting is
-removed from the configuration surface, its environment variable MUST be
-ignored without failing startup, and for at least one release after removal,
-startup MUST emit a single warning log listing every removed setting name
-found in the process environment (never the values), referencing the
-simplicity principle that motivated the removal. Each subsystem affected by
-a removal MUST retain at most one enable/disable setting, and the Helm chart
-MUST NOT render environment variables for removed settings.
+operator-configurable, and values the dashboard runtime settings own SHALL NOT
+also be operator-configurable through the environment. When a previously
+supported `CODEX_LB_*` setting is removed from the configuration surface, its
+environment variable MUST be ignored without failing startup, and for at
+least one release after removal, startup MUST emit a single warning log
+listing every removed setting name found in the process environment or the
+loaded env files (never the values), referencing the simplicity principle
+that motivated the removal. Once a removed name has had its warning release,
+it MUST be pruned from the warning list while staying inert (`extra="ignore"`);
+the warning list therefore covers only the most recent removal batch. Each
+subsystem affected by a removal MUST retain at most one enable/disable
+setting, and the Helm chart MUST NOT render environment variables for removed
+settings.
 
 The following values MUST be fixed at their previously documented defaults:
 
@@ -40,29 +45,37 @@ The following values MUST be derived rather than configured:
 - The background-task database engine's pool size and max overflow: always
   taken from `database_pool_size` and `database_max_overflow`.
 
+The following values MUST be owned by the dashboard runtime settings alone,
+with the first-created settings row taking the column defaults (`smart`,
+`1800`, `gpt-5.4-mini`, `false`) instead of an environment seed:
+`http_downstream_transport_policy`, `openai_cache_affinity_max_age_seconds`,
+`warmup_model`, and `http_responses_session_bridge_gateway_safe_mode`. The
+retention windows (`request_log_retention_days`,
+`usage_history_retention_days`) MUST be dashboard runtime settings with no
+environment alias (see `data-retention`).
+
 Incident-debugging trace logging SHALL be controlled by the single
 `CODEX_LB_TRACE` comma-separated channel list, whose empty default disables
 all trace channels. The Codex HTTP-bridge prewarm rollout scoping SHALL NOT
 be operator-configurable: prewarm eligibility MUST be the
 `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` flag alone,
-with no canary sampling percent and no API-key allow/deny cohort lists (the
-removed `..._PREWARM_CANARY_PERCENT`, `..._PREWARM_ALLOW_API_KEY_IDS`, and
-`..._PREWARM_DENY_API_KEY_IDS` variables are covered by the
-removed-settings warning). `database_pool_size` and `database_max_overflow`
-MUST remain operator-configurable settings, and `soft_drain_enabled` and
+with no canary sampling percent and no API-key allow/deny cohort lists.
+`database_pool_size` and `database_max_overflow` MUST remain
+operator-configurable settings, and `soft_drain_enabled` and
 `deterministic_failover_enabled` MUST remain the failover subsystem's only
-enable switches. Those two switches and `circuit_breaker_enabled` are
-managed from the dashboard (`dashboard_settings` columns of the same name,
-`account-routing` / `outbound-http-clients`); their `CODEX_LB_*` variables
-are deprecated aliases that apply only while the dashboard value is unset
-and are removed in the next minor release via the removed-settings warning.
+enable switches. Those two switches and `circuit_breaker_enabled` MUST be
+dashboard runtime settings (`dashboard_settings` columns of the same name,
+NULL on the first-created row; see `account-routing` and
+`outbound-http-clients`) whose `CODEX_LB_*` variables are deprecated aliases
+that apply only while the column is NULL and that join the removed-settings
+warning list in the next minor release.
 
 #### Scenario: Removed env vars are ignored with one startup warning
 
 - **GIVEN** a deployment whose environment still sets removed settings such
-  as `CODEX_LB_AUTH_BASE_URL` and `CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS`
+  as `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and `CODEX_LB_WARMUP_MODEL`
 - **WHEN** the application starts
-- **THEN** startup succeeds and the fixed built-in values are used
+- **THEN** startup succeeds and the dashboard runtime values are used
 - **AND** exactly one warning log lists both removed names without their
   values
 
@@ -71,6 +84,16 @@ and are removed in the next minor release via the removed-settings warning.
 - **GIVEN** a deployment that sets no removed setting names
 - **WHEN** the application starts
 - **THEN** no removed-settings warning is logged
+
+#### Scenario: Names past their warning release are silently inert
+
+- **GIVEN** a deployment whose environment still sets names removed in an
+  earlier batch, such as `CODEX_LB_AUTH_BASE_URL`,
+  `CODEX_LB_QUOTA_PLANNER_TICK_SECONDS`, or
+  `CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS`
+- **WHEN** the application starts
+- **THEN** startup succeeds, the fixed built-in values are used
+- **AND** no removed-settings warning is logged for those names
 
 #### Scenario: Trace channels default to off
 
@@ -85,15 +108,6 @@ and are removed in the next minor release via the removed-settings warning.
 - **WHEN** the proxy serves requests
 - **THEN** request-shape and upstream-payload trace logs are emitted while
   all other trace channels stay off
-
-#### Scenario: Removed scheduler and images env vars are ignored with one startup warning
-
-- **GIVEN** a deployment whose environment still sets removed settings such
-  as `CODEX_LB_QUOTA_PLANNER_TICK_SECONDS` and `CODEX_LB_IMAGES_HOST_MODEL`
-- **WHEN** the application starts
-- **THEN** startup succeeds and the fixed built-in values are used
-- **AND** exactly one warning log lists both removed names without their
-  values
 
 #### Scenario: Memory warning threshold derives from the reject threshold
 
@@ -114,20 +128,36 @@ and are removed in the next minor release via the removed-settings warning.
 
 - **GIVEN** a Helm install using the chart's default values
 - **WHEN** the config map is rendered
-- **THEN** it contains no `CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD`,
-  `CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS`, or
+- **THEN** it contains no `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS`,
+  `CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD`, or
   `CODEX_LB_STICKY_SESSION_CLEANUP_INTERVAL_SECONDS` entries
 - **AND** startup emits no removed-settings warning
 
-#### Scenario: Removed pool and drain env vars are ignored with one startup warning
+#### Scenario: Dashboard-owned columns seed from their defaults
 
-- **GIVEN** a deployment whose environment still sets removed settings such
-  as `CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS` and
-  `CODEX_LB_DRAIN_PRIMARY_THRESHOLD_PCT`
+- **GIVEN** a fresh database and `CODEX_LB_WARMUP_MODEL=gpt-5.4-nano` still
+  set in the environment
+- **WHEN** the dashboard settings row is created for the first time
+- **THEN** `warmup_model` is `gpt-5.4-mini`, `http_downstream_transport_policy`
+  is `smart`, and `openai_cache_affinity_max_age_seconds` is `1800`
+- **AND** the startup warning names `CODEX_LB_WARMUP_MODEL`
+
+#### Scenario: Fresh database bootstrap ignores a removed variable
+
+- **GIVEN** an empty database and
+  `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS=64` still set in the
+  environment
+- **WHEN** the Alembic chain is upgraded to head
+- **THEN** the seeded `dashboard_settings` row has
+  `openai_cache_affinity_max_age_seconds` `1800`
+- **AND** no migration reads the removed variable
+
+#### Scenario: Removed names are matched case-insensitively
+
+- **GIVEN** a deployment whose environment sets `codex_lb_warmup_model`
+  in lowercase (which the former field honoured)
 - **WHEN** the application starts
-- **THEN** startup succeeds and the fixed built-in values are used
-- **AND** exactly one warning log lists both removed names without their
-  values
+- **THEN** the startup warning lists `CODEX_LB_WARMUP_MODEL`
 
 #### Scenario: Background pool sizing derives from the main pool settings
 
@@ -146,15 +176,12 @@ and are removed in the next minor release via the removed-settings warning.
   60-second quiet window, regardless of any `CODEX_LB_PROBE_QUIET_SECONDS`
   value still present in the environment
 
-#### Scenario: Removed prewarm canary env vars are ignored with one startup warning
+#### Scenario: Prewarm stays off by default
 
-- **GIVEN** a deployment whose environment still sets
-  `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT` or
-  the allow/deny list variables
-- **WHEN** the application starts
-- **THEN** startup succeeds and the values are ignored
-- **AND** exactly one warning log lists the removed names without their
-  values
+- **GIVEN** a default install with no prewarm variables set
+- **WHEN** Codex bridge requests are served
+- **THEN** no session prewarm is attempted and visible requests record
+  `prewarm_status=not_applicable`
 
 #### Scenario: Prewarm eligibility is the enabled flag alone
 
@@ -164,9 +191,12 @@ and are removed in the next minor release via the removed-settings warning.
 - **THEN** the session prewarm is attempted for that request
 - **AND** no request is excluded by canary sampling or an allow/deny cohort
 
-#### Scenario: Prewarm stays off by default
+#### Scenario: Resilience toggle env aliases apply only until the dashboard sets a value
 
-- **GIVEN** a default install with no prewarm variables set
-- **WHEN** Codex bridge requests are served
-- **THEN** no session prewarm is attempted and visible requests record
-  `prewarm_status=not_applicable`
+- **GIVEN** `CODEX_LB_CIRCUIT_BREAKER_ENABLED=true` and a `dashboard_settings`
+  row whose `circuit_breaker_enabled` column is NULL
+- **WHEN** an operator sets the circuit breaker off in the dashboard
+- **THEN** the next request runs with the breaker off on every replica without
+  a restart, and the settings API reports `source: "dashboard"`
+- **AND** clearing the dashboard value returns to the environment alias
+  (`source: "env"`) until that alias is removed in the next minor release

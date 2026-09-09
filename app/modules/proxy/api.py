@@ -266,6 +266,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
+from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingResponse
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
@@ -6739,8 +6740,9 @@ async def _stream_responses(
         responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
         responses_owner_forward_rejected_event=responses_owner_forward_rejected_event,
     )
-    return StreamingResponse(
+    return DeliveryTracedStreamingResponse(
         stream,
+        surface="responses",
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

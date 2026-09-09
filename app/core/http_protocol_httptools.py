@@ -33,6 +33,11 @@ seconds. Reverse proxies purge idle server-side connections with RST, so
 behind one every request leaked its protocol for the whole window. Fixing the
 upgrade handling upstream therefore does not by itself make this module
 retirable; see ``tests/integration/test_http_keepalive_timer.py``.
+
+Third job: stamping a mid-response connection loss into the in-flight
+request's ``scope["state"]`` (``app.core.http_protocol.stamp_disconnect_into_scope``)
+so a streaming response can tell whether a late write was dropped by uvicorn's
+``send`` after the peer went away.
 """
 
 from __future__ import annotations
@@ -40,7 +45,12 @@ from __future__ import annotations
 import httptools
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
-from app.core.http_protocol import combined_upgrade_offer, offers_ignorable_upgrade, without_upgrade_headers
+from app.core.http_protocol import (
+    combined_upgrade_offer,
+    offers_ignorable_upgrade,
+    stamp_disconnect_into_scope,
+    without_upgrade_headers,
+)
 
 
 class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
@@ -57,6 +67,9 @@ class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
         # force-closed it).
         super().connection_lost(exc)
         self._unset_keepalive_if_required()
+        # super() marked the in-flight cycle disconnected and keeps self.cycle
+        # referenced, so the stamp lands on the request that lost its peer.
+        stamp_disconnect_into_scope(self.cycle, exc)
 
     def _active_parser(self) -> httptools.HttpRequestParser:
         # The base class only clears ``self.parser`` in connection_lost, after

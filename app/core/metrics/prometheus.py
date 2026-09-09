@@ -370,6 +370,12 @@ if PROMETHEUS_AVAILABLE:
         ["surface"],
         registry=REGISTRY,
     )
+    stream_terminal_delivery_total = Counter(
+        "codex_lb_stream_terminal_delivery_total",
+        "Downstream SSE terminal-frame delivery outcomes by surface",
+        ["surface", "outcome"],
+        registry=REGISTRY,
+    )
     cache_invalidation_bump_failures_total = Counter(
         "codex_lb_cache_invalidation_bump_failures_total",
         "Total cache invalidation version bumps that failed after retries",
@@ -508,6 +514,7 @@ else:
     event_loop_lag_warnings_total: CounterLike | None = None
     stream_keepalive_sent_total: CounterLike | None = None
     stream_idle_timeout_total: CounterLike | None = None
+    stream_terminal_delivery_total: CounterLike | None = None
     cache_invalidation_bump_failures_total: CounterLike | None = None
     cache_invalidation_poll_failures_total: CounterLike | None = None
     model_source_dispatch_total: CounterLike | None = None
@@ -571,6 +578,7 @@ __all__ = [
     "http_bridge_stuck_retire_total",
     "stream_keepalive_sent_total",
     "stream_idle_timeout_total",
+    "stream_terminal_delivery_total",
     "image_request_duration_seconds",
     "image_requests_total",
     "make_scrape_registry",

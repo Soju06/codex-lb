@@ -5,7 +5,6 @@ import logging
 import time
 from datetime import datetime, timedelta
 from typing import cast
-from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -37,6 +36,8 @@ from app.modules.accounts import probes, reset_credit_cache
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.reset_credit_attempts import ResetCreditAttemptsRepository
+from app.modules.accounts.reset_credit_recovery import refresh_standard_capacity
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
@@ -61,7 +62,11 @@ from app.modules.accounts.schemas import (
     OpenCodeAuthJson,
     OpenCodeOAuthAuth,
 )
-from app.modules.accounts.subscription_status import CANCELED_SUBSCRIPTION_STATUS, normalize_subscription_status
+from app.modules.accounts.subscription_status import (
+    CANCELED_SUBSCRIPTION_STATUS,
+    is_subscription_usable,
+    normalize_subscription_status,
+)
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage.additional_quota_keys import (
@@ -169,6 +174,7 @@ class AccountsService:
         self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
         self._encryptor = TokenEncryptor()
         self._auth_manager = auth_manager
+        self._reset_attempts: ResetCreditAttemptsRepository | None = None
 
     async def list_accounts(self, *, include_request_usage: bool = False) -> list[AccountSummary]:
         accounts = await self._repo.list_accounts()
@@ -778,6 +784,8 @@ class AccountsService:
         self,
         account_id: str,
         credit_id: str | None = None,
+        *,
+        trigger: str = "manual",
     ) -> AccountResetCreditConsumeResponse | None:
         """Consume one banked upstream reset credit and refresh usage state.
 
@@ -791,12 +799,74 @@ class AccountsService:
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         access_token = self._encryptor.decrypt(credit_account.access_token_encrypted)
-        payload = await rate_limit_resets.consume_reset_credit(
-            access_token=access_token,
-            chatgpt_account_id=credit_account.chatgpt_account_id,
-            redeem_request_id=str(uuid4()),
-            credit_id=credit_id,
-        )
+        attempts = self._reset_attempts or ResetCreditAttemptsRepository(self._repo.session)
+        attempt = await attempts.active()
+        retrying = attempt is not None
+        if attempt is not None:
+            if attempt.account_id != account_id or (credit_id is not None and attempt.credit_id != credit_id):
+                raise AccountResetCreditsUnavailableError("Another reset attempt requires reconciliation")
+            if not await attempts.acquire(attempt):
+                raise AccountResetCreditsUnavailableError("Reset recovery is already running or cooling down")
+        else:
+            inventory = await rate_limit_resets.fetch_reset_credits(
+                access_token=access_token, chatgpt_account_id=credit_account.chatgpt_account_id,
+            )
+            available = [item for item in inventory.credits if item.status == "available"]
+            reset_credit_cache.record_count(account_id, len(available))
+            if inventory.available_count <= 0 or not available or (
+                credit_id is not None and not any(item.id == credit_id for item in available)
+            ):
+                return AccountResetCreditConsumeResponse(
+                    status="not_redeemed", account_id=account_id, code="no_credit", windows_reset=0,
+                    primary_used_percent_before=primary_before, secondary_used_percent_before=secondary_before,
+                    primary_used_percent_after=primary_before, secondary_used_percent_after=secondary_before,
+                )
+            if credit_id is None:
+                credit_id = min(available, key=lambda item: item.expires_at or "9999").id
+            attempt = await attempts.create(account_id, credit_id, trigger)
+            if attempt is None:
+                raise AccountResetCreditsUnavailableError("Another reset attempt is already running")
+
+        if attempt.state == "applied":
+            payload = rate_limit_resets.ConsumeResetCreditPayload(
+                code="already_redeemed", windows_reset=attempt.windows_reset,
+            )
+        else:
+            # Inventory and usage must be reconciled before re-sending a
+            # pending attempt. The same committed ID protects uncertain calls.
+            inventory = await rate_limit_resets.fetch_reset_credits(
+                access_token=access_token, chatgpt_account_id=credit_account.chatgpt_account_id,
+            )
+            available = [item for item in inventory.credits if item.status == "available"]
+            reset_credit_cache.record_count(account_id, len(available))
+            credit = next((item for item in inventory.credits if item.id == attempt.credit_id), None)
+            if credit is not None and credit.status == "redeemed":
+                payload = rate_limit_resets.ConsumeResetCreditPayload(code="already_redeemed")
+            elif inventory.available_count <= 0 and attempt.credit_id is None:
+                payload = rate_limit_resets.ConsumeResetCreditPayload(code="no_credit")
+            elif credit is not None and credit.status not in {"available", "redeemed"}:
+                raise AccountResetCreditsUnavailableError("Reset credit status is unresolved; outcome is unknown")
+            elif attempt.credit_id is not None and credit is None:
+                raise AccountResetCreditsUnavailableError("Reset credit is absent from inventory; outcome is unknown")
+            else:
+                if self._usage_updater and self._usage_repo:
+                    refreshed = await self._usage_updater.force_refresh(credit_account)
+                    if retrying and not refreshed:
+                        raise AccountResetCreditsUnavailableError("Pending reset requires fresh usage reconciliation")
+                if inventory.available_count <= 0:
+                    raise AccountResetCreditsUnavailableError("Reset inventory has no available credits")
+                payload = await rate_limit_resets.consume_reset_credit(
+                    access_token=access_token,
+                    chatgpt_account_id=credit_account.chatgpt_account_id,
+                    redeem_request_id=attempt.id,
+                    credit_id=attempt.credit_id,
+                )
+
+            if payload.code in ("reset", "already_redeemed"):
+                # Never allow a later refresh failure to hide consumed credit.
+                await attempts.applied(attempt, payload.code, payload.windows_reset)
+            else:
+                await attempts.settle(attempt, payload.code)
 
         if payload.code in ("reset", "already_redeemed"):
             try:
@@ -817,8 +887,15 @@ class AccountsService:
                 )
 
             if self._usage_repo and self._usage_updater:
-                await self._usage_updater.force_refresh(credit_account)
+                recovered = await refresh_standard_capacity(credit_account, self._usage_updater, self._usage_repo)
                 get_account_selection_cache().invalidate()
+                if recovered is not True:
+                    # Upstream usage can remain stale until one real request
+                    # wakes its limiter. Applied attempts cannot consume again.
+                    await self.probe_account(account_id)
+                    recovered = await refresh_standard_capacity(credit_account, self._usage_updater, self._usage_repo)
+                if recovered is True:
+                    await attempts.settle(attempt, payload.code)
 
         primary_after, secondary_after = await self._latest_usage_percents(account_id)
         return AccountResetCreditConsumeResponse(
@@ -842,6 +919,8 @@ class AccountsService:
             raise AccountResetCreditsUnavailableError(
                 f"Account is {account.status.value} and cannot use reset credits"
             )
+        if not is_subscription_usable(account):
+            raise AccountResetCreditsUnavailableError("Account subscription cannot use reset credits")
         if self._auth_manager is not None:
             return await self._auth_manager.ensure_fresh(account, force=False)
         return account

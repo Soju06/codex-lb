@@ -463,6 +463,23 @@ class AuditLog(Base):
     request_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
+class ResetCreditAttempt(Base):
+    __tablename__ = "reset_credit_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    active_slot: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True)
+    account_id: Mapped[str] = mapped_column(String, nullable=False)
+    credit_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    trigger: Mapped[str] = mapped_column(String(20), nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    result_code: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    windows_reset: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String(36), nullable=False)
+
+
 class SchedulerLeader(Base):
     __tablename__ = "scheduler_leader"
 

@@ -31,8 +31,11 @@ from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts import reset_credit_cache
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.reset_credit_attempts import ResetCreditAttemptsRepository
+from app.modules.accounts.reset_credit_recovery import refresh_standard_capacity
 from app.modules.accounts.subscription_status import is_subscription_usable
 from app.modules.usage.repository import UsageRepository
+from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
@@ -133,17 +136,44 @@ class ResetCreditAutoRedeemScheduler:
     async def _tick(self) -> None:
         exhaustion_eligible = self.enabled and not self._cooldown_active()
         expiry_due = self._expiry_sweep_due()
-        if not exhaustion_eligible and not expiry_due:
+        if not self.enabled and not expiry_due:
             return
         if not await _get_leader_election().try_acquire():
             return
         async with get_background_session() as session:
             repo = AccountsRepository(session)
+            attempts = ResetCreditAttemptsRepository(session)
+            active = await attempts.active()
+            if active is not None:
+                service = _build_accounts_service(repo, session)
+                try:
+                    await service.redeem_rate_limit_reset_credit(
+                        active.account_id, credit_id=active.credit_id, trigger=active.trigger,
+                    )
+                except Exception:
+                    logger.warning("Reset recovery remains pending attempt=%s", active.id, exc_info=True)
+                return
+            applied_at = await attempts.latest_applied_at()
+            if applied_at is not None:
+                self._last_redeemed_at = to_utc_naive(applied_at)
+                exhaustion_eligible = self.enabled and not self._cooldown_active()
             accounts = list(await repo.list_accounts())
             if exhaustion_eligible:
                 candidates = exhausted_pool_or_none(accounts)
                 if candidates is not None:
-                    await self._redeem_first_available(session, repo, candidates)
+                    usage_repo = UsageRepository(session)
+                    updater = UsageUpdater(usage_repo, repo)
+                    for account in candidates:
+                        available = await refresh_standard_capacity(account, updater, usage_repo)
+                        if available is not False:
+                            # Unknown refresh or any recovered capacity keeps
+                            # credits banked and lets ordinary failover recover.
+                            break
+                    else:
+                        candidates = exhausted_pool_or_none(await repo.list_accounts(refresh_existing=True))
+                        if candidates is not None:
+                            await self._redeem_first_available(session, repo, candidates)
+                            return
             if expiry_due:
                 self._last_expiry_sweep_at = utcnow()
                 await self._expiry_sweep(session, repo, accounts)
@@ -188,10 +218,13 @@ class ResetCreditAutoRedeemScheduler:
             ]
             for credit in expiring:
                 await self._redeem_expiring(service, account, credit.id, credit.expires_at)
+                # A second expiry reset needs a new inventory/usage sweep.
+                # This also prevents unknown results from fanning out.
+                return
 
     async def _redeem_expiring(self, service, account: Account, credit_id: str, expires_at: str | None) -> None:  # noqa: ANN001
         try:
-            result = await service.redeem_rate_limit_reset_credit(account.id, credit_id=credit_id)
+            result = await service.redeem_rate_limit_reset_credit(account.id, credit_id=credit_id, trigger="expiring")
         except Exception:
             logger.exception(
                 "Expiring reset-credit redemption failed account=%s credit=%s",
@@ -256,14 +289,14 @@ class ResetCreditAutoRedeemScheduler:
             return
         for account, credit_id in ranked:
             try:
-                result = await service.redeem_rate_limit_reset_credit(account.id, credit_id=credit_id)
+                result = await service.redeem_rate_limit_reset_credit(account.id, credit_id=credit_id, trigger="auto")
             except Exception:
                 logger.exception(
-                    "Auto reset-credit redemption failed account=%s credit=%s; trying next candidate",
+                    "Auto reset-credit redemption requires reconciliation account=%s credit=%s",
                     account.id,
                     credit_id,
                 )
-                continue
+                return
             if result is None or result.status != "redeemed":
                 logger.warning(
                     "Auto reset-credit redemption not applied account=%s credit=%s code=%s",

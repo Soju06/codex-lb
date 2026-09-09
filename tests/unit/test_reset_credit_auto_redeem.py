@@ -21,6 +21,14 @@ from app.modules.accounts.schemas import AccountResetCreditConsumeResponse
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _reset_journal(monkeypatch):
+    journal = AsyncMock()
+    journal.active.return_value = None
+    journal.latest_applied_at.return_value = None
+    monkeypatch.setattr(scheduler_module, "ResetCreditAttemptsRepository", lambda session: journal)
+
+
 def _account(
     account_id: str,
     status: AccountStatus,
@@ -183,12 +191,12 @@ class TestRedeemSweep:
         monkeypatch.setattr(scheduler_module, "_rank_candidates_by_credit_expiry", _fake_rank)
 
         await scheduler._redeem_first_available(AsyncMock(), AsyncMock(), accounts)
-        service.redeem_rate_limit_reset_credit.assert_awaited_once_with("a1", credit_id="c-1")
+        service.redeem_rate_limit_reset_credit.assert_awaited_once_with("a1", credit_id="c-1", trigger="auto")
         service.probe_account.assert_awaited_once_with("a1")
         assert scheduler._cooldown_active() is True
 
     @pytest.mark.asyncio
-    async def test_failure_falls_through_to_next_candidate(self, monkeypatch):
+    async def test_uncertain_failure_does_not_consume_next_candidate(self, monkeypatch):
         scheduler = _scheduler()
         accounts = [
             _account("a1", AccountStatus.QUOTA_EXCEEDED),
@@ -196,7 +204,7 @@ class TestRedeemSweep:
         ]
         calls: list[Any] = []
 
-        async def _redeem(account_id, credit_id=None):
+        async def _redeem(account_id, credit_id=None, *, trigger="auto"):
             calls.append((account_id, credit_id))
             if account_id == "a1":
                 raise ResetCreditsError(500, "boom")
@@ -212,8 +220,8 @@ class TestRedeemSweep:
         monkeypatch.setattr(scheduler_module, "_rank_candidates_by_credit_expiry", _fake_rank)
 
         await scheduler._redeem_first_available(AsyncMock(), AsyncMock(), accounts)
-        assert calls == [("a1", "c-1"), ("a2", "c-2")]
-        assert scheduler._cooldown_active() is True
+        assert calls == [("a1", "c-1")]
+        assert scheduler._cooldown_active() is False
 
     @pytest.mark.asyncio
     async def test_no_credits_no_cooldown(self, monkeypatch):
@@ -232,15 +240,16 @@ class TestRedeemSweep:
         assert scheduler._cooldown_active() is False
 
     @pytest.mark.asyncio
-    async def test_cooldown_suppresses_tick(self, monkeypatch):
+    async def test_cooldown_still_checks_leadership_for_pending_recovery(self, monkeypatch):
         scheduler = _scheduler()
         scheduler._last_redeemed_at = scheduler_module.utcnow()
 
         acquired = AsyncMock()
+        acquired.try_acquire.return_value = False
         monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: acquired)
 
         await scheduler._tick()
-        acquired.try_acquire.assert_not_awaited()
+        acquired.try_acquire.assert_awaited_once()
 
 
 class TestExpiresWithin:
@@ -282,7 +291,7 @@ class TestExpirySweep:
         monkeypatch.setattr(scheduler_module, "_build_accounts_service", lambda repo, session: service)
 
         await scheduler._expiry_sweep(AsyncMock(), AsyncMock(), [account])
-        service.redeem_rate_limit_reset_credit.assert_awaited_once_with("a1", credit_id="c-soon")
+        service.redeem_rate_limit_reset_credit.assert_awaited_once_with("a1", credit_id="c-soon", trigger="expiring")
         service.probe_account.assert_awaited_once_with("a1")
         assert scheduler._cooldown_active() is False
 

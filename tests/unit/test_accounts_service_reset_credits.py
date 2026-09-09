@@ -12,6 +12,7 @@ from app.core.clients.rate_limit_resets import ConsumeResetCreditPayload, ResetC
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 from app.modules.accounts import reset_credit_cache
+from app.modules.accounts import service as service_module
 from app.modules.accounts.service import AccountResetCreditsUnavailableError, AccountsService
 
 pytestmark = pytest.mark.unit
@@ -26,6 +27,11 @@ def _reset_credit_count_cache():
     reset_credit_cache.reset()
     yield
     reset_credit_cache.reset()
+
+
+@pytest.fixture(autouse=True)
+def _recovery_dependencies(monkeypatch):
+    monkeypatch.setattr(service_module, "refresh_standard_capacity", AsyncMock(return_value=True))
 
 
 def _credits_payload(*statuses: str) -> ResetCreditsPayload:
@@ -88,6 +94,15 @@ def _build_service(
     usage_updater = AsyncMock()
     usage_updater.force_refresh = AsyncMock(return_value=True)
     service._usage_updater = usage_updater
+    service._reset_attempts = AsyncMock()
+    service._reset_attempts.active.return_value = None
+    service._reset_attempts.create.side_effect = lambda account_id, credit_id, trigger: SimpleNamespace(
+        id="logical-request-id",
+        account_id=account_id,
+        credit_id=credit_id,
+        trigger=trigger,
+        state="pending",
+    )
     return service
 
 
@@ -109,6 +124,16 @@ async def test_list_reset_credits_rejects_paused_account():
     service = _build_service(account=_make_account(status=AccountStatus.PAUSED))
     with pytest.raises(AccountResetCreditsUnavailableError):
         await service.list_rate_limit_reset_credits(_ACCOUNT_ID)
+
+
+@pytest.mark.asyncio
+async def test_reset_credit_rejects_unusable_subscription():
+    account = _make_account()
+    account.subscription_status = "canceled"
+    service = _build_service(account=account)
+    with pytest.raises(AccountResetCreditsUnavailableError, match="subscription"):
+        await service.redeem_rate_limit_reset_credit(_ACCOUNT_ID)
+    service._reset_attempts.create.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -177,7 +202,13 @@ async def test_redeem_reset_credit_refetch_failure_clears_cached_count(monkeypat
     async def _fake_consume(**kwargs):  # noqa: ARG001
         return ConsumeResetCreditPayload(code="reset", windows_reset=1)
 
+    fetches = 0
+
     async def _fake_fetch(**kwargs):  # noqa: ARG001
+        nonlocal fetches
+        fetches += 1
+        if fetches <= 2:
+            return _credits_payload("available")
         raise RuntimeError("listing unavailable")
 
     monkeypatch.setattr(rate_limit_resets, "consume_reset_credit", _fake_consume)
@@ -198,6 +229,7 @@ async def test_redeem_reset_credit_no_credit_skips_refresh(monkeypatch):
         return ConsumeResetCreditPayload(code="no_credit", windows_reset=0)
 
     monkeypatch.setattr(rate_limit_resets, "consume_reset_credit", _fake_consume)
+    monkeypatch.setattr(rate_limit_resets, "fetch_reset_credits", AsyncMock(return_value=_credits_payload()))
 
     result = await service.redeem_rate_limit_reset_credit(_ACCOUNT_ID)
     assert result is not None
@@ -215,7 +247,7 @@ async def test_redeem_reset_credit_already_redeemed_is_idempotent_success(monkey
         return ConsumeResetCreditPayload(code="already_redeemed", windows_reset=0)
 
     async def _fake_fetch(**kwargs):  # noqa: ARG001
-        return _credits_payload()
+        return _credits_payload("available")
 
     monkeypatch.setattr(rate_limit_resets, "consume_reset_credit", _fake_consume)
     monkeypatch.setattr(rate_limit_resets, "fetch_reset_credits", _fake_fetch)

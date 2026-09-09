@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,8 +15,26 @@ from app.core.clients.rate_limit_resets import (
     ResetCreditsPayload,
 )
 from app.modules.accounts import reset_credit_cache
+from app.modules.accounts import service as service_module
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def _redemption_inventory(monkeypatch):
+    payload = ResetCreditsPayload(
+        credits=[
+            ResetCreditDetails(
+                id="credit-1",
+                reset_type="weekly",
+                status="available",
+                granted_at="2026-07-01T00:00:00Z",
+            )
+        ],
+        available_count=1,
+    )
+    monkeypatch.setattr(rate_limit_resets, "fetch_reset_credits", AsyncMock(return_value=payload))
+    monkeypatch.setattr(service_module, "refresh_standard_capacity", AsyncMock(return_value=True))
 
 
 def _encode_jwt(payload: dict) -> str:

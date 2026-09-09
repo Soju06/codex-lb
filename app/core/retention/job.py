@@ -125,8 +125,8 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
     lifetime account totals. No watermark (fold never ran) means skip.
 
     The effective watermark is the MIN of the lifetime fold watermark and the
-    hourly and conversation time-axis watermarks: a raw row is only prunable
-    once EVERY rollup that must outlive it has folded it. While either
+    hourly, conversation and report time-axis watermarks: a raw row is only prunable
+    once EVERY rollup that must outlive it has folded it. While any
     time-axis backfill is catching up (each watermark starts at the epoch),
     the min fails the currency check below and pruning pauses entirely — the
     pre-existing "never delete what is not folded" invariant extended to the
@@ -163,6 +163,7 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                             AccountUsageRollupState.folded_through,
                             AccountUsageRollupState.hourly_folded_through,
                             AccountUsageRollupState.conversation_folded_through,
+                            AccountUsageRollupState.reports_folded_through,
                         )
                         .where(AccountUsageRollupState.id == 1)
                         .with_for_update()

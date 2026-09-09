@@ -5,10 +5,11 @@ import json
 import logging
 import math
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import partial
 from json import JSONDecodeError
 from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
@@ -75,6 +76,7 @@ from app.core.clients.usage import (
 )
 from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -243,6 +245,7 @@ from app.modules.model_sources.selection import (
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy._service.observability import record_http_bridge_routing
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
     _bind_propagated_capacity_startup_wait,
@@ -319,11 +322,13 @@ from app.modules.proxy.schemas import (
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 from app.modules.proxy.source_admission import try_claim as try_claim_source_admission
 from app.modules.proxy.source_dispatch import (
+    ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
     ABANDON_CLIENT_DISCONNECTED_DURING_OPEN,
     ABANDON_DISPATCH_INTERRUPTED,
     ABANDON_SOURCE_STALL,
     CANCELLED_CLIENT_DISCONNECTED,
     ClientDisconnectedDuringOpen,
+    SourceChatStreamOwner,
     SourceDispatch,
     SourceStreamingResponse,
     open_with_disconnect_watch,
@@ -2345,6 +2350,53 @@ def _responses_cleanup_scheduler(service: object) -> _ResponsesCleanupScheduler 
     return None
 
 
+async def _guard_chat_bridge_reservation(
+    stream: AsyncIterator[str],
+    *,
+    reservation: ApiKeyUsageReservationData | None,
+    service: object,
+) -> AsyncIterator[str]:
+    cleanup = _ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=reservation,
+        scheduler=_responses_cleanup_scheduler(service),
+        request_id=ensure_request_id(),
+    )
+    ready, dispatched, rejected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @contextmanager
+    def settlement_signals() -> Iterator[None]:
+        ready_token = _bind_propagated_responses_service_cleanup_ready(ready)
+        dispatched_token = _bind_propagated_responses_owner_forward_dispatched(dispatched)
+        rejected_token = _bind_propagated_responses_owner_forward_rejected(rejected)
+        try:
+            yield
+        finally:
+            _reset_propagated_responses_owner_forward_rejected(rejected_token)
+            _reset_propagated_responses_owner_forward_dispatched(dispatched_token)
+            _reset_propagated_responses_service_cleanup_ready(ready_token)
+
+    try:
+        while True:
+            # Startup probes and response consumers can run in different tasks.
+            # Never retain a ContextVar token across a yield to either caller.
+            with settlement_signals():
+                try:
+                    line = await anext(stream)
+                except StopAsyncIteration:
+                    break
+            yield line
+    finally:
+        with anyio.CancelScope(shield=True), settlement_signals():
+            await _close_responses_stream_best_effort(stream, action="chat bridge")
+            if _responses_origin_may_release_reservation(
+                service_cleanup_ready_event=ready,
+                owner_forward_dispatched_event=dispatched,
+                owner_forward_rejected_event=rejected,
+            ):
+                await cleanup.release(action="chat bridge")
+
+
 def _select_codex_usage_limit(
     limits: list[V1UsageLimitResponse],
     window: str,
@@ -4297,6 +4349,7 @@ def _raw_optional_string(raw: Mapping[str, JsonValue], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+@v1_router.post("/chat/completions/", include_in_schema=False)
 @v1_router.post(
     "/chat/completions",
     response_model=ChatCompletionResult,
@@ -4398,6 +4451,11 @@ async def v1_chat_completions(
         )
         if admission_denial is not None:
             return admission_denial
+    bridge_active = (
+        await _http_bridge_active_for_request(responses_payload, request.headers, api_key, preferred=True)
+        if source is None
+        else False
+    )
     reservation = await _enforce_request_limits(
         api_key,
         request_model=request_model,
@@ -4421,17 +4479,38 @@ async def v1_chat_completions(
             prohibit_fast_mode=prohibit_fast_mode,
         )
     responses_payload.stream = True
-    stream = context.service.stream_responses(
-        responses_payload,
-        request.headers,
-        codex_session_affinity=False,
-        propagate_http_errors=True,
-        openai_cache_affinity=True,
-        api_key=api_key,
-        api_key_reservation=reservation,
-        suppress_text_done_events=True,
-        client_ip=resolve_request_client_host(request),
-    )
+    if bridge_active:
+        downstream_turn_state = proxy_affinity_module.ensure_http_downstream_turn_state(request.headers)
+        rate_limit_headers = {
+            **rate_limit_headers,
+            **proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state),
+        }
+        stream = context.service.stream_http_responses(
+            responses_payload,
+            request.headers,
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=True,
+            client_ip=resolve_request_client_host(request),
+            downstream_turn_state=downstream_turn_state,
+            http_bridge_active=True,
+        )
+        stream = _guard_chat_bridge_reservation(stream, reservation=reservation, service=context.service)
+    else:
+        stream = context.service.stream_responses(
+            responses_payload,
+            request.headers,
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=True,
+            client_ip=resolve_request_client_host(request),
+        )
     startup_probe_timeout = (
         _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
         if cursor_compat_client
@@ -4457,7 +4536,8 @@ async def v1_chat_completions(
         _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
         if cursor_compat_client and _is_context_length_startup_error(startup_error):
-            await _release_reservation(reservation)
+            if not bridge_active:
+                await _release_reservation(reservation)
             if payload.stream:
                 return _cursor_context_limit_usage_stream(
                     payload,
@@ -4481,7 +4561,7 @@ async def v1_chat_completions(
         return StreamingResponse(
             inject_sse_keepalives(
                 chat_stream,
-                get_settings().sse_keepalive_interval_seconds,
+                with_dashboard_overrides(get_settings()).sse_keepalive_interval_seconds,
                 on_keepalive=lambda: _record_stream_keepalive("chat_completions"),
             ),
             media_type="text/event-stream",
@@ -5490,6 +5570,22 @@ async def _source_chat_completion_response(
                 upstream_status_code=stream.upstream_status_code,
                 rate_limit_headers=rate_limit_headers,
             )
+        # The settlement generator owns the outcome once Starlette iterates the
+        # body; the transport owner covers the one await before that (the
+        # response start), where a departing client would otherwise leave the
+        # upstream response, the pooled lease and the reservation to garbage
+        # collection (``SourceChatStreamOwner``).
+        owner = SourceChatStreamOwner(
+            stream=stream,
+            on_abandoned_before_body=partial(
+                _abandon_source_chat_stream_before_body,
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                reservation=reservation,
+            ),
+        )
         body = _source_chat_stream_with_settlement(
             stream.body,
             usage_holder=stream.usage_holder,
@@ -5499,10 +5595,11 @@ async def _source_chat_completion_response(
             api_key=api_key,
             model=model,
             reservation=reservation,
+            owner=owner,
         )
-        return StreamingResponse(
+        return SourceStreamingResponse(
             body,
-            media_type="text/event-stream",
+            owner=owner,
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
         )
 
@@ -5716,6 +5813,11 @@ async def _buffered_limited_source_chat_stream_response(
             raise close_exc
         raise cancel_exc
     except ModelSourceForwardingError as exc:
+        # Post-open failures only (idle timeout, transport loss, the
+        # empty-stream verdict above): a source ``Retry-After`` rides a
+        # pre-open 4xx/5xx, which the open site answers before this handler
+        # exists, so these errors never carry one and there is nothing to
+        # merge into the headers here (``test_body_phase_errors_carry_no_retry_after``).
         await _release_reservation(reservation)
         await _log_source_chat_completion(
             request,
@@ -5727,9 +5829,7 @@ async def _buffered_limited_source_chat_stream_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(
-            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
-        )
+        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
     except Exception as exc:
         await _release_reservation(reservation)
         error = openai_error(
@@ -5928,7 +6028,7 @@ async def _wrap_source_responses_public_stream(
     """
     use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
     keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     event_blocks = _iter_source_sse_event_blocks(
         stream,
         max_event_bytes=getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024),
@@ -6003,7 +6103,13 @@ async def _source_chat_stream_with_settlement(
     api_key: ApiKeyData | None,
     model: str,
     reservation: ApiKeyUsageReservationData | None,
+    owner: SourceChatStreamOwner | None = None,
 ) -> AsyncIterator[_SourceStreamChunkT]:
+    if owner is not None:
+        # From here on this generator owns the outcome (reservation and row)
+        # through its own except/finally paths; the owner's transport finalizer
+        # only steps in for a body that never started.
+        owner.body_started = True
     status = "success"
     error_code: str | None = None
     error_message: str | None = None
@@ -6089,6 +6195,49 @@ async def _source_chat_stream_with_settlement(
                 error_message=error_message,
                 upstream_status_code=row_upstream_status_code,
             )
+        )
+
+
+async def _abandon_source_chat_stream_before_body(
+    request: Request,
+    *,
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    model: str,
+    reservation: ApiKeyUsageReservationData | None,
+) -> None:
+    """A chat stream body that never started: release the reservation and record the abandoned attempt.
+
+    Runs from ``SourceChatStreamOwner.finalize_transport`` (which already
+    defers cancellation and has closed the source transport) when the client
+    left between the route returning and the response start, so the
+    settlement generator that normally owns both steps never ran. The row is
+    the same ``cancelled`` classification the Responses owner writes for this
+    window (``client_disconnected_before_body``) and stays out of every
+    error-rate numerator (#1552).
+    """
+
+    release_exc: Exception | None = None
+    if reservation is not None:
+        try:
+            await _release_reservation(reservation)
+        except Exception as exc:
+            release_exc = exc
+    await _log_source_chat_completion(
+        request,
+        source=source,
+        api_key=api_key,
+        model=model,
+        status="cancelled",
+        error_code=ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
+        error_message="client disconnected before the source stream body started",
+    )
+    if release_exc is not None:
+        logger.warning(
+            "Failed to release source stream reservation after client disconnect before body source_id=%s model=%s",
+            source.id,
+            model,
+            exc_info=release_exc,
         )
 
 
@@ -6575,7 +6724,7 @@ async def _stream_responses(
     if not preserve_native_failure_lifecycle:
         stream = inject_sse_keepalives(
             stream,
-            get_settings().sse_keepalive_interval_seconds,
+            with_dashboard_overrides(get_settings()).sse_keepalive_interval_seconds,
             keepalive_frame=keepalive_frame,
             on_keepalive=lambda: _record_stream_keepalive("responses"),
         )
@@ -6616,6 +6765,7 @@ async def _http_bridge_active_for_request(
 ) -> bool:
     base_settings = proxy_service_module.get_settings()
     if not preferred or not base_settings.http_responses_session_bridge_enabled:
+        record_http_bridge_routing(stage="admission", reason="bridge_disabled" if preferred else "route_disabled")
         return False
     if policy_already_applied:
         # The origin already made the authoritative policy decision before
@@ -7430,11 +7580,28 @@ async def _wait_for_first_stream_probe(
                         post_ready_timeout = max(0.0, timeout_seconds - (clock.monotonic() - ready_set_at))
                 if post_ready_timeout <= 0:
                     return False
-                post_ready_done, _pending = await scheduler.wait(
-                    {first_task},
-                    timeout=post_ready_timeout,
-                )
-                return bool(post_ready_done)
+                # The resumed upstream may reject again and park the stream on
+                # a further bounded wait (e.g. the same-account burst backoff).
+                # A newer wait marker supersedes this ready, so keep watching
+                # it and re-read the level state instead of handing off.
+                post_ready_wait_task = scheduler.create_task(capacity_wait_event.wait())
+                try:
+                    post_ready_done, _pending = await scheduler.wait(
+                        {first_task, post_ready_wait_task},
+                        timeout=post_ready_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    if not post_ready_wait_task.done():
+                        post_ready_wait_task.cancel()
+                    await asyncio.gather(post_ready_wait_task, return_exceptions=True)
+                if first_task in post_ready_done:
+                    if capacity_wait_event.is_set():
+                        capacity_wait_event.clear()
+                    return True
+                if post_ready_wait_task in post_ready_done:
+                    continue
+                return False
 
             marker_task = scheduler.create_task(capacity_wait_event.wait())
             ready_task = (

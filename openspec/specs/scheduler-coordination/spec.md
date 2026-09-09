@@ -1,7 +1,7 @@
 # scheduler-coordination Specification
 
 ## Purpose
-TBD - created by archiving change harden-scheduler-leader-election. Update Purpose after archive.
+Governs the shared leader lease that gates singleton background schedulers in multi-replica deployments. Without a sound lease every replica runs the same token refreshes, warmups, and usage fetches, marking healthy accounts as needing re-authentication and double-spending quota. This capability requires atomic lease acquisition on both database backends, expiry evaluated in a single clock domain, renewal while gated work runs with demotion on loss, and release on graceful shutdown.
 ## Requirements
 ### Requirement: Singleton schedulers gate on the shared leader lease
 

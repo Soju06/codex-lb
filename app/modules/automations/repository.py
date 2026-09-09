@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql.selectable import CTE
 
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -1787,7 +1788,7 @@ def _serialize_schedule_days(days: Sequence[str]) -> str:
 
 
 def _automation_run_execution_claim_stale_started_before(now_utc: datetime) -> datetime:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     timeout_seconds = max(30.0, settings.compact_request_budget_seconds + 30.0)
     return now_utc - timedelta(seconds=timeout_seconds)
 

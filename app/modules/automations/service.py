@@ -17,10 +17,13 @@ from app.core.auth.refresh import RefreshError
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy import compact_responses as core_compact_responses
+from app.core.config.dashboard_overrides import dashboard_overrides_bound, with_dashboard_overrides
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
@@ -761,6 +764,12 @@ class AutomationsService:
         raise RuntimeError("Failed to claim manual automation run")
 
     async def run_due_jobs(self, *, now_utc: datetime | None = None) -> int:
+        # Scheduler entry: bind the dashboard snapshot so the compact budget the
+        # runs use is the dashboard value (C2-1), as it is on the request path.
+        with dashboard_overrides_bound(await get_settings_cache().get()):
+            return await self._run_due_jobs(now_utc=now_utc)
+
+    async def _run_due_jobs(self, *, now_utc: datetime | None = None) -> int:
         now = now_utc or utcnow()
         executed = await self._run_due_manual_runs(now_utc=now)
         jobs_by_id = {job.id: job for job in await self._repository.list_enabled_jobs()}
@@ -1157,6 +1166,9 @@ class AutomationsService:
                     reasoning=ResponsesReasoning(effort=wire_reasoning_effort) if wire_reasoning_effort else None,
                 )
                 request_started_at = time.monotonic()
+                # C2-3 resilience toggles: background job, no request snapshot
+                # to inherit; take one so the breaker gate follows the dashboard.
+                bind_resilience_toggles(await get_settings_cache().get())
                 compact_response = await asyncio.wait_for(
                     core_compact_responses(
                         ping_request,
@@ -2422,12 +2434,12 @@ def _automation_request_id(response_id: str | None, run_id: str, attempt_count: 
 
 
 def _manual_run_execution_claim_timeout_seconds() -> float:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     return max(30.0, settings.compact_request_budget_seconds + 30.0)
 
 
 def _automation_compact_request_timeout_seconds() -> float:
-    return get_settings().compact_request_budget_seconds
+    return with_dashboard_overrides(get_settings()).compact_request_budget_seconds
 
 
 def _elapsed_ms(started_at: float | None) -> int | None:

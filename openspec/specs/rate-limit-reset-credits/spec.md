@@ -1,7 +1,7 @@
 # rate-limit-reset-credits Specification
 
 ## Purpose
-TBD - created by archiving change add-rate-limit-reset-credits. Update Purpose after archive.
+Governs visibility and redemption of upstream banked rate-limit reset credits per account. Upstream exposes the redeem affordance only in selected editors, so operators managing many accounts had no way to see how many credits an account holds, when they expire, or to redeem one from the dashboard. This capability defines the per-account polling cadence and in-memory cache, operator redemption of the soonest-expiring credit, isolation of polling failures from account status, and cross-replica serialization of redemption and cache invalidation.
 ## Requirements
 ### Requirement: Reset credits are polled per account on a fixed cadence
 

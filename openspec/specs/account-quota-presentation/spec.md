@@ -1,7 +1,7 @@
 # account-quota-presentation Specification
 
 ## Purpose
-Define how account quota windows, remaining usage, and configured caps are presented consistently across dashboard surfaces.
+Governs how account quota windows are presented across the dashboard when an account does not fit the paid 5h/7d shape. Free accounts report a single monthly window, and rendering it as weekly produced wrong bars, trends, donut totals, and assigned-account badges. This capability keeps monthly-only accounts labelled as such, omits zero-credit accounts from window totals they cannot contribute to, and keeps quota refreshes visually stable.
 ## Requirements
 ### Requirement: Free-account quota surfaces are monthly-only
 
@@ -38,21 +38,6 @@ Aggregate quota donuts SHALL omit assigned accounts whose visible assigned credi
 - **WHEN** an assigned account has zero visible credits for a 5h or weekly donut calculation
 - **THEN** that account is excluded from the corresponding donut total and legend contributions
 
-### Requirement: Account usage-cap controls and markers
-
-The Accounts page SHALL offer independent optional 5h and weekly usable-quota-percentage cap controls for applicable windows, with existing configured values removable when a window disappears. Enabled caps SHALL expose a visually distinct disable button. Read-only users SHALL NOT be able to save changes. Individual account remaining-quota bars on the Accounts and Dashboard pages SHALL render quota below `100 - cap` percent remaining as a solid gray unavailable segment separated from usable quota by a narrow gap and SHALL label capped values with both total remaining and usable remaining percentages plus accessible descriptive text. Provider remaining percentages SHALL remain unchanged; monthly and additional-quota bars SHALL NOT display these cap segments. Aggregate 5h and weekly credit donuts and weekly credit pace calculations SHALL subtract reserved capacity and operate on usable capacity and balances.
-
-#### Scenario: Reserved quota is visible
-- **WHEN** a displayed 5h account bar has a configured cap of 80 percent used
-- **THEN** the first 20 percent of its remaining-quota track is a solid gray unavailable segment
-- **AND** a narrow gap separates it from usable remaining quota
-- **AND** its value shows total remaining and usable remaining percentages
-- **AND** its accessible description identifies the cap and remaining threshold
-
-#### Scenario: Independent controls
-- **WHEN** an operator enables only the weekly cap
-- **THEN** the weekly threshold is editable and saved independently
-- **AND** the 5h bar has no cap marker
 ### Requirement: Account quota refreshes preserve visual continuity
 
 Account-facing quota surfaces MUST retain the last valid percentage when a

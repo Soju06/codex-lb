@@ -1,7 +1,7 @@
 # live-usage-ingestion Specification
 
 ## Purpose
-TBD - created by archiving change live-rate-limit-ingestion. Update Purpose after archive.
+Governs the passive usage source that reads rate-limit headers and `codex.rate_limits` stream events from proxied traffic. Polling upstream usage alone leaves selection state up to a refresh interval behind real usage, so bursty traffic could exhaust a window before the poller noticed. This capability turns every proxied turn into a usage snapshot while guaranteeing that ingestion never impairs the serving path, is throttled per account, can be switched off, and has an instance-scoped lifecycle.
 ## Requirements
 ### Requirement: Proxied responses feed passive usage snapshots
 

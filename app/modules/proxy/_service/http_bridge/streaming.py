@@ -184,6 +184,9 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.observability import (
+    record_http_bridge_routing,
+)
 from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
@@ -977,6 +980,7 @@ class _HTTPBridgeStreamingMixin:
         )
         ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
+            record_http_bridge_routing(stage="bypass", reason="payload_size")
             logger.info(
                 "stream_responses bypassing http bridge for large payload size=%s budget=%s request_id=%s",
                 payload_size_estimate_bytes,
@@ -988,6 +992,7 @@ class _HTTPBridgeStreamingMixin:
         image_generation_request = _responses_request_uses_image_generation(payload)
         force_upstream_stream_transport = "http" if image_request else None
         if runtime_config.enabled and (image_request or image_generation_request):
+            record_http_bridge_routing(stage="bypass", reason="image")
             logger.info(
                 "stream_responses bypassing http bridge for image-capable request input_image=%s "
                 "image_generation=%s request_id=%s",
@@ -1000,6 +1005,7 @@ class _HTTPBridgeStreamingMixin:
         # "http" upstream transport must bypass it; without this gate the
         # dashboard pin is silently ignored for bridged follow-up turns.
         if runtime_config.enabled and configured_upstream_stream_transport(dashboard_settings) == "http":
+            record_http_bridge_routing(stage="bypass", reason="explicit_http")
             logger.info(
                 "stream_responses bypassing http bridge for pinned http upstream transport request_id=%s",
                 request_id,
@@ -1013,6 +1019,7 @@ class _HTTPBridgeStreamingMixin:
         # unavailable websocket upstream.
         if force_upstream_stream_transport is None and upstream_websocket_transport_recently_failed():
             if runtime_config.enabled:
+                record_http_bridge_routing(stage="bypass", reason="recent_ws_failure")
                 logger.info(
                     "stream_responses bypassing http bridge for recent upstream websocket transport failure "
                     "request_id=%s",
@@ -2870,6 +2877,7 @@ class _HTTPBridgeStreamingMixin:
             and not fresh_reattach_anchor_suppressed_quarantined
             and not proxy_injected_previous_response_id
             and effective_payload.previous_response_id is None
+            and not effective_payload.conversation
             and session.last_completed_response_id is not None
             and (session_anchor_trimmable or recovery_session_can_anchor)
         )
@@ -3433,6 +3441,7 @@ class _HTTPBridgeStreamingMixin:
                             max_sessions=max_sessions,
                             previous_response_id=None,
                             gateway_safe_mode=runtime_config.gateway_safe_mode,
+                            request_service_tier=request_state.requested_service_tier,
                             allow_forward_to_owner=False,
                             forwarded_request=forwarded_request,
                             durable_lookup=None,

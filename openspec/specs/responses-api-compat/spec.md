@@ -1019,6 +1019,8 @@ and durable circuit state.
 ### Requirement: Long Codex websocket turns tolerate extended upstream silence
 The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.
 
+`compact_request_budget_seconds`, `stream_idle_timeout_seconds` and `proxy_request_budget_seconds` are dashboard-managed (`configuration-tiers`): each has a nullable `dashboard_settings` column of the same name whose non-NULL value MUST override the process environment value, which in turn overrides the code default. Consumers MUST read the effective value from the `SettingsCache` snapshot bound at the request or WebSocket entry point and MUST NOT query the database per request or per event. The environment variables remain as deprecated fallbacks and MUST NOT be copied into the column by the server; a client that echoes the effective values of a `GET /api/settings` response back through `PUT` stores them as explicit dashboard values (clients MUST send only the fields they intend to change). `GET /api/settings` MUST report any environment value the `Settings` model accepts, including one outside the bounds `PUT` enforces.
+
 #### Scenario: compact and stream watchdog defaults leave room for long turns
 - **WHEN** the service starts with default configuration
 - **THEN** `compact_request_budget_seconds` is at least 180 seconds
@@ -1039,9 +1041,26 @@ The default compact request budget MUST be at least 180 seconds, and the default
 - **THEN** both operations remain bounded by the original 7200-second stream deadline
 - **AND** the reconnect does not fail solely because the generic 600-second budget elapsed
 
+#### Scenario: Dashboard value overrides startup environment
+- **GIVEN** `CODEX_LB_PROXY_REQUEST_BUDGET_SECONDS=600` in the process environment and an operator has stored `900` for `proxy_request_budget_seconds` through `PUT /api/settings`
+- **WHEN** a new request computes its request deadline on any replica
+- **THEN** the deadline uses the 900 second dashboard value
+- **AND** `GET /api/settings` reports `proxyRequestBudgetSeconds: 900` with `provenance.proxy_request_budget_seconds.source = "dashboard"`
+
+#### Scenario: Clearing the dashboard value returns to the environment
+- **GIVEN** the same deployment
+- **WHEN** the operator sends `PUT /api/settings` with `proxyRequestBudgetSeconds: null`
+- **THEN** the column becomes NULL, new requests use the 600 second environment value, and the provenance source becomes `"env"` (or `"default"` when the environment matches the code default)
+
+#### Scenario: Timeout invariants are enforced on the effective values
+- **GIVEN** the environment-only admission wait is 10 seconds
+- **WHEN** the operator sends `PUT /api/settings` with `proxyRequestBudgetSeconds: 5`
+- **THEN** the request is rejected with `400` and code `timeout_invariant_violation` naming `admission-wait-within-proxy-budget`
+- **AND** a request that raises every violated budget in the same `PUT` is accepted
+
 ### Requirement: Responses upstream websocket liveness is bounded
 
-The proxy MUST configure direct and routed upstream Responses WebSocket transports with finite ping/pong liveness detection derived from `proxy_downstream_websocket_idle_timeout_seconds`. A direct connection MUST use the native helper watchdog when native egress is selected and the Python `websockets` watchdog only on the pre-dispatch missing-helper fallback. When an established Responses WebSocket is terminated because its transport did not receive the required pong, the adapter MUST classify the failure as `upstream_websocket_liveness_timeout`. Direct WebSocket and HTTP bridge relay owners MUST treat that failure as account neutral, MUST NOT transparently replay a pending request whose delivery is ambiguous, MUST finalize its pending request ownership exactly once, and MUST retire the affected upstream socket so a later client retry opens a fresh connection. An HTTP bridge reader MUST suppress its own pending-deque settlement only when a concurrent submitter explicitly claimed liveness-settlement ownership under the session lifecycle lock; `session.closed` alone MUST NOT suppress settlement.
+The proxy MUST configure direct and routed upstream Responses WebSocket transports with finite ping/pong liveness detection derived from `proxy_downstream_websocket_idle_timeout_seconds`, read as the effective dashboard-managed value (a non-NULL `dashboard_settings.proxy_downstream_websocket_idle_timeout_seconds` overrides the environment value) from the snapshot bound to the connection. A direct connection MUST use the native helper watchdog when native egress is selected and the Python `websockets` watchdog only on the pre-dispatch missing-helper fallback. When an established Responses WebSocket is terminated because its transport did not receive the required pong, the adapter MUST classify the failure as `upstream_websocket_liveness_timeout`. Direct WebSocket and HTTP bridge relay owners MUST treat that failure as account neutral, MUST NOT transparently replay a pending request whose delivery is ambiguous, MUST finalize its pending request ownership exactly once, and MUST retire the affected upstream socket so a later client retry opens a fresh connection. An HTTP bridge reader MUST suppress its own pending-deque settlement only when a concurrent submitter explicitly claimed liveness-settlement ownership under the session lifecycle lock; `session.closed` alone MUST NOT suppress settlement.
 
 #### Scenario: Direct Responses websocket loses pong liveness
 
@@ -1082,6 +1101,13 @@ The proxy MUST configure direct and routed upstream Responses WebSocket transpor
 - **WHEN** the submitter is cancelled before whole-deque settlement completes
 - **THEN** settlement continues until every pending sibling is finalized exactly once
 - **AND** the submitter cancellation is preserved after settlement completes
+
+#### Scenario: Dashboard idle timeout controls new connections
+
+- **GIVEN** `CODEX_LB_PROXY_DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT_SECONDS=120` and an operator stores `45` through `PUT /api/settings`
+- **WHEN** a new downstream WebSocket connection is accepted on any replica
+- **THEN** its idle timeout and the derived upstream ping/pong liveness window use 45 seconds
+- **AND** connections accepted before the change keep the value they were bound with
 
 ### Requirement: Upstream websocket drops penalize affected accounts
 
@@ -2341,7 +2367,7 @@ When an upstream websocket or HTTP bridge session has multiple pending Responses
 
 ### Requirement: HTTP bridge streams emit downstream liveness frames while pending
 
-When an HTTP bridge Responses request is waiting for upstream queue events, the system MUST emit a downstream SSE liveness frame at the configured `sse_keepalive_interval_seconds` interval so downstream clients do not disconnect before the upstream terminal frame arrives. The first generated liveness frame MUST be delayed until after the HTTP bridge startup-error probe window so a local startup `ProxyResponseError` can still be surfaced as a non-2xx HTTP response. Once a generated liveness frame is emitted, the stream MUST be considered started for later HTTP-error propagation decisions, so a subsequent upstream `response.failed` is forwarded in-stream instead of being raised as a startup HTTP error. If the pending request already has a response id, the liveness frame MAY be a `response.in_progress` SSE event for that response id. If no response id is known yet, the Codex CLI route MUST emit an ignored `codex.keepalive` SSE data event because comment-only frames do not reset the CLI's EventSource idle timer. Public `/v1/responses` stream normalization MUST preserve SSE comment keepalives instead of treating them as malformed data, and MUST drop `codex.*` liveness events from the public OpenAI SDK contract surface.
+When an HTTP bridge Responses request is waiting for upstream queue events, the system MUST emit a downstream SSE liveness frame at the configured `sse_keepalive_interval_seconds` interval so downstream clients do not disconnect before the upstream terminal frame arrives. The interval is dashboard-managed: a non-NULL `dashboard_settings.sse_keepalive_interval_seconds` MUST override the environment value, `0` disables generated liveness frames, and the value MUST be read from the `SettingsCache` snapshot bound to the request rather than from the environment alone. The first generated liveness frame MUST be delayed until after the HTTP bridge startup-error probe window so a local startup `ProxyResponseError` can still be surfaced as a non-2xx HTTP response. Once a generated liveness frame is emitted, the stream MUST be considered started for later HTTP-error propagation decisions, so a subsequent upstream `response.failed` is forwarded in-stream instead of being raised as a startup HTTP error. If the pending request already has a response id, the liveness frame MAY be a `response.in_progress` SSE event for that response id. If no response id is known yet, the Codex CLI route MUST emit an ignored `codex.keepalive` SSE data event because comment-only frames do not reset the CLI's EventSource idle timer. Public `/v1/responses` stream normalization MUST preserve SSE comment keepalives instead of treating them as malformed data, and MUST drop `codex.*` liveness events from the public OpenAI SDK contract surface.
 
 Before a response id exists, a verified native Codex client on `/backend-api/codex/responses` MUST receive an event-bearing `codex.keepalive` JSON SSE frame even when payload-shape heuristics also require OpenAI-compatible response normalization, because comment-only frames do not reset the native client's parsed-event idle timer. Native identity MUST come from the existing native User-Agent or originator allowlist and MUST NOT be inferred from continuity headers. Explicit OpenAI SDK fingerprint markers, including `x-stainless-*` headers or an OpenAI User-Agent, MUST retain precedence for heartbeat framing and MUST receive comment liveness. Public `/v1/responses` and other non-native OpenAI SDK streams MUST retain comment heartbeats before `response.created`. Heartbeat selection MUST NOT disable authentication, payload validation, event normalization, fingerprint normalization, or routing policy.
 
@@ -2393,6 +2419,12 @@ Before a response id exists, a verified native Codex client on `/backend-api/cod
 - **WHEN** the request is pending before `response.created`
 - **THEN** periodic liveness uses OpenAI-contract-safe comment frames
 - **AND** the first data event remains `response.created`
+
+#### Scenario: Dashboard keepalive interval overrides startup environment
+- **GIVEN** the process environment leaves `sse_keepalive_interval_seconds` at 10 and an operator stores `0.5` through `PUT /api/settings`
+- **WHEN** a Responses stream waits for its first upstream event on any replica
+- **THEN** liveness frames are emitted every 0.5 seconds
+- **AND** the request did not read `dashboard_settings` from the database beyond the cached snapshot
 
 ### Requirement: Codex WebSocket pre-created turns receive application heartbeats
 When serving the Codex-native `/backend-api/codex/responses` WebSocket route, the proxy SHALL emit a parseable Codex vendor heartbeat while a `response.create` request is pending but upstream has not yet emitted `response.created`. The heartbeat MUST be an application text frame so Codex clients reset stream-idle watchdogs that do not observe WebSocket protocol ping/pong frames. Once upstream assigns a response id, the proxy MUST continue using the existing `response.in_progress` heartbeat shape for that response id.
@@ -4513,8 +4545,8 @@ When a downstream HTTP/SSE request (`request_transport == "http"`) resolves its 
 
 Precedence (highest first), evaluated before the policy:
 
-1. An explicit `upstream_stream_transport` override of `"http"` or
-   `"websocket"` wins outright.
+1. Outside the existing recent upstream WS failure cooldown, an explicit
+   `upstream_stream_transport` override of `"http"` or `"websocket"` wins.
 2. Oversized-payload bypass and image / image-generation bypass force
    upstream HTTP.
 3. The effective policy (per-API-key `transport_policy_override` when
@@ -4535,7 +4567,17 @@ Policy values and behavior:
   - a `prompt_cache_key` present on the request model, **OR**
   - a Codex session header (`session_id`, `x-codex-session-id`, or
     `x-codex-conversation-id`), **OR**
-  - an `x-codex-turn-state` continuity header.
+  - an `x-codex-turn-state` continuity header, **OR**
+  - a non-empty `conversation` identifier, **OR**
+  - a structured tool-result input item (`function_call_output`,
+    `custom_tool_call_output`, or `apply_patch_call_output`), **OR**
+  - an assistant message followed by new user input in the supplied history.
+
+Tool declarations, instruction messages, and user-only input sequences MUST NOT
+alone count as continuation evidence. The existing recent upstream WS failure
+cooldown MUST force upstream HTTP before these policy choices, including an
+explicit WebSocket preference; clearing or expiring the marker restores normal
+eligibility.
 
 When a policy decision keeps upstream WebSocket, the proxy MUST preserve
 the configured/base downstream transport mode passed to the upstream
@@ -4555,7 +4597,7 @@ through to the global `http_downstream_transport_policy`.
   upstream transport resolves to `"websocket"`
 - **AND** a downstream HTTP request carries no `previous_response_id`, no
   `prompt_cache_key`, no Codex session header, and no `x-codex-turn-state`
-  header
+  header, conversation identifier, tool result, or assistant-to-user history
 - **WHEN** the proxy resolves the upstream transport
 - **THEN** the request MUST be sent over upstream HTTP `POST`
 
@@ -4613,6 +4655,7 @@ through to the global `http_downstream_transport_policy`.
 #### Scenario: explicit websocket override still beats the policy
 
 - **GIVEN** `upstream_stream_transport` is explicitly `"websocket"`
+- **AND** no recent upstream WS failure marker is active
 - **WHEN** a single-shot downstream HTTP request with no sticky signals
   resolves the upstream transport under any policy
 - **THEN** the explicit override MUST win and the request MUST use
@@ -6951,7 +6994,7 @@ Direct Responses HTTP/SSE requests sent through native egress MUST preserve the 
 
 ### Requirement: HTTP session bridge admission obeys downstream transport policy
 
-Before an HTTP/SSE Responses request enters the upstream WebSocket session bridge, the proxy MUST apply the same explicit-transport precedence and effective `http_downstream_transport_policy` used by the ordinary streaming retry path. An explicit upstream `http` selection MUST bypass the bridge, an explicit upstream `websocket` selection MUST retain it, and otherwise the per-key override or global policy MUST decide. A bridge bypass MUST continue through the ordinary HTTP streaming path without changing request or response shapes.
+Before an HTTP/SSE Responses request enters the upstream WebSocket session bridge, the proxy MUST apply the same explicit-transport precedence and effective `http_downstream_transport_policy` used by the ordinary streaming retry path. Outside the existing recent upstream WS failure cooldown, an explicit upstream `http` selection MUST bypass the bridge, an explicit upstream `websocket` selection MUST retain it, and otherwise the per-key override or global policy MUST decide. A bridge bypass MUST continue through the ordinary HTTP streaming path without changing request or response shapes.
 
 #### Scenario: Always-HTTP bypasses an enabled bridge
 
@@ -6972,7 +7015,7 @@ Before an HTTP/SSE Responses request enters the upstream WebSocket session bridg
 
 #### Scenario: Explicit transport wins before bridge admission
 
-- **GIVEN** the HTTP Responses session bridge is enabled
+- **GIVEN** the HTTP Responses session bridge is enabled and no recent upstream WS failure marker is active
 - **WHEN** upstream transport is explicitly `http`
 - **THEN** the bridge is bypassed under every policy
 - **BUT WHEN** upstream transport is explicitly `websocket`
@@ -7101,27 +7144,28 @@ streams.
 - **AND** existing request-log and account-health error handling remains
   unchanged
 
-### Requirement: Native Codex HTTP attempts preserve client transport choice
+### Requirement: Native Codex HTTP attempts preserve verified transport fallback
 
-For a downstream HTTP/SSE Responses request identified as a native Codex
-request by the existing first-party `User-Agent` or `originator` rules, the
-proxy MUST retain upstream HTTP when transport is otherwise controlled by the
-HTTP downstream policy. This native pin MUST take precedence over sticky
-continuation signals and the `smart` or `always_websocket` policy, but it MUST
-NOT override an explicit operator `upstream_stream_transport="websocket"` or
-an existing higher-precedence mandatory transport rail. Native downstream
-WebSocket requests MUST remain on their dedicated WebSocket path.
+Native Codex HTTP/SSE requests SHALL follow the same effective HTTP transport
+policy as other HTTP requests. First-party User-Agent or originator identity
+alone MUST NOT imply a previous WS failure or force upstream HTTP. The existing
+recent upstream WS connect-failure marker and explicit upstream HTTP preference
+MUST preserve HTTP fallback. Native downstream WebSocket requests MUST remain
+on their dedicated WebSocket path.
 
-#### Scenario: Codex HTTP fallback is not promoted again
+#### Scenario: Healthy native HTTP continuation is promoted
+- **GIVEN** a native Codex HTTP request carries continuation evidence
+- **WHEN** upstream transport is automatic, HTTP policy is smart, and no recent WS failure is active
+- **THEN** the request is eligible for the upstream WS bridge
 
-- **GIVEN** a native Codex client retries a WebSocket turn as an HTTP request
-- **AND** the HTTP request carries a prompt cache key or Codex session header
-- **WHEN** the configured transport is automatic and the HTTP policy is smart
+#### Scenario: Verified Codex HTTP fallback is retained during outage
+- **GIVEN** the existing recent upstream WS connect-failure marker is active
+- **WHEN** a native Codex HTTP request arrives
 - **THEN** codex-lb sends the attempt upstream over HTTP
+- **AND** normal promotion eligibility returns when the marker clears or expires
 
-#### Scenario: Explicit WebSocket remains authoritative
-
-- **GIVEN** a native Codex HTTP request
+#### Scenario: Explicit WebSocket remains authoritative when healthy
+- **GIVEN** a native Codex HTTP request with no active WS transport failure marker
 - **WHEN** the operator explicitly configures upstream WebSocket transport
 - **THEN** the explicit WebSocket selection remains authoritative
 
@@ -10681,3 +10725,71 @@ original upstream code is retained for account-health recovery.
 - **THEN** the downstream error code is `previous_response_owner_unavailable`
 - **AND** the request-log error code is `previous_response_owner_unavailable`
 - **AND** no raw stale-anchor identifier or source-ownership detail is exposed
+
+
+
+### Requirement: Structured HTTP continuation promotion
+Under automatic upstream transport and smart HTTP policy, the proxy SHALL
+recognize a non-empty conversation identifier, a tool-result input item, or an
+assistant response followed by new user input as continuation evidence, in
+addition to existing response, cache, session and turn-state identifiers.
+Tool declarations, instruction messages, and multiple user-only messages SHALL
+NOT alone constitute continuation evidence.
+
+#### Scenario: Full-history agent turn
+- **WHEN** a smart HTTP request contains user, assistant, then user input without explicit continuity metadata
+- **THEN** it is eligible for the upstream WS bridge
+- **AND** the complete input remains intact unless existing verified hard-continuity rules authorize trimming
+
+#### Scenario: Native identity without failure evidence
+- **WHEN** a native Codex HTTP request has continuation evidence and upstream WS is healthy
+- **THEN** the same smart/override policy as other HTTP requests applies
+- **AND** native identity alone MUST NOT force HTTP
+
+#### Scenario: Real upstream outage
+- **WHEN** the existing recent upstream WS failure marker is active
+- **THEN** HTTP entry paths MUST use upstream HTTP during its existing cooldown
+- **AND** normal WS eligibility MUST return when it expires or clears
+
+### Requirement: Inferred continuation locality remains soft
+History-only bridge requests SHALL use a deterministic locality key based on
+complete initial user input and instruction context, isolated by API-key scope.
+Conversation identifiers SHALL have distinct locality from inferred histories.
+Inferred locality SHALL NOT authorize previous-response injection, cross-account
+replay, or dropping client history. Explicit turn/session ownership SHALL retain
+precedence and existing recovery/fork/queue safeguards.
+
+#### Scenario: Repeated history without response headers
+- **WHEN** two compatible multi-turn requests retain the same initial user input and instructions
+- **THEN** they can reuse the same healthy upstream connection without replaying response headers
+- **AND** divergent complete initial inputs MUST NOT share an inferred locality key merely because their first 512 characters match
+
+### Requirement: Chat Completions uses HTTP bridge policy
+Subscription-backed Chat Completions SHALL apply the same HTTP bridge admission
+and fallback policy to its converted Responses request for streaming and
+non-streaming clients. Chat chunks, JSON, usage, error envelopes, reservation
+settlement and source routing SHALL preserve their existing public contracts.
+
+#### Scenario: Chat trailing slash uses the same handler
+- **WHEN** a client posts to `/v1/chat/completions/`
+- **THEN** the same authentication, routing, bridge and response contract as `/v1/chat/completions` SHALL apply
+
+#### Scenario: Chat tool loop reuses upstream connection
+- **WHEN** successive Chat requests include tool results and retain compatible initial context
+- **THEN** eligible requests reuse the upstream WS bridge
+- **AND** clients still receive Chat Completions responses
+
+#### Scenario: Chat bridge fails before settlement handoff
+- **WHEN** bridge startup fails or is cancelled before dispatch or service settlement ownership
+- **THEN** the originating API releases its usage reservation
+- **AND** an ambiguous owner-forward dispatch MUST NOT release the reservation without a definitive rejection
+
+### Requirement: HTTP bridge routing reasons are observable
+The proxy SHALL emit structured admission and bypass reasons and bounded-label
+counters, and SHALL count bridge create/reuse/close/reconnect/idle-eviction events.
+Metrics SHALL NOT label raw request, conversation, session, account or API-key identifiers.
+
+#### Scenario: Identify policy exclusion and transport fallback
+- **WHEN** a request remains HTTP because it is single-turn, policy-pinned, bridge-disabled, oversized, image-capable, or affected by a recent WS outage
+- **THEN** its routing diagnostics distinguish that reason
+- **AND** admission counters MUST NOT be represented as successful WS connections

@@ -26,6 +26,8 @@ from app.modules.model_sources.projection import (
     OVERFLOW_VIEW_FIELDS,
     OVERFLOW_VIEW_REASONING_FIELDS,
     SERVICE_TIER_FIELD,
+    STREAM_OPTIONS_FIELD,
+    STRIPPED_STREAM_OPTIONS_KEYS,
     STRIPPED_TELEMETRY_FIELDS,
     Declined,
     PortabilityView,
@@ -79,9 +81,11 @@ def test_strip_removes_exactly_the_telemetry_fields_in_place() -> None:
     result = strip_source_telemetry(payload)
 
     assert result is payload
+    # ``client_metadata`` / ``access_programs`` whole; ``stream_options`` because
+    # removing its only key (the Codex one) emptied it.
     assert (
         set(before) - set(result)
-        == set(STRIPPED_TELEMETRY_FIELDS)
+        == set(STRIPPED_TELEMETRY_FIELDS) | {STREAM_OPTIONS_FIELD}
         == {
             "client_metadata",
             "stream_options",
@@ -89,7 +93,7 @@ def test_strip_removes_exactly_the_telemetry_fields_in_place() -> None:
         }
     )
     for field, value in before.items():
-        if field not in STRIPPED_TELEMETRY_FIELDS:
+        if field not in STRIPPED_TELEMETRY_FIELDS and field != STREAM_OPTIONS_FIELD:
             assert result[field] == value, field
     # ``prompt_cache_key`` verbatim, ``include`` intact (mutant: strip include),
     # ``service_tier`` kept for direct routing, unknown fields forwarded (CP-7).
@@ -106,7 +110,10 @@ def test_strip_service_tier_only_when_flagged() -> None:
 
     stripped = strip_source_telemetry(_telemetry_payload(), strip_service_tier=True)
     assert SERVICE_TIER_FIELD not in stripped
-    assert set(_telemetry_payload()) - set(stripped) == set(STRIPPED_TELEMETRY_FIELDS) | {SERVICE_TIER_FIELD}
+    assert set(_telemetry_payload()) - set(stripped) == set(STRIPPED_TELEMETRY_FIELDS) | {
+        STREAM_OPTIONS_FIELD,
+        SERVICE_TIER_FIELD,
+    }
 
 
 def test_strip_is_idempotent_and_tolerates_absent_fields() -> None:
@@ -117,6 +124,54 @@ def test_strip_is_idempotent_and_tolerates_absent_fields() -> None:
     once = strip_source_telemetry(_telemetry_payload())
     twice = strip_source_telemetry(dict(once))
     assert once == twice
+
+
+@pytest.mark.parametrize(
+    ("stream_options", "expected"),
+    [
+        # Codex: the delivery mode is the only key, so the emptied object is dropped.
+        ({"reasoning_summary_delivery": "interleaved"}, None),
+        # SDK client alongside Codex telemetry: only the Codex key goes.
+        ({"include_obfuscation": False, "reasoning_summary_delivery": "interleaved"}, {"include_obfuscation": False}),
+        # Standard field alone: forwarded unchanged.
+        ({"include_obfuscation": True}, {"include_obfuscation": True}),
+        # Nothing removed, so nothing dropped: an already-empty object is the client's, not telemetry.
+        ({}, {}),
+        # Not an object: forwarded untouched for the source to judge (never fail closed).
+        ("interleaved", "interleaved"),
+        (["reasoning_summary_delivery"], ["reasoning_summary_delivery"]),
+    ],
+    ids=["codex_only", "sdk_plus_codex", "sdk_only", "empty", "string", "list"],
+)
+def test_strip_removes_only_the_codex_key_from_stream_options(stream_options: JsonValue, expected: JsonValue) -> None:
+    """Design §4.6 names ``reasoning_summary_delivery`` as the telemetry; ``stream_options`` itself is a standard
+    Responses field (``include_obfuscation``) that ``main`` forwarded verbatim (#2208 residual 1)."""
+
+    payload: dict[str, JsonValue] = {"model": "gpt-5.5", "input": [], "stream_options": copy.deepcopy(stream_options)}
+    nested_before = payload["stream_options"]
+
+    stripped = strip_source_telemetry(payload)
+
+    if expected is None:
+        assert STREAM_OPTIONS_FIELD not in stripped
+    else:
+        assert stripped["stream_options"] == expected
+        # In place: the client's own object is edited, not replaced.
+        assert stripped["stream_options"] is nested_before
+    assert stripped["model"] == "gpt-5.5" and stripped["input"] == []
+
+
+def test_a_surviving_stream_options_forwards_for_direct_routing_but_declines_the_overflow_view() -> None:
+    """The view allowlist (§4.6) is not widened: overflow stays Codex-shaped, direct routing forwards the field."""
+
+    codex_shaped = {**_full_allowlisted_body(), "stream_options": {"reasoning_summary_delivery": "interleaved"}}
+    assert overflow_portability_view(codex_shaped) == Declined("not_portable_unknown_field", "stream_options")
+    assert isinstance(overflow_portability_view(strip_source_telemetry(codex_shaped)), PortabilityView)
+
+    sdk_shaped = {**_full_allowlisted_body(), "stream_options": {"include_obfuscation": True}}
+    stripped = strip_source_telemetry(sdk_shaped)
+    assert stripped["stream_options"] == {"include_obfuscation": True}
+    assert overflow_portability_view(stripped) == Declined("not_portable_unknown_field", "stream_options")
 
 
 def test_strip_never_fails_closed_on_an_unknown_field_while_the_view_declines_it() -> None:
@@ -245,8 +300,12 @@ def test_view_never_raises_and_only_uses_closed_reasons(body: dict[str, JsonValu
 
 
 def test_constants_are_disjoint_and_closed() -> None:
-    assert STRIPPED_TELEMETRY_FIELDS == frozenset({"client_metadata", "stream_options", "access_programs"})
+    assert STRIPPED_TELEMETRY_FIELDS == frozenset({"client_metadata", "access_programs"})
+    assert STRIPPED_STREAM_OPTIONS_KEYS == frozenset({"reasoning_summary_delivery"})
+    assert STREAM_OPTIONS_FIELD == "stream_options"
     assert not STRIPPED_TELEMETRY_FIELDS & OVERFLOW_VIEW_FIELDS
+    # A ``stream_options`` that survives the projection declines the view as an unknown field.
+    assert STREAM_OPTIONS_FIELD not in OVERFLOW_VIEW_FIELDS
     assert SERVICE_TIER_FIELD not in OVERFLOW_VIEW_FIELDS
     assert DECLINE_REASONS == frozenset(
         {

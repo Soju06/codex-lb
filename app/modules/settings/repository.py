@@ -39,6 +39,12 @@ class SettingsRepository:
             proxy_account_stream_limit=None,
             proxy_account_stream_recovery_reserve=None,
             proxy_api_key_fair_share_congestion_threshold_pct=None,
+            # C2-2 routing/overload: same tri-state rule, seeded NULL.
+            proxy_overload_isolation_seconds=None,
+            proxy_account_error_rate_weighting_enabled=None,
+            proxy_account_inflight_penalty_pct=None,
+            proxy_account_lease_token_weight=None,
+            proxy_account_lease_ttl_seconds=None,
             upstream_proxy_routing_enabled=False,
             upstream_proxy_default_pool_id=None,
             prefer_earlier_reset_accounts=True,
@@ -80,6 +86,10 @@ class SettingsRepository:
             limit_warmup_staggered_idle_enabled=False,
             request_log_retention_days=None,
             usage_history_retention_days=None,
+            # C2-3 resilience toggles: NULL = inherit the env alias / default.
+            soft_drain_enabled=None,
+            deterministic_failover_enabled=None,
+            circuit_breaker_enabled=None,
         )
         self._session.add(row)
         try:
@@ -108,6 +118,18 @@ class SettingsRepository:
         clear_proxy_account_stream_recovery_reserve: bool = False,
         proxy_api_key_fair_share_congestion_threshold_pct: int | None = None,
         clear_proxy_api_key_fair_share_congestion_threshold_pct: bool = False,
+        # C2-2 routing/overload
+        proxy_overload_isolation_seconds: int | None = None,
+        clear_proxy_overload_isolation_seconds: bool = False,
+        proxy_account_error_rate_weighting_enabled: bool | None = None,
+        clear_proxy_account_error_rate_weighting_enabled: bool = False,
+        proxy_account_inflight_penalty_pct: float | None = None,
+        clear_proxy_account_inflight_penalty_pct: bool = False,
+        proxy_account_lease_token_weight: float | None = None,
+        clear_proxy_account_lease_token_weight: bool = False,
+        proxy_account_lease_ttl_seconds: float | None = None,
+        clear_proxy_account_lease_ttl_seconds: bool = False,
+        # end C2-2 routing/overload
         upstream_proxy_routing_enabled: bool | None = None,
         upstream_proxy_default_pool_id: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
@@ -152,6 +174,30 @@ class SettingsRepository:
         usage_history_retention_days: int | None = None,
         clear_request_log_retention: bool = False,
         clear_usage_history_retention: bool = False,
+        # C2-3 resilience toggles (tri-state like the retention overrides)
+        soft_drain_enabled: bool | None = None,
+        clear_soft_drain_enabled: bool = False,
+        deterministic_failover_enabled: bool | None = None,
+        clear_deterministic_failover_enabled: bool = False,
+        circuit_breaker_enabled: bool | None = None,
+        clear_circuit_breaker_enabled: bool = False,
+        # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
+        # inherit, neither = untouched).
+        upstream_connect_timeout_seconds: float | None = None,
+        clear_upstream_connect_timeout_seconds: bool = False,
+        proxy_request_budget_seconds: float | None = None,
+        clear_proxy_request_budget_seconds: bool = False,
+        compact_request_budget_seconds: float | None = None,
+        clear_compact_request_budget_seconds: bool = False,
+        transcription_request_budget_seconds: float | None = None,
+        clear_transcription_request_budget_seconds: bool = False,
+        stream_idle_timeout_seconds: float | None = None,
+        clear_stream_idle_timeout_seconds: bool = False,
+        proxy_downstream_websocket_idle_timeout_seconds: float | None = None,
+        clear_proxy_downstream_websocket_idle_timeout_seconds: bool = False,
+        sse_keepalive_interval_seconds: float | None = None,
+        clear_sse_keepalive_interval_seconds: bool = False,
+        # end C2-1 timeouts
         expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -193,6 +239,28 @@ class SettingsRepository:
             settings.proxy_api_key_fair_share_congestion_threshold_pct = (
                 proxy_api_key_fair_share_congestion_threshold_pct
             )
+        # C2-2 routing/overload
+        if clear_proxy_overload_isolation_seconds:
+            settings.proxy_overload_isolation_seconds = None
+        elif proxy_overload_isolation_seconds is not None:
+            settings.proxy_overload_isolation_seconds = proxy_overload_isolation_seconds
+        if clear_proxy_account_error_rate_weighting_enabled:
+            settings.proxy_account_error_rate_weighting_enabled = None
+        elif proxy_account_error_rate_weighting_enabled is not None:
+            settings.proxy_account_error_rate_weighting_enabled = proxy_account_error_rate_weighting_enabled
+        if clear_proxy_account_inflight_penalty_pct:
+            settings.proxy_account_inflight_penalty_pct = None
+        elif proxy_account_inflight_penalty_pct is not None:
+            settings.proxy_account_inflight_penalty_pct = proxy_account_inflight_penalty_pct
+        if clear_proxy_account_lease_token_weight:
+            settings.proxy_account_lease_token_weight = None
+        elif proxy_account_lease_token_weight is not None:
+            settings.proxy_account_lease_token_weight = proxy_account_lease_token_weight
+        if clear_proxy_account_lease_ttl_seconds:
+            settings.proxy_account_lease_ttl_seconds = None
+        elif proxy_account_lease_ttl_seconds is not None:
+            settings.proxy_account_lease_ttl_seconds = proxy_account_lease_ttl_seconds
+        # end C2-2 routing/overload
         if upstream_proxy_routing_enabled is not None:
             settings.upstream_proxy_routing_enabled = upstream_proxy_routing_enabled
         settings.upstream_proxy_default_pool_id = upstream_proxy_default_pool_id or None
@@ -288,6 +356,47 @@ class SettingsRepository:
             settings.usage_history_retention_days = None
         elif usage_history_retention_days is not None:
             settings.usage_history_retention_days = usage_history_retention_days
+        # C2-3 resilience toggles: clear flag resets to NULL (inherit the env
+        # alias / code default); a non-None value is dashboard-owned.
+        if clear_soft_drain_enabled:
+            settings.soft_drain_enabled = None
+        elif soft_drain_enabled is not None:
+            settings.soft_drain_enabled = soft_drain_enabled
+        if clear_deterministic_failover_enabled:
+            settings.deterministic_failover_enabled = None
+        elif deterministic_failover_enabled is not None:
+            settings.deterministic_failover_enabled = deterministic_failover_enabled
+        if clear_circuit_breaker_enabled:
+            settings.circuit_breaker_enabled = None
+        elif circuit_breaker_enabled is not None:
+            settings.circuit_breaker_enabled = circuit_breaker_enabled
+        # C2-1 timeouts
+        for column_name, value, clear in (
+            (
+                "upstream_connect_timeout_seconds",
+                upstream_connect_timeout_seconds,
+                clear_upstream_connect_timeout_seconds,
+            ),
+            ("proxy_request_budget_seconds", proxy_request_budget_seconds, clear_proxy_request_budget_seconds),
+            ("compact_request_budget_seconds", compact_request_budget_seconds, clear_compact_request_budget_seconds),
+            (
+                "transcription_request_budget_seconds",
+                transcription_request_budget_seconds,
+                clear_transcription_request_budget_seconds,
+            ),
+            ("stream_idle_timeout_seconds", stream_idle_timeout_seconds, clear_stream_idle_timeout_seconds),
+            (
+                "proxy_downstream_websocket_idle_timeout_seconds",
+                proxy_downstream_websocket_idle_timeout_seconds,
+                clear_proxy_downstream_websocket_idle_timeout_seconds,
+            ),
+            ("sse_keepalive_interval_seconds", sse_keepalive_interval_seconds, clear_sse_keepalive_interval_seconds),
+        ):
+            if clear:
+                setattr(settings, column_name, None)
+            elif value is not None:
+                setattr(settings, column_name, value)
+        # end C2-1 timeouts
         # Force the optimistic-version CAS to run even when the payload makes no
         # net change. `version_id_col` only raises `StaleDataError` when the
         # flush emits an ORM UPDATE; a full-row save that assigns values all

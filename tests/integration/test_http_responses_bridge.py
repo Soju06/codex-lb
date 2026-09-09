@@ -1652,6 +1652,85 @@ class _PrewarmingBridgeUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
         )
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_routing_hint_is_first_handshake_only(async_client, monkeypatch):
+    from app.core.clients import proxy_websocket as websocket_client
+    from app.core.clients.native_egress import NativeWebSocketMessage, NativeWebSocketRequest
+
+    # Given real bridge selection, request preparation and client header building.
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(async_client, "acc_hint_reuse", "hint-reuse@example.com")
+    account = await _get_account(account_id)
+    upstream = _FakeBridgeUpstreamWebSocket("resp_hint_reuse")
+    handshakes: list[NativeWebSocketRequest] = []
+
+    async def select_account(self, deadline, **kwargs):
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def ensure_fresh(self, target, *, force=False, timeout_seconds):
+        return target
+
+    async def receive_native():
+        message = await upstream.receive()
+        return NativeWebSocketMessage(kind=message.kind, text=message.text)
+
+    async def close_native(code=1000, reason=""):
+        await upstream.close()
+
+    native_socket = Mock()
+    native_socket.send_text = upstream.send_text
+    native_socket.receive = receive_native
+    native_socket.close = close_native
+    native_socket.response_header = upstream.response_header
+
+    async def connect_native(request: NativeWebSocketRequest):
+        handshakes.append(request)
+        return native_socket
+
+    native_client = Mock()
+    native_client.websocket = connect_native
+    monkeypatch.setattr(websocket_client, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+
+    # When an anchored second turn changes tier on the existing connection.
+    with anyio.fail_after(_TEST_SYNC_TIMEOUT_SECONDS):
+        first = await _collect_sse_events(
+            async_client,
+            "/v1/responses",
+            json_body={
+                "model": "gpt-5.4",
+                "input": "first",
+                "prompt_cache_key": "routing-hint-reuse",
+                "service_tier": "priority",
+                "stream": True,
+            },
+            headers={"X-Codex-Routing-Hint": "model=spoof;tier=flex"},
+        )
+        first_response_id = next(event["response"]["id"] for event in first if event["type"] == "response.completed")
+        second = await _collect_sse_events(
+            async_client,
+            "/v1/responses",
+            json_body={
+                "model": "gpt-5.4",
+                "input": "second",
+                "prompt_cache_key": "routing-hint-reuse",
+                "previous_response_id": first_response_id,
+                "stream": True,
+            },
+        )
+
+    # Then the first header remains; second-frame tier absence never reconnects.
+    assert any(event["type"] == "response.completed" for event in second)
+    assert len(handshakes) == 1
+    assert handshakes[0].headers.get("x-codex-routing-hint") == "model=gpt-5.4;tier=priority"
+    frames = [json.loads(text) for text in upstream.sent_text]
+    assert len(frames) == 2
+    assert frames[0]["service_tier"] == "priority"
+    assert "service_tier" not in frames[1]
+    assert frames[1]["previous_response_id"] == first_response_id
+
+
 class _TurnStateBridgeUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     def __init__(self, turn_state: str) -> None:
         super().__init__()
@@ -1708,6 +1787,7 @@ async def test_v1_responses_http_bridge_fails_over_confirmed_proxy_connect_befor
     second_account = await _get_account(second_account_id)
     upstream = _FakeBridgeUpstreamWebSocket()
     connect_calls: list[str | None] = []
+    routing_hints: list[tuple[str, str | None] | None] = []
     selection_exclusions: list[set[str]] = []
     backed_off_accounts: list[str] = []
     handle_stream_error = AsyncMock()
@@ -1729,7 +1809,8 @@ async def test_v1_responses_http_bridge_fails_over_confirmed_proxy_connect_befor
         account_id_header,
         **kwargs,
     ):
-        del headers, access_token, kwargs
+        del headers, access_token
+        routing_hints.append(kwargs.get("routing_hint"))
         connect_calls.append(account_id_header)
         if len(connect_calls) == 1:
             raise proxy_module.ProxyResponseError(
@@ -1760,6 +1841,7 @@ async def test_v1_responses_http_bridge_fails_over_confirmed_proxy_connect_befor
             "instructions": "Return exactly OK.",
             "input": "hello",
             "prompt_cache_key": "http-bridge-proxy-connect-failover-key",
+            "service_tier": "priority",
             "stream": True,
         },
     )
@@ -1768,6 +1850,7 @@ async def test_v1_responses_http_bridge_fails_over_confirmed_proxy_connect_befor
     assert len(connect_calls) == 2
     assert selection_exclusions == [set(), {first_account.id}]
     assert backed_off_accounts == [first_account.id]
+    assert routing_hints == [("gpt-5.4", "priority"), ("gpt-5.4", "priority")]
     assert len(upstream.sent_text) == 1
     handle_stream_error.assert_not_awaited()
 
@@ -17387,3 +17470,236 @@ async def test_v1_responses_http_bridge_retries_accepted_output_free_capacity_er
     assert first_account.id in selection_exclusions[-1]
     assert len(failing_upstream.sent_text) == 1
     assert len(retry_upstream.sent_text) == 1
+
+
+class _PromotionUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        await super().send_text(text)
+        created = self._messages.get_nowait()
+        completed = self._messages.get_nowait()
+        self._messages.put_nowait(created)
+        self._messages.put_nowait(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": "OK",
+                        "output_index": 0,
+                        "content_index": 0,
+                    }
+                ),
+            )
+        )
+        self._messages.put_nowait(completed)
+
+
+@pytest_asyncio.fixture
+async def promotion_transport(async_client, app_instance, monkeypatch):
+    """Real routes, bridge/session/accounting; only replace upstream I/O."""
+    dashboard = _make_dashboard_settings()
+    dashboard.http_downstream_transport_policy = "smart"
+    _install_proxy_settings(monkeypatch, app_settings=_make_app_settings(enabled=True), dashboard_settings=dashboard)
+    account_id = await _import_account(async_client, "acc_promotion", "promotion@example.com")
+    account = await _get_account(account_id)
+    upstreams = []
+    raw_calls = []
+
+    async def select_account(self, *args, **kwargs):
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fresh(self, target, **kwargs):
+        return target
+
+    async def connect(*args, **kwargs):
+        upstream = _PromotionUpstreamWebSocket(response_id_prefix=f"resp_promoted_{len(upstreams)}")
+        upstreams.append(upstream)
+        return upstream
+
+    async def raw(payload, *args, upstream_stream_transport_override=None, **kwargs):
+        raw_calls.append({**kwargs, "upstream_transport": upstream_stream_transport_override})
+        response = {
+            "id": "resp_raw",
+            "object": "response",
+            "status": "in_progress",
+            "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}],
+            "usage": {"input_tokens": 24, "output_tokens": 2, "total_tokens": 26},
+        }
+        yield "data: " + json.dumps({"type": "response.created", "response": response}) + "\n\n"
+        yield 'data: {"type":"response.output_text.delta","delta":"OK","output_index":0,"content_index":0}\n\n'
+        response["status"] = "completed"
+        yield "data: " + json.dumps({"type": "response.completed", "response": response}) + "\n\n"
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fresh)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", raw)
+    proxy_support.clear_upstream_websocket_transport_failure()
+    yield upstreams, raw_calls, dashboard
+    proxy_support.clear_upstream_websocket_transport_failure()
+    await get_proxy_service_for_app(app_instance).drain_persistence_tasks(timeout_seconds=5.0)
+
+
+def _promotion_history(first="task"):
+    return [
+        {"role": "user", "content": first},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "continue"},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/v1/responses/", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("native", [False, True])
+async def test_smart_history_http_promotes_and_reuses_without_dropping_context(
+    async_client,
+    promotion_transport,
+    path,
+    native,
+    caplog,
+):
+    upstreams, raw_calls, _ = promotion_transport
+    headers = {"user-agent": "codex_exec/0.153.4" if native else "OpenAI/Python"}
+    caplog.set_level(logging.INFO)
+    history = _promotion_history()
+    body = {"model": "gpt-5.4", "instructions": "test", "stream": True, "input": history}
+    first = await _collect_sse_events(async_client, path, json_body=body, headers=headers)
+    second_history = [*history, {"role": "assistant", "content": "OK"}, {"role": "user", "content": "next"}]
+    second = await _collect_sse_events(async_client, path, json_body={**body, "input": second_history}, headers=headers)
+    assert first[-1]["type"] == second[-1]["type"] == "response.completed"
+    assert len(upstreams) == 1
+    assert not raw_calls
+    frames = [json.loads(frame) for frame in upstreams[0].sent_text]
+    assert len(frames[0]["input"]) == len(history)
+    assert len(frames[1]["input"]) == len(second_history)
+    assert all("previous_response_id" not in frame for frame in frames)
+    assert "reason=smart_history" in caplog.text
+    assert "event=reuse" in caplog.text
+    # Same first 512 characters do not coalesce different conversations.
+    await _collect_sse_events(
+        async_client, path, json_body={**body, "input": _promotion_history("different")}, headers=headers
+    )
+    assert len(upstreams) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/chat/completions/"])
+async def test_smart_chat_tool_loop_reuses_bridge_with_chat_contract(
+    async_client,
+    promotion_transport,
+    stream,
+    path,
+    caplog,
+):
+    upstreams, raw_calls, _ = promotion_transport
+    caplog.set_level(logging.INFO)
+    messages = [
+        {"role": "user", "content": "read file"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call_read", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_read", "content": "file contents"},
+    ]
+    body = {"model": "gpt-5.4", "messages": messages, "stream": stream}
+    if stream:
+        body["stream_options"] = {"include_usage": True}
+    for _ in range(2):
+        response = await async_client.post(path, json=body)
+        assert response.status_code == 200, response.text
+        if stream:
+            chunks = [
+                json.loads(line[6:])
+                for line in response.text.splitlines()
+                if line.startswith("data: ") and line[6:] != "[DONE]"
+            ]
+            assert chunks and all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
+            assert chunks[-1]["usage"]["total_tokens"] == 26
+            assert "data: [DONE]" in response.text
+        else:
+            assert response.json()["object"] == "chat.completion"
+            assert response.json()["choices"][0]["message"]["content"] == "OK"
+            assert response.json()["usage"]["total_tokens"] == 26
+    assert len(upstreams) == 1
+    assert not raw_calls
+    assert "reason=smart_tool_result" in caplog.text
+    for frame in upstreams[0].sent_text:
+        payload = json.loads(frame)
+        assert any(item.get("type") == "function_call_output" for item in payload["input"])
+        assert "previous_response_id" not in payload
+
+
+@pytest.mark.asyncio
+async def test_smart_promotion_follows_real_outage_and_recovers(async_client, promotion_transport, caplog):
+    upstreams, raw_calls, dashboard = promotion_transport
+    caplog.set_level(logging.INFO)
+    body = {"model": "gpt-5.4", "input": _promotion_history()}
+    headers = {"user-agent": "codex_exec/0.153.4"}
+    proxy_support.mark_upstream_websocket_transport_failure()
+    response = await async_client.post("/v1/responses", json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+    assert "reason=recent_ws_failure" in caplog.text
+    proxy_support.clear_upstream_websocket_transport_failure()
+    response = await async_client.post("/v1/responses", json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    assert len(upstreams) == 1
+    dashboard.http_downstream_transport_policy = "always_http"
+    await async_client.post("/v1/responses", json=body, headers=headers)
+    assert len(upstreams[0].sent_text) == 1
+    assert "reason=always_http" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_smart_conversation_keeps_wire_conversation_and_separates_keys(async_client, promotion_transport):
+    upstreams, raw_calls, _ = promotion_transport
+    body = {"model": "gpt-5.4", "input": "continue", "conversation": "conv_a"}
+    for conversation in ["conv_a", "conv_a", "conv_b"]:
+        response = await async_client.post("/v1/responses", json={**body, "conversation": conversation})
+        assert response.status_code == 200, response.text
+    assert len(upstreams) == 2
+    assert not raw_calls
+    assert len(upstreams[0].sent_text) == 2
+    assert all(json.loads(frame)["conversation"] == "conv_a" for frame in upstreams[0].sent_text)
+    assert all("previous_response_id" not in json.loads(frame) for frame in upstreams[0].sent_text)
+
+
+@pytest.mark.asyncio
+async def test_smart_conversation_with_session_never_injects_conflicting_response_anchor(
+    async_client, promotion_transport
+):
+    upstreams, _, _ = promotion_transport
+    history = _promotion_history()
+    for items in [history, [*history, {"role": "assistant", "content": "OK"}, {"role": "user", "content": "again"}]]:
+        response = await async_client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.4", "input": items, "conversation": "conv_session"},
+            headers={"session_id": "explicit-session"},
+        )
+        assert response.status_code == 200, response.text
+    assert len(upstreams) == 1
+    frames = [json.loads(frame) for frame in upstreams[0].sent_text]
+    assert len(frames) == 2
+    assert all(frame["conversation"] == "conv_session" and "previous_response_id" not in frame for frame in frames)
+    assert len(frames[-1]["input"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_smart_single_turn_stays_http_before_history_promotes(async_client, promotion_transport, caplog):
+    upstreams, raw_calls, _ = promotion_transport
+    caplog.set_level(logging.INFO)
+    body = {"model": "gpt-5.4", "messages": [{"role": "user", "content": "task"}]}
+    first = await async_client.post("/v1/chat/completions", json=body)
+    assert first.status_code == 200, first.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+    second = await async_client.post("/v1/chat/completions", json={**body, "messages": _promotion_history()})
+    assert second.status_code == 200, second.text
+    assert len(upstreams) == 1
+    assert "reason=smart_single_turn" in caplog.text
+    assert "reason=smart_history" in caplog.text

@@ -169,6 +169,87 @@ describe("RoutingSettings", () => {
     expect(onSave).toHaveBeenCalledWith(buildSettingsUpdateRequest(settings, { proxyAccountStreamLimit: null }));
   });
 
+  it("renders routing weights as inherited inputs and saves only the changed fields", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const settings: DashboardSettings = {
+      ...BASE_SETTINGS,
+      provenance: {
+        proxy_overload_isolation_seconds: { source: "env", envValue: 600, default: 1800 },
+        proxy_account_error_rate_weighting_enabled: { source: "default", envValue: true, default: true },
+        proxy_account_inflight_penalty_pct: { source: "default", envValue: 2.5, default: 2.5 },
+        proxy_account_lease_token_weight: { source: "default", envValue: 1, default: 1 },
+        proxy_account_lease_ttl_seconds: { source: "default", envValue: 900, default: 900 },
+      },
+    };
+    render(<RoutingSettings settings={settings} busy={false} onSave={onSave} />);
+
+    expect(screen.getByRole("spinbutton", { name: "Overload isolation (seconds)" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "In-flight penalty (% per request)" })).toHaveValue(null);
+    expect(screen.getByText("Inherited from environment (600)")).toBeInTheDocument();
+    expect(screen.getByText("Default (2.5)")).toBeInTheDocument();
+    expect(screen.getByText("Default (on)")).toBeInTheDocument();
+    const saveButton = screen.getByRole("button", { name: "Save routing weights" });
+    expect(saveButton).toBeDisabled();
+
+    await user.type(screen.getByRole("spinbutton", { name: "Overload isolation (seconds)" }), "240");
+    await user.type(screen.getByRole("spinbutton", { name: "In-flight penalty (% per request)" }), "7.5");
+    await user.click(saveButton);
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      proxyOverloadIsolationSeconds: 240,
+      proxyAccountInflightPenaltyPct: 7.5,
+    });
+    const payload = onSave.mock.calls[0]?.[0];
+    expect(payload).not.toHaveProperty("proxyAccountLeaseTokenWeight");
+    expect(payload).not.toHaveProperty("proxyAccountLeaseTtlSeconds");
+  });
+
+  it("clears a dashboard-owned routing weight with an explicit null and blocks out-of-bounds values", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const settings: DashboardSettings = {
+      ...BASE_SETTINGS,
+      proxyAccountLeaseTtlSeconds: 1200,
+      provenance: {
+        proxy_account_lease_ttl_seconds: { source: "dashboard", envValue: 900, default: 900 },
+        proxy_account_inflight_penalty_pct: { source: "default", envValue: 2.5, default: 2.5 },
+      },
+    };
+    render(<RoutingSettings settings={settings} busy={false} onSave={onSave} />);
+
+    const ttlInput = screen.getByRole("spinbutton", { name: "Account lease TTL (seconds)" });
+    expect(ttlInput).toHaveValue(1200);
+    const saveButton = screen.getByRole("button", { name: "Save routing weights" });
+
+    await user.type(screen.getByRole("spinbutton", { name: "In-flight penalty (% per request)" }), "150");
+    expect(saveButton).toBeDisabled();
+    await user.clear(screen.getByRole("spinbutton", { name: "In-flight penalty (% per request)" }));
+
+    await user.clear(ttlInput);
+    expect(saveButton).toBeEnabled();
+    await user.click(saveButton);
+    expect(onSave).toHaveBeenCalledWith({ ...BASE_UPDATE_PAYLOAD, proxyAccountLeaseTtlSeconds: null });
+
+    await user.click(screen.getByRole("button", { name: "Reset to inherited" }));
+    expect(onSave).toHaveBeenLastCalledWith(
+      buildSettingsUpdateRequest(settings, { proxyAccountLeaseTtlSeconds: null }),
+    );
+  });
+
+  it("toggles error-rate weighting as a dashboard value", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    const toggle = screen.getByRole("switch", { name: "Toggle error-rate weighting" });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    await user.click(toggle);
+
+    expect(onSave).toHaveBeenCalledWith({ ...BASE_UPDATE_PAYLOAD, proxyAccountErrorRateWeightingEnabled: false });
+  });
+
   it.each([
     ["Response-create limit", "proxyAccountResponseCreateLimit"],
     ["Stream limit", "proxyAccountStreamLimit"],

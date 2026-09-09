@@ -11723,6 +11723,7 @@ async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
             "instructions": "hi",
             "input": "hello",
             "prompt_cache_key": "soft-queue-full",
+            "service_tier": "priority",
         }
     )
     saturated_session = _make_bridge_session(key_value="soft-queue-full", queued_request_count=8)
@@ -11811,6 +11812,8 @@ async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
     assert get_or_create.await_args_list[1].kwargs["previous_response_id"] is None
     assert get_or_create.await_args_list[2].kwargs["previous_response_id"] is None
     assert "internal_soft_affinity_reroute" in caplog.text
+    assert get_or_create.await_args_list[1].kwargs["request_service_tier"] == "priority"
+    assert get_or_create.await_args_list[2].kwargs["request_service_tier"] == "priority"
 
 
 @pytest.mark.asyncio

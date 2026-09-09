@@ -11926,7 +11926,8 @@ async def test_stream_responses_auto_transport_keeps_http_for_bare_session_affin
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket_upgrade_required(monkeypatch):
+@pytest.mark.parametrize("tier", [None, "priority", "ultrafast"])
+async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket_upgrade_required(monkeypatch, tier):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
@@ -11944,6 +11945,8 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
 
     async def fake_open_upstream_websocket(**kwargs):
         attempts["websocket"] += 1
+        expected = "model=gpt-5.4" + (f";tier={tier}" if tier is not None else "")
+        assert kwargs["headers"]["x-codex-routing-hint"] == expected
         raise proxy_module.aiohttp.WSServerHandshakeError(request_info, (), status=426, message="Upgrade Required")
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
@@ -11964,6 +11967,7 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
             "instructions": "hi",
             "input": [additional_tools, {"role": "user", "content": "hi"}],
             "reasoning": {"context": "last_turn", "effort": "high"},
+            "service_tier": tier,
         }
     )
 
@@ -11975,6 +11979,7 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
+            synthesize_routing_hint=True,
         )
     ]
 
@@ -11982,6 +11987,8 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
     assert session.calls
     upstream_headers = cast(dict[str, str], session.calls[0]["headers"])
     assert upstream_headers[proxy_module.CODEX_RESPONSES_LITE_HEADER] == "true"
+    expected = "model=gpt-5.4" + (f";tier={tier}" if tier is not None else "")
+    assert upstream_headers["x-codex-routing-hint"] == expected
     upstream_payload = cast(dict[str, JsonValue], session.calls[0]["json"])
     assert upstream_payload["reasoning"] == {"context": "all_turns", "effort": "high"}
     assert proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY not in cast(

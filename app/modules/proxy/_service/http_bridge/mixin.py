@@ -1685,6 +1685,7 @@ class _HTTPBridgeMixin(
             request_id=f"http_bridge_connect_{uuid4().hex}",
             model=request_model,
             service_tier=request_service_tier,
+            requested_service_tier=request_service_tier,
             reasoning_effort=None,
             api_key_reservation=None,
             started_at=clock_for(self).monotonic(),

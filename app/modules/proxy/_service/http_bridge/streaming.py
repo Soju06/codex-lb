@@ -3433,6 +3433,7 @@ class _HTTPBridgeStreamingMixin:
                             max_sessions=max_sessions,
                             previous_response_id=None,
                             gateway_safe_mode=runtime_config.gateway_safe_mode,
+                            request_service_tier=request_state.requested_service_tier,
                             allow_forward_to_owner=False,
                             forwarded_request=forwarded_request,
                             durable_lookup=None,

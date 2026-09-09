@@ -937,6 +937,7 @@ def _build_upstream_headers(
     access_token: str,
     account_id: str | None,
     accept: str = "text/event-stream",
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> dict[str, str]:
     native = _is_native_codex_request(inbound)
     if native:
@@ -988,6 +989,11 @@ def _build_upstream_headers(
             account_id,
             fallback_name="chatgpt-account-id" if native else _CHATGPT_ACCOUNT_ID_HEADER,
         )
+    if routing_hint is not None:
+        model, service_tier = routing_hint
+        headers[CODEX_ROUTING_HINT_HEADER] = f"model={model}" + (
+            f";tier={service_tier}" if service_tier is not None else ""
+        )
     return headers
 
 
@@ -1021,6 +1027,7 @@ def _build_upstream_websocket_headers(
     inbound: Mapping[str, str],
     access_token: str,
     account_id: str | None,
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> dict[str, str]:
     connected_header_tokens: set[str] = set()
     for key, value in inbound.items():
@@ -1054,6 +1061,11 @@ def _build_upstream_websocket_headers(
             headers["chatgpt-account-id"] = account_id
         else:
             headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
+    if routing_hint is not None:
+        model, service_tier = routing_hint
+        headers[CODEX_ROUTING_HINT_HEADER] = f"model={model}" + (
+            f";tier={service_tier}" if service_tier is not None else ""
+        )
     return headers
 
 
@@ -3585,6 +3597,7 @@ async def stream_responses(
     codex_lb_account_id: str | None = None,
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
+    synthesize_routing_hint: bool = False,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     # aclosing() at every hop lets a consumer's aclose() reach the upstream
@@ -3610,6 +3623,7 @@ async def stream_responses(
                 codex_lb_account_id=codex_lb_account_id,
                 suppress_live_usage=suppress_live_usage,
                 native_egress_client=native_egress_client,
+                synthesize_routing_hint=synthesize_routing_hint,
             )
         ) as upstream_events,
     ):
@@ -3641,6 +3655,7 @@ async def _stream_responses_with_session(
     codex_lb_account_id: str | None = None,
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
+    synthesize_routing_hint: bool = False,
 ) -> AsyncGenerator[str, None]:
     settings = with_dashboard_overrides(get_settings())
     headers = apply_codex_installation_headers(
@@ -3739,7 +3754,12 @@ async def _stream_responses_with_session(
         native_egress_client or discover_native_egress_client() if route is None and transport == "http" else None
     )
     if transport == "websocket":
-        upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_websocket_headers(
+            headers,
+            access_token,
+            account_id,
+            routing_hint=(payload.model, payload.service_tier) if synthesize_routing_hint else None,
+        )
         method = "GET"
     else:
         upstream_headers = _build_upstream_headers(
@@ -3747,6 +3767,7 @@ async def _stream_responses_with_session(
             access_token,
             account_id,
             accept="application/json" if non_streaming_http else "text/event-stream",
+            routing_hint=(payload.model, payload.service_tier) if synthesize_routing_hint else None,
         )
         _apply_responses_lite_http_header(
             upstream_headers,
@@ -4144,7 +4165,12 @@ async def _stream_responses_with_session(
         transport = "http"
         payload_dict = http_payload_dict
         payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_headers(
+            headers,
+            access_token,
+            account_id,
+            routing_hint=(payload.model, payload.service_tier) if synthesize_routing_hint else None,
+        )
         _apply_responses_lite_http_header(
             upstream_headers,
             payload_dict,
@@ -4702,6 +4728,7 @@ async def compact_responses(
     route_trace: UpstreamProxyRouteTrace | None = None,
     chatgpt_account_id: str | None = None,
     allow_direct_egress: bool = True,
+    synthesize_routing_hint: bool = False,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
         transport = _CompactCommandTransport(
@@ -4715,6 +4742,7 @@ async def compact_responses(
             route_trace=route_trace,
             chatgpt_account_id=chatgpt_account_id,
             allow_direct_egress=allow_direct_egress,
+            synthesize_routing_hint=synthesize_routing_hint,
         )
         return await transport.execute()
 
@@ -4731,6 +4759,7 @@ class _CompactCommandTransport:
     route_trace: UpstreamProxyRouteTrace | None = None
     chatgpt_account_id: str | None = None
     allow_direct_egress: bool = False
+    synthesize_routing_hint: bool = False
 
     async def execute(self) -> CompactResponsePayload:
         settings = with_dashboard_overrides(get_settings())
@@ -4750,6 +4779,7 @@ class _CompactCommandTransport:
             self.access_token,
             upstream_account_id,
             accept="text/event-stream",
+            routing_hint=(self.payload.model, self.payload.service_tier) if self.synthesize_routing_hint else None,
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)

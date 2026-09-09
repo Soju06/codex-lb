@@ -1198,6 +1198,7 @@ class _CompactMixin:
                                     "allow_direct_egress": route is None,
                                     "route_trace": route_trace,
                                     "chatgpt_account_id": account_id,
+                                    "synthesize_routing_hint": True,
                                 },
                             ),
                             timeout=upstream_budget,

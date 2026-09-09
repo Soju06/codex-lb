@@ -4785,6 +4785,14 @@ class _WebSocketMixin:
                 optional_kwargs={
                     "route": route,
                     "allow_direct_egress": route is None,
+                    # This opener already selected a subscription account.
+                    # Preconnect without a model has no hint; reused sockets
+                    # retain their original handshake, as in the Codex CLI.
+                    "routing_hint": (
+                        (request_state.model, request_state.requested_service_tier)
+                        if request_state is not None and request_state.model is not None
+                        else None
+                    ),
                 },
             )
             if request_state is not None:

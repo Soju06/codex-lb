@@ -580,6 +580,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 "codex_installation_id": account.codex_installation_id,
                 "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
                 "codex_lb_account_id": account.id,
+                # Selected subscription Account, independent of optional legacy header.
+                "synthesize_routing_hint": True,
             }
             if upstream_stream_transport is not None:
                 stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport

@@ -272,7 +272,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.streaming.helpers import (
     _classify_terminal_stream_error_frame,
-    _is_account_neutral_request_rejection,
+    _log_account_neutral_stream_rejection,
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
     _observe_terminal_stream_error_frame,
@@ -717,18 +717,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                             failure_phase="upstream", failure_detail="upstream_eof_before_terminal_event"
                         )
                     settlement.account_health_error = _facade()._should_penalize_stream_error(code)
-                    if not settlement.account_health_error and _is_account_neutral_request_rejection(
-                        code=code,
-                        http_status=None,
-                        message=error_message,
-                    ):
-                        _facade().logger.info(
-                            "Skipped account error penalty for account-neutral request rejection "
-                            "account_id=%s request_id=%s code=%s",
-                            account_id_value,
-                            request_id,
-                            code,
-                        )
+                    _log_account_neutral_stream_rejection(account_id_value, request_id, code, error_message)
                     if allow_retry and code == "stream_idle_timeout":
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                     if allow_retry and _facade()._is_security_work_authorization_required_error(code, error_message):

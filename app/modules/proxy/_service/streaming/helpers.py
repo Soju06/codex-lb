@@ -1019,6 +1019,21 @@ def _is_account_neutral_request_rejection(
     return code == "invalid_request_error" and bool(_facade()._is_missing_tool_output_message(message))
 
 
+def _log_account_neutral_stream_rejection(
+    account_id: str,
+    request_id: str,
+    code: str | None,
+    message: str | None,
+) -> None:
+    if _is_account_neutral_request_rejection(code=code or "", http_status=None, message=message):
+        _facade().logger.info(
+            "Skipped account error penalty for account-neutral request rejection account_id=%s request_id=%s code=%s",
+            account_id,
+            request_id,
+            code,
+        )
+
+
 def _is_model_scoped_rejection(
     *,
     http_status: int | None,

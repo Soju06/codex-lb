@@ -3575,10 +3575,8 @@ async def test_http_bridge_activity_snapshot_counts_pending_closed_detached_gene
 async def test_response_create_gate_timeout_retires_old_pending_without_upstream_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = _make_app_settings(
-        proxy_admission_wait_timeout_seconds=0.001,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
-    )
+    settings = _make_app_settings(http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0)
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     session = _make_bridge_session()
@@ -3684,10 +3682,8 @@ def test_stale_gate_cleanup_keeps_draining_sibling_active() -> None:
 async def test_response_create_gate_timeout_retires_closed_anchored_pending_without_upstream_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = _make_app_settings(
-        proxy_admission_wait_timeout_seconds=0.001,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
-    )
+    settings = _make_app_settings(http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0)
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     session = _make_bridge_session()
@@ -3756,10 +3752,8 @@ async def test_response_create_gate_timeout_retires_closed_anchored_pending_with
 async def test_response_create_gate_timeout_retires_old_precreated_request_after_rate_limit_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = _make_app_settings(
-        proxy_admission_wait_timeout_seconds=0.001,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
-    )
+    settings = _make_app_settings(http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0)
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     session = _make_bridge_session()
@@ -3865,10 +3859,8 @@ async def test_response_create_gate_timeout_does_not_retire_active_response_prog
     latency_response_created_ms: int | None,
     response_event_count: int,
 ) -> None:
-    settings = _make_app_settings(
-        proxy_admission_wait_timeout_seconds=0.001,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
-    )
+    settings = _make_app_settings(http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0)
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     session = _make_bridge_session()
@@ -17853,7 +17845,6 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
                         openai_cache_affinity_max_age_seconds=1800,
                         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
                         http_responses_session_bridge_gateway_safe_mode=False,
-                        openai_prompt_cache_key_derivation_enabled=True,
                     )
                 )
             ),
@@ -23278,7 +23269,7 @@ async def test_get_or_create_http_bridge_session_inflight_wait_times_out(
     inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
     service._http_bridge_inflight_sessions[key] = inflight_future
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -23606,7 +23597,7 @@ async def test_get_or_create_http_bridge_session_capacity_wait_times_out(
     inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
     service._http_bridge_inflight_sessions[inflight_key] = inflight_future
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_http_bridge_pending_count", AsyncMock(return_value=1))
@@ -24185,7 +24176,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-late-owner", None)
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     created = _make_bridge_session(key_value="sid-late-owner")
     created.key = key
     create_started = asyncio.Event()
@@ -30374,7 +30365,8 @@ async def test_http_bridge_handoff_future_survives_same_key_and_capacity_timeout
     setattr(handoff_future, "_http_bridge_handoff", True)
     service._http_bridge_sessions[key] = session
     service._http_bridge_inflight_sessions[key] = handoff_future
-    settings = _make_app_settings(proxy_admission_wait_timeout_seconds=0.01)
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_http_bridge_pending_count", AsyncMock(return_value=1))
@@ -31648,11 +31640,8 @@ async def test_http_bridge_response_create_gate_timeout_logs_pending_bridge_cont
         queued_request_count=1,
     )
     session.response_create_gate = gate
-    monkeypatch.setattr(
-        proxy_service,
-        "get_settings",
-        lambda: _make_app_settings(proxy_admission_wait_timeout_seconds=0.001),
-    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.001)
 
     with caplog.at_level(logging.WARNING):
         with pytest.raises(ProxyResponseError):
@@ -37402,7 +37391,7 @@ async def test_rejected_creator_does_not_release_the_registered_winners_durable_
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-rejected-creator", None)
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     stale_creator_session = _make_bridge_session(key_value="sid-rejected-creator")
     stale_creator_session.key = key
     registered_winner = _make_bridge_session(key_value="sid-rejected-creator-winner")

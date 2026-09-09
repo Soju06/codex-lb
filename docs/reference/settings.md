@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 130 settings. Every setting is an environment
+codex-lb currently exposes 103 settings. Every setting is an environment
 variable, normally with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process); aliased settings list every accepted name.
 All defaults work with zero configuration —
@@ -109,9 +109,7 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_UPSTREAM_BASE_URL` | T1 | `str` | `'https://chatgpt.com/backend-api'` |
-| `CODEX_LB_UPSTREAM_COMPACT_TIMEOUT_SECONDS` | T3 | `float \| None` | `None` |
 | `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | T3 (dashboard) | `float` | `8.0` |
-| `CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES` | T3 | `int` | `15728640` |
 | `CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS` | T1 | `float` | `60.0` |
 | `CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV` | T1 | `bool` | auto-detected from outbound proxy env vars |
 
@@ -123,9 +121,6 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT` | T1 | `int` | `100` |
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT_PER_HOST` | T1 | `int` | `50` |
 | `CODEX_LB_HTTP_RESPONSES_STREAM_REQUEST_BUDGET_SECONDS` | T3 | `float` | `7200.0` |
-| `CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES` | T3 | `int` | `33554432` |
-| `CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES` | T3 | `int` | `134217728` |
-| `CODEX_LB_MAX_SSE_EVENT_BYTES` | T3 | `int` | `16777216` |
 | `CODEX_LB_SSE_KEEPALIVE_INTERVAL_SECONDS` | T3 (dashboard) | `float` | `10.0` |
 | `CODEX_LB_STREAM_IDLE_TIMEOUT_SECONDS` | T3 (dashboard) | `float` | `7200.0` |
 | `CODEX_LB_TRANSCRIPTION_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `120.0` |
@@ -171,61 +166,32 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT` | T3 (dashboard) | `int` | `4` |
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT` | T3 (dashboard) | `int` | `8` |
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` | T3 (dashboard) | `int` | `1` |
-| `CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS` | T3 | `float` | `10.0` |
 | `CODEX_LB_PROXY_API_KEY_FAIR_SHARE_CONGESTION_THRESHOLD_PCT` | T3 (dashboard) | `int` | `0` |
-| `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT` | T3 | `int` | `64` |
 | `CODEX_LB_PROXY_DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT_SECONDS` | T3 (dashboard) | `float` | `120.0` |
 | `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` | T3 (dashboard) | `int` | `1800` |
-| `CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS` | T3 | `float` | `5.0` |
 | `CODEX_LB_PROXY_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `600.0` |
 | `CODEX_LB_PROXY_RESPONSE_CREATE_LIMIT` | T1 | `int` | `256` |
-| `CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT` | T3 | `int` | `64` |
 | `CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS` | T1 | `list[str]` | `[]` |
-| `CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT` | T3 | `int` | `128` |
 
 ## OAuth
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_OAUTH_CALLBACK_HOST` | T1 | `str` | `127.0.0.1` (host) / `0.0.0.0` (container) |
-| `CODEX_LB_OAUTH_TIMEOUT_SECONDS` | T3 | `float` | `30.0` |
 
 ## Token refresh
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_AUTH_GUARDIAN_ENABLED` | T3 | `bool` | `True` |
-| `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS` | T3 | `float` | `30.0` |
 | `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS` | T3 | `int` | `8` |
-| `CODEX_LB_TOKEN_REFRESH_TIMEOUT_SECONDS` | T3 | `float` | `8.0` |
 
 ## Usage
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE` | T1 | `Path \| None` | `None` |
-| `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` | T3 | `bool` | `True` |
 | `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` | T3 | `bool` | `True` |
-| `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS` | T3 | `int` | `60` |
-| `CODEX_LB_USAGE_FETCH_MAX_RETRIES` | T3 | `int` | `2` |
-| `CODEX_LB_USAGE_FETCH_TIMEOUT_SECONDS` | T3 | `float` | `10.0` |
-| `CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS` | T3 | `float` | `300.0` |
-| `CODEX_LB_USAGE_REFRESH_ENABLED` | T3 | `bool` | `True` |
-| `CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS` | T3 | `int` | `60` |
-
-## Prompt caching & affinity
-
-| Environment variable | Tier | Type | Default |
-| --- | --- | --- | --- |
-| `CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED` | T3 | `bool` | `True` |
-
-## Images
-
-| Environment variable | Tier | Type | Default |
-| --- | --- | --- | --- |
-| `CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS` | T3 | `list[str]` | `[]` |
-| `CODEX_LB_IMAGE_INLINE_FETCH_ENABLED` | T3 | `bool` | `True` |
-| `CODEX_LB_IMAGES_DEFAULT_MODEL` | T3 | `str` | `'gpt-image-2'` |
 
 ## Model registry
 
@@ -233,7 +199,6 @@ anything else belongs in `app/core/config/settings.py`.
 | --- | --- | --- | --- |
 | `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` | T3 | `dict[str, int]` | `{}` |
 | `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | T1 | `str` | `'0.153.4'` |
-| `CODEX_LB_MODEL_REGISTRY_ENABLED` | T3 | `bool` | `True` |
 | `CODEX_LB_MODEL_REGISTRY_SNAPSHOT_MAX_AGE_SECONDS` | T1 | `int` | `86400` |
 
 ## Firewall
@@ -268,8 +233,6 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED` | T3 | `bool` | `True` |
-| `CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED` | T3 | `bool` | `True` |
-| `CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED` | T3 | `bool` | `True` |
 
 ## Multi-replica
 
@@ -324,6 +287,33 @@ issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
 - `CODEX_LB_WARMUP_MODEL`
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_GATEWAY_SAFE_MODE`
 - `CODEX_LB_UPSTREAM_STREAM_TRANSPORT`
+- `CODEX_LB_UPSTREAM_COMPACT_TIMEOUT_SECONDS`
+- `CODEX_LB_MAX_SSE_EVENT_BYTES`
+- `CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES`
+- `CODEX_LB_OAUTH_TIMEOUT_SECONDS`
+- `CODEX_LB_TOKEN_REFRESH_TIMEOUT_SECONDS`
+- `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS`
+- `CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS`
+- `CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS`
+- `CODEX_LB_USAGE_FETCH_TIMEOUT_SECONDS`
+- `CODEX_LB_USAGE_FETCH_MAX_RETRIES`
+- `CODEX_LB_USAGE_REFRESH_ENABLED`
+- `CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS`
+- `CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS`
+- `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED`
+- `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS`
+- `CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED`
+- `CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED`
+- `CODEX_LB_MODEL_REGISTRY_ENABLED`
+- `CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES`
+- `CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES`
+- `CODEX_LB_IMAGE_INLINE_FETCH_ENABLED`
+- `CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS`
+- `CODEX_LB_IMAGES_DEFAULT_MODEL`
+- `CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED`
+- `CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT`
+- `CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT`
+- `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT`
 
 ---
 

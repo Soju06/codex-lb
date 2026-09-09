@@ -418,8 +418,4 @@ class StickySessionCleanupScheduler:
 
 
 def build_sticky_session_cleanup_scheduler() -> StickySessionCleanupScheduler:
-    settings = get_settings()
-    return StickySessionCleanupScheduler(
-        interval_seconds=_CLEANUP_INTERVAL_SECONDS,
-        enabled=settings.sticky_session_cleanup_enabled,
-    )
+    return StickySessionCleanupScheduler(interval_seconds=_CLEANUP_INTERVAL_SECONDS, enabled=True)

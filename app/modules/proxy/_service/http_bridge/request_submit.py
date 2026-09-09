@@ -937,8 +937,6 @@ class _HTTPBridgeRequestSubmitMixin:
         allowing the upstream to hang.
         """
         settings = _service_get_settings()
-        if not settings.image_inline_fetch_enabled:
-            return text_data
         # Quick string-level pre-check: skip the parse/fetch cycle when the
         # payload contains no ``input_image`` items with an ``http`` URL.
         if "input_image" not in text_data:

@@ -194,7 +194,6 @@ def _make_app_settings(
     enabled: bool,
     max_sessions: int = 128,
     queue_limit: int = 8,
-    admission_wait_timeout_seconds: float = 0.05,
     codex_idle_ttl_seconds: float = 900.0,
     codex_prewarm_enabled: bool = False,
     instance_id: str = "instance-a",
@@ -209,13 +208,10 @@ def _make_app_settings(
         http_responses_session_bridge_queue_limit=queue_limit,
         http_responses_session_bridge_instance_id=instance_id,
         http_responses_session_bridge_instance_ring=list(instance_ring or []),
-        proxy_admission_wait_timeout_seconds=admission_wait_timeout_seconds,
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         stream_idle_timeout_seconds=300.0,
-        openai_prompt_cache_key_derivation_enabled=True,
     )
 
 
@@ -249,9 +245,13 @@ def _install_proxy_settings(
     *,
     app_settings: Settings,
     dashboard_settings: DashboardSettings,
+    admission_wait_timeout_seconds: float = 0.05,
 ) -> None:
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(dashboard_settings))
     monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    # The admission wait is a fixed constant (ADMISSION_WAIT_TIMEOUT_SECONDS); the
+    # bridge tests shorten it through the service's module-level seam.
+    monkeypatch.setattr(proxy_module, "_proxy_admission_wait_timeout_seconds", lambda: admission_wait_timeout_seconds)
 
 
 def _install_bridge_settings(monkeypatch: pytest.MonkeyPatch, *, enabled: bool) -> None:
@@ -275,11 +275,11 @@ def _install_bridge_settings_with_limits(
 ) -> None:
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=admission_wait_timeout_seconds,
         app_settings=_make_app_settings(
             enabled=enabled,
             max_sessions=max_sessions,
             queue_limit=queue_limit,
-            admission_wait_timeout_seconds=admission_wait_timeout_seconds,
             codex_idle_ttl_seconds=codex_idle_ttl_seconds,
             codex_prewarm_enabled=codex_prewarm_enabled,
             instance_id=instance_id,
@@ -10678,13 +10678,11 @@ async def test_http_bridge_stale_gate_retires_after_leading_rate_limit_telemetry
     app_instance,
     monkeypatch,
 ):
-    app_settings = _make_app_settings(
-        enabled=True,
-        admission_wait_timeout_seconds=0.001,
-    )
+    app_settings = _make_app_settings(enabled=True)
     app_settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=0.001,
         app_settings=app_settings,
         dashboard_settings=_make_dashboard_settings(),
     )
@@ -10778,13 +10776,11 @@ async def test_http_bridge_stale_gate_direct_retirement_quarantines_wedged_reatt
     session directly (no partial cleanup, no reader-failure funnel). That
     direct retirement must still quarantine the key, or the next request
     rebuilds the identical anchored wedge."""
-    app_settings = _make_app_settings(
-        enabled=True,
-        admission_wait_timeout_seconds=0.001,
-    )
+    app_settings = _make_app_settings(enabled=True)
     app_settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=0.001,
         app_settings=app_settings,
         dashboard_settings=_make_dashboard_settings(),
     )
@@ -11241,10 +11237,10 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
 
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -11346,10 +11342,10 @@ async def test_v1_responses_http_bridge_inflight_waiter_rejects_service_tier_pro
 
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -11596,10 +11592,10 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
 
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -11714,10 +11710,10 @@ async def test_v1_responses_http_bridge_reserved_handoff_forks_before_submit(
 
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -11787,10 +11783,10 @@ async def test_v1_responses_http_bridge_reused_unanchored_refresh_reserves_canon
 
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -11881,10 +11877,10 @@ async def test_v1_responses_http_bridge_cancellation_during_durable_refresh_rele
 
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -11943,10 +11939,10 @@ async def test_v1_responses_http_bridge_request_key_follower_isolates_different_
 
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -12045,10 +12041,10 @@ async def test_v1_responses_http_bridge_forks_follower_when_account_assignment_c
 
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],
@@ -12192,10 +12188,10 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
 
     _install_proxy_settings(
         monkeypatch,
+        admission_wait_timeout_seconds=1.0,
         app_settings=_make_app_settings(
             enabled=True,
             max_sessions=8,
-            admission_wait_timeout_seconds=1.0,
             codex_idle_ttl_seconds=120.0,
             instance_id="instance-a",
             instance_ring=[],

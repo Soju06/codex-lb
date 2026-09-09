@@ -19,13 +19,6 @@ os.environ["CODEX_LB_DATABASE_URL"] = os.environ.get(
     "CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}"
 )
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
-# ``usage_refresh_enabled`` is not only the scheduler's switch: it also gates
-# request-path refreshes (``UsageUpdater.refresh_accounts`` on account import,
-# ``request_refresh`` after a streamed ``usage_limit_reached``), which would
-# otherwise fetch usage from the unreachable upstream on every imported account
-# (measured 20-30 s per import). The scheduler itself is disabled by the
-# fixture seam below; this export only covers the request path.
-os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
 # The HTTP responses session bridge is a request-path feature with a T4 env
 # kill switch (see app/core/config/tiers.py). The suite runs on the raw
 # upstream path by default; bridge suites opt in with explicit ``Settings``.
@@ -229,7 +222,7 @@ def _disable_background_loop_schedulers(monkeypatch) -> tuple[str, ...]:
     its own module globals at startup, so patching those names is enough to
     keep the loops from ever starting — without touching ``Settings`` (unit
     tests still observe the real production defaults such as
-    ``model_registry_enabled is True``) and without depending on a
+    ``automations_scheduler_enabled is True``) and without depending on a
     ``CODEX_LB_*_ENABLED`` env override that would silently stop working once
     the toggle behind it is constantized. Returns the patched builder names so
     the coverage test can assert the seam is complete.
@@ -239,6 +232,32 @@ def _disable_background_loop_schedulers(monkeypatch) -> tuple[str, ...]:
     for builder_name in BACKGROUND_LOOP_BUILDERS:
         monkeypatch.setattr(main_module, builder_name, lambda: _NoopScheduler())
     return BACKGROUND_LOOP_BUILDERS
+
+
+@pytest.fixture(autouse=True)
+def _disable_request_path_usage_refresh(request, monkeypatch):
+    """Turn the request-path usage refreshes into no-ops.
+
+    Background usage refresh is always on in production (the env kill switch
+    was constantized; issue #1340), and it is not only the scheduler's loop:
+    ``UsageUpdater.refresh_accounts`` runs on account import and
+    ``UsageUpdater.request_refresh`` after a streamed ``usage_limit_reached``.
+    Left live, every imported account would fetch usage from the unreachable
+    test upstream (measured 20-30 s per import). Tests that exercise the
+    updater itself opt out with ``@pytest.mark.usage_refresh_request_path``.
+    """
+    if request.node.get_closest_marker("usage_refresh_request_path") is not None:
+        return
+    from app.modules.usage.updater import UsageUpdater
+
+    async def _noop_refresh_accounts(
+        self, accounts, latest_usage, *, own_singleflight_sessions=False, join_existing=None
+    ):
+        del self, accounts, latest_usage, own_singleflight_sessions, join_existing
+        return False
+
+    monkeypatch.setattr(UsageUpdater, "refresh_accounts", _noop_refresh_accounts)
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(lambda account_id: None))
 
 
 @pytest.fixture(autouse=True)

@@ -266,17 +266,11 @@ def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
     return min(20.0, max(0.0, remaining_budget - reserve))
 
 
-def _compact_upstream_budget_seconds(
-    remaining_budget: float,
-    configured_timeout_seconds: float | None = None,
-) -> float:
+def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
     if remaining_budget <= 0:
         return 0.0
     reserve = _compact_upstream_call_budget_reserve_seconds(remaining_budget)
-    available = max(0.0, remaining_budget - reserve)
-    if configured_timeout_seconds is not None:
-        return min(configured_timeout_seconds, available)
-    return available
+    return max(0.0, remaining_budget - reserve)
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -1156,10 +1150,7 @@ class _CompactMixin:
                             target.id,
                         )
                         _raise_proxy_budget_exhausted()
-                    upstream_budget = _compact_upstream_budget_seconds(
-                        remaining_budget,
-                        getattr(settings, "upstream_compact_timeout_seconds", None),
-                    )
+                    upstream_budget = _compact_upstream_budget_seconds(remaining_budget)
                     if upstream_budget <= 0:
                         logger.warning(
                             "Compact request budget exhausted before upstream call cap request_id=%s account_id=%s",

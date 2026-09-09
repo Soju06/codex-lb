@@ -32,10 +32,12 @@ LIVE_MAINTENANCE_LOOP_BUILDERS: tuple[str, ...] = (
 )
 
 # ``CODEX_LB_*_ENABLED`` toggles the harness used to export as ``false``. They
-# stay unset so ``Settings()`` keeps its production defaults inside the suite.
-# ``CODEX_LB_USAGE_REFRESH_ENABLED`` is deliberately absent: it still gates the
-# request-path refresh on account import (see the note in tests/conftest.py).
+# stay unset so ``Settings()`` keeps its production defaults inside the suite;
+# most of them no longer exist as settings at all (constantize-core-tunables).
+# The request-path usage refresh is neutralised by the
+# ``_disable_request_path_usage_refresh`` fixture seam instead.
 RETIRED_HARNESS_ENV_OVERRIDES: tuple[str, ...] = (
+    "CODEX_LB_USAGE_REFRESH_ENABLED",
     "CODEX_LB_MODEL_REGISTRY_ENABLED",
     "CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED",
     "CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED",

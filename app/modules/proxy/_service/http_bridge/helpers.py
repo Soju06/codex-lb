@@ -795,8 +795,8 @@ def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     return payload
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    return cast(Callable[[Any | None], float], _service_global("_proxy_admission_wait_timeout_seconds"))(settings)
+def _proxy_admission_wait_timeout_seconds() -> float:
+    return cast(Callable[[], float], _service_global("_proxy_admission_wait_timeout_seconds"))()
 
 
 def _http_bridge_stale_inflight_seconds() -> float:

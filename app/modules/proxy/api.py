@@ -51,6 +51,7 @@ from app.core.clients.proxy import (
     _SSE_SEPARATOR_OVERLAP,
     CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE,
     CODEX_LB_REQUIRED_CAPABILITY_HEADER,
+    MAX_SSE_EVENT_BYTES,
     CodexControlRequestPrivacyPolicy,
     CodexControlResponse,
     ProxyResponseError,
@@ -130,7 +131,12 @@ from app.core.openai.chat_responses import (
     stream_chat_chunks,
 )
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.images import V1ImageResponse, V1ImagesEditsForm, V1ImagesGenerationsRequest
+from app.core.openai.images import (
+    DEFAULT_PUBLIC_IMAGE_MODEL,
+    V1ImageResponse,
+    V1ImagesEditsForm,
+    V1ImagesGenerationsRequest,
+)
 from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
 from app.core.openai.models import (
     CompactResponsePayload,
@@ -3250,11 +3256,10 @@ async def _proxy_images_generation_request(
     # ``gpt-image-*`` variant whose validation matrix it does not
     # satisfy, leading to a non-canonical upstream failure instead of
     # a deterministic 400 at the API boundary.
-    settings = proxy_service_module.get_settings()
     requested_model = payload.model  # may be None; resolved below.
     effective_model = _effective_model_for_api_key(
         api_key,
-        requested_model or settings.images_default_model,
+        requested_model or DEFAULT_PUBLIC_IMAGE_MODEL,
     )
     if not images_service_module.is_supported_image_model(effective_model):
         record_images_route_observability(
@@ -3559,11 +3564,10 @@ async def _proxy_images_edit_request(
     # cross-field matrix, so the matrix is checked against the model we
     # will actually send upstream. See the matching comment in
     # ``_proxy_images_generation_request``.
-    settings = proxy_service_module.get_settings()
     requested_model = payload.model
     effective_model = _effective_model_for_api_key(
         api_key,
-        requested_model or settings.images_default_model,
+        requested_model or DEFAULT_PUBLIC_IMAGE_MODEL,
     )
     if not images_service_module.is_supported_image_model(effective_model):
         record_images_route_observability(
@@ -5941,9 +5945,9 @@ async def _iter_source_sse_event_blocks(
     byte-identical. Ignores one optional leading UTF-8 BOM, and swallows the
     LF residue of a CRLF separator whose CR arrived at the end of the prior
     chunk (CR-only dispatch must not wait for the disambiguating byte).
-    Bounds reassembly with ``max_sse_event_bytes``.
+    Bounds reassembly with ``MAX_SSE_EVENT_BYTES``.
     """
-    limit = max_event_bytes if max_event_bytes is not None else get_settings().max_sse_event_bytes
+    limit = max_event_bytes if max_event_bytes is not None else MAX_SSE_EVENT_BYTES
     buffer = bytearray()
     scanned = 0
     bom_pending = True
@@ -6029,10 +6033,7 @@ async def _wrap_source_responses_public_stream(
     use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
     keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
     settings = with_dashboard_overrides(get_settings())
-    event_blocks = _iter_source_sse_event_blocks(
-        stream,
-        max_event_bytes=getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024),
-    )
+    event_blocks = _iter_source_sse_event_blocks(stream)
     normalized = _normalize_public_responses_stream(
         event_blocks,
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -7452,11 +7453,7 @@ async def _force_refresh_codex_usage_identity_account(request: Request) -> None:
             accounts_repo,
             AdditionalUsageRepository(session),
         )
-        usage_written = await updater.force_refresh(
-            account,
-            ignore_refresh_disabled=True,
-            access_token_override=access_token,
-        )
+        usage_written = await updater.force_refresh(account, access_token_override=access_token)
         if usage_written:
             get_account_selection_cache().invalidate()
 
@@ -10338,7 +10335,7 @@ def _http_bridge_recovery_request_eligible(
     ) or proxy_service_module._responses_request_uses_image_generation(payload):
         return False
     payload_bytes = len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
-    return payload_bytes <= proxy_service_module._ws_transport_payload_budget_bytes(settings)
+    return payload_bytes <= proxy_service_module._ws_transport_payload_budget_bytes()
 
 
 def _mask_previous_response_not_found_error(

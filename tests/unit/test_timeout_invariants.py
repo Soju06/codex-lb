@@ -38,18 +38,12 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
             "transcription_request_budget_seconds",
             "stream_idle_timeout_seconds",
             "sse_keepalive_interval_seconds",
-            "usage_fetch_timeout_seconds",
-            "usage_refresh_interval_seconds",
-            "rate_limit_reset_credits_refresh_interval_seconds",
             "http_responses_session_bridge_request_budget_seconds",
             "http_responses_session_bridge_idle_ttl_seconds",
             "http_responses_session_bridge_codex_idle_ttl_seconds",
             "http_responses_session_bridge_stuck_gate_retire_after_seconds",
             "http_responses_session_bridge_clean_close_retry_jitter_max_seconds",
-            "proxy_admission_wait_timeout_seconds",
             "proxy_account_lease_ttl_seconds",
-            "proxy_refresh_failure_cooldown_seconds",
-            "model_registry_enabled",
             "model_registry_snapshot_max_age_seconds",
             "timeout_invariant_validation_strict",
         )
@@ -75,7 +69,7 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
         ("account-lease-ttl-covers-compact-budget", {"proxy_account_lease_ttl_seconds": 179.0}),
         (
             "model-registry-snapshot-outlives-refresh-interval",
-            {"model_registry_enabled": True, "model_registry_snapshot_max_age_seconds": 300.0},
+            {"model_registry_snapshot_max_age_seconds": 300.0},
         ),
     ],
 )
@@ -87,17 +81,6 @@ def test_each_settings_backed_rule_names_violation(rule_id: str, overrides: dict
     assert any(violation.rule.id == rule_id for violation in violations)
     formatted = "\n".join(violation.format() for violation in violations)
     assert rule_id in formatted
-
-
-def test_disabled_model_registry_skips_snapshot_cadence_rule() -> None:
-    settings = _timeout_settings(
-        model_registry_enabled=False,
-        model_registry_snapshot_max_age_seconds=1.0,
-    )
-
-    violations = find_timeout_invariant_violations(settings)
-
-    assert all(violation.rule.id != "model-registry-snapshot-outlives-refresh-interval" for violation in violations)
 
 
 def test_durable_bridge_retry_circuit_rule_names_violation(monkeypatch: pytest.MonkeyPatch) -> None:

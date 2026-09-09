@@ -267,6 +267,10 @@ def test_helm_default_disables_global_backpressure_and_honors_override() -> None
 
     assert default_configmap["data"]["CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS"] == "0"
     assert override_configmap["data"]["CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS"] == "37"
+    # constantize-core-tunables: removed settings must not be rendered, or every
+    # default install would trip its own removed-settings startup warning.
+    assert "CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED" not in default_configmap["data"]
+    assert "CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED" not in default_configmap["data"]
 
 
 def test_helm_pool_budget_values_flow_to_runtime_and_hpa_templates() -> None:

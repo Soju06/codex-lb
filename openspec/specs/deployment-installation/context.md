@@ -227,11 +227,12 @@ Phase 1 (24 removed, 1 added; zero-risk internals):
   limit; compact = min(http, 16), 0 when http is 0).
 - Token-refresh claim polling (2): wait 8.0 s, poll 0.25 s — constants in
   `app/modules/accounts/auth_manager.py`.
-  `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS` stays: its floor validation
-  against `proxy_admission_wait_timeout_seconds + 2 x
-  token_refresh_timeout_seconds` protects the cross-replica single-use
-  refresh-token invariant and references settings that remain
-  configurable.
+  `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS` stayed in this phase because
+  its floor validation referenced settings that were still configurable;
+  `constantize-core-tunables` later fixed those operands too, so the TTL
+  is now the code helper `max(30 s, admission wait + 2 x refresh timeout)`
+  in `app/modules/accounts/auth_manager.py` (same 30 s result) and the
+  env name is removed.
 
 Phase 2 (15 removed):
 
@@ -271,8 +272,12 @@ Phase 2 (15 removed):
   tracking the bootstrap catalog beats inventing registry plumbing —
   never echoed to clients) and partial-images cap fixed to 3 in
   `app/core/openai/images.py` (an upstream streaming contract).
-  `CODEX_LB_IMAGES_DEFAULT_MODEL` stays: the public API contract for
-  clients that omit `model`.
+  `CODEX_LB_IMAGES_DEFAULT_MODEL` stayed in this phase as the public API
+  contract for clients that omit `model`; `constantize-core-tunables`
+  later fixed it as `DEFAULT_PUBLIC_IMAGE_MODEL = "gpt-image-2"` in
+  `app/core/openai/images.py` (nobody ever pointed it elsewhere, and the
+  public default is a contract precisely because it does not move per
+  deployment).
 
 Phase 3 (10 removed):
 
@@ -354,6 +359,60 @@ Six env fields whose documented behavior was already dead or deprecated:
 is NOT a removed setting: it is a startup guard (only `1` is supported) and
 keeps rejecting any other value with the same error
 (`proxy-admission-control`).
+
+### Removed by `constantize-core-tunables` (first release after v1.25.0-beta.5)
+
+Twenty-seven never-tuned core tunables from the `MIGRATING` backlog became
+fixed constants at their previous defaults (slop-removal 0908, K1; the
+triage evidence is per field: definition line unchanged since introduction,
+no Helm/.env.example/docs/issue/incident mention, never set in production).
+Behaviour is unchanged; each env name gets the one-release WARN.
+
+- Upstream transport: `CODEX_LB_MAX_SSE_EVENT_BYTES` (16 MiB),
+  `CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES` (15 MiB, derived from the
+  frame budget), `CODEX_LB_UPSTREAM_COMPACT_TIMEOUT_SECONDS` (no constant —
+  the dashboard `compact_request_budget_seconds` was already the only total
+  cap that ever applied).
+- Auth / token refresh: `CODEX_LB_OAUTH_TIMEOUT_SECONDS` (30 s),
+  `CODEX_LB_TOKEN_REFRESH_TIMEOUT_SECONDS` (8 s),
+  `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS` (helper, 30 s),
+  `CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS` (5 s),
+  `CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS` (10 s, single home in
+  `app/modules/proxy/work_admission.py`).
+- Usage polling: `CODEX_LB_USAGE_FETCH_TIMEOUT_SECONDS` (10 s),
+  `CODEX_LB_USAGE_FETCH_MAX_RETRIES` (2), `CODEX_LB_USAGE_REFRESH_ENABLED`
+  (always on, including the request-path refreshes),
+  `CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS` (60 s; the 180 s freshness
+  horizon is derived in `app/core/usage/refresh_policy.py`),
+  `CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS` (300 s),
+  `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` (always on),
+  `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS` (60 s).
+  `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` is NOT in this batch:
+  it migrates to a dashboard toggle in a later change.
+- Scheduler toggles: `CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED`,
+  `CODEX_LB_MODEL_REGISTRY_ENABLED` (always on),
+  `CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED` (folded into the dashboard
+  `quota_planner_settings.mode = "off"`, which already stopped every tick;
+  no new column).
+- Ingress / images / models: `CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES` (32 MiB)
+  and `CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES` (128 MiB) in
+  `app/core/ingress_limits.py`, the same constant that seeds `--ws-max-size`;
+  `CODEX_LB_IMAGE_INLINE_FETCH_ENABLED` (always on) and
+  `CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS` (the allowlist was never populated;
+  the scheme, literal-host and disallowed-IP SSRF guards stay);
+  `CODEX_LB_IMAGES_DEFAULT_MODEL` (`gpt-image-2`);
+  `CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED` (always on; Helm
+  `config.promptCacheKeyDerivationEnabled` removed).
+- Process admission gates: `CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT` (64),
+  `CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT` (128),
+  `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT` (64); every gate always
+  exists. `CODEX_LB_PROXY_RESPONSE_CREATE_LIMIT` (256) stays configurable.
+
+Helm also drops `config.stickySessionCleanupEnabled` so a default install
+does not trip its own removal warning. `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS`
+was in the triage batch but is kept: `scripts/traffic_analysis/fast_canary_suite.py`
+sets it to `365` in the failure-matrix subprocess to suppress proactive
+refresh, a live consumer that constantizing would silently defeat.
 
 ## Example
 

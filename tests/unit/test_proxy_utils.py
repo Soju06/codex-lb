@@ -26432,6 +26432,7 @@ async def test_prepare_websocket_response_create_request_injects_anchor_for_code
 
 @pytest.mark.asyncio
 async def test_prepare_websocket_response_create_request_retires_injected_anchor_remembered_stale(monkeypatch):
+    """Resend full client context and clear continuity when the injected anchor is stale."""
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     reserve_usage = AsyncMock(return_value=None)

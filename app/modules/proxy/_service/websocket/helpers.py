@@ -713,6 +713,7 @@ def _websocket_continuity_anchor_for_payload(
     codex_session_affinity: bool,
     api_key_id: str | None = None,
 ) -> _WebSocketContinuityAnchor | None:
+    """Select a matching session anchor, retiring any known upstream rejection."""
     if continuity_state is None or not codex_session_affinity:
         return None
     if responses_payload.previous_response_id is not None:
@@ -808,6 +809,7 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
+    """Record completed context and pending tools, or clear an absent response anchor."""
     if response_id is None:
         _retire_websocket_continuity_anchor(continuity_state)
         return

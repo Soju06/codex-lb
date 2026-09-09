@@ -53,7 +53,6 @@ import type {
 	DashboardSettings,
 	SubscriptionOverflowPreflight,
 	TelemetryConsent,
-	TelemetrySnapshotEnvelope,
 	UpstreamProxyAdmin,
 } from "@/features/settings/schemas";
 import {
@@ -566,12 +565,12 @@ export function createDashboardSettings(
 	});
 }
 
-export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
-	return TelemetrySnapshotEnvelopeSchema.parse({
+export function createTelemetrySnapshotEnvelope(): TelemetryConsent["preview"] {
+	const heartbeat = TelemetrySnapshotEnvelopeSchema.parse({
 		instance_id: "00000000-0000-4000-8000-000000000000",
 		timestamp: "2026-08-06T00:00:00Z",
 		metrics: {
-			schema_version: 1,
+			schema_version: 2,
 			consent: "undecided",
 			instance_id: "00000000-0000-4000-8000-000000000000",
 			version: "1.23.0",
@@ -587,8 +586,9 @@ export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
 				reverse_proxy: true,
 			},
 			accounts: {
-				pool_bucket: "2-5",
-				plan_mix: { plus: "2-5", pro: "0", team: "0", free: "0" },
+				total: 2,
+				per_plan: { plus: 2, pro: 0, team: 0, free: 0 },
+				per_status: { active: 2 },
 				workspace_accounts: false,
 				routing_policy: "usage_weighted",
 				limit_warmup_enabled: false,
@@ -637,6 +637,7 @@ export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
 			},
 		},
 	});
+	return { heartbeat, day: { schema_version: 2, instance_id: heartbeat.instance_id, utc_date: "2026-08-05", dimensions: { models: [], clients: [], transport: [], upstream_transport: [], service_tier: [], request_kinds: { responses: 0, chat: 0, images: 0, unknown: 0 }, global: { name: "global", requests: 0, latency_ms: { sample_count: 0, buckets: {} }, ttft_ms: { sample_count: 0, buckets: {} }, tps: { sample_count: 0, buckets: {} } } }, errors: { upstream_error_class: {}, failure_phase: {}, http_status_class: {}, outcomes: { success: 0, error: 0, cancelled: 0 } } } };
 }
 
 export function createTelemetryConsent(

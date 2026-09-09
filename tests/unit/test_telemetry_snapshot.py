@@ -107,14 +107,15 @@ async def test_snapshot_serialized_field_set_matches_documented_schema(async_ses
     }
     assert set(payload["deploy"]) == {"method", "db_backend", "db_size_bucket", "replicas", "reverse_proxy"}
     assert set(payload["accounts"]) == {
-        "pool_bucket",
-        "plan_mix",
+        "total",
+        "per_plan",
+        "per_status",
         "workspace_accounts",
         "routing_policy",
         "limit_warmup_enabled",
         "egress_proxy_used",
     }
-    assert set(payload["accounts"]["plan_mix"]) == {"plus", "pro", "team", "free"}
+    assert set(payload["accounts"]["per_plan"]) == {"plus", "pro", "team", "free"}
     assert set(payload["usage_7d"]) == {
         "requests",
         "success_rate",
@@ -455,7 +456,7 @@ async def test_privacy_quick_check_identifying_values_never_serialize(async_sess
         "private-upstream-message",
     ):
         assert private_value not in serialized
-    assert '"pool_bucket":"1"' in serialized
+    assert '"total":1' in serialized
     assert '"workspace_accounts":true' in serialized
     assert '"name":"other"' in serialized
     assert '"clients":{"other":1.0}' in serialized

@@ -32,7 +32,7 @@ describe("TelemetryConsentDialog", () => {
     ).toBeInTheDocument();
     expect(within(dialog).getByText(/"timestamp": "2026-08-06T00:00:00Z"/)).toBeInTheDocument();
     expect(within(dialog).getByText(/"metrics": \{/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/"schema_version": 1/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/"schema_version": 2/)).toBeInTheDocument();
     expect(within(dialog).getByText(/"consent": "undecided"/)).toBeInTheDocument();
     expect(
       within(dialog).getByText(i18n.t("settings.telemetry.optOutNotice")),

@@ -101,7 +101,7 @@ describe("TelemetrySettings", () => {
     await user.click(viewButton);
 
     const dialog = await screen.findByRole("dialog", { name: "Collected telemetry data" });
-    expect(within(dialog).getByText(/"schema_version": 1/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/"schema_version": 2/)).toBeInTheDocument();
     expect(within(dialog).getByText(/"consent": "undecided"/)).toBeInTheDocument();
     expect(within(dialog).getByText(/"timestamp": "2026-08-06T00:00:00Z"/)).toBeInTheDocument();
     expect(

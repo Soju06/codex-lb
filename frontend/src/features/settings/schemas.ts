@@ -444,121 +444,27 @@ export const TelemetryConsentSourceSchema = z.enum(["env", "persisted", "default
 // Wire-format (snake_case) mirror of app/modules/telemetry/schemas.py. Every
 // object is strict so backend drift (renamed, added, or removed fields) fails
 // schema parsing instead of passing silently.
-const TelemetryDeploymentSnapshotSchema = z.strictObject({
-  method: z.enum(["docker", "k8s", "pip", "bare"]),
-  db_backend: z.enum(["sqlite", "postgres"]),
-  db_size_bucket: z.enum(["unknown", "<100MB", "100MB-1GB", "1-5GB", "5-10GB", "10-50GB", "50GB+"]),
-  replicas: z.number().int().min(1),
-  reverse_proxy: z.boolean(),
-});
+const TelemetryDeploymentSnapshotSchema = z.strictObject({ method: z.enum(["docker", "k8s", "pip", "bare"]), db_backend: z.enum(["sqlite", "postgres"]), db_size_bucket: z.string(), replicas: z.number().int().min(1), reverse_proxy: z.boolean() });
+const TelemetryAccountsSnapshotSchema = z.strictObject({ total: z.number().int().min(0), per_plan: z.record(z.string(), z.number().int().min(0)), per_status: z.record(z.string(), z.number().int().min(0)), workspace_accounts: z.boolean(), routing_policy: z.string(), limit_warmup_enabled: z.boolean(), egress_proxy_used: z.boolean() });
+const TelemetryRequestKindsSchema = z.strictObject({ responses: z.number(), chat: z.number(), images: z.number(), unknown: z.number() });
+const TelemetryTransportMixSchema = z.strictObject({ ws: z.number(), http_bridge: z.number() });
+const TelemetryServiceTierMixSchema = z.strictObject({ default: z.number(), flex: z.number(), priority: z.number() });
+const TelemetryUsageSnapshotSchema = z.strictObject({ requests: z.number().int().min(0), success_rate: z.number().min(0).max(1), tokens_input: z.number().int().min(0), tokens_output: z.number().int().min(0), tokens_cached_ratio: z.number().min(0).max(1), cost_usd_bucket: z.string(), request_kinds: TelemetryRequestKindsSchema, transport_mix: TelemetryTransportMixSchema, service_tier_mix: TelemetryServiceTierMixSchema, clients: z.record(z.string(), z.number()), clients_other_ratio: z.number().min(0).max(1), models: z.array(z.strictObject({ name: z.string(), share: z.number(), reasoning: z.record(z.string(), z.number()), avg_output_tokens_bucket: z.string() })), latency_ms_p50: z.number().int().min(0), ttft_ms_p50: z.number().int().min(0), ttft_ms_p95: z.number().int().min(0), rate_limit_429_ratio: z.number().min(0).max(1), top_upstream_errors: z.array(z.string()).max(5) });
+const TelemetryFeaturesSnapshotSchema = z.strictObject({ api_firewall: z.boolean(), quota_planner: z.boolean(), sticky_sessions: z.boolean(), conversation_archive: z.boolean(), automations: z.boolean(), fleet: z.boolean(), model_sources_count: z.number().int().min(0), api_keys_bucket: z.string(), prometheus: z.boolean(), otel: z.boolean(), dashboard_auth: z.boolean(), reset_credits: z.boolean(), image_api_used: z.boolean() });
+export const TelemetrySnapshotSchema = z.strictObject({ schema_version: z.literal(2), consent: z.enum(["undecided", "enabled"]), instance_id: z.string(), version: z.string(), python: z.string(), os: z.string(), arch: z.string(), uptime_hours: z.number().int().min(0), deploy: TelemetryDeploymentSnapshotSchema, accounts: TelemetryAccountsSnapshotSchema, usage_7d: TelemetryUsageSnapshotSchema, features: TelemetryFeaturesSnapshotSchema });
+const HistogramSchema = z.strictObject({ sample_count: z.number().int().min(0), buckets: z.record(z.string(), z.number().int().min(0)) });
+const DayEntrySchema = z.strictObject({ name: z.string(), requests: z.number().int().min(0), latency_ms: HistogramSchema, ttft_ms: HistogramSchema, tps: HistogramSchema });
+const DaySchema = z.strictObject({ schema_version: z.literal(2), instance_id: z.string(), utc_date: z.iso.date(), dimensions: z.strictObject({ models: z.array(DayEntrySchema), clients: z.array(DayEntrySchema), transport: z.array(DayEntrySchema), upstream_transport: z.array(DayEntrySchema), service_tier: z.array(DayEntrySchema), request_kinds: z.record(z.string(), z.number()), global: DayEntrySchema }), errors: z.strictObject({ upstream_error_class: z.record(z.string(), z.number()), failure_phase: z.record(z.string(), z.number()), http_status_class: z.record(z.string(), z.number()), outcomes: z.strictObject({ success: z.number(), error: z.number(), cancelled: z.number() }) }) });
+export const TelemetrySnapshotEnvelopeSchema = z.strictObject({ instance_id: z.string(), metrics: TelemetrySnapshotSchema, timestamp: z.iso.datetime({ offset: true }) });
+export const TelemetryDaySchema = DaySchema;
 
-const TelemetryPlanMixSnapshotSchema = z.strictObject({
-  plus: z.string(),
-  pro: z.string(),
-  team: z.string(),
-  free: z.string(),
-});
-
-const TelemetryAccountsSnapshotSchema = z.strictObject({
-  pool_bucket: z.string(),
-  plan_mix: TelemetryPlanMixSnapshotSchema,
-  workspace_accounts: z.boolean(),
-  routing_policy: z.string(),
-  limit_warmup_enabled: z.boolean(),
-  egress_proxy_used: z.boolean(),
-});
-
-const TelemetryRequestKindsSnapshotSchema = z.strictObject({
-  responses: z.number(),
-  chat: z.number(),
-  images: z.number(),
-  unknown: z.number(),
-});
-
-const TelemetryTransportMixSnapshotSchema = z.strictObject({
-  ws: z.number(),
-  http_bridge: z.number(),
-});
-
-const TelemetryServiceTierMixSnapshotSchema = z.strictObject({
-  default: z.number(),
-  flex: z.number(),
-  priority: z.number(),
-});
-
-const TelemetryModelUsageSnapshotSchema = z.strictObject({
-  name: z.string(),
-  share: z.number(),
-  reasoning: z.record(z.string(), z.number()),
-  avg_output_tokens_bucket: z.string(),
-});
-
-const TelemetryUsageSnapshotSchema = z.strictObject({
-  requests: z.number().int().min(0),
-  success_rate: z.number().min(0).max(1),
-  tokens_input: z.number().int().min(0),
-  tokens_output: z.number().int().min(0),
-  tokens_cached_ratio: z.number().min(0).max(1),
-  cost_usd_bucket: z.string(),
-  request_kinds: TelemetryRequestKindsSnapshotSchema,
-  transport_mix: TelemetryTransportMixSnapshotSchema,
-  service_tier_mix: TelemetryServiceTierMixSnapshotSchema,
-  clients: z.record(z.string(), z.number()),
-  clients_other_ratio: z.number().min(0).max(1),
-  models: z.array(TelemetryModelUsageSnapshotSchema),
-  latency_ms_p50: z.number().int().min(0),
-  ttft_ms_p50: z.number().int().min(0),
-  ttft_ms_p95: z.number().int().min(0),
-  rate_limit_429_ratio: z.number().min(0).max(1),
-  top_upstream_errors: z.array(z.string()).max(5),
-});
-
-const TelemetryFeaturesSnapshotSchema = z.strictObject({
-  api_firewall: z.boolean(),
-  quota_planner: z.boolean(),
-  sticky_sessions: z.boolean(),
-  conversation_archive: z.boolean(),
-  automations: z.boolean(),
-  fleet: z.boolean(),
-  model_sources_count: z.number().int().min(0),
-  api_keys_bucket: z.string(),
-  prometheus: z.boolean(),
-  otel: z.boolean(),
-  dashboard_auth: z.boolean(),
-  reset_credits: z.boolean(),
-  image_api_used: z.boolean(),
-});
-
-export const TelemetrySnapshotSchema = z.strictObject({
-  schema_version: z.literal(1),
-  consent: z.enum(["undecided", "enabled"]),
-  instance_id: z.string(),
-  version: z.string(),
-  python: z.string(),
-  os: z.string(),
-  arch: z.string(),
-  uptime_hours: z.number().int().min(0),
-  deploy: TelemetryDeploymentSnapshotSchema,
-  accounts: TelemetryAccountsSnapshotSchema,
-  usage_7d: TelemetryUsageSnapshotSchema,
-  features: TelemetryFeaturesSnapshotSchema,
-});
-
-// The exact body the instance would transmit; the consent dialog and the
-// settings preview render this envelope verbatim.
-export const TelemetrySnapshotEnvelopeSchema = z.strictObject({
-  instance_id: z.string(),
-  metrics: TelemetrySnapshotSchema,
-  timestamp: z.iso.datetime({ offset: true }),
-});
-
+const TelemetryPreviewSchema = z.strictObject({ heartbeat: TelemetrySnapshotEnvelopeSchema, day: DaySchema });
 export const TelemetryConsentSchema = z.object({
   state: TelemetryConsentStateSchema,
   source: TelemetryConsentSourceSchema,
   active: z.boolean(),
-  // Present only when the backend built a snapshot: undecided consent with
-  // default source (the dialog case) or an explicit include_preview request.
-  preview: TelemetrySnapshotEnvelopeSchema.nullable(),
+  notice_version: z.number().int().default(2),
+  preview: TelemetryPreviewSchema.nullable(),
 });
 
 export const TelemetryConsentUpdateRequestSchema = z.object({

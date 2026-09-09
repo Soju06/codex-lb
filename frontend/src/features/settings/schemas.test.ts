@@ -499,7 +499,7 @@ describe("TelemetrySnapshotEnvelopeSchema", () => {
 
     expect(parsed.instance_id).toBe("00000000-0000-4000-8000-000000000000");
     expect(parsed.timestamp).toBe("2026-08-06T00:00:00Z");
-    expect(parsed.metrics.schema_version).toBe(1);
+    expect(parsed.metrics.schema_version).toBe(2);
     expect(parsed.metrics.deploy.method).toBe("docker");
     expect(parsed.metrics.usage_7d.request_kinds.unknown).toBe(0);
     expect(parsed.metrics.usage_7d.models[0]?.reasoning).toEqual({ high: 0.5, medium: 0.5 });
@@ -514,7 +514,7 @@ describe("TelemetrySnapshotEnvelopeSchema", () => {
       ["metrics"],
       ["metrics", "deploy"],
       ["metrics", "accounts"],
-      ["metrics", "accounts", "plan_mix"],
+      ["metrics", "accounts", "per_plan"],
       ["metrics", "usage_7d"],
       ["metrics", "usage_7d", "request_kinds"],
       ["metrics", "usage_7d", "transport_mix"],
@@ -545,7 +545,7 @@ describe("TelemetrySnapshotEnvelopeSchema", () => {
     expect(TelemetrySnapshotEnvelopeSchema.safeParse(missingTimestamp).success).toBe(false);
 
     const missingNested = structuredClone(createTelemetrySnapshotEnvelope());
-    delete (missingNested.metrics.usage_7d.request_kinds as Record<string, unknown>).unknown;
+    delete (missingNested!.heartbeat.metrics.usage_7d.request_kinds as Record<string, unknown>).unknown;
     expect(TelemetrySnapshotEnvelopeSchema.safeParse(missingNested).success).toBe(false);
   });
 });
@@ -558,7 +558,7 @@ describe("TelemetryConsentSchema", () => {
       active: true,
       preview: createTelemetrySnapshotEnvelope(),
     });
-    expect(withPreview.preview?.metrics.schema_version).toBe(1);
+    expect(withPreview.preview?.heartbeat.metrics.schema_version).toBe(2);
 
     const withoutPreview = TelemetryConsentSchema.parse({
       state: "enabled",

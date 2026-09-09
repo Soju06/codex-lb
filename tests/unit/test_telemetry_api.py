@@ -35,10 +35,10 @@ async def test_consent_api_get_preview_and_put_persists_without_restart(
     assert initial["state"] == "undecided"
     assert initial["source"] == "default"
     assert initial["active"] is True
-    assert set(initial["preview"]) == {"instance_id", "metrics", "timestamp"}
-    assert initial["preview"]["metrics"]["schema_version"] == 1
+    assert set(initial["preview"]) == {"heartbeat", "day"}
+    assert initial["preview"]["heartbeat"]["metrics"]["schema_version"] == 2
     assert initial["preview"]["metrics"]["consent"] == "undecided"
-    assert initial["preview"]["instance_id"] == initial["preview"]["metrics"]["instance_id"]
+    assert initial["preview"]["heartbeat"]["instance_id"] == initial["preview"]["heartbeat"]["metrics"]["instance_id"]
 
     response = await async_client.put("/api/settings/telemetry", json={"enabled": False})
     assert response.status_code == 200
@@ -73,8 +73,8 @@ async def test_consent_api_builds_decided_preview_only_when_requested(
     assert response.status_code == 200
     payload = response.json()
     assert payload["state"] == "disabled"
-    assert payload["preview"]["instance_id"] == payload["preview"]["metrics"]["instance_id"]
-    assert payload["preview"]["metrics"]["consent"] == "enabled"
+    assert payload["preview"]["heartbeat"]["instance_id"] == payload["preview"]["heartbeat"]["metrics"]["instance_id"]
+    assert payload["preview"]["heartbeat"]["metrics"]["consent"] == "enabled"
 
 
 @pytest.mark.asyncio

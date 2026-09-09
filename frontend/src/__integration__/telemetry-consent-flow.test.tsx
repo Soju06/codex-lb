@@ -29,7 +29,7 @@ describe("telemetry consent flow integration", () => {
     // The dialog renders the full transmitted envelope, not just the metrics.
     expect(dialog).toHaveTextContent('"instance_id": "00000000-0000-4000-8000-000000000000"');
     expect(dialog).toHaveTextContent('"timestamp": "2026-08-06T00:00:00Z"');
-    expect(dialog).toHaveTextContent('"schema_version": 1');
+    expect(dialog).toHaveTextContent('"schema_version": 2');
 
     await user.click(screen.getByRole("button", { name: "Disable telemetry" }));
 

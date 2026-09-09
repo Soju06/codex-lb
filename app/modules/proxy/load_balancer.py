@@ -1414,6 +1414,7 @@ class LoadBalancer:
         stream_reserve_slots: int = 0,
         service_tier: str | None = None,
         observe_only: bool = False,
+        dashboard_settings: object | None = None,
     ) -> AccountSelection:
         outcome = await run_opportunistic_admission(
             self,
@@ -1432,6 +1433,8 @@ class LoadBalancer:
                 record_account_cap_rejection=_record_account_cap_rejection,
                 build_states=_build_states,
                 observe_only=observe_only,
+                # C2-3 resilience toggles: from the caller's dashboard snapshot.
+                soft_drain_enabled=resolve_resilience_toggles(dashboard_settings).soft_drain_enabled,
             ),
         )
         return AccountSelection(
@@ -1578,6 +1581,7 @@ class LoadBalancer:
         *,
         required_account_id: str | None,
         redact_sensitive_details: bool,
+        soft_drain_enabled: bool | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]:
         self._reclaim_stale_account_leases_locked(
             redact_sensitive_details=redact_sensitive_details,
@@ -1593,7 +1597,13 @@ class LoadBalancer:
             routing_policy_override=selection_inputs.routing_policy_override,
             ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
             encryptor=self._encryptor,
-            soft_drain_enabled=getattr(selection_inputs, "soft_drain_enabled", None),  # C2-3 resilience toggles
+            # C2-3 resilience toggles: an explicit value (opportunistic admission)
+            # wins; selection carries it on its inputs.
+            soft_drain_enabled=(
+                soft_drain_enabled
+                if soft_drain_enabled is not None
+                else getattr(selection_inputs, "soft_drain_enabled", None)
+            ),
         )
         if required_account_id is None:
             return states, account_map

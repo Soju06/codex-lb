@@ -72,6 +72,7 @@ class StatesBuilder(Protocol):
         routing_policy_override: str | None = None,
         ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
         encryptor: TokenEncryptor | None = None,
+        soft_drain_enabled: bool | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
 
@@ -96,6 +97,7 @@ class OpportunisticAdmissionOwner(Protocol):
         *,
         required_account_id: str | None,
         redact_sensitive_details: bool,
+        soft_drain_enabled: bool | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
     def _detached_runtime_snapshot(self) -> dict[str, RuntimeState]: ...
@@ -178,6 +180,9 @@ class OpportunisticAdmissionRequest:
     record_account_cap_rejection: AccountCapRejectionCallback
     build_states: StatesBuilder
     observe_only: bool = False
+    # C2-3 resilience toggles: dashboard soft-drain value resolved by the
+    # caller's snapshot; None inherits the env alias / default.
+    soft_drain_enabled: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +198,7 @@ def _observe_selection_states(
     selection_inputs: SelectionInputsProtocol,
     *,
     build_states: StatesBuilder,
+    soft_drain_enabled: bool | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     """Build the states ordinary selection would build, on a detached copy of the runtime.
 
@@ -214,6 +220,7 @@ def _observe_selection_states(
         routing_policy_override=selection_inputs.routing_policy_override,
         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
         encryptor=owner._encryptor,
+        soft_drain_enabled=soft_drain_enabled,
     )
 
 
@@ -261,7 +268,12 @@ async def run_opportunistic_admission(
             error_code=selection_inputs.error_code,
         )
     if request.observe_only:
-        states, account_map = _observe_selection_states(owner, selection_inputs, build_states=request.build_states)
+        states, account_map = _observe_selection_states(
+            owner,
+            selection_inputs,
+            build_states=request.build_states,
+            soft_drain_enabled=request.soft_drain_enabled,
+        )
         selection_states, cap_closed = _account_cap_closed(request, states)
         if cap_closed is not None:
             return cap_closed
@@ -271,6 +283,7 @@ async def run_opportunistic_admission(
                 selection_inputs,
                 required_account_id=None,
                 redact_sensitive_details=False,
+                soft_drain_enabled=request.soft_drain_enabled,
             )
             selection_states, cap_closed = _account_cap_closed(request, states)
             if cap_closed is not None:

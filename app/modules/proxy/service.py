@@ -2041,6 +2041,7 @@ class ProxyService(
     ) -> AccountSelection:
         settings = await get_settings_cache().get()
         return await self._load_balancer.check_opportunistic_admission(
+            dashboard_settings=settings,  # C2-3 resilience toggles
             model=model,
             service_tier=service_tier,
             observe_only=observe_only,

@@ -18,9 +18,11 @@ from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_perman
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
@@ -1157,6 +1159,9 @@ class AutomationsService:
                     reasoning=ResponsesReasoning(effort=wire_reasoning_effort) if wire_reasoning_effort else None,
                 )
                 request_started_at = time.monotonic()
+                # C2-3 resilience toggles: background job, no request snapshot
+                # to inherit; take one so the breaker gate follows the dashboard.
+                bind_resilience_toggles(await get_settings_cache().get())
                 compact_response = await asyncio.wait_for(
                     core_compact_responses(
                         ping_request,

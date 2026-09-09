@@ -996,3 +996,30 @@ async def test_refresh_cycles_follow_the_dashboard_toggle_without_restart(monkey
     toggle["enabled"] = True
     await scheduler._refresh_once()
     assert cycles == 2
+
+
+@pytest.mark.asyncio
+async def test_run_loop_survives_a_transient_toggle_read_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M2: a flaky settings read must not kill the loop task (a dead task also aborts shutdown)."""
+    reads = 0
+    scheduler: RateLimitResetCreditsRefreshScheduler
+
+    async def flaky_dashboard_enabled() -> bool:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("database is briefly unavailable")
+        scheduler._stop.set()
+        return False
+
+    scheduler = RateLimitResetCreditsRefreshScheduler(
+        interval_seconds=0, enabled=True, dashboard_enabled=flaky_dashboard_enabled
+    )
+
+    with caplog.at_level("ERROR"):
+        await scheduler._run_loop()
+
+    assert reads == 2
+    assert "Reset credits refresh cycle failed" in caplog.text

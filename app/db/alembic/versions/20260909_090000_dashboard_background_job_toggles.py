@@ -8,7 +8,7 @@ code default, keep applying until an operator sets a value in the dashboard
 (configuration-tiers; slop-removal campaign 0908, M2).
 
 Revision ID: 20260909_090000_dashboard_background_job_toggles
-Revises: 20260909_100000_dashboard_codex_prewarm
+Revises: 20260909_110000_model_context_window_overrides
 Create Date: 2026-09-09
 """
 
@@ -19,7 +19,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260909_090000_dashboard_background_job_toggles"
-down_revision = "20260909_100000_dashboard_codex_prewarm"
+down_revision = "20260909_110000_model_context_window_overrides"
 branch_labels = None
 depends_on = None
 

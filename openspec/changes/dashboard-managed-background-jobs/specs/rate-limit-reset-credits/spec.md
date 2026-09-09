@@ -2,7 +2,7 @@
 
 ### Requirement: Reset credit polling can be disabled
 
-The dashboard setting `rate_limit_reset_credits_refresh_enabled` (a nullable `dashboard_settings` column; NULL inherits the deprecated `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` environment variable, then the default `true`) SHALL enable or disable background reset-credit polling. It SHALL be exposed with provenance on `GET`/`PUT /api/settings` (Settings → Advanced → Background jobs). The polling loop SHALL always start; each refresh cycle SHALL read the effective value from the dashboard-settings snapshot before taking its lock and SHALL skip the cycle (no upstream fetch, no automatic redemption) while it is `false`, so a change applies on the next cycle on every replica without a restart. Because the refresh loop is the sole driver of automatic reset-credit redemption, disabling polling SHALL also disable automatic redemption; when polling is effectively disabled while the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is enabled, the system SHALL log a configuration-conflict warning at startup naming both settings. The dashboard settings update SHALL reject a request that newly enables `auto_redeem_reset_credits_before_expiry` while the polling toggle would be effectively `false` after that same update — the gate SHALL evaluate the proposed effective value (a value in the request, else the inherited value when the request clears it, else the current effective value) — with a bad-request error naming the polling toggle; enabling both in one request SHALL succeed, and an already-persisted opt-in SHALL remain readable and re-savable so unrelated settings edits are not blocked.
+The dashboard setting `rate_limit_reset_credits_refresh_enabled` (a nullable `dashboard_settings` column; NULL inherits the deprecated `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` environment variable, then the default `true`) SHALL enable or disable background reset-credit polling. It SHALL be exposed with provenance on `GET`/`PUT /api/settings` (Settings → Advanced → Background jobs). The polling loop SHALL always start; each refresh cycle SHALL read the effective value from the dashboard-settings snapshot before taking its lock and SHALL skip the cycle (no upstream fetch, no automatic redemption) while it is `false`, so a change applies on the next cycle on every replica without a restart. Because the refresh loop is the sole driver of automatic reset-credit redemption, disabling polling SHALL also disable automatic redemption; when polling is effectively disabled while the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is enabled, the system SHALL log a configuration-conflict warning at startup naming both settings. The dashboard settings update SHALL reject, with a bad-request error naming the polling toggle, any request that would newly produce the unrunnable pair "auto-redeem enabled, polling effectively disabled" — both the request that newly enables `auto_redeem_reset_credits_before_expiry` and the request that disables the polling toggle while the opt-in stays enabled. The gate SHALL evaluate the proposed effective values (a value in the request, else the inherited value when the request clears it, else the current effective value). Setting both consistently in one request (both on, or both off) SHALL succeed, and a payload that only re-saves an already inconsistent pair SHALL remain accepted so unrelated settings edits are not blocked.
 
 #### Scenario: Operator disables background polling
 
@@ -27,6 +27,15 @@ The dashboard setting `rate_limit_reset_credits_refresh_enabled` (a nullable `da
 - **WHEN** a dashboard settings update sets `auto_redeem_reset_credits_before_expiry` to `true` without also enabling the polling toggle
 - **THEN** the update is rejected with a bad-request error naming the polling toggle
 - **AND** the persisted setting remains `false`
+
+#### Scenario: Disabling polling is rejected while auto-redeem is enabled
+
+- **GIVEN** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is `true`
+- **AND** `rate_limit_reset_credits_refresh_enabled` is effectively `true`
+- **WHEN** a dashboard settings update sets `rate_limit_reset_credits_refresh_enabled` to `false` without also turning the opt-in off
+- **THEN** the update is rejected with the same bad-request error naming the polling toggle
+- **AND** the polling toggle remains effectively `true`
+- **AND** turning both off in one request succeeds
 
 #### Scenario: Enabling polling and auto-redeem in one request succeeds
 

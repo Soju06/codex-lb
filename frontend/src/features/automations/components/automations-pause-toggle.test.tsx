@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AutomationsPauseToggle } from "@/features/automations/components/automations-pause-toggle";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings } from "@/features/settings/schemas";
 import { createDashboardSettings } from "@/test/mocks/factories";
@@ -21,6 +22,7 @@ describe("AutomationsPauseToggle", () => {
   beforeEach(() => {
     mutateAsync.mockReset();
     mutateAsync.mockResolvedValue(undefined);
+    useAuthStore.setState({ canWrite: true });
   });
 
   it("renders nothing until the settings are loaded", () => {
@@ -66,5 +68,20 @@ describe("AutomationsPauseToggle", () => {
     const payload = buildSettingsUpdateRequest(settingsData, { automationsSchedulerEnabled: null });
     expect(payload.automationsSchedulerEnabled).toBeNull();
     expect(mutateAsync).toHaveBeenCalledWith(payload);
+  });
+
+  it("disables the switch and the reset action for a read-only viewer", () => {
+    settingsData = createDashboardSettings({
+      automationsSchedulerEnabled: false,
+      provenance: { automations_scheduler_enabled: { source: "dashboard", envValue: true, default: true } },
+    });
+    useAuthStore.setState({ canWrite: false });
+    render(<AutomationsPauseToggle />);
+
+    // The state stays readable (the badge and the paused copy), but writing the
+    // shared setting needs write access, so neither control can start a PUT.
+    expect(screen.getByRole("switch", { name: "Pause all automations" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reset to inherited" })).toBeDisabled();
+    expect(screen.getByText("Paused")).toBeInTheDocument();
   });
 });

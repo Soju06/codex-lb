@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from app.core.config.background_jobs import BACKGROUND_JOB_SETTINGS, auth_guardian_blocked_by_topology
+from app.core.config.background_jobs import BACKGROUND_JOB_SETTINGS
 from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 
 # Re-exported: the resolver lives in ``app.core.config.inheritable`` so hot
@@ -443,12 +443,13 @@ def _resolve_environment_toggle(row: DashboardSettings, name: str) -> Inheritabl
 
 
 def _auth_guardian_blocked_by_topology() -> bool:
-    # M2 background jobs: startup-settings fakes in tests may lack the topology
-    # fields; only a real ``Settings`` can describe the ring.
+    # M2 background jobs: read the two topology fields defensively, the way
+    # ``_resolve_environment_toggle`` reads its field, so a stub startup-settings
+    # object without them reads as "not blocked" instead of raising.
     startup = get_settings()
-    if not isinstance(startup, Settings):
-        return False
-    return auth_guardian_blocked_by_topology(startup)
+    ring = getattr(startup, "http_responses_session_bridge_instance_ring", ())
+    leader_election_enabled = bool(getattr(startup, "leader_election_enabled", True))
+    return len(ring) > 1 and not leader_election_enabled
 
 
 def warn_environment_shadowed_by_dashboard(row: DashboardSettings, settings: Settings | None = None) -> list[str]:

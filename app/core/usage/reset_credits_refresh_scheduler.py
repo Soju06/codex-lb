@@ -126,7 +126,13 @@ class RateLimitResetCreditsRefreshScheduler:
         if await self._wait_or_stop(self._startup_delay_seconds()):
             return
         while not self._stop.is_set():
-            await self._refresh_once()
+            # The whole cycle, including the settings read that decides whether
+            # polling runs, is guarded: a transient database error must not kill
+            # the loop task (a dead task also aborts the shutdown stop chain).
+            try:
+                await self._refresh_once()
+            except Exception:
+                logger.exception("Reset credits refresh cycle failed")
             if await self._wait_or_stop(self._tick_delay_seconds()):
                 return
 

@@ -26,7 +26,7 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning
 from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
@@ -777,12 +777,17 @@ class AutomationsService:
             )
         raise RuntimeError("Failed to claim manual automation run")
 
-    async def run_due_jobs(self, *, now_utc: datetime | None = None) -> int:
+    async def run_due_jobs(
+        self, *, now_utc: datetime | None = None, dashboard_settings: DashboardSettings | None = None
+    ) -> int:
         # Scheduler entry: bind the dashboard snapshot so the compact budget the
         # runs use is the dashboard value (C2-1), as it is on the request path.
-        snapshot = await get_settings_cache().get()
-        # M2 background jobs: the same snapshot carries the pause toggle; a
-        # paused scheduler dispatches nothing (scheduled cycles or manual runs).
+        # M2 background jobs: the scheduler took that snapshot before its lock
+        # and passes it in, so the locked body never awaits the settings cache;
+        # only callers without one (tests, ad-hoc runs) read it here.
+        snapshot = dashboard_settings if dashboard_settings is not None else await get_settings_cache().get()
+        # The same snapshot carries the pause toggle; a paused scheduler
+        # dispatches nothing (scheduled cycles or manual runs).
         if not resolve_background_job_toggle(snapshot, "automations_scheduler_enabled"):
             return 0
         with dashboard_overrides_bound(snapshot):

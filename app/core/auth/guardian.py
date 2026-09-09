@@ -142,7 +142,9 @@ class AuthGuardianScheduler:
             logger.debug("Auth Guardian skipped refresh pass: disabled in the dashboard settings")
             return
         if self.topology_blocked:
-            logger.warning(
+            # The builder already logged this once at WARNING; repeating it
+            # every pass for a static condition would only be noise.
+            logger.debug(
                 "Auth Guardian skipped refresh pass: multi-replica deployment without leader election; "
                 "set CODEX_LB_LEADER_ELECTION_ENABLED=true to run it leader-gated"
             )

@@ -329,16 +329,19 @@ async def test_auth_guardian_dashboard_toggle_cannot_override_the_topology_gate(
         leader_election_enabled=leader_election_enabled,
     )
 
-    with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
+    with caplog.at_level(logging.DEBUG, logger="app.core.auth.guardian"):
         await scheduler._refresh_once()
 
     assert calls == expected_calls
-    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    # The builder logs the static topology block once at WARNING; a pass that
+    # skips because of it only says so at DEBUG (a 6-hourly WARNING for a
+    # condition that cannot change without a restart is noise).
+    assert [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING] == []
+    skips = [record.getMessage() for record in caplog.records if "without leader election" in record.getMessage()]
     if topology_blocked:
-        assert len(warnings) == 1
-        assert "without leader election" in warnings[0]
+        assert len(skips) == 1
     else:
-        assert warnings == []
+        assert skips == []
 
 
 @pytest.mark.asyncio

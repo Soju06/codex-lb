@@ -2697,3 +2697,60 @@ async def test_dashboard_codex_prewarm_migration_upgrade_and_downgrade(tmp_path)
         assert column in await _dashboard_settings_columns(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_background_job_toggles_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the three nullable background-job toggle columns to
+    ``dashboard_settings`` (M2 background jobs), downgrade drops them, and a
+    final walk to head proves the revision sits on a single-head graph. The
+    parent is read from the script directory so a re-chain at merge time does
+    not need a test edit."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-background-job-toggles.sqlite'}"
+    toggles_revision = "20260909_090000_dashboard_background_job_toggles"
+    toggle_columns = {
+        "auth_guardian_enabled",
+        "automations_scheduler_enabled",
+        "rate_limit_reset_credits_refresh_enabled",
+    }
+    config = _build_alembic_config(db_url)
+    parent_revision = ScriptDirectory.from_config(config).get_revision(toggles_revision).down_revision
+    assert isinstance(parent_revision, str)
+
+    async def _settings_columns(engine) -> set[str]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            return {row[1] for row in rows}
+
+    async def _toggle_column_shape(engine) -> dict[str, tuple[int, object]]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            # (notnull, dflt_value) per PRAGMA table_info.
+            return {row[1]: (row[3], row[4]) for row in rows if row[1] in toggle_columns}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert not (toggle_columns & await _settings_columns(engine))
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, toggles_revision, bootstrap_legacy=False))
+        assert toggle_columns <= await _settings_columns(engine)
+
+        # "Inherit" is the migrated state: the columns must be nullable with no
+        # server default, so an existing row keeps reading the environment alias
+        # instead of being seeded from it.
+        assert await _toggle_column_shape(engine) == {name: (0, None) for name in toggle_columns}
+
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert not (toggle_columns & await _settings_columns(engine))
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert toggle_columns <= await _settings_columns(engine)
+    finally:
+        await engine.dispose()

@@ -1879,6 +1879,29 @@ async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(a
 
 
 @pytest.mark.asyncio
+async def test_disabling_polling_is_rejected_while_auto_redeem_is_on(async_client):
+    """M2 background jobs: the gate is symmetric — the other direction cannot create the same dead state."""
+    opt_in = await async_client.put("/api/settings", json={"autoRedeemResetCreditsBeforeExpiry": True})
+    assert opt_in.status_code == 200
+    assert opt_in.json()["autoRedeemResetCreditsBeforeExpiry"] is True
+
+    response = await async_client.put("/api/settings", json={"rateLimitResetCreditsRefreshEnabled": False})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "reset_credit_polling_disabled"
+    current = await async_client.get("/api/settings")
+    assert current.json()["rateLimitResetCreditsRefreshEnabled"] is True
+
+    # Turning both off in one request is consistent, so it is accepted.
+    both_off = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": False, "rateLimitResetCreditsRefreshEnabled": False},
+    )
+    assert both_off.status_code == 200
+    assert both_off.json()["rateLimitResetCreditsRefreshEnabled"] is False
+
+
+@pytest.mark.asyncio
 async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disabled(async_client):
     async with SessionLocal() as session:
         await session.execute(

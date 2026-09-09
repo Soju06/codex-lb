@@ -891,6 +891,13 @@ def _proposed_reset_credit_polling_enabled(payload: DashboardSettingsUpdateReque
     return bool(resolve_inheritable(None, inherited.env_value, inherited.default).value)
 
 
+def _proposed_auto_redeem_enabled(payload: DashboardSettingsUpdateRequest, current) -> bool:
+    """M2 background jobs: the auto-redeem opt-in as it will be after this update."""
+    if payload.auto_redeem_reset_credits_before_expiry is None:
+        return bool(current.auto_redeem_reset_credits_before_expiry)
+    return bool(payload.auto_redeem_reset_credits_before_expiry)
+
+
 def _timeout_field(payload: DashboardSettingsUpdateRequest, name: str) -> tuple[float | None, bool]:
     """(value to store, clear flag) for one tri-state timeout field of ``payload``."""
     if name not in payload.model_fields_set:
@@ -935,20 +942,28 @@ async def update_settings(
         current.subscription_overflow_drain_until,
         utcnow(),
     )
-    if (
-        payload.auto_redeem_reset_credits_before_expiry
-        and not current.auto_redeem_reset_credits_before_expiry
-        and not _proposed_reset_credit_polling_enabled(payload, current)
-    ):
-        # The reset-credit refresh loop is the sole driver of automatic
-        # redemption; accepting the opt-in while polling is disabled would
-        # persist a setting that can never run. The gate reads the effective
-        # (dashboard-aware) value, including the value this same request sets.
-        raise DashboardBadRequestError(
-            "autoRedeemResetCreditsBeforeExpiry requires reset-credit polling; "
-            "enable rateLimitResetCreditsRefreshEnabled (Settings -> Advanced -> Background jobs) first",
-            code="reset_credit_polling_disabled",
+    # The reset-credit refresh loop is the sole driver of automatic redemption,
+    # so "auto-redeem on, polling off" is a setting that can never run. The gate
+    # gets the effective (dashboard-aware) values this request would leave
+    # behind and is symmetric: it refuses both the request that turns the
+    # opt-in on and the one that turns polling off. A payload that only
+    # re-saves an already inconsistent pair is still accepted, so unrelated
+    # settings edits are never blocked by pre-existing state.
+    proposed_polling_enabled = _proposed_reset_credit_polling_enabled(payload, current)
+    proposed_auto_redeem_enabled = _proposed_auto_redeem_enabled(payload, current)
+    if proposed_auto_redeem_enabled and not proposed_polling_enabled:
+        enables_auto_redeem = not current.auto_redeem_reset_credits_before_expiry
+        disables_polling = (
+            "rate_limit_reset_credits_refresh_enabled" in payload.model_fields_set
+            and current.rate_limit_reset_credits_refresh_enabled
         )
+        if enables_auto_redeem or disables_polling:
+            raise DashboardBadRequestError(
+                "autoRedeemResetCreditsBeforeExpiry requires reset-credit polling; "
+                "keep rateLimitResetCreditsRefreshEnabled on (Settings -> Advanced -> Background jobs), "
+                "or turn the opt-in off in the same request",
+                code="reset_credit_polling_disabled",
+            )
     try:
         legacy_threshold_provided = payload.sticky_reallocation_budget_threshold_pct is not None
         primary_threshold_provided = payload.sticky_reallocation_primary_budget_threshold_pct is not None

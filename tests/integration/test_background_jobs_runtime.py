@@ -93,7 +93,8 @@ async def test_automations_tick_follows_dashboard_pause_without_restart(async_cl
     assert get_settings().automations_scheduler_enabled is True
     body_runs = 0
 
-    async def _counting_body(self: AutomationsScheduler) -> None:
+    async def _counting_body(self: AutomationsScheduler, dashboard_settings) -> None:
+        # The tick threads its pre-lock snapshot into the leader-gated body.
         nonlocal body_runs
         body_runs += 1
 

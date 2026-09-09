@@ -505,6 +505,11 @@ async def test_settings_data_resolves_background_job_toggles_with_provenance(mon
         http_responses_session_bridge_instance_ring=["pod-a", "pod-b"],
     )
     monkeypatch.setattr(settings_service_module, "get_settings", lambda: startup)
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
     service = SettingsService(cast(SettingsRepository, _Repository()))
 
     data = await service.get_settings()

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import time
 from unittest.mock import MagicMock
 
@@ -844,8 +845,11 @@ async def test_stream_safety_policy_rejection_keeps_account_health_and_original_
     async_client,
     monkeypatch,
     status_code,
+    caplog,
 ):
     """A routed policy block is request-scoped and must not poison its account."""
+    caplog.set_level(logging.INFO, logger=proxy_module.logger.name)
+    caplog.clear()
     imported_account_id = await _import_account(
         async_client,
         "acc_safety_policy",
@@ -898,6 +902,7 @@ async def test_stream_safety_policy_rejection_keeps_account_health_and_original_
             "message": _SAFETY_POLICY_REJECTION_MESSAGE,
         }
         assert len(seen_account_ids) == 1, "a non-retryable policy block must not fan out"
+        assert "Skipped account error penalty for account-neutral request rejection" in caplog.text
     elif status_code == 400:
         assert response_body is not None
         assert response_body["error"]["code"] == "misalignment_policy_violation"

@@ -139,10 +139,11 @@ Interpretation:
 
 ## Step 3: Verify `Codex CLI` Through Local `codex-lb`
 
-Start a local proxy instance on a spare port:
+Start a local proxy instance on a spare port (from a `codex-lb` checkout; the
+background usage/model-registry loops may run and do not affect the probe):
 
 ```bash
-cd /home/egor/services/codex-lb-defin85 && env CODEX_LB_USAGE_REFRESH_ENABLED=false CODEX_LB_MODEL_REGISTRY_ENABLED=false .venv/bin/python -m app.cli --host 127.0.0.1 --port 2460
+.venv/bin/python -m app.cli --host 127.0.0.1 --port 2460
 ```
 
 Prepare an isolated `HOME` for the CLI:

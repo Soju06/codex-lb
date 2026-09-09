@@ -15,6 +15,6 @@
 
 ## 3. Verification
 
-- [x] 3.1 Unit: resolver states (NULL→env, NULL+env unset→default, dashboard wins both ways), env fallback before the cache loaded, grep gate on the call sites, service provenance, telemetry effective value. Integration: API round trip (default → dashboard → cleared/env → unchanged on omit, column stays NULL, directory read-only), audit event asserted on enable and on clear-to-off with actor, enable → next record archived / disable → no new record without a restart, migration upgrade/downgrade.
+- [x] 3.1 Unit: resolver states (NULL→env, NULL+env unset→default, dashboard wins both ways), env fallback before the cache loaded, grep gate on the call sites, service provenance, telemetry effective value. Integration: API round trip (default → dashboard → cleared/env → unchanged on omit, column stays NULL, directory read-only), audit event asserted on enable and on clear-to-off with actor, enable → next record archived / disable → no new record without a restart, migration upgrade/downgrade, guest `GET /api/settings` redacts the directory.
 - [x] 3.2 Frontend: cannot enable without confirming, confirm sends `true`, cancel sends nothing, off is immediate, reset blocked when the env alias would enable, page mock; i18n parity.
 - [x] 3.3 `make lint`, `uv run ty check`, `make migration-check`, frontend lint/typecheck/vitest, simplicity budgets, `openspec validate dashboard-managed-conversation-archive --strict`, `docs/reference/settings.md` regenerated.

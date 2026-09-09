@@ -28,7 +28,7 @@ None.
 
 ## Impact
 
-- Schema: alembic `20260909_010000_dashboard_timeout_settings` (seven nullable `FLOAT` columns; downgrade drops them).
+- Schema: alembic `20260909_040000_dashboard_timeout_settings` (seven nullable `FLOAT` columns; downgrade drops them).
 - Code: `app/core/config/dashboard_overrides.py` (registry, request-scoped overlay), `app/core/middleware/dashboard_overrides.py`, `app/modules/settings/{service,schemas,api,repository}.py`, `app/modules/proxy/service.py` (settings facade), the direct `get_settings()` timeout consumers in `app/core/clients/{proxy,proxy_websocket,files}.py`, `app/modules/proxy/{api,load_balancer,http_bridge_forwarding}.py`, `app/modules/proxy/_service/{warmup,realtime_live}.py`, `app/modules/model_sources/forwarding.py`, `app/modules/automations/{service,repository}.py`, `app/main.py`; `app/core/timeout_invariants.py` (three connect-within-budget rules).
 - API: additive fields on `GET`/`PUT /api/settings`; a new `400` code `timeout_invariant_violation`.
 - Operators: the seven `CODEX_LB_*` variables keep working as fallbacks for one release; the dashboard value wins once set.

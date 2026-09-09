@@ -2,7 +2,7 @@
 
 ## 1. Backend
 
-- [x] 1.1 Alembic `20260909_010000_dashboard_timeout_settings`: seven nullable `FLOAT` columns on `dashboard_settings` (SQLite batch + PostgreSQL), downgrade drops them.
+- [x] 1.1 Alembic `20260909_040000_dashboard_timeout_settings`: seven nullable `FLOAT` columns on `dashboard_settings` (SQLite batch + PostgreSQL), downgrade drops them.
 - [x] 1.2 ORM columns, `DashboardSettingsData` effective fields, `DashboardSettingsUpdateData` tri-state fields, repository `update()` value/clear pairs, `_ENVIRONMENT_INHERITABLE_SETTINGS` extended so `provenance` covers the seven settings.
 - [x] 1.3 `DashboardSettingsResponse` / `DashboardSettingsUpdateRequest` fields; `PUT` evaluates `find_timeout_invariant_violations` on the effective values before/after and rejects introduced violations with `timeout_invariant_violation`; three `upstream-connect-within-*-budget` rules.
 - [x] 1.4 `app/core/config/dashboard_overrides.py` + `DashboardOverridesMiddleware`; proxy service `get_settings()` facade applies the overlay; direct `get_settings()` timeout consumers switched; warmup / automation schedulers bind the snapshot; bridge advertise wait uses `effective_settings`.

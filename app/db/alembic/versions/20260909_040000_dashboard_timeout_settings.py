@@ -8,8 +8,8 @@ fields they override (slop-removal C2-1): ``upstream_connect_timeout_seconds``,
 ``sse_keepalive_interval_seconds``. NULL means "inherit the environment value
 (or the code default)"; the environment is never copied into the column.
 
-Revision ID: 20260909_010000_dashboard_timeout_settings
-Revises: 20260908_020000_merge_overflow_transport_heads
+Revision ID: 20260909_040000_dashboard_timeout_settings
+Revises: 20260909_030000_dashboard_resilience_toggle_settings
 Create Date: 2026-09-09
 """
 
@@ -19,8 +19,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260909_010000_dashboard_timeout_settings"
-down_revision = "20260908_020000_merge_overflow_transport_heads"
+revision = "20260909_040000_dashboard_timeout_settings"
+down_revision = "20260909_030000_dashboard_resilience_toggle_settings"
 branch_labels = None
 depends_on = None
 

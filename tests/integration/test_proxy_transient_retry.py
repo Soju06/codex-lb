@@ -899,6 +899,7 @@ async def test_stream_safety_policy_rejection_keeps_account_health_and_original_
         }
         assert len(seen_account_ids) == 1, "a non-retryable policy block must not fan out"
     elif status_code == 400:
+        assert response_body is not None
         assert response_body["error"]["code"] == "misalignment_policy_violation"
         assert response_body["error"]["message"] == _SAFETY_POLICY_REJECTION_MESSAGE
 

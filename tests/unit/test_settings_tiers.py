@@ -45,9 +45,11 @@ def test_every_live_t3_field_has_a_dashboard_home_or_migrating_entry() -> None:
 
 
 def test_live_dashboard_homes_are_not_duplicated_in_migrating() -> None:
-    # A field is either migrating (env-only) or already homed; never both.
-    assert set(DASHBOARD_HOMES) & set(MIGRATING) == set()
-    assert all(SETTING_TIERS.get(name) == "T3" for name in DASHBOARD_HOMES)
+    # A live field is either migrating (env-only) or already homed; never both.
+    # Entries for removed fields are left to the checker's stale-entry warning.
+    live_homes = {name for name in DASHBOARD_HOMES if name in Settings.model_fields}
+    assert live_homes & set(MIGRATING) == set()
+    assert all(SETTING_TIERS.get(name) == "T3" for name in live_homes)
 
 
 def test_live_tree_passes_all_checks() -> None:

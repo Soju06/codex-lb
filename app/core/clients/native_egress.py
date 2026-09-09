@@ -34,6 +34,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "http_compact_sse_v1",
         "http_sse_v1",
         "http_responses_events_v1",
+        "http_responses_completion_v1",
         "websocket",
         "websocket_responses_events_v1",
         "websocket_send_ack",
@@ -302,18 +303,29 @@ class NativeEgressResponse:
                 if event_type == "responses_event":
                     kind = event.get("event_type")
                     python_normalization = event.get("python_normalization")
+                    stream_complete = event.get("stream_complete", False)
                     if (
                         "event_type" not in event
                         or (kind is not None and not isinstance(kind, str))
                         or (isinstance(kind, str) and len(kind.encode("utf-8")) > 16 * 1024)
                         or type(python_normalization) is not bool
+                        or type(stream_complete) is not bool
                         or (more and (kind is not None or python_normalization))
+                        or (
+                            stream_complete
+                            and (more or kind not in {"response.completed", "response.failed", "response.incomplete"})
+                        )
                     ):
                         raise NativeEgressProtocolError("native Responses event has invalid metadata")
                     if not more:
                         text = "".join(fragments) + text
                         fragments.clear()
+                        if stream_complete:
+                            self._completed = True
+                            self._client._finish_request(self._request_id, self._generation, self._events)
                         yield NativeResponsesEvent(text, kind, python_normalization)
+                        if stream_complete:
+                            return
                         continue
                 if more:
                     fragments.append(text)

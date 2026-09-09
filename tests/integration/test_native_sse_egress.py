@@ -234,7 +234,8 @@ async def test_buffered_native_burst_preserves_responses_result(
         "               'text/event-stream' if kind == 'sse' else 'application/json']]}]\n"
         "    if kind == 'sse':\n"
         "        events.extend({'type': 'responses_event', 'text': 'data: ' + json.dumps(payload) + '\\n\\n',\n"
-        "                       'more': False, 'event_type': payload['type'], 'python_normalization': False}\n"
+        "                       'more': False, 'event_type': payload['type'], 'python_normalization': False,\n"
+        "                       'stream_complete': payload['type'] == 'response.completed'}\n"
         "                      for payload in payloads)\n"
         "    else:\n"
         "        body = body.encode() + b' ' * 256\n"
@@ -1435,6 +1436,92 @@ async def test_native_interpretation_drains_large_fragments_without_python_norma
     assert result == [expected, terminal]
     assert len(fragments) > 2
     assert max(fragments) <= 16 * 1024
+    assert not native_worker._streams
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_type", ["response.completed", "response.failed", "response.incomplete"])
+@pytest.mark.parametrize("sdk", [False, True])
+async def test_native_http_terminal_releases_upstream_without_python_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    routed: bool,
+    terminal_type: str,
+    sdk: bool,
+) -> None:
+    closed = asyncio.Event()
+    terminal = (
+        "data: "
+        + json.dumps({"type": terminal_type, "response": {"id": "done", "output": [], "padding": "한글😀" * 5000}})
+        + "\n\n"
+    )
+    commands: list[str] = []
+    fragments: list[dict[str, object]] = []
+    send = native_worker._send_command
+    read = native_module._read_event
+
+    async def record_command(*args: Any, **kwargs: Any) -> None:
+        command = args[2]
+        commands.append(command["type"])
+        await send(*args, **kwargs)
+
+    async def record_event(stdout: asyncio.StreamReader) -> dict[str, object]:
+        event = await read(stdout)
+        if event.get("type") == "responses_event":
+            fragments.append(event)
+        return event
+
+    monkeypatch.setattr(native_worker, "_send_command", record_command)
+    monkeypatch.setattr(native_module, "_read_event", record_event)
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        # The later event would exceed the configured limit if Rust kept framing.
+        await _write_chunk(writer, terminal.encode() + b"data: " + b"x" * (256 * 1024))
+        with contextlib.suppress(ConnectionError):
+            await reader.read()
+        closed.set()
+
+    monkeypatch.setattr(proxy_module.get_settings(), "max_sse_event_bytes", 256 * 1024)
+    async with _serve_http(handler) as base_url:
+        session = _UnexpectedPythonSession()
+        route = (
+            ResolvedUpstreamRoute(
+                mode="account_bound",
+                pool_id="terminal-parity",
+                endpoint=ResolvedProxyEndpoint("terminal-proxy", "http", "127.0.0.1", urlsplit(base_url).port or 80),
+            )
+            if routed
+            else None
+        )
+        result = await asyncio.wait_for(
+            _collect(
+                stream_responses(
+                    _request("terminal"),
+                    {},
+                    "test-access-token",
+                    "test-account",
+                    base_url="http://upstream.invalid" if routed else base_url,
+                    session=cast(aiohttp.ClientSession, session),
+                    route=route,
+                    codex_client=CodexClient(cast(aiohttp.ClientSession, session), native_egress_client=native_worker)
+                    if routed
+                    else None,
+                    upstream_stream_transport_override="http",
+                    allow_direct_egress=False,
+                    suppress_live_usage=True,
+                    native_egress_client=native_worker,
+                    enforce_openai_sdk_contract=sdk,
+                )
+            ),
+            5,
+        )
+        await asyncio.wait_for(closed.wait(), 5)
+    assert result == [terminal]
+    assert commands == ["request"]
+    assert len(fragments) > 1
+    assert all("stream_complete" not in event for event in fragments[:-1])
+    assert fragments[-1]["stream_complete"] is True
     assert not native_worker._streams
 
 

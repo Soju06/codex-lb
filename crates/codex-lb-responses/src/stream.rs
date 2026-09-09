@@ -25,6 +25,17 @@ pub struct StreamEvent<'a> {
     pub python_normalization: bool,
 }
 
+impl StreamEvent<'_> {
+    /// These response terminals end both SDK and native HTTP streams.
+    /// Bare errors still require the caller's normalization policy.
+    pub fn completes_http_stream(&self) -> bool {
+        matches!(
+            self.event_type.as_deref(),
+            Some("response.completed" | "response.failed" | "response.incomplete")
+        )
+    }
+}
+
 #[derive(Deserialize)]
 struct Payload<'a> {
     #[serde(default, borrow, rename = "type")]

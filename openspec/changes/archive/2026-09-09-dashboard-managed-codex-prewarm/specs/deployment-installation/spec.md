@@ -36,6 +36,25 @@ The following values MUST be fixed at their previously documented defaults:
   drain threshold 90%, error window 60 seconds, error count 2, probe quiet
   window 60 seconds, probe success streak 3), fixed in
   `app/core/balancer/logic.py`.
+- The never-tuned core tunables constantized by `constantize-core-tunables`:
+  the upstream SSE event / websocket frame budget (16 MiB) and the derived
+  serialized `response.create` budget (15 MiB); the OAuth exchange timeout
+  (30 s), token-refresh exchange timeout (8 s), refresh-failure negative
+  cache (5 s) and the token-refresh claim TTL (`max(30 s, admission wait +
+  2 x refresh timeout)`, all in code); the admission wait (10 s) and the
+  token-refresh (64), upstream websocket connect (128) and compact
+  response-create (64) gates; the usage / reset-credits fetch timeout (10 s)
+  and retry budget (2), the usage refresh interval (60 s) with its derived
+  freshness horizon, the usage auth-failure cooldown (300 s) and the
+  reset-credits polling interval (60 s); the always-on switches for usage
+  refresh, live usage ingestion, sticky-session cleanup, the model registry
+  and the quota planner scheduler (the dashboard `quota_planner_settings.mode
+  = "off"` remains the only planner switch); the HTTP ingress body budgets
+  (32 MiB general, 128 MiB Responses); inline image fetching (always on, no
+  host allowlist); the public default image model (`gpt-image-2`); and
+  proxy-generated prompt-cache-key derivation (always on). There is no
+  separate upstream compact timeout: the dashboard compact request budget is
+  the only cap.
 
 The following values MUST be derived rather than configured:
 
@@ -82,7 +101,8 @@ warning list in the next minor release.
 #### Scenario: Removed env vars are ignored with one startup warning
 
 - **GIVEN** a deployment whose environment still sets removed settings such
-  as `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and `CODEX_LB_WARMUP_MODEL`
+  as `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and
+  `CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS`
 - **WHEN** the application starts
 - **THEN** startup succeeds and the dashboard runtime values are used
 - **AND** exactly one warning log lists both removed names without their

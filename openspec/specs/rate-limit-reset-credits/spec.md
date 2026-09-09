@@ -5,21 +5,22 @@ Governs visibility and redemption of upstream banked rate-limit reset credits pe
 ## Requirements
 ### Requirement: Reset credits are polled per account on a fixed cadence
 
-The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eligible account on a configurable cadence that defaults to 60 seconds, using that account's stored OAuth bearer token and `chatgpt-account-id`. The scheduler SHALL start with the application lifespan when reset-credit polling is enabled. Because snapshots are kept in process-local memory, every running replica SHALL refresh its own snapshot cache instead of relying on leader election, and the scheduler SHALL NOT be leader-gated while snapshots remain process-local. Each replica SHALL apply a randomized startup delay of up to one full interval and randomized per-tick jitter of +/-10% so replica ticks are desynchronized. The aggregate upstream fetch rate scales with the number of running replicas; `rate_limit_reset_credits_refresh_interval_seconds` is the operator control for total upstream load. The poll SHALL skip any account that is paused, requires reauthentication, deactivated, or lacks a usable `chatgpt-account-id`.
+The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eligible account on a fixed 60-second cadence, using that account's stored OAuth bearer token and `chatgpt-account-id`. The scheduler SHALL start with the application lifespan when reset-credit polling is enabled. Because snapshots are kept in process-local memory, every running replica SHALL refresh its own snapshot cache instead of relying on leader election, and the scheduler SHALL NOT be leader-gated while snapshots remain process-local. Each replica SHALL apply a randomized startup delay of up to one full interval and randomized per-tick jitter of +/-10% so replica ticks are desynchronized. The aggregate upstream fetch rate scales with the number of running replicas (one fetch per eligible account per 60 seconds per replica); the cadence is a fixed application constant and MUST NOT be operator-configurable. The poll SHALL skip any account that is paused, requires reauthentication, deactivated, or lacks a usable `chatgpt-account-id`.
 
 When dashboard setting `auto_redeem_reset_credits_before_expiry` is enabled, the refresh loop SHALL evaluate refreshed snapshots and attempt to redeem the soonest-expiring available reset credit when it expires within five minutes by reusing the existing reset-credit redemption function, serialization, idempotency ledger, cache invalidation, and usage-refresh path. Before invoking the redemption function, automatic redemption SHALL re-read the target account in the redemption session and abort without consuming upstream when the account is missing, paused, requires reauthentication, deactivated, or no longer has a usable `chatgpt-account-id`. Automatic redemption SHALL constrain the redemption helper to the credit id and expiry that triggered the five-minute window, and SHALL abort without consuming upstream if the helper's fresh pre-consume fetch no longer reports that same credit with the same expiry as available. Automatic redemption SHALL use a stable automatic redeem request id for the account and UTC expiry date, and SHALL NOT issue another upstream consume when that automatic request is already durably pinned.
 
 #### Scenario: Default cadence polls every 60 seconds
-- **WHEN** the application starts with default settings
+- **WHEN** the application starts
 - **THEN** each eligible account's credits are fetched from upstream at most once per 60 seconds plus the jitter bound
+- **AND** a `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS` value in the environment is ignored with the removed-setting warning
 
 #### Scenario: Every replica refreshes its local cache
 - **WHEN** the application is deployed with multiple running replicas
-- **THEN** each replica refreshes its own in-memory reset-credit snapshots on the configured cadence
+- **THEN** each replica refreshes its own in-memory reset-credit snapshots on the fixed cadence
 - **AND** dashboard reads served by any replica can observe populated reset-credit data after that replica's refresh tick
 
 #### Scenario: Two replicas do not fetch in lockstep
-- **GIVEN** two replicas start with identical configuration
+- **GIVEN** two replicas start
 - **WHEN** their refresh loops run
 - **THEN** their startup delays are independent uniform draws over the full interval and each tick interval carries independent +/-10% jitter, so the replicas' tick times are not synchronized
 
@@ -170,41 +171,6 @@ The reset-credits refresh scheduler SHALL NOT transition any account's persisted
 - **THEN** the response is treated as an upstream failure
 - **AND** the cached snapshot is retained
 
-### Requirement: Reset credit polling interval is configurable
-
-The system SHALL expose setting `rate_limit_reset_credits_refresh_interval_seconds` (default `60`) to control the polling cadence. The system SHALL expose setting `rate_limit_reset_credits_refresh_enabled` (default `true`) to enable or disable background reset-credit polling. Because the refresh loop is the sole driver of automatic reset-credit redemption, disabling background polling SHALL also disable automatic redemption; when polling is disabled while the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is enabled, the system SHALL log a configuration-conflict warning at startup naming both settings. While polling is disabled, the dashboard settings update SHALL reject a request that newly enables `auto_redeem_reset_credits_before_expiry` with a bad-request error naming the polling toggle; an already-persisted opt-in SHALL remain readable and re-savable so unrelated settings edits are not blocked.
-
-#### Scenario: Operator tunes the polling interval
-- **GIVEN** `rate_limit_reset_credits_refresh_interval_seconds` is set to `120`
-- **WHEN** the application starts and runs
-- **THEN** each eligible account's credits are fetched from upstream at most once per 120 seconds
-
-#### Scenario: Operator disables background polling
-- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is set to `false`
-- **WHEN** the application starts
-- **THEN** the reset-credit polling scheduler does not create a background polling task
-- **AND** no upstream reset-credits fetches occur
-
-#### Scenario: Disabled polling conflicts with persisted auto-redeem opt-in
-- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is set to `false`
-- **AND** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is `true`
-- **WHEN** the application starts
-- **THEN** the system logs a configuration-conflict warning naming both settings
-- **AND** no automatic reset-credit redemption occurs while polling remains disabled
-
-#### Scenario: Auto-redeem opt-in is rejected while polling is disabled
-- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is set to `false`
-- **AND** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is `false`
-- **WHEN** a dashboard settings update sets `auto_redeem_reset_credits_before_expiry` to `true`
-- **THEN** the update is rejected with a bad-request error naming the polling toggle
-- **AND** the persisted setting remains `false`
-
-#### Scenario: Persisted auto-redeem does not block unrelated settings edits
-- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is set to `false`
-- **AND** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is already `true`
-- **WHEN** a full settings payload that keeps the opt-in unchanged is submitted
-- **THEN** the update succeeds
-
 ### Requirement: Reset credit redemption is serialized and idempotent across replicas
 
 Per-account redemption serialization MUST hold across all replicas and processes sharing one database. On PostgreSQL the system SHALL use `pg_advisory_xact_lock` keyed by the account id on the caller's session. On SQLite the system SHALL acquire a durable claim row via a single atomic conditional upsert (`INSERT ... ON CONFLICT(account_id) DO UPDATE ... WHERE expires_at < now`) with a 30-second lease, a bounded retry loop that surfaces a client-facing conflict on timeout, release on completion, and takeover of expired claims. While the redeem section runs, the claim holder SHALL renew its lease on a heartbeat cadence shorter than the lease (10 seconds) so a redemption that legitimately outlives one lease (e.g. slow upstream fetch/consume) is NOT taken over by a concurrent process; lease expiry without renewal remains the crash-recovery path. A claim-acquisition timeout SHALL surface in the caller surface's native error envelope: the dashboard error envelope on the dashboard consume endpoint and the `/v1/*` OpenAI error envelope (HTTP 409) on `POST /v1/reset-credit`. The system SHALL persist the `(account_id, redeem_request_id) -> credit_id` mapping in the shared database, committed inside the serialized section BEFORE the upstream consume call; a retry carrying the same `redeem_request_id`, served by ANY replica, MUST resolve to the originally selected `credit_id` and MUST NOT consume a different credit. Ledger rows SHALL be retained at least 24 hours (including after a failed consume, so a retry retargets the same credit) and purged opportunistically afterwards. Expired rows for an account SHALL be purged BEFORE a new pin is inserted, so that reusing a `redeem_request_id` after its prior row has aged past the 24h TTL durably re-pins the new attempt to its newly selected `credit_id` instead of silently discarding the new pin because an `ON CONFLICT DO NOTHING` insert collided with the soon-purged expired row. The pin lookup SHALL apply the same 24h TTL on read: a ledger row whose `created_at` is older than the TTL MUST be treated as absent (not returned as a durable pin) so a reused `redeem_request_id` is re-selected against the fresh fetch and re-pinned rather than forwarded for the stale expired `credit_id`; the read TTL and the purge TTL SHALL be the same duration. Both the dashboard consume endpoint and `POST /v1/reset-credit` SHALL redeem inside this cross-replica serialized section.
@@ -308,4 +274,60 @@ crash or release-error backstop, not routine live-process cancellation cleanup.
 - **THEN** the heartbeat is cancelled and drained
 - **AND** holder-fenced release finishes before cancellation surfaces
 - **AND** a successor can acquire immediately without waiting for lease expiry
+
+### Requirement: Reset credit polling can be disabled
+
+The dashboard setting `rate_limit_reset_credits_refresh_enabled` (a nullable `dashboard_settings` column; NULL inherits the deprecated `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` environment variable, then the default `true`) SHALL enable or disable background reset-credit polling. It SHALL be exposed with provenance on `GET`/`PUT /api/settings` (Settings → Advanced → Background jobs). The polling loop SHALL always start; each refresh cycle SHALL read the effective value from the dashboard-settings snapshot before taking its lock and SHALL skip the cycle (no upstream fetch, no automatic redemption) while it is `false`, so a change applies on the next cycle on every replica without a restart. Because the refresh loop is the sole driver of automatic reset-credit redemption, disabling polling SHALL also disable automatic redemption; when polling is effectively disabled while the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is enabled, the system SHALL log a configuration-conflict warning at startup naming both settings. The dashboard settings update SHALL reject, with a bad-request error naming the polling toggle, any request that would newly produce the unrunnable pair "auto-redeem enabled, polling effectively disabled" — both the request that newly enables `auto_redeem_reset_credits_before_expiry` and the request that disables the polling toggle while the opt-in stays enabled. The gate SHALL evaluate the proposed effective values (a value in the request, else the inherited value when the request clears it, else the current effective value). Setting both consistently in one request (both on, or both off) SHALL succeed, and a payload that only re-saves an already inconsistent pair SHALL remain accepted so unrelated settings edits are not blocked.
+
+#### Scenario: Operator disables background polling
+
+- **GIVEN** the polling loop was started with `rate_limit_reset_credits_refresh_enabled` effectively `true`
+- **WHEN** an operator sets `rate_limit_reset_credits_refresh_enabled` to `false` in the dashboard
+- **THEN** the next refresh cycle performs no upstream reset-credits fetch and no automatic redemption
+- **AND** setting it back to `true` (or clearing it so the inherited `true` applies) makes the following cycle fetch again
+- **AND** no replica was restarted
+
+#### Scenario: Disabled polling conflicts with persisted auto-redeem opt-in
+
+- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is effectively `false` (dashboard value, or environment alias while the dashboard value is unset)
+- **AND** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is `true`
+- **WHEN** the application starts
+- **THEN** the system logs a configuration-conflict warning naming both settings
+- **AND** no automatic reset-credit redemption occurs while polling remains disabled
+
+#### Scenario: Auto-redeem opt-in is rejected while polling is disabled
+
+- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is effectively `false`
+- **AND** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is `false`
+- **WHEN** a dashboard settings update sets `auto_redeem_reset_credits_before_expiry` to `true` without also enabling the polling toggle
+- **THEN** the update is rejected with a bad-request error naming the polling toggle
+- **AND** the persisted setting remains `false`
+
+#### Scenario: Disabling polling is rejected while auto-redeem is enabled
+
+- **GIVEN** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is `true`
+- **AND** `rate_limit_reset_credits_refresh_enabled` is effectively `true`
+- **WHEN** a dashboard settings update sets `rate_limit_reset_credits_refresh_enabled` to `false` without also turning the opt-in off
+- **THEN** the update is rejected with the same bad-request error naming the polling toggle
+- **AND** the polling toggle remains effectively `true`
+- **AND** turning both off in one request succeeds
+
+#### Scenario: Enabling polling and auto-redeem in one request succeeds
+
+- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is `false` in the dashboard
+- **WHEN** a dashboard settings update sets both `auto_redeem_reset_credits_before_expiry` and `rate_limit_reset_credits_refresh_enabled` to `true`
+- **THEN** the update succeeds and both values are persisted
+
+#### Scenario: Persisted auto-redeem does not block unrelated settings edits
+
+- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is effectively `false`
+- **AND** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is already `true`
+- **WHEN** a full settings payload that keeps the opt-in unchanged is submitted
+- **THEN** the update succeeds
+
+#### Scenario: Environment alias applies only while the dashboard value is unset
+
+- **GIVEN** `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED=false` and no dashboard value
+- **WHEN** an operator sets `rate_limit_reset_credits_refresh_enabled` to `true` in the dashboard
+- **THEN** refresh cycles fetch again and `provenance.rate_limit_reset_credits_refresh_enabled.source` is `dashboard`
 

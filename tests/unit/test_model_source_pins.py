@@ -587,6 +587,35 @@ async def test_executor_resolves_a_failed_statement_by_reread_as_written(virtual
 
 
 @pytest.mark.asyncio
+async def test_executor_verification_normalises_a_naive_clock_like_every_other_now_boundary(virtual, caplog) -> None:
+    """``_record_from_row`` yields aware UTC timestamps; a ``Clock`` seam that returns naive UTC (the settings row's
+    convention, accepted by ``upsert``/``touch``/``classify_pin``) must verify instead of raising ``TypeError``."""
+
+    clock, scheduler = virtual
+
+    class _NaiveClock:
+        def now(self) -> datetime:
+            return clock.now().replace(tzinfo=None)
+
+        def monotonic(self) -> float:
+            return clock.monotonic()
+
+        def time(self) -> float:
+            return clock.time()
+
+    failing = _FakeSession(fail_statement=RuntimeError("commit lost"))
+    verify = _FakeSession(rows=[_row("thread\nkey", last_seen_at=clock.now())])
+    executor = _executor(failing, verify)
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+    outcome = await executor.commit(_intent(), drain_until=None, scheduler=scheduler, clock=_NaiveClock())
+
+    assert outcome == "written"
+    assert verify.statements and "SELECT" in verify.statements[0]
+    assert "TypeError" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_executor_resolves_a_failed_statement_by_reread_as_not_written(virtual, caplog) -> None:
     clock, scheduler = virtual
     stale = _row("thread\nkey", last_seen_at=clock.now() - _DAY)  # an older write, not ours

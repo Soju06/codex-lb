@@ -254,6 +254,8 @@ def test_detached_runtime_snapshot_keeps_fresh_leases_and_never_goes_negative() 
         "acc_fresh": RuntimeState(inflight_streams=1, leased_tokens=10.0, leases={"fresh": fresh}),
         "acc_drifted": drifted,
     }
+    # An independent baseline: comparing the live leases against themselves would pass an in-place mutation.
+    live_drifted_before = deepcopy(drifted)
 
     snapshot = detached_runtime_snapshot(runtime, now=1000.0, stale_lease_ttl_seconds=lambda _kind: 900.0)
 
@@ -262,7 +264,9 @@ def test_detached_runtime_snapshot_keeps_fresh_leases_and_never_goes_negative() 
     assert snapshot["acc_drifted"].leases == {}
     assert snapshot["acc_drifted"].inflight_streams == 0
     assert snapshot["acc_drifted"].leased_tokens == 0.0
-    assert runtime["acc_drifted"].leases == {"stale": drifted.leases["stale"]} if drifted.leases else False
+    assert runtime["acc_drifted"] is drifted
+    assert runtime["acc_drifted"] == live_drifted_before
+    assert runtime["acc_drifted"].leases == {"stale": live_drifted_before.leases["stale"]}
 
 
 # --- account scope ------------------------------------------------------------

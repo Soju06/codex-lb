@@ -623,7 +623,9 @@ class PinWriteExecutor:
         writes = intent.writes
         if not writes:
             return "written"
-        now = clock.now()
+        # Aware UTC like every other ``now`` boundary here: ``_write_landed``
+        # compares it with the re-read row's aware ``last_seen_at``.
+        now = _as_utc(clock.now())
         kinds = ",".join(sorted({write.kind for write in writes}))
 
         async def upsert(repository: ModelSourcePinRepository) -> None:

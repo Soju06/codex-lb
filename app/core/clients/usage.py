@@ -15,7 +15,8 @@ from app.core.clients.codex import (
     require_route_or_direct_egress_opt_in,
 )
 from app.core.clients.headers import build_chatgpt_auth_headers
-from app.core.clients.http import lease_retry_client
+from app.core.clients.http import _safe_json, lease_retry_client
+from app.core.clients.proxy import _codex_response_status
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.upstream_proxy import ResolvedUpstreamRoute
@@ -323,13 +324,6 @@ def _consume_rate_limit_reset_response_or_raise(
         raise UsageFetchError(502, "Invalid usage limit reset payload") from exc
 
 
-def _codex_response_status(response: object) -> int:
-    value = getattr(response, "status_code", getattr(response, "status", None))
-    if value is None:
-        return 0
-    return int(value)
-
-
 async def _safe_codex_json(response: object) -> JsonObject:
     try:
         json_method = getattr(response, "json", None)
@@ -364,15 +358,6 @@ def _rate_limit_reset_url(base_url: str) -> str:
 
 def _usage_headers(access_token: str, account_id: str | None) -> dict[str, str]:
     return build_chatgpt_auth_headers(access_token, account_id)
-
-
-async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
-    try:
-        data = await resp.json(content_type=None)
-    except Exception:
-        text = await resp.text()
-        return {"error": {"message": text.strip()}}
-    return data if isinstance(data, dict) else {"error": {"message": str(data)}}
 
 
 def _extract_error_message(payload: JsonObject) -> str | None:

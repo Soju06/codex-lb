@@ -3,8 +3,11 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use codex_lb_protocol::{NativeEvent, NativeRequest, NativeSseOptions};
+use codex_lb_responses::compact::{CompactCollector, CompactResult};
+use codex_lb_responses::stream::interpret;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
+use crate::output::EventBatch;
 use crate::runtime::{Output, RequestError, emit};
 use crate::sse::{SseEventTooLarge, SseFramer, text_fragments};
 
@@ -152,6 +155,8 @@ async fn execute_sse_body(
 ) -> Result<Option<SseEventTooLarge>, RequestError> {
     let idle_timeout = Duration::from_millis(options.idle_timeout_ms);
     let mut framer = SseFramer::new(options.max_event_bytes);
+    let mut collector = options.collect_compact.then(CompactCollector::default);
+    let mut batch = EventBatch::default();
     loop {
         let chunk = tokio::time::timeout(idle_timeout, response.chunk())
             .await
@@ -161,44 +166,140 @@ async fn execute_sse_body(
         };
         for read in chunk.chunks(SSE_READ_CHUNK_SIZE) {
             framer.push(read);
-            if let Some(error) = emit_available_sse_events(&mut framer, request_id, output).await? {
-                return Ok(Some(error));
+            loop {
+                match framer.next_event() {
+                    Ok(Some(text)) => {
+                        if consume_sse(
+                            output,
+                            request_id,
+                            &text,
+                            &mut collector,
+                            options.interpret_responses,
+                            &mut batch,
+                        )
+                        .await?
+                        {
+                            batch.flush(output).await?;
+                            return Ok(None);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        batch.flush(output).await?;
+                        return Ok(Some(error));
+                    }
+                }
             }
+            batch.flush(output).await?;
         }
     }
     match framer.finish() {
-        Ok(Some(text)) => emit_sse(output, request_id, &text).await?,
+        Ok(Some(text)) => {
+            if consume_sse(
+                output,
+                request_id,
+                &text,
+                &mut collector,
+                options.interpret_responses,
+                &mut batch,
+            )
+            .await?
+            {
+                batch.flush(output).await?;
+                return Ok(None);
+            }
+        }
         Ok(None) => {}
         Err(error) => return Ok(Some(error)),
+    }
+    batch.flush(output).await?;
+    if let Some(collector) = collector {
+        emit_compact(output, request_id, collector.finish()).await?;
     }
     Ok(None)
 }
 
-async fn emit_available_sse_events(
-    framer: &mut SseFramer,
-    request_id: &str,
+async fn consume_sse(
     output: &Output,
-) -> Result<Option<SseEventTooLarge>, std::io::Error> {
-    loop {
-        match framer.next_event() {
-            Ok(Some(text)) => emit_sse(output, request_id, &text).await?,
-            Ok(None) => return Ok(None),
-            Err(error) => return Ok(Some(error)),
+    request_id: &str,
+    text: &str,
+    collector: &mut Option<CompactCollector>,
+    interpret_responses: bool,
+    batch: &mut EventBatch,
+) -> Result<bool, std::io::Error> {
+    if let Some(collector) = collector {
+        if let Some(result) = collector.push(text) {
+            emit_compact(output, request_id, result).await?;
+            return Ok(true);
         }
+    } else if interpret_responses {
+        let mut event = interpret(text);
+        // Type metadata is not fragmented; keep it within the text budget too.
+        if event
+            .event_type
+            .as_ref()
+            .is_some_and(|kind| kind.len() > SSE_IPC_TEXT_FRAGMENT_SIZE)
+        {
+            event.event_type = None;
+            event.python_normalization = true;
+        }
+        for (fragment, more) in text_fragments(&event.text, SSE_IPC_TEXT_FRAGMENT_SIZE) {
+            batch
+                .push(
+                    output,
+                    &NativeEvent::ResponsesEvent {
+                        request_id: request_id.to_owned(),
+                        text: fragment.to_owned(),
+                        more,
+                        event_type: if more { None } else { event.event_type.clone() },
+                        python_normalization: !more && event.python_normalization,
+                    },
+                )
+                .await?;
+        }
+    } else {
+        emit_sse(output, request_id, text, batch).await?;
     }
+    Ok(false)
 }
 
-async fn emit_sse(output: &Output, request_id: &str, text: &str) -> Result<(), std::io::Error> {
-    for (fragment, more) in text_fragments(text, SSE_IPC_TEXT_FRAGMENT_SIZE) {
+async fn emit_compact(
+    output: &Output,
+    request_id: &str,
+    result: CompactResult,
+) -> Result<(), std::io::Error> {
+    let text = serde_json::to_string(&result)?;
+    for (fragment, more) in text_fragments(&text, SSE_IPC_TEXT_FRAGMENT_SIZE) {
         emit(
             output,
-            &NativeEvent::Sse {
+            &NativeEvent::Compact {
                 request_id: request_id.to_owned(),
                 text: fragment.to_owned(),
                 more,
             },
         )
         .await?;
+    }
+    Ok(())
+}
+
+async fn emit_sse(
+    output: &Output,
+    request_id: &str,
+    text: &str,
+    batch: &mut EventBatch,
+) -> Result<(), std::io::Error> {
+    for (fragment, more) in text_fragments(text, SSE_IPC_TEXT_FRAGMENT_SIZE) {
+        batch
+            .push(
+                output,
+                &NativeEvent::Sse {
+                    request_id: request_id.to_owned(),
+                    text: fragment.to_owned(),
+                    more,
+                },
+            )
+            .await?;
     }
     Ok(())
 }

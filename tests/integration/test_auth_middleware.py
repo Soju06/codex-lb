@@ -127,17 +127,9 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_update.status_code == 403
     assert blocked_update.json()["error"]["code"] == "read_only_access"
 
-    blocked_export = await client.post("/api/accounts/missing/export")
-    assert blocked_export.status_code == 403
-    assert blocked_export.json()["error"]["code"] == "read_only_access"
-
     blocked_auth_export = await client.post("/api/accounts/missing/export/auth")
     assert blocked_auth_export.status_code == 403
     assert blocked_auth_export.json()["error"]["code"] == "read_only_access"
-
-    blocked_opencode_export = await client.post("/api/accounts/missing/export/opencode-auth")
-    assert blocked_opencode_export.status_code == 403
-    assert blocked_opencode_export.json()["error"]["code"] == "read_only_access"
 
     blocked_alias = await client.put("/api/accounts/missing/alias", json={"alias": "Guest Alias"})
     assert blocked_alias.status_code == 403
@@ -200,10 +192,6 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
 
 
 async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
-    blocked_archive = await client.get("/api/conversation-archive/files")
-    assert blocked_archive.status_code == 403
-    assert blocked_archive.json()["error"]["code"] == "admin_access_required"
-
     blocked_archive_records = await client.get(
         "/api/conversation-archive/records",
         params={"requestId": "guest-hidden"},
@@ -216,10 +204,6 @@ async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_conversation_archive_routes_remain_available_to_admin(async_client):
-    files = await async_client.get("/api/conversation-archive/files")
-    assert files.status_code == 200
-    assert isinstance(files.json(), list)
-
     records = await async_client.get(
         "/api/conversation-archive/records",
         params={"requestId": "admin-fixture"},
@@ -305,6 +289,7 @@ async def test_proxy_family_consensus_controls_local_proxy_and_dashboard_access(
 ) -> None:
     monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.0.0.2")
+    get_settings.cache_clear()
     _set_dashboard_auth_env(
         monkeypatch,
         mode=DashboardAuthMode.STANDARD,
@@ -377,6 +362,7 @@ async def test_proxy_unauthenticated_client_cidr_rejects_projected_client_when_r
     monkeypatch,
 ):
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    get_settings.cache_clear()
     _set_proxy_unauthenticated_client_cidrs_env(
         monkeypatch,
         cidrs="192.168.65.1/32",

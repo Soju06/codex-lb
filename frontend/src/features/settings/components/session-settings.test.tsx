@@ -8,7 +8,7 @@ import { createDashboardSettings } from "@/test/mocks/factories";
 
 const baseSettings = createDashboardSettings({
   stickyThreadsEnabled: true,
-  upstreamStreamTransport: "default" as const,
+  upstreamStreamTransport: "auto" as const,
   upstreamProxyRoutingEnabled: false,
   upstreamProxyDefaultPoolId: null,
   preferEarlierResetAccounts: false,

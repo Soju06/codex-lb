@@ -77,6 +77,32 @@ class FileAccountPin(Base):
     __table_args__ = (Index("ix_file_account_pins_expires_at", "expires_at"),)
 
 
+class ModelSourcePin(Base):
+    """Stickiness of a conversation, anchor, or bounce to a subscription-overflow model source.
+
+    ``pin_key`` is namespaced by ``kind`` (``thread`` | ``anchor`` | ``bounce``; a
+    plain string because the routing stage owns the values). ``source_id``
+    carries no foreign key so rows outlive a deleted source for the drain
+    window instead of cascading away. A row answers lookups while
+    ``purge_at > now``; ``expires_at <= now`` marks it a tombstone. Timestamps
+    are timezone-aware like ``file_account_pins`` because the database clock is
+    authoritative for expiry. No runtime code reads this table yet (#2123 WP-A).
+    """
+
+    __tablename__ = "model_source_pins"
+
+    pin_key: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    source_id: Mapped[str] = mapped_column(String, nullable=False)
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    purge_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_model_source_pins_purge_at", "purge_at"),)
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -499,12 +525,6 @@ class RequestLog(Base):
     latency_bridge_queue_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     prewarm_status: Mapped[str | None] = mapped_column(String, nullable=True)
     prewarm_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # Deprecated: no longer written since the prewarm canary retirement
-    # (reduce-settings-surface-phase-4). Kept one release so old replicas can
-    # keep inserting during rolling upgrades; the column drop ships in the
-    # next release.
-    prewarm_canary_bucket: Mapped[str | None] = mapped_column(String, nullable=True)
-    prewarm_eligible_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     session_previous_gap_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -837,8 +857,8 @@ class DashboardSettings(Base):
     sticky_threads_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     upstream_stream_transport: Mapped[str] = mapped_column(
         String,
-        default="default",
-        server_default=text("'default'"),
+        default="auto",
+        server_default=text("'auto'"),
         nullable=False,
     )
     prohibit_fast_mode: Mapped[bool] = mapped_column(
@@ -915,6 +935,12 @@ class DashboardSettings(Base):
         nullable=False,
     )
     single_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Subscription-exhaustion overflow designation (#2123). No foreign key on
+    # purpose: a dangling id means "off", mirroring single_account_id. The drain
+    # deadline is armed when the designation is cleared and compared against
+    # utcnow() (naive UTC) like every other dashboard_settings timestamp.
+    subscription_overflow_source_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    subscription_overflow_drain_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
         Integer,
         default=1800,
@@ -1094,7 +1120,7 @@ class DashboardSettings(Base):
         nullable=False,
     )
     # Data retention windows in days; NULL = never set from the dashboard
-    # (the deprecated env alias then applies), 0 = explicitly disabled.
+    # (treated as disabled), 0 = explicitly disabled.
     request_log_retention_days: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,

@@ -245,28 +245,94 @@ The proxy MUST reserve the configured number of account-local stream slots from 
 
 ### Requirement: Dashboard-configurable account concurrency caps
 
-The dashboard settings API MUST persist nonnegative per-account `proxy_account_response_create_limit`, `proxy_account_stream_limit`, and `proxy_account_stream_recovery_reserve` overrides. A settings row created for the first time MUST persist the process environment values for those settings. Existing settings rows upgraded to this capability MUST use nullable overrides so a NULL value continues to inherit the corresponding process environment value until explicitly changed by an operator.
+The dashboard settings API MUST persist nonnegative per-account
+`proxy_account_response_create_limit`, `proxy_account_stream_limit`, and
+`proxy_account_stream_recovery_reserve` overrides, plus the
+`proxy_api_key_fair_share_congestion_threshold_pct` override in the range
+0-100. A settings row created for the first time MUST persist the process
+environment values for these settings. Existing settings rows MUST use
+nullable stored overrides so a `NULL` value continues to inherit the
+corresponding process environment value.
+
+The settings response MUST expose each effective value, its environment
+baseline value, and its nullable stored override. Updates MUST use tri-state semantics for these four override
+fields: an absent field MUST leave the stored override unchanged, a field with
+a numeric value MUST store that value as an override, and a field explicitly
+set to `null` MUST clear the stored override so the effective value inherits
+from the process environment.
+
+#### Scenario: Explicit null clears a capacity override
+
+- **GIVEN** a stored dashboard stream-cap override and an environment stream
+  cap
+- **WHEN** `PUT /api/settings` contains
+  `proxyAccountStreamLimit: null`
+- **THEN** the stored stream-cap override is `NULL`
+- **AND** the response reports the environment stream cap as the effective
+  value
+- **AND** the response reports a `null` stream-cap override
 
 #### Scenario: Operator changes caps without restart
 
 - **GIVEN** the dashboard cache contains persisted account concurrency caps
 - **WHEN** an operator updates one or more cap values through `PUT /api/settings`
-- **THEN** the response returns the persisted values
-- **AND** subsequent new selection and lease decisions use the updated cached values without mutating global process settings
+- **THEN** the response returns the persisted effective values
+- **AND** subsequent new selection and lease decisions use the updated cached
+  values without mutating global process settings
+
+#### Scenario: Omitted capacity field preserves its override
+
+- **GIVEN** a stored dashboard capacity override
+- **WHEN** an update omits that capacity field
+- **THEN** the stored override remains unchanged
+- **AND** the effective value remains unchanged
 
 #### Scenario: Negative cap is rejected
 
-- **WHEN** an operator supplies a negative account concurrency cap or recovery reserve
+- **WHEN** an operator supplies a negative account concurrency cap or recovery
+  reserve
 - **THEN** the settings API rejects the request
 - **AND** the previously persisted values remain unchanged
+
+#### Scenario: Explicit value remains a pinned override
+
+- **GIVEN** an environment stream cap of 8 and no dashboard stream-cap
+  override
+- **WHEN** `PUT /api/settings` contains `proxyAccountStreamLimit: 8`
+- **THEN** the stored stream-cap override is 8
+- **AND** a later environment change does not alter the effective dashboard
+  value until the override is cleared
 
 #### Scenario: Operator edits caps in the dashboard
 
 - **GIVEN** an operator opens routing settings
 - **WHEN** the operator enters nonnegative integer cap values and saves them
-- **THEN** the dashboard sends all three values through the settings API
+- **THEN** the dashboard sends the edited values through the settings API
 - **AND** `0` is presented as unlimited
-- **AND** a bounded stream recovery reserve greater than the stream cap is rejected before saving
+- **AND** a bounded stream recovery reserve greater than the effective stream
+  cap is rejected before saving
+
+#### Scenario: Clearing one field does not modify sibling overrides
+
+- **GIVEN** stored overrides for the response-create limit and stream limit
+- **WHEN** only `proxyAccountStreamLimit` is explicitly cleared
+- **THEN** the stream-limit override becomes `NULL`
+- **AND** the response-create override remains unchanged
+
+#### Scenario: Invalid capacity update is atomic
+
+- **WHEN** an update contains an invalid capacity value or a recovery reserve
+  greater than its effective stream limit
+- **THEN** the settings API rejects the update
+- **AND** all four stored capacity overrides remain unchanged
+
+#### Scenario: Clear validation uses the environment baseline
+
+- **GIVEN** a stored stream-limit override of 24, a stored recovery reserve of
+  3, and an environment stream limit of 2
+- **WHEN** only the stream-limit override is explicitly cleared
+- **THEN** the settings API rejects the update before persistence
+- **AND** the stored stream-limit override remains 24
 
 ### Requirement: Cached caps govern runtime admission
 
@@ -703,6 +769,8 @@ When multiple requests wait on one shared future (an inflight bridge session cre
 
 The same bounded-callback contract applies to waits that re-attach to one owned task repeatedly: defer-cancellation waits on owned cleanup tasks, repeated timed waits such as SSE keepalive ticks on a pending chunk task, and bounded teardown drains. A defer-cancellation wait MUST shield itself from level-cancelled scopes so re-delivered cancellation cannot busy-spin the wait loop, MUST keep the owned task's done-callback count bounded by a constant regardless of how many times the waiter is cancelled or times out, MUST NOT cancel the owned task, MUST defer the caller's cancellation until the owned task finishes and then surface it, and MUST propagate the owned task's cancellation and exceptions unchanged.
 
+Every defer-cancellation wait MUST route through the one canonical shared-future helper (or, where site-specific control flow forces an inline loop, wait through the shared-future fan-out mechanism inside that loop) rather than a hand-rolled `asyncio.shield` retry. The deferred-cancellation surfacing above applies uniformly: a caller consuming a boolean or exception marker from any defer-cancellation wait MUST receive the marker for a level-cancelled scope as well as for edge task cancellation, so cleanup-then-cancel sequencing does not depend on which copy of the wait a call site reached.
+
 #### Scenario: Waiter pile-up keeps the shared future's callback list constant
 
 - **WHEN** many requests wait on the same inflight bridge-session future
@@ -762,4 +830,157 @@ The same bounded-callback contract applies to waits that re-attach to one owned 
   cancelled
 - **AND** the pending chunk task's done-callback count does not grow with the
   number of elapsed ticks
+
+#### Scenario: Every defer-cancellation wait shares the canonical implementation
+
+- **WHEN** any module performs a defer-cancellation wait on an owned task
+- **THEN** the wait routes through the canonical shared-future helper (or the
+  shared-future fan-out mechanism inside a site-specific loop)
+- **AND** no hand-rolled `asyncio.shield` retry loop remains
+
+#### Scenario: Level cancellation surfaces through every marker shape
+
+- **GIVEN** a caller in a level-cancelled scope awaiting an owned cleanup via
+  a defer-cancellation wait that reports a boolean or exception marker
+- **WHEN** the owned cleanup completes
+- **THEN** the marker reports the deferred cancellation
+- **AND** the caller can re-raise it deterministically after cleanup instead
+  of being interrupted at an arbitrary later checkpoint
+
+### Requirement: Fresh hard bridge requests may recover across accounts
+
+When a hard HTTP bridge request is still pre-response and has no
+`previous_response_id`, hard continuity anchor, proxy-injected anchor, or
+account-scoped file ownership, pre-response recovery MAY exclude the failed
+session account and select another eligible account. The request MUST retain
+its original request body and deadline. Requests carrying any of those
+continuity or ownership markers MUST remain pinned to the required account.
+
+#### Scenario: Fresh hard request switches after silent upstream failure
+
+- **GIVEN** a hard session-header request has sent `response.create`
+- **AND** upstream has not emitted `response.created` or any response event
+- **AND** the request has no previous-response, turn-state, proxy-injected
+  anchor, or account-scoped file ownership
+- **WHEN** pre-response recovery retries the request
+- **THEN** the failed account is excluded from selection
+- **AND** another eligible account may receive the unchanged request body
+- **AND** the original request deadline remains in force
+
+#### Scenario: Eventless watchdog gives fresh requests one bounded recovery
+
+- **GIVEN** a hard session-header request has reached the eventless
+  `response.created` watchdog without response events
+- **AND** the request has no previous-response, turn-state, proxy-injected
+  anchor, or account-scoped file ownership
+- **WHEN** the client-safe watchdog deadline expires
+- **THEN** the proxy attempts the same bounded pre-response recovery once
+- **AND** the failed account is excluded when recovery selects a replacement
+- **AND** if recovery is unavailable, the proxy preserves the existing
+  terminal timeout behavior
+
+#### Scenario: Fresh account recovery bypasses a stale retry circuit
+
+- **GIVEN** a hard session key has an active retry cooldown from repeated
+  pre-response failures
+- **AND** the pending request is fresh, self-contained, and has no continuity
+  or account-ownership marker
+- **WHEN** bounded pre-response recovery is attempted
+- **THEN** the request may bypass that cooldown once to exclude the failed
+  account
+- **AND** continuity-bound requests remain subject to the retry cooldown
+
+#### Scenario: Continuity-bound hard request remains pinned
+
+- **GIVEN** a hard request has a previous-response id, continuity anchor,
+  proxy-injected anchor, or account-scoped file ownership
+- **WHEN** pre-response recovery retries the request
+- **THEN** the original account remains required
+- **AND** the request is not replayed through another account
+
+#### Scenario: Proof-gated client full resend replays on the continuity owner
+
+- **GIVEN** a hard request has a previous-response id and a client-provided
+  full resend whose input body has passed the bridge's retry-safety checks
+- **AND** upstream has not emitted `response.created` or any response event
+- **WHEN** bounded pre-response recovery is attempted
+- **THEN** the bridge may strip the previous-response id and replay the verified
+  full body once
+- **AND** recovery remains pinned to the original continuity owner
+- **AND** an unverified continuation remains fail-closed
+
+#### Scenario: Unsafe continuity timeout does not wait through an unusable cooldown
+
+- **GIVEN** a hard continuation has no proof-gated full resend available
+- **AND** the retry circuit is cooling down after repeated pre-response failures
+- **WHEN** the downstream keepalive window expires
+- **THEN** the proxy fails the stream closed immediately
+- **AND** it does not hold the client connection open until the cooldown ends
+- **AND** the client may retry with its continuity payload intact
+
+### Requirement: WebSocket response-create lease cleanup is cancellation-safe
+
+When WebSocket terminal cleanup has captured an account response-create lease, it MUST complete the asynchronous lease release even if the surrounding task is cancelled while waiting for the load-balancer runtime lock. Cleanup MUST retain the existing response-create gate release semantics.
+
+#### Scenario: Cancellation under lease-release contention returns the account slot
+
+- **GIVEN** a WebSocket request owns an account response-create lease and its
+  response-create gate
+- **AND** the load-balancer runtime lock is held by another task
+- **WHEN** terminal cleanup is cancelled while releasing the account lease
+- **THEN** the account response-create slot MUST be returned after the lock is
+  freed
+- **AND** the request state does not retain the released lease
+- **AND** the response-create gate cleanup semantics remain unchanged
+
+### Requirement: Helm default leaves global backpressure disabled
+
+The Helm chart MUST default `config.backpressureMaxConcurrentRequests` to
+`0` so a default install sets
+`CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS` to `"0"`. A value of `0`
+MUST leave the process-wide backpressure semaphore uninstalled. A positive
+operator override MUST still render into that ConfigMap key. The default
+MUST NOT install one global concurrent-request cap across proxy HTTP,
+websocket, compact, and dashboard traffic.
+
+#### Scenario: Default Helm ConfigMap disables global backpressure
+
+- **WHEN** the chart is rendered with default values
+- **THEN** the ConfigMap `CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS`
+  value is `"0"`
+
+#### Scenario: Explicit Helm override renders the global cap
+
+- **WHEN** an operator sets `config.backpressureMaxConcurrentRequests=37`
+- **THEN** the ConfigMap `CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS`
+  value is `"37"`
+
+### Requirement: Live stream lease release survives caller cancellation
+
+The proxy SHALL prevent caller cancellation from interrupting release after a
+Live handler has selected an account stream lease. The handler MUST complete
+or explicitly settle the release before propagating the cancellation.
+
+#### Scenario: Cancellation arrives during contended Live lease release
+
+- **GIVEN** a Live handler owns an account stream lease
+- **AND** release of that lease has started but is suspended
+- **WHEN** caller cancellation is delivered repeatedly while release remains suspended
+- **THEN** the release completes exactly once
+- **AND** the account slot is returned before cancellation propagates
+
+### Requirement: Daybreak capability intent bypasses ordinary opportunistic admission
+
+`GET /backend-api/codex/opportunistic/admission` MUST require a valid proxy API key whenever `X-Codex-LB-Required-Capability` is present and MUST then return HTTP 400 with `error.code = "required_capability_transport_unsupported"` before model-source or ordinary account-capacity evaluation. Headerless admission requests MUST retain their existing behavior.
+
+#### Scenario: Authenticated carrier is denied before admission evaluation
+
+- **WHEN** a valid proxy API key requests opportunistic admission with the Daybreak carrier
+- **THEN** the route returns HTTP 400 `required_capability_transport_unsupported`
+- **AND** no model source or ordinary account capacity is evaluated
+
+#### Scenario: Headerless admission behavior remains unchanged
+
+- **WHEN** an opportunistic admission request omits the required-capability carrier
+- **THEN** the existing admission policy remains in effect
 

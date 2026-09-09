@@ -39,7 +39,6 @@ from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
 from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
-    OpenAIErrorEnvelope,
     openai_error,
     response_failed_event,
 )
@@ -86,6 +85,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _capture_http_bridge_denied_anchor_fence,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_client_full_history_recovery_error,
     _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
@@ -106,6 +106,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_requires_cluster_registration,
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _http_bridge_runtime_config,
+    _http_bridge_server_anchored_replay_enabled,
     _http_bridge_should_attempt_local_bootstrap_rebind,
     _http_bridge_should_attempt_local_previous_response_recovery,
     _http_bridge_should_attempt_soft_affinity_reroute,
@@ -202,6 +203,7 @@ from app.modules.proxy._service.support import (
     _signal_propagated_responses_service_cleanup_ready,
     _ttft_event_visible_at,
     _WebSocketRequestState,
+    configured_upstream_stream_transport,
     mark_upstream_websocket_transport_failure,
     upstream_websocket_transport_recently_failed,
     websocket_connect_transport_failure_code,
@@ -468,33 +470,6 @@ def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketR
         and request_state.response_event_count == 0
         and not request_state.fresh_upstream_request_is_retry_safe
     )
-
-
-def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
-    """Return whether the one permitted server-side anchored replay is unused."""
-    settings = _service_get_settings()
-    return (
-        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
-        in {"server_anchored_replay_once", "server_indefinite_recovery"}
-        and request_state.previous_response_id is not None
-        and request_state.response_id is None
-        and request_state.response_event_count == 0
-        and (
-            request_state.replay_count == 0
-            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
-            == "server_indefinite_recovery"
-        )
-    )
-
-
-def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
-    payload = openai_error(
-        "previous_response_not_found",
-        "Previous response was not found; retry without previous_response_id.",
-        error_type="invalid_request_error",
-    )
-    payload["error"]["param"] = "previous_response_id"
-    return payload
 
 
 _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL = "The previous bridge owner is no longer available."
@@ -1024,10 +999,7 @@ class _HTTPBridgeStreamingMixin:
         # The bridge exists to hold upstream websocket sessions, so a pinned
         # "http" upstream transport must bypass it; without this gate the
         # dashboard pin is silently ignored for bridged follow-up turns.
-        configured_upstream_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
-        if configured_upstream_transport == "default":
-            configured_upstream_transport = getattr(_service_get_settings(), "upstream_stream_transport", "auto")
-        if runtime_config.enabled and configured_upstream_transport == "http":
+        if runtime_config.enabled and configured_upstream_stream_transport(dashboard_settings) == "http":
             logger.info(
                 "stream_responses bypassing http bridge for pinned http upstream transport request_id=%s",
                 request_id,

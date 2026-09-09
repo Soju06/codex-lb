@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Literal
+
 from pydantic import Field, field_validator
 
 from app.modules.shared.schemas import DashboardModel
@@ -31,9 +34,24 @@ class AdditionalQuotaPolicy(DashboardModel):
     model_ids: list[str] = Field(default_factory=list)
 
 
+class SettingProvenance(DashboardModel):
+    """Where an inheritable setting's effective value comes from.
+
+    ``source`` is ``"dashboard"`` (the dashboard column is set), ``"env"`` (the
+    column is NULL and the environment value differs from the code default) or
+    ``"default"``. ``env_value`` is the environment value that applies while
+    the column is NULL (``None`` for database-only settings); ``default`` is
+    the code default. Both carry the setting's own scalar type.
+    """
+
+    source: Literal["dashboard", "env", "default"]
+    env_value: int | float | str | bool | None = None
+    default: int | float | str | bool | None = None
+
+
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
-    upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
+    upstream_stream_transport: str = Field(pattern=r"^(auto|http|websocket)$")
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
     proxy_account_response_create_limit: int = Field(ge=0)
@@ -61,6 +79,12 @@ class DashboardSettingsResponse(DashboardModel):
     relative_availability_power: float = Field(gt=0.0)
     relative_availability_top_k: int = Field(ge=1, le=20)
     single_account_id: str | None = None
+    subscription_overflow_source_id: str | None = None
+    subscription_overflow_drain_until: datetime | None = None
+    # Derived, read-only: the drain deadline minus the tombstone grace and one
+    # day (the clear time plus the 7-day pin idle limit); ``None`` when no drain
+    # is armed. The date every pinned conversation has expired by.
+    subscription_overflow_pins_expire_by: datetime | None = None
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     dashboard_session_ttl_seconds: int = Field(ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
@@ -94,14 +118,29 @@ class DashboardSettingsResponse(DashboardModel):
     guest_access_enabled: bool
     guest_password_configured: bool
     version: int = Field(ge=1)
+    # Provenance of every inheritable setting keyed by its setting name (the
+    # ``dashboard_settings`` column / ``Settings`` field name). Additive: the
+    # flat ``<name>``, ``<name>_environment_value`` and ``<name>_override``
+    # fields above stay as they are.
+    provenance: dict[str, SettingProvenance] = Field(default_factory=dict)
 
 
 class DashboardSettingsUpdateRequest(DashboardModel):
+    """Partial update of the dashboard settings.
+
+    Inheritable settings (the four account-capacity caps and the two retention
+    overrides) are tri-state, decided by ``model_fields_set``: a field that is
+    omitted is left unchanged, an explicit ``null`` clears the dashboard value
+    so the setting returns to inheriting the environment value or code default
+    (``provenance[<name>].source`` becomes ``"env"`` or ``"default"``), and a
+    concrete value is stored and wins over both.
+    """
+
     expected_version: int | None = Field(default=None, ge=1)
     sticky_threads_enabled: bool | None = None
     upstream_stream_transport: str | None = Field(
         default=None,
-        pattern=r"^(default|auto|http|websocket)$",
+        pattern=r"^(auto|http|websocket)$",
     )
     prohibit_fast_mode: bool | None = None
     http_downstream_transport_policy: str | None = Field(
@@ -126,6 +165,10 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     relative_availability_power: float | None = Field(default=None, gt=0.0)
     relative_availability_top_k: int | None = Field(default=None, ge=1, le=20)
     single_account_id: str | None = Field(default=None, max_length=255)
+    # Tri-state via ``model_fields_set``: absent = unchanged, null = off
+    # (arms the drain deadline), value = designate. The drain deadline itself
+    # is read-only.
+    subscription_overflow_source_id: str | None = Field(default=None, max_length=255)
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
     dashboard_session_ttl_seconds: int | None = Field(default=None, ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
@@ -194,6 +237,39 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         if value not in _WEEKLY_PACE_SMOOTHING_MINUTES:
             raise ValueError("weekly_pace_smoothing_minutes must be one of 15, 30, 60, 120, 240")
         return value
+
+
+class SubscriptionOverflowContextWindowMismatch(DashboardModel):
+    registry: int
+    source: int | None = None
+    max_output_tokens: int | None = None
+
+
+class SubscriptionOverflowPreflightModel(DashboardModel):
+    slug: str
+    enabled: bool
+    never_overflows: bool
+    never_overflows_reason: str | None = None
+    undeclared_tool_types: list[str] = Field(default_factory=list)
+    supports_vision: bool
+    supports_streaming: bool
+    priced: bool
+    context_window_mismatch: SubscriptionOverflowContextWindowMismatch | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SubscriptionOverflowPreflightResponse(DashboardModel):
+    source_id: str
+    source_name: str
+    source_enabled: bool
+    eligible: bool
+    blockers: list[str] = Field(default_factory=list)
+    drain_until: datetime | None = None
+    served_models: list[SubscriptionOverflowPreflightModel] = Field(default_factory=list)
+    missing_models: list[str] = Field(default_factory=list)
+    scoped_api_key_count: int = Field(ge=0)
+    live_pin_count: int = Field(ge=0)
+    tombstone_count: int = Field(ge=0)
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

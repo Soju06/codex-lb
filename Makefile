@@ -46,8 +46,9 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_capped_floor_query_plan_is_index_only_postgresql \
 	tests/integration/test_migrations.py::test_usage_history_bulk_covering_indexes_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql \
-	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql
-SHELL := /bin/bash
+	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql \
+	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql
+SHELL := bash
 
 .PHONY: help
 help:
@@ -102,6 +103,7 @@ architecture-check:
 	uv run python scripts/check_proxy_architecture.py
 	uv run python scripts/check_cancellation_safety.py
 	uv run python scripts/check_proxy_timing_seams.py
+	uv run python scripts/check_settings_tiers.py
 
 typecheck:
 	uv sync --dev --frozen

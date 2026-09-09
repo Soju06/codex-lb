@@ -174,3 +174,84 @@ The service MUST NOT replay a request when dispatch is unknown or when the reque
 - **THEN** the client receives the original sanitized upstream-unavailable failure
 - **AND** the failure is not replaced with `no_accounts`
 
+### Requirement: Routed aiohttp egress carries proxy credentials outside the proxy URL
+
+When the Codex upstream client dispatches a routed HTTP request or WebSocket
+connect through aiohttp, it MUST pass a credential-free proxy URL
+(`scheme://host:port`) and MUST carry the endpoint username and password as a
+`Proxy-Authorization` Basic header whose bytes are identical to the header
+aiohttp derives from URL userinfo (latin1 encoding). The client MUST NOT place
+proxy credentials in the aiohttp proxy URL. Because aiohttp forwards proxy
+headers only on the CONNECT tunnel, a route whose ordered pool contains any
+credentialed endpoint MUST fail closed for a non-TLS (`http`/`ws`) upstream
+target before any connection is opened and ahead of every transport branch
+(aiohttp, native egress, SOCKS), surfacing as a credential-free connect-phase
+transport error, so a credential-free fallback endpoint cannot absorb the
+misconfigured primary. Route resolution MUST fail closed for a proxy username
+containing `:`. Native egress and SOCKS transports keep carrying credentials
+through their existing URL and field inputs.
+
+#### Scenario: Credentialed https endpoint uses Proxy-Authorization
+
+- **GIVEN** a resolved `https` proxy endpoint with a username and password
+- **WHEN** the Codex upstream client sends a routed request or opens a routed WebSocket through aiohttp
+- **THEN** the aiohttp `proxy` argument contains no userinfo
+- **AND** the CONNECT request carries a `Proxy-Authorization` header whose value is byte-identical to the userinfo-derived token
+- **AND** the aiohttp connection-key repr and the proxy-error message text contain neither the password nor its Basic token
+- **AND** the proxy-error repr, which carries the tunnel request headers, renders with `Basic [REDACTED]` through the log formatters (see `proxy-runtime-observability`)
+
+#### Scenario: Credentialed route to a plaintext target fails closed
+
+- **GIVEN** a resolved route whose primary proxy endpoint carries credentials and whose fallback does not
+- **WHEN** the Codex upstream client is asked to reach an `http` or `ws` upstream URL, for an idempotent or non-idempotent request or a WebSocket open, whether or not a native egress helper is available
+- **THEN** the client fails before dispatch with a credential-free connect-phase transport error
+- **AND** no endpoint in the pool, including the credential-free fallback, receives the request on any transport
+
+#### Scenario: Username with a colon is rejected at resolution
+
+- **WHEN** a proxy endpoint username contains `:`
+- **THEN** route resolution fails closed with reason `invalid_proxy_username`
+
+### Requirement: Dashboard rejects and reports proxy usernames the resolver cannot encode
+
+The dashboard MUST reject an upstream proxy endpoint whose username contains
+`:` at creation with a 400 error coded `invalid_proxy_username`, mirroring the
+resolver rule (RFC 7617 Basic credentials cannot encode a colon in the
+user-id). The endpoint test route MUST report a resolver rejection of an
+already persisted endpoint as a failed probe carrying the resolver reason
+rather than surfacing an unhandled error.
+
+#### Scenario: Colon username is rejected at creation
+
+- **WHEN** an operator creates an upstream proxy endpoint whose username contains `:`
+- **THEN** the request is rejected with a 400 error coded `invalid_proxy_username`
+
+#### Scenario: Endpoint test reports a persisted row the resolver rejects
+
+- **GIVEN** a persisted endpoint the resolver rejects (for example a username containing `:`)
+- **WHEN** the endpoint test route is invoked for it
+- **THEN** the response reports `ok: false` with the resolver reason as `error` and no status code
+- **AND** no probe is sent
+
+### Requirement: Plaintext proxy credentials are surfaced, not blocked
+
+An upstream proxy endpoint whose scheme is `http`, `socks5`, or `socks5h` and which has a username or password MUST be accepted by endpoint creation and by route resolution. The upstream proxy admin API MUST report `plaintextCredentials: true` for such an endpoint and `false` for an `https` endpoint or a credential-free endpoint, and MUST NOT include the password in any response. Route resolution MUST emit exactly one warning per such endpoint per process, identifying the endpoint by id, scheme, host, and port without the credential.
+
+#### Scenario: Operator creates a credentialed http proxy endpoint
+
+- **WHEN** an operator creates an endpoint with scheme `http` and a username and password
+- **THEN** the request succeeds
+- **AND** the created endpoint and the admin listing report `plaintextCredentials: true`
+
+#### Scenario: Credentialed https endpoint is not flagged
+
+- **WHEN** an operator creates an endpoint with scheme `https` and a username and password
+- **THEN** the created endpoint reports `plaintextCredentials: false`
+
+#### Scenario: Resolver warns once per endpoint
+
+- **GIVEN** a credentialed `http` endpoint
+- **WHEN** it is resolved twice in the same process
+- **THEN** exactly one warning is logged for it
+- **AND** the warning contains neither the username nor the password
+

@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use codex_lb_protocol::{NativeEvent, NativeWebSocketRequest};
+use codex_lb_responses::stream::interpret_websocket;
 use futures_util::{SinkExt, StreamExt};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -199,13 +200,32 @@ pub(crate) async fn execute_websocket(
             incoming = websocket.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        emit(
-                            output,
-                            &NativeEvent::WebsocketText {
-                                request_id: request_id.clone(),
-                                text: text.to_string(),
-                            },
-                        ).await?;
+                        let text = text.to_string();
+                        let event = request
+                            .interpret_responses
+                            .then(|| interpret_websocket(&text))
+                            .flatten();
+                        if let Some(event) = event {
+                            emit(
+                                output,
+                                &NativeEvent::WebsocketResponsesText {
+                                    request_id: request_id.clone(),
+                                    text,
+                                    event_type: event.event_type,
+                                    payload: event.payload,
+                                },
+                            )
+                            .await?;
+                        } else {
+                            emit(
+                                output,
+                                &NativeEvent::WebsocketText {
+                                    request_id: request_id.clone(),
+                                    text,
+                                },
+                            )
+                            .await?;
+                        }
                     }
                     Some(Ok(Message::Binary(data))) => {
                         emit(

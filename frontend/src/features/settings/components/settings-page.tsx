@@ -10,6 +10,7 @@ import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section"
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
 import { ModelSourcesSettings } from "@/features/model-sources/components/model-sources-settings";
+import { useModelSources } from "@/features/model-sources/hooks/use-model-sources";
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
@@ -49,6 +50,7 @@ export function SettingsPage() {
   const { settingsQuery, updateSettingsMutation } = useSettings();
   const [initialRetryError, setInitialRetryError] = useState<string | null>(null);
   const { accountsQuery } = useAccounts();
+  const { modelSourcesQuery } = useModelSources();
   const {
     upstreamProxyQuery,
     createEndpointMutation,
@@ -209,6 +211,9 @@ export function SettingsPage() {
                 settings={settings}
                 accounts={accountsQuery.data ?? []}
                 accountsLoading={accountsQuery.isLoading}
+                modelSources={modelSourcesQuery.data?.sources ?? []}
+                modelSourcesLoading={modelSourcesQuery.isLoading}
+                modelSourcesError={modelSourcesQuery.error !== null}
                 busy={controlsDisabled}
                 onSave={handleSave}
               />

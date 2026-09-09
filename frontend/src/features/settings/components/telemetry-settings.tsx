@@ -31,7 +31,10 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
   const { telemetryPreviewQuery } = useTelemetryPreview(previewOpen);
 
   const consent = telemetryConsentQuery.data;
-  const envControlled = consent?.source === "env";
+  // `env` means no dashboard decision is saved yet and the environment
+  // variable currently decides. A saved decision always wins, so the toggle
+  // stays usable; the notice only explains where the current value comes from.
+  const envFallback = consent?.source === "env";
   const busy = disabled || updateTelemetryConsentMutation.isPending || !consent;
   const previewEnvelope = telemetryPreviewQuery.data?.preview ?? null;
 
@@ -51,14 +54,14 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
           <Switch
             aria-label={t("settings.telemetry.toggleAria")}
             checked={consent?.active ?? false}
-            disabled={busy || envControlled}
+            disabled={busy}
             onCheckedChange={(checked) => updateTelemetryConsentMutation.mutate({ enabled: checked })}
           />
         </div>
 
         <p className="text-xs text-muted-foreground">{t("settings.telemetry.optOutNotice")}</p>
 
-        {envControlled ? (
+        {envFallback ? (
           <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">
             {t("settings.telemetry.envNotice")}
           </div>

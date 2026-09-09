@@ -47,18 +47,19 @@ from app.core.clients.proxy import (
     _is_native_codex_request,
     _is_upstream_edge_challenge,
     _normalize_non_native_upstream_fingerprint,
+    _openai_error_detail,
     filter_inbound_headers,
 )
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
-from app.core.openai.models import OpenAIError
+from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.parsing import parse_error_payload
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
     process_network_error_code,
     rotate_shared_http_transport,
 )
+from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.proxy_env import resolve_websocket_proxy_from_env
 from app.core.utils.request_id import get_request_id
@@ -191,6 +192,9 @@ class UpstreamWebSocketMessage:
     close_reason: str | None = None
     error: str | None = None
     error_code: str | None = None
+    responses_interpreted: bool = False
+    event_type: str | None = None
+    payload: dict[str, JsonValue] | None = None
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
@@ -443,6 +447,9 @@ class NativeUpstreamWebSocket:
             data=message.data,
             close_code=message.close_code,
             close_reason=message.close_reason,
+            responses_interpreted=message.responses_interpreted,
+            event_type=message.event_type,
+            payload=message.payload,
         )
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -912,6 +919,7 @@ async def _connect_upstream_websocket(
                     max_msg_size=settings.max_sse_event_bytes,
                     heartbeat=heartbeat,
                     compress=15,
+                    native_interpret_responses=policy.include_responses_beta,
                     **protocol_kwargs,
                 )
                 context = result.context
@@ -1039,6 +1047,7 @@ async def _connect_upstream_websocket(
                     ping_interval_seconds=20.0,
                     ping_timeout_seconds=ping_timeout,
                     proxy_url=proxy_url,
+                    interpret_responses=policy.include_responses_beta,
                 )
             )
         except NativeEgressUnavailable:
@@ -1380,22 +1389,3 @@ def _try_parse_handshake_error_payload(
     if error is None:
         return None
     return {"error": _openai_error_detail(error)}
-
-
-def _openai_error_detail(error: OpenAIError) -> OpenAIErrorDetail:
-    detail: OpenAIErrorDetail = {}
-    if error.message is not None:
-        detail["message"] = error.message
-    if error.type is not None:
-        detail["type"] = error.type
-    if error.code is not None:
-        detail["code"] = error.code
-    if error.param is not None:
-        detail["param"] = error.param
-    if error.plan_type is not None:
-        detail["plan_type"] = error.plan_type
-    if error.resets_at is not None:
-        detail["resets_at"] = error.resets_at
-    if error.resets_in_seconds is not None:
-        detail["resets_in_seconds"] = error.resets_in_seconds
-    return detail

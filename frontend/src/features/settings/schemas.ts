@@ -11,7 +11,6 @@ const RoutingStrategySchema = z.enum([
   "fill_first",
 ]);
 const UpstreamStreamTransportSchema = z.enum([
-  "default",
   "auto",
   "http",
   "websocket",
@@ -33,6 +32,17 @@ const AdditionalQuotaRoutingPolicySchema = z.enum([
   "burn_first",
   "preserve",
 ]);
+const SettingScalarSchema = z.union([z.number(), z.string(), z.boolean()]);
+
+// Where an inheritable setting's effective value comes from: the dashboard
+// column, the environment (column NULL, env differs from the code default) or
+// the code default. Keyed by the backend setting name (snake_case).
+export const SettingProvenanceSchema = z.object({
+  source: z.enum(["dashboard", "env", "default"]),
+  envValue: SettingScalarSchema.nullable().optional().default(null),
+  default: SettingScalarSchema.nullable().optional().default(null),
+});
+
 const AdditionalQuotaPolicySchema = z.object({
   quotaKey: z.string(),
   displayLabel: z.string(),
@@ -55,7 +65,7 @@ export const DashboardSettingsSchema = z
   .object({
     stickyThreadsEnabled: z.boolean(),
     upstreamStreamTransport:
-      UpstreamStreamTransportSchema.optional().default("default"),
+      UpstreamStreamTransportSchema.optional().default("auto"),
     prohibitFastMode: z.boolean().optional().default(false),
     httpDownstreamTransportPolicy:
       HttpDownstreamTransportPolicySchema.optional().default("smart"),
@@ -76,6 +86,11 @@ export const DashboardSettingsSchema = z
       .optional()
       .default(5),
     singleAccountId: z.string().nullable().optional().default(null),
+    subscriptionOverflowSourceId: z.string().nullable().optional().default(null),
+    subscriptionOverflowDrainUntil: z.iso.datetime({ offset: true }).nullable().optional().default(null),
+    // Derived by the backend from the deadline: the date every conversation
+    // pinned to the cleared source has expired by (clear time + 7 days).
+    subscriptionOverflowPinsExpireBy: z.iso.datetime({ offset: true }).nullable().optional().default(null),
     proxyAccountResponseCreateLimit: z.number().int().min(0).optional().default(4),
     proxyAccountResponseCreateLimitEnvironmentValue: z.number().int().min(0).optional().default(4),
     proxyAccountResponseCreateLimitOverride: z.number().int().min(0).nullable().optional().default(null),
@@ -158,6 +173,8 @@ export const DashboardSettingsSchema = z
     usageHistoryRetentionDays: z.number().int().min(0).max(3650).optional().default(0),
     requestLogRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
     usageHistoryRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
+    // Optional so responses from backends that predate provenance still parse.
+    provenance: z.record(z.string(), SettingProvenanceSchema).optional(),
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -201,6 +218,9 @@ export const SettingsUpdateRequestSchema = z
     relativeAvailabilityPower: z.number().positive().optional(),
     relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
     singleAccountId: z.string().nullable().optional(),
+    // Tri-state: absent = unchanged, null = off (arms the drain deadline),
+    // value = designate. The drain deadline itself is read-only.
+    subscriptionOverflowSourceId: z.string().nullable().optional(),
     proxyAccountResponseCreateLimit: z.number().int().min(0).nullable().optional(),
     proxyAccountStreamLimit: z.number().int().min(0).nullable().optional(),
     proxyAccountStreamRecoveryReserve: z.number().int().min(0).nullable().optional(),
@@ -297,6 +317,7 @@ export type DashboardSettings = Omit<
   Partial<StickyThresholdPresenceFlags> &
   Partial<StickyThresholdValues>;
 export type SettingsUpdateRequest = z.infer<typeof SettingsUpdateRequestSchema>;
+export type SettingProvenance = z.infer<typeof SettingProvenanceSchema>;
 export type AdditionalQuotaRoutingPolicy = z.infer<typeof AdditionalQuotaRoutingPolicySchema>;
 
 export const UpstreamProxyEndpointSchema = z.object({
@@ -496,6 +517,41 @@ export const TelemetryConsentUpdateRequestSchema = z.object({
   enabled: z.boolean(),
 });
 
+export const SubscriptionOverflowPreflightModelSchema = z.object({
+  slug: z.string(),
+  enabled: z.boolean(),
+  neverOverflows: z.boolean(),
+  neverOverflowsReason: z.string().nullable().optional().default(null),
+  undeclaredToolTypes: z.array(z.string()).default([]),
+  supportsVision: z.boolean(),
+  supportsStreaming: z.boolean(),
+  priced: z.boolean(),
+  contextWindowMismatch: z
+    .object({
+      registry: z.number().int(),
+      source: z.number().int().nullable().optional().default(null),
+      maxOutputTokens: z.number().int().nullable().optional().default(null),
+    })
+    .nullable()
+    .optional()
+    .default(null),
+  warnings: z.array(z.string()).default([]),
+});
+
+export const SubscriptionOverflowPreflightSchema = z.object({
+  sourceId: z.string(),
+  sourceName: z.string(),
+  sourceEnabled: z.boolean(),
+  eligible: z.boolean(),
+  blockers: z.array(z.string()).default([]),
+  drainUntil: z.iso.datetime({ offset: true }).nullable().optional().default(null),
+  servedModels: z.array(SubscriptionOverflowPreflightModelSchema).default([]),
+  missingModels: z.array(z.string()).default([]),
+  scopedApiKeyCount: z.number().int().min(0),
+  livePinCount: z.number().int().min(0),
+  tombstoneCount: z.number().int().min(0),
+});
+
 export type UpstreamProxyEndpoint = z.infer<typeof UpstreamProxyEndpointSchema>;
 export type UpstreamProxyEndpointCreateRequest = z.infer<typeof UpstreamProxyEndpointCreateRequestSchema>;
 export type UpstreamProxyEndpointTestResponse = z.infer<typeof UpstreamProxyEndpointTestResponseSchema>;
@@ -509,3 +565,5 @@ export type TelemetrySnapshot = z.infer<typeof TelemetrySnapshotSchema>;
 export type TelemetrySnapshotEnvelope = z.infer<typeof TelemetrySnapshotEnvelopeSchema>;
 export type TelemetryConsent = z.infer<typeof TelemetryConsentSchema>;
 export type TelemetryConsentUpdateRequest = z.infer<typeof TelemetryConsentUpdateRequestSchema>;
+export type SubscriptionOverflowPreflight = z.infer<typeof SubscriptionOverflowPreflightSchema>;
+export type SubscriptionOverflowPreflightModel = z.infer<typeof SubscriptionOverflowPreflightModelSchema>;

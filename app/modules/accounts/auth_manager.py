@@ -655,6 +655,12 @@ class AuthManager:
         if adopted is not None:
             return adopted
 
+        latest = await self._repo.get_by_id_fresh(account.id)
+        if latest is not None:
+            # Rotation can reconcile a concurrent access rejection or preserve
+            # a newer operator status; detached callers must adopt that state.
+            return _adopt_account_row(account, latest)
+
         account.access_token_encrypted = new_access_token_encrypted
         account.refresh_token_encrypted = new_refresh_token_encrypted
         account.id_token_encrypted = new_id_token_encrypted

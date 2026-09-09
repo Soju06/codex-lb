@@ -115,6 +115,7 @@ def _make_postgres_repo(monkeypatch: pytest.MonkeyPatch) -> tuple[AccountsReposi
 def _make_result(value: str | None = "acc") -> MagicMock:
     result = MagicMock()
     result.scalar_one_or_none.return_value = value
+    result.one_or_none.return_value = (AccountStatus.ACTIVE, None) if value is not None else None
     return result
 
 

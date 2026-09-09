@@ -102,7 +102,7 @@ when the requested slug matches a bootstrap entry.
 
 ### Requirement: OpenAI-compatible model metadata uses backend context windows
 
-When serving `GET /v1/models`, the system SHALL expose `metadata.context_window` as the upstream backend `context_window` budget by default. The system MUST NOT promote raw `max_context_window` values or hard-coded full-context guesses into `metadata.context_window`. Explicit operator context-window overrides remain the highest-priority reported-context value.
+When serving `GET /v1/models`, the system SHALL expose `metadata.context_window` as the upstream backend `context_window` budget by default. The system MUST NOT promote raw `max_context_window` values or hard-coded full-context guesses into `metadata.context_window`. Explicit operator context-window overrides remain the highest-priority reported-context value, clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`.
 
 #### Scenario: GPT-5 Codex models are reported with the backend context window on /v1/models
 
@@ -116,7 +116,7 @@ When serving `GET /v1/models`, the system SHALL expose `metadata.context_window`
 
 ### Requirement: OpenAI-compatible model metadata preserves the backend input budget explicitly
 
-When serving `GET /v1/models`, the system SHALL expose the upstream backend input/context budget in `metadata.input_context_window`. For models whose reported `metadata.context_window` is not operator-overridden, `metadata.context_window` and `metadata.input_context_window` SHOULD be equal. The system SHOULD expose `metadata.max_output_tokens` for known GPT-5 Codex models when that output-budget value is known; that value MUST NOT be used to inflate `metadata.context_window`.
+When serving `GET /v1/models`, the system SHALL expose the upstream backend input/context budget in `metadata.input_context_window`. When an explicit operator context-window override applies to a model, that override SHALL be the reported input budget as well, clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`, so `metadata.input_context_window` and the OpenAI-compatible `context_length`, `contextLength`, and `capabilities.context_length` fields never contradict `metadata.context_window` and never advertise more input than the backend sanctions. A `max_context_window` equal to the backend `context_window` — the parseability default synthesized for bootstrap and source-catalog models — MUST NOT clamp an override, so raise overrides for those models keep working. For models whose reported `metadata.context_window` is not operator-overridden, `metadata.context_window` and `metadata.input_context_window` SHOULD be equal. The system SHOULD expose `metadata.max_output_tokens` for known GPT-5 Codex models when that output-budget value is known; that value MUST NOT be used to inflate `metadata.context_window`.
 
 #### Scenario: /v1/models exposes the 272k backend input budget explicitly
 
@@ -127,9 +127,26 @@ When serving `GET /v1/models`, the system SHALL expose the upstream backend inpu
 #### Scenario: Explicit reported-context overrides do not hide the backend input budget
 
 - **WHEN** an operator override sets a model's reported `metadata.context_window` to `515000`
-- **AND** the upstream model catalog contains that model with `context_window=272000`
+- **AND** the upstream model catalog contains that model with `context_window=272000` and no `max_context_window`
 - **THEN** `GET /v1/models` returns that model with `metadata.context_window=515000`
-- **AND** `metadata.input_context_window=272000`
+- **AND** `metadata.input_context_window=515000`
+- **AND** `context_length`, `contextLength`, and `capabilities.context_length` of `515000`
+
+#### Scenario: An override never advertises more input than the backend ceiling
+
+- **WHEN** an operator override sets a model's reported context window to `1000000`
+- **AND** the upstream model catalog contains that model with `context_window=272000` and `max_context_window=872000`
+- **THEN** `GET /v1/models` returns that model with `metadata.context_window=872000`
+- **AND** `metadata.input_context_window=872000`
+- **AND** `context_length`, `contextLength`, and `capabilities.context_length` of `872000`
+
+#### Scenario: A synthesized ceiling equal to the backend budget does not clamp an override
+
+- **WHEN** an operator override sets a source-catalog model's reported context window to `32768`
+- **AND** that model declares `context_window=8192` and no explicit `max_context_window`, so the catalog synthesizes `max_context_window=8192`
+- **THEN** `GET /v1/models` returns that model with `metadata.context_window=32768`
+- **AND** `metadata.input_context_window=32768`
+- **AND** `context_length`, `contextLength`, and `capabilities.context_length` of `32768`
 
 #### Scenario: /v1/models exposes max output budget for known GPT-5 Codex models
 
@@ -139,6 +156,8 @@ When serving `GET /v1/models`, the system SHALL expose the upstream backend inpu
 ### Requirement: Codex-native model catalog keeps backend catalog fields
 
 When serving `GET /backend-api/codex/models`, the system MUST keep Codex-native model catalog semantics unchanged: the top-level `context_window` field remains the backend compact/input budget unless an explicit operator override applies, and upstream raw fields such as `max_context_window` remain available when upstream provides them. The `/v1/models` compatibility metadata MUST NOT mutate the native Codex endpoint.
+
+When an explicit operator context-window override applies to a model, the native entry SHALL report the single resolved value — the override clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`; a `max_context_window` equal to the backend `context_window` (the synthesized parseability default) MUST NOT clamp — on `context_window`, and SHALL rewrite `max_context_window` to that same resolved value when upstream provides the field. The endpoint's OpenAI-compatible `data` alias SHALL report the same resolved value on its `context_length`, `contextLength`, `capabilities.context_length`, `metadata.context_window`, and `metadata.input_context_window` fields, so the native and alias views of one model never advertise different budgets.
 
 #### Scenario: Native Codex route preserves compact budget
 
@@ -153,6 +172,21 @@ When serving `GET /backend-api/codex/models`, the system MUST keep Codex-native 
 - **AND** the response includes `object: "list"` and an OpenAI-compatible `data` list
 - **AND** `data` contains model entries whose Codex visibility is `list`
 - **AND** `data` excludes entries whose Codex visibility is `hide`
+
+#### Scenario: Native Codex catalog reports one resolved budget for a clamped override
+
+- **WHEN** an operator override sets a model's reported context window to `1000000`
+- **AND** the upstream model catalog contains that model with `context_window=272000` and `max_context_window=872000`
+- **THEN** `GET /backend-api/codex/models` returns that model with `context_window=872000`
+- **AND** `max_context_window=872000`
+
+#### Scenario: Codex data alias reports the resolved input budget for an override
+
+- **WHEN** an operator override sets a model's reported context window to `515000`
+- **AND** the upstream model catalog contains that model with `context_window=272000` and no explicit `max_context_window`
+- **THEN** the `GET /backend-api/codex/models` `data` alias entry for that model reports `context_length`, `contextLength`, and `capabilities.context_length` of `515000`
+- **AND** `metadata.context_window=515000` and `metadata.input_context_window=515000`
+- **AND** the native `models` entry reports `context_window=515000`
 
 ### Requirement: OpenAI-compatible model metadata preserves speed tiers
 
@@ -1116,4 +1150,217 @@ The system MUST treat `ultrafast` as an access-controlled service tier and MUST 
 
 - **WHEN** no live or retained account catalog advertises `ultrafast`
 - **THEN** bootstrap model metadata does not expose or grant that tier
+
+### Requirement: Source-model catalog entries advertise operator-declared reasoning efforts
+
+Codex catalog entries built for OpenAI-compatible source models MUST derive
+`supported_reasoning_levels`, `default_reasoning_level`, and
+`supports_reasoning_summaries` from the source model's `raw_metadata_json`
+rather than reporting a fixed no-reasoning capability.
+
+Derivation MUST be gated on `"supports_reasoning": true`. That flag is the only
+reasoning control the dashboard exposes, so a model whose operator left it off
+MUST advertise no efforts, no default, and no summary support regardless of what
+else the metadata declares. Levels say *which* efforts an opted-in backend
+accepts, not *whether* reasoning is permitted, and gating them on the same flag
+that gates the chat-completions sanitizer is what keeps the Codex catalog,
+`/v1/models` and the dashboard checkbox in agreement.
+
+`supported_reasoning_levels` MUST accept a list of effort slugs and a list of
+`{"effort", "description"}` objects. Entries that are neither a string nor a
+mapping with a string `effort`, and duplicate efforts, MUST be ignored. A
+non-list value MUST yield no advertised efforts. `default_reasoning_level` MUST
+be reported only when it matches one of the advertised efforts. A source model
+without reasoning metadata MUST continue to advertise no efforts, no default,
+and no summary support.
+
+Declared efforts MUST be normalized (trimmed and lowercased) and
+deduplicated. They MUST NOT be filtered against a fixed vocabulary: backends
+disagree on which efforts exist -- `none` is real on GLM and Alibaba Model
+Studio, while others stop at `low`/`high`/`max` -- so an enum would drop
+efforts a provider genuinely accepts. Only shape is validated; an entry that
+is not a string, a mapping without a string `effort`, or an empty slug MUST be
+dropped.
+
+#### Scenario: Effort slugs are advertised in declaration order
+
+- **GIVEN** a source model whose `raw_metadata_json` sets
+  `"supported_reasoning_levels": ["low", "medium", "high", "xhigh"]` and
+  `"default_reasoning_level": "high"`
+- **WHEN** a client fetches the Codex model catalog
+- **THEN** the entry advertises efforts `low`, `medium`, `high`, `xhigh` in that order
+- **AND** `default_reasoning_level` is `high`
+
+#### Scenario: Effort objects carry operator descriptions and summary support
+
+- **GIVEN** a source model whose `raw_metadata_json` sets
+  `"supported_reasoning_levels": [{"effort": "low", "description": "Low effort"}]`
+  and `"supports_reasoning_summaries": true`
+- **WHEN** a client fetches the Codex model catalog
+- **THEN** the `low` effort is advertised with description `Low effort`
+- **AND** `supports_reasoning_summaries` is `true`
+
+#### Scenario: Malformed entries and out-of-range defaults are dropped
+
+- **GIVEN** a source model whose `raw_metadata_json` sets
+  `"supported_reasoning_levels": ["low", "low", {"description": "x"}, 7, {"effort": "high"}]`
+  and `"default_reasoning_level": "ultra"`
+- **WHEN** a client fetches the Codex model catalog
+- **THEN** the entry advertises exactly `low` and `high`
+- **AND** `default_reasoning_level` is absent
+
+#### Scenario: Casing variants are normalized, unknown efforts are kept
+
+- **GIVEN** a source model whose `raw_metadata_json` sets
+  `"supported_reasoning_levels": [" Low ", "HIGH", "provider-specific"]` and
+  `"default_reasoning_level": " HIGH "`
+- **WHEN** a client fetches the Codex model catalog
+- **THEN** the entry advertises `low`, `high`, and `provider-specific`
+- **AND** `default_reasoning_level` is `high`
+
+#### Scenario: An operator-declared `none` survives
+
+- **GIVEN** a source model whose `raw_metadata_json` sets
+  `"supported_reasoning_levels": ["none", "high", "max"]` and
+  `"default_reasoning_level": "none"`
+- **WHEN** a client fetches the Codex model catalog
+- **THEN** the entry advertises `none`, `high`, and `max`
+- **AND** `default_reasoning_level` is `none`
+
+#### Scenario: Models without reasoning metadata keep the previous behavior
+
+- **GIVEN** a source model with no `raw_metadata_json`
+- **WHEN** a client fetches the Codex model catalog
+- **THEN** the entry advertises no reasoning efforts, no default effort, and no
+  reasoning-summary support
+
+### Requirement: The reasoning switch is the single opt-in across every surface
+
+`"supports_reasoning": true` MUST remain the only reasoning opt-in for a source
+model. Declared levels or `supports_reasoning_summaries` MUST NOT imply it.
+
+Because catalog derivation is gated on the same flag, the surfaces cannot
+disagree: with the switch off the model advertises no efforts, `/v1/models`
+reports `supports_reasoning: false`, the chat-completions sanitizer strips the
+client's reasoning fields, and the unsupported-effort restore has no declared
+effort to act on. With it on, the operator's declared efforts reach all of them.
+
+#### Scenario: The switch is off
+
+- **GIVEN** a source model that declares `supported_reasoning_levels` and
+  `supports_reasoning_summaries` but not `"supports_reasoning": true`
+- **WHEN** its catalog entry is built and a chat-completions request for it
+  carries reasoning fields
+- **THEN** the entry advertises no efforts, no default, and no summary support
+- **AND** `/v1/models` reports `supports_reasoning: false`
+- **AND** the request's reasoning fields are stripped
+
+#### Scenario: The switch is on
+
+- **GIVEN** the same source model with `"supports_reasoning": true` added
+- **WHEN** its catalog entry is built and a chat-completions request for it
+  carries reasoning fields
+- **THEN** the entry advertises the declared efforts and summary support
+- **AND** the request's reasoning fields are forwarded
+
+#### Scenario: The switch alone still opts in
+
+- **GIVEN** a source model that sets only `"supports_reasoning": true`
+- **WHEN** a chat-completions request for that model carries reasoning fields
+- **THEN** the fields are forwarded, and the entry advertises no specific efforts
+
+### Requirement: The unsupported-effort rewrite is undone for source-routed requests
+
+The `minimal` normalization works around a ChatGPT/Codex backend that drops the
+value, hanging the stream. Model sources do not have that defect, so a request
+served by one MUST NOT be downgraded by it.
+
+Whether a request is served by a model source is known only after source
+selection, which runs after enforcement. The rewrite MUST therefore be applied
+unconditionally at enforcement time, and the replaced effort MUST be reported to
+the caller so it can be restored once a source has actually been selected.
+Restoration MUST occur only when a source was selected and the replaced effort
+is among the efforts that source declares for the model. Declared efforts are
+read through the same `"supports_reasoning"` gate as the catalog, so a model
+whose switch is off has none and is never restored. The reported effort
+MUST be the post-enforcement value, so restoring it cannot resurrect an effort
+an API key overrode, and MUST be the normalized (trimmed, lowercased) form, so
+restoration cannot reintroduce a casing variant the normalizer removed.
+
+Restoration MUST apply only to efforts replaced by the unsupported-effort
+fallback. The `ultra` -> `max` rewrite is a wire alias rather than a workaround:
+it mirrors the reference client and is required on every upstream surface, so it
+MUST remain applied to source-routed payloads even when the source declares
+`ultra`.
+
+Registry membership MUST NOT be used to decide this. A populated snapshot can
+omit a genuine subscription model — a partial refresh, an account unavailable
+during refresh, or an operator-mapped slug outside the bootstrap set — and those
+requests still reach the ChatGPT backend, where skipping the rewrite restores
+the hang. Conversely a source model whose slug shadows a subscription slug is
+present in the snapshot yet source-routed.
+
+#### Scenario: A source that declared the effort receives it unchanged
+
+- **GIVEN** a source model declaring `["minimal", "low", "high"]`
+- **AND** a request for that model with `reasoning.effort` of `minimal`
+- **WHEN** the request is routed to the source
+- **THEN** the source receives `minimal`
+
+#### Scenario: A source that did not declare the effort keeps the safe value
+
+- **GIVEN** a source model declaring `["low", "high"]`
+- **AND** a request for that model with `reasoning.effort` of `minimal`
+- **WHEN** the request is routed to the source
+- **THEN** the source receives the rewritten effort
+
+#### Scenario: A source declaring ultra still receives the max alias
+
+- **GIVEN** a source model declaring `["ultra", "max"]`
+- **AND** a request for that model with `reasoning.effort` of `ultra`
+- **WHEN** the request is routed to the source
+- **THEN** the source receives `max`
+
+#### Scenario: Subscription requests keep the workaround
+
+- **GIVEN** a request with `reasoning.effort` of `minimal` that is not routed to
+  a model source, including one whose model is absent from a populated registry
+  snapshot
+- **WHEN** the request is forwarded
+- **THEN** the effort is rewritten to the model's lowest supported effort
+
+#### Scenario: WebSocket requests keep the workaround
+
+- **GIVEN** a WebSocket Responses request with `reasoning.effort` of `minimal`
+- **WHEN** the request is forwarded
+- **THEN** the effort is rewritten, because the WebSocket transport never
+  reaches a model source
+
+#### Scenario: An enforced effort is not resurrected by restoration
+
+- **GIVEN** an API key that enforces a reasoning effort
+- **AND** a request for a source model that declares the client's original effort
+- **WHEN** the request is routed to the source
+- **THEN** the source receives the enforced effort
+
+### Requirement: Daybreak profile can initialize from the local model catalog
+
+`GET /backend-api/codex/models` MUST validate the proxy API key whenever `X-Codex-LB-Required-Capability` is present, even when deployment-wide API-key authentication is disabled. With a valid key it MUST return the existing local Codex catalog without applying the unsupported-transport denial, selecting an account, or dispatching an upstream request. Headerless model-catalog requests MUST retain their existing behavior.
+
+#### Scenario: Authenticated Daybreak catalog request remains available
+
+- **WHEN** the Daybreak provider requests the Codex-native model catalog with its valid key and capability carrier
+- **THEN** the route returns the existing catalog response
+- **AND** no account is selected and no upstream request is made
+
+#### Scenario: Catalog carrier requires authentication
+
+- **WHEN** a capability-bearing catalog request omits its proxy API key or supplies an invalid key
+- **THEN** the route returns the existing HTTP 401 `invalid_api_key` response
+- **AND** no catalog response or routing attempt occurs
+
+#### Scenario: Headerless catalog behavior remains unchanged
+
+- **WHEN** a model-catalog request omits the required-capability carrier
+- **THEN** the existing deployment-level authentication and catalog behavior remains in effect
 

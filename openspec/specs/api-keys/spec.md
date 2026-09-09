@@ -6,9 +6,9 @@ Define API key lifecycle, enforcement, accounting, and dashboard management cont
 ## Requirements
 ### Requirement: API Key creation
 
-The system SHALL allow the admin to create API keys via `POST /api/api-keys` with a `name` (required), `allowed_models` (optional list), `weekly_token_limit` (optional integer), `expires_at` (optional ISO 8601 datetime), `assigned_account_ids` (optional list), and `usage_sections` (optional comma-separated string, defaults to `"upstream_limits,account_pool_usage"`). The system MUST generate a key in the format `sk-clb-{48 hex chars}`, store only the `sha256` hash in the database, and return the plain key exactly once in the creation response. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt`, normalize them to UTC naive for persistence, and return the expiration as UTC in API responses.
+The system SHALL allow the admin to create API keys via `POST /api/api-keys` with a `name` (required), `allowedModels` (optional list), `weeklyTokenLimit` (optional integer), `expiresAt` (optional ISO 8601 datetime), `assignedAccountIds` (optional list), and `usageSections` (optional comma-separated string, defaults to `"upstream_limits,account_pool_usage"`). The system MUST generate a key in the format `sk-clb-{48 hex chars}`, store only the `sha256` hash in the database, and return the plain key exactly once in the creation response. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt`, normalize them to UTC naive for persistence, and return the expiration as UTC in API responses.
 
-When `assigned_account_ids` is omitted or empty, the created key SHALL remain unscoped and apply to all accounts. When `assigned_account_ids` is provided with one or more valid account IDs, the created key SHALL enable account-assignment scope and persist those assignments.
+When `assignedAccountIds` is omitted or empty, the created key SHALL remain unscoped and apply to all accounts. When `assignedAccountIds` is provided with one or more valid account IDs, the created key SHALL enable account-assignment scope and persist those assignments.
 
 #### Scenario: Create unscoped key without assigned accounts
 
@@ -30,7 +30,9 @@ When `assigned_account_ids` is omitted or empty, the created key SHALL remain un
 #### Scenario: Create key and show plain key
 
 - **WHEN** admin submits `POST /api/api-keys` with a valid payload
-- **THEN** the response contains the full plain key exactly once and the system never returns the plain key on subsequent reads
+- **THEN** the response contains a key matching `sk-clb-[0-9a-f]{48}`
+- **AND** the full plain key is returned exactly once
+- **AND** the system never returns the plain key on subsequent reads
 
 #### Scenario: Create key with timezone-aware expiration
 
@@ -103,12 +105,14 @@ The system SHALL allow deleting an API key via `DELETE /api/api-keys/{id}`. Dele
 
 ### Requirement: API Key regeneration
 
-The system SHALL allow regenerating an API key via `POST /api/api-keys/{id}/regenerate`. This MUST generate a new key value (new hash, new prefix) while preserving all other properties (name, models, limits, expiration). The new plain key MUST be returned exactly once.
+The system SHALL allow regenerating an API key via `POST /api/api-keys/{id}/regenerate`. This MUST generate a new key matching `sk-clb-[0-9a-f]{48}` with a new hash and prefix while preserving all other properties (name, models, limits, expiration). The new plain key MUST be returned exactly once.
 
 #### Scenario: Regenerate key
 
 - **WHEN** admin calls `POST /api/api-keys/{id}/regenerate`
-- **THEN** the system returns the updated key object with a new `key` and `keyPrefix`; the old key immediately stops authenticating
+- **THEN** the system returns the updated key object with a new `key` and `keyPrefix`
+- **AND** the new key matches `sk-clb-[0-9a-f]{48}`
+- **AND** the old key immediately stops authenticating
 
 ### Requirement: API Key authentication global switch
 The system SHALL provide an `api_key_auth_enabled` boolean in `DashboardSettings`. When false (default), local requests to protected proxy routes MAY proceed without an API key. Operators MAY additionally opt specific non-local proxy clients into unauthenticated access by configuring `proxy_unauthenticated_client_cidrs`. Requests that are neither local nor explicitly allowlisted MUST be rejected until proxy authentication is configured. When true, protected proxy routes require a valid API key in the `Authorization` header using the Bearer authentication scheme.
@@ -514,6 +518,14 @@ This predicate SHALL be applied consistently across `/api/models`, `/v1/models`,
 
 Usage reservation의 최종 정산(finalize 또는 release)은 요청 단위에서 정확히 1회 수행되어야 한다. 재시도 가능한 중간 attempt에서는 정산을 defer하고, 요청 종료 시점에서 단일 지점이 정산 책임을 갖는다. 시스템은 이 동작을 SHALL 보장해야 한다.
 
+When an Images route owns a limited API-key reservation and cancellation
+interrupts the first upstream SSE read, the system MUST close the upstream
+iterator, MUST finish the route-owned release attempt despite active
+cancellation, and MUST then propagate the original `CancelledError`. A failed
+close or release MUST be logged and MUST NOT replace the original cancellation.
+Stale reclamation MUST remain an exceptional backstop and MUST NOT substitute
+for normal request-owned cleanup.
+
 #### Scenario: 스트림 401 → refresh retry 성공 시 finalize 1회
 
 - **WHEN** 첫 `_stream_once()` attempt에서 401을 수신하고 계정 refresh 후 재시도가 성공하면
@@ -531,6 +543,43 @@ Usage reservation의 최종 정산(finalize 또는 release)은 요청 단위에�
 
 - **WHEN** `_stream_once()`가 retry 없이 첫 attempt에서 성공하면
 - **THEN** `finalize_usage_reservation()`이 정확히 1회 호출되어야 한다 (SHALL)
+
+#### Scenario: Cancelled Images priming releases its route-owned reservation
+
+- **GIVEN** a limited API key has created an Images route-owned reservation for
+  `/v1/images/generations` or `/v1/images/edits`
+- **AND** the internal Responses stream has no API-key reservation owner
+- **WHEN** request cancellation interrupts the first upstream SSE read before
+  any event is yielded
+- **THEN** the upstream iterator is closed
+- **AND** the Images route finishes releasing its reservation exactly once
+  despite active cancellation
+- **AND** the reservation reaches `released` state and its reserved quota is
+  restored
+- **AND** the original `CancelledError` propagates after cleanup completes
+- **AND** stale-reservation reclamation is not required for that request
+
+#### Scenario: Failed upstream close does not prevent reservation release
+
+- **GIVEN** cancellation interrupts Images stream priming before the first
+  upstream SSE event
+- **WHEN** closing the upstream iterator fails but the route-owned reservation
+  release succeeds
+- **THEN** the proxy logs the close failure
+- **AND** the Images route releases its reservation exactly once
+- **AND** the reservation reaches `released` state and its reserved quota is
+  restored
+- **AND** the original `CancelledError` propagates unchanged
+- **AND** stale-reservation reclamation is not required for that request
+
+#### Scenario: Failed reservation release preserves the original cancellation
+
+- **GIVEN** cancellation interrupts Images stream priming before the first
+  upstream SSE event
+- **WHEN** releasing the route-owned reservation fails
+- **THEN** the proxy logs the release failure
+- **AND** the original `CancelledError` propagates unchanged
+- **AND** the still-reserved reservation remains eligible for stale reclamation
 
 ### Requirement: 조기 종료 경로에서 reservation release 보장
 
@@ -1418,4 +1467,342 @@ The dashboard API key CRUD surface MUST accept and persist `ultrafast` as a cano
 - **GIVEN** an account model advertises the `ultrafast` service tier
 - **WHEN** a request uses an API key whose enforced service tier is `ultrafast`
 - **THEN** the upstream request carries `service_tier: "ultrafast"`
+
+### Requirement: Required-capability header authenticates through the existing proxy API-key dependency
+
+Whenever a protected proxy request carries one or more `X-Codex-LB-Required-Capability` values, the existing `validate_proxy_api_key` Security dependency MUST require a valid proxy API key before the handler runs, even when `api_key_auth_enabled` is false and the caller would otherwise qualify as local or CIDR-allowlisted. Headerless requests MUST retain the existing global-switch behavior. The capability header MUST NOT introduce a second FastAPI authentication dependency identity for ordinary proxy routes.
+
+#### Scenario: Capability header requires a key while global auth is disabled
+
+- **WHEN** `api_key_auth_enabled` is false
+- **AND** a local or CIDR-allowlisted client sends a protected proxy request with `X-Codex-LB-Required-Capability`
+- **THEN** ingress requires a valid proxy API key
+- **AND** a missing or invalid key is rejected with the existing `401 invalid_api_key` error
+
+#### Scenario: Headerless requests keep the global authentication switch
+
+- **WHEN** `api_key_auth_enabled` is false
+- **AND** a local or CIDR-allowlisted client sends a protected proxy request without `X-Codex-LB-Required-Capability`
+- **THEN** the request proceeds without a new per-request API-key requirement
+
+### Requirement: Disconnect cleanup settles source-chat reservations
+
+When a source-chat request is cancelled or its streaming body is closed, the proxy MUST close the upstream iterator, release its API-key reservation, and write or explicitly abort the source request-log row despite repeated cancellation delivery.
+
+#### Scenario: Client disconnects during source stream
+
+- **WHEN** the downstream client disconnects before source-stream completion
+- **THEN** the reservation is released and the source request is logged as an aborted/error request.
+
+### Requirement: Limit-free admissions skip the reservation ledger
+
+When API-key admission finds no applicable limit for a request (the key has no configured limits, or none of its limits apply to the request model), the system MUST NOT create a usage reservation row and MUST NOT run the reservation commit for that request. Admission MUST report that no reservation exists, and every downstream reservation consumer (stream and compact settlement, release paths, heartbeat touch, quota-planner warmup finalization) MUST treat the missing reservation as "nothing to settle" and no-op without error. Admission-time validity checks (key active, key not expired, lazy expired-limit reset) MUST still run unchanged. Because settlement — which records the key's last-used touch for reserved requests — never runs without a reservation, admission MUST record the last-used touch itself on the limit-free path so `last_used_at` continues to advance for these keys. Admission MUST also close the read transaction it opened before returning without a reservation, and MUST do so without expiring ORM state tracked by a caller-shared session (callers such as the quota-planner warmup service hold already-loaded rows on the same session and access them after admission). Keys with at least one applicable limit MUST continue to create reservations with per-limit items (including zero-delta items) and full commit durability.
+
+#### Scenario: Key without limits creates no reservation
+
+- **WHEN** admission runs for an API key with no configured limits
+- **THEN** no usage reservation row is inserted and no reservation write is committed (the only commit issued closes the read-only admission transaction)
+- **AND** the request is admitted without a reservation
+
+#### Scenario: Key whose limits do not apply to the request model creates no reservation
+
+- **WHEN** admission runs for a key whose limits all carry a `model_filter` that does not match the request model
+- **THEN** no usage reservation row is inserted
+- **AND** the non-matching limits' `current_value` values are unchanged
+
+#### Scenario: Limit-free admissions still advance last-used
+
+- **WHEN** admission runs for a key with no applicable limits
+- **THEN** the key's last-used touch is recorded at admission via the write-behind coalescer
+- **AND** the dashboard-visible `last_used_at` continues to advance for the key
+
+#### Scenario: Settlement, release, and heartbeat no-op without a reservation
+
+- **WHEN** a request admitted without a reservation finishes (success or failure)
+- **THEN** settlement, release, and heartbeat-touch paths skip without error
+- **AND** no settlement transaction runs for that request
+
+#### Scenario: Quota-planner warmup probes without a reservation
+
+- **WHEN** the quota-planner warmup executor admits its probe with a key that has no applicable limits
+- **THEN** the warmup probe executes
+- **AND** no reservation finalization is attempted
+
+#### Scenario: Limit-free admission preserves shared-session ORM state
+
+- **WHEN** a caller that holds already-loaded ORM rows on the same session (the quota-planner warmup service tracks the target account and decision) admits a request with a limit-free key
+- **THEN** the admission read transaction is closed before admission returns
+- **AND** the caller's tracked rows remain readable afterwards without reload errors, so the warmup probe executes
+
+#### Scenario: Stale-reservation reclamation sees no rows for limit-free admissions
+
+- **WHEN** stale usage-reservation reclamation runs after admissions for keys without applicable limits
+- **THEN** those admissions contribute no reservations to reclaim
+
+#### Scenario: Limited keys are unaffected
+
+- **WHEN** admission runs for a key with an applicable limit
+- **THEN** a reservation with per-limit items is created and committed exactly as before admission returned reservations unconditionally
+
+### Requirement: API keys can restrict client-selected reasoning efforts
+
+The dashboard API-key create, update, list, and response surfaces SHALL expose
+an optional `allowedReasoningEfforts` list. When absent or `null`, the API key
+MUST retain unrestricted reasoning-effort behavior. When present, the list
+MUST be non-empty and consist only of the supported client-plane efforts
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. The service
+MUST trim, case-normalize, de-duplicate, and return entries in canonical
+catalog order.
+
+`allowedReasoningEfforts` MUST be mutually exclusive with
+`enforcedReasoningEffort`. Create and PATCH requests MUST validate the
+effective persisted state, including an unchanged counterpart field. Existing
+API keys whose persisted allowlist is null MUST remain unrestricted.
+The persistence layer MUST reject a row that contains both an allowlist and a
+fixed reasoning effort.
+If legacy or manually edited storage contains a malformed non-null allowlist,
+the service MUST remain fail-closed for explicit efforts and the dashboard MUST
+NOT clear that sentinel during an unrelated edit. A concurrent update that
+loses the mutual-exclusion constraint race MUST return the normal dashboard
+validation error instead of an internal server error.
+
+#### Scenario: Create an effort-selectable key
+
+- **WHEN** an administrator creates an API key with
+  `allowedReasoningEfforts: ["XHIGH", "low", "high", "low"]`
+- **THEN** the response returns `allowedReasoningEfforts` as
+  `["low", "high", "xhigh"]`
+- **AND** `enforcedReasoningEffort` is null
+
+#### Scenario: Reject an empty allowlist
+
+- **WHEN** an administrator creates or updates an API key with
+  `allowedReasoningEfforts: []`
+- **THEN** the dashboard API returns 400
+- **AND** the API key is not changed
+
+#### Scenario: Reject conflicting reasoning policies on update
+
+- **GIVEN** an API key has `enforcedReasoningEffort: "low"`
+- **WHEN** an administrator updates only `allowedReasoningEfforts` to
+  `["low", "medium"]`
+- **THEN** the dashboard API returns 400
+- **AND** the existing fixed effort remains unchanged
+
+#### Scenario: Existing key remains unrestricted
+
+- **GIVEN** an API key created before `allowedReasoningEfforts` existed
+- **WHEN** it is read or used without that field configured
+- **THEN** its response contains `allowedReasoningEfforts: null`
+- **AND** no reasoning-effort allowlist is applied
+
+#### Scenario: Unrelated edit preserves a malformed fail-closed policy
+
+- **GIVEN** an API key exposes an empty allowlist sentinel for malformed stored
+  policy data
+- **WHEN** an administrator changes only its name
+- **THEN** the dashboard update omits `allowedReasoningEfforts`
+- **AND** the malformed persisted policy is not replaced with null
+
+#### Scenario: Concurrent policy conflict returns a validation error
+
+- **GIVEN** concurrent updates try to set a fixed effort and an allowlist on
+  the same unrestricted key
+- **WHEN** the database mutual-exclusion constraint rejects the losing update
+- **THEN** the dashboard API returns its normal invalid API-key payload error
+
+### Requirement: Dashboard manages selectable reasoning efforts
+
+The API-key create and edit dialogs SHALL present the supported reasoning
+efforts as an accessible multi-select when no fixed effort is selected. The UI
+MUST represent no selected values as `null`, not an empty allowlist. When an
+administrator selects a fixed effort, the UI MUST clear and disable the
+allowlist; when it selects one or more allowlist values, it MUST clear the
+fixed-effort selection.
+
+#### Scenario: Configure all normal efforts without max or ultra
+
+- **WHEN** an administrator selects `minimal`, `low`, `medium`, `high`, and
+  `xhigh` in the API-key dialog
+- **THEN** the saved key returns exactly those five allowed efforts
+- **AND** the dialog does not show `max` or `ultra` as selected
+
+### Requirement: Keyed stream mid-loop failover settles before account-health writes
+
+When an HTTP SSE Responses stream holds an API-key usage reservation, mid-loop failover account-health writes for a failed account MUST NOT run while that reservation remains unsettled. The stream MUST keep the same reservation across the internal failover, MUST defer the failed account's health write until settlement is confirmed, and MUST NOT acquire a second reservation solely for that failover. If primary settlement fails but fail-safe release confirms, the stream MAY flush deferred health after that confirmed release when ordered settle never ran. If neither settlement nor fail-safe release confirms, deferred health MUST stay unapplied. After settlement ownership transfers from the request and both ordered settlement and its immediate fail-safe release fail, tracked persistence cleanup MUST retry reservation release while the request path keeps deferred health unapplied. Cancellation observed while an immediate fail-safe release is still running MUST NOT start a retrying release after that fallback confirms, and cleanup MAY flush deferred health after that confirmed release. After settlement commits, the stream MUST record that settled state before awaiting deferred health flush so a cancellation that arrives during the flush cannot skip retained deferred penalties. Deferred health flush MUST consume one queued entry at a time and MUST retain later entries when one write fails or cancellation interrupts an await. Deferred health flush MUST complete each queued entry under cancellation-deferred ownership so a cancel mid-write cannot replay the same health operation and double-count errors. After settlement or release confirms, a deferred route-backoff failure MUST NOT prevent independent queued stream-health penalties from being attempted. A detached cancel-safe deferred-health flush MUST be tracked as persistence work and graceful shutdown MUST await it within the configured persistence-drain budget. After cancellation, cleanup MUST attempt to settle or release the reservation. Cleanup MUST flush deferred health before it finishes only after settlement or release is confirmed. If neither operation confirms, deferred health MUST remain unapplied.
+
+#### Scenario: Keyed refresh/connect failover defers health until settle
+
+- **GIVEN** a keyed HTTP SSE Responses stream with a held API-key reservation
+- **AND** the first account fails a retryable freshness/connect transport error
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_stream_error` for the failed account runs only after that settlement
+- **AND** the request does not acquire another reservation
+
+#### Scenario: Keyed transient exhaustion defers health until settle
+
+- **GIVEN** a keyed HTTP SSE Responses stream with a held API-key reservation
+- **AND** the first account exhausts same-account transient stream retries
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_stream_error` and extra `record_errors` for the failed account run only after that settlement
+
+#### Scenario: Streaming Responses route preserves settle-before-health
+
+- **GIVEN** a keyed request admitted through the streaming `/v1/responses` entry point
+- **AND** mid-loop keyed failover queues a deferred account-health penalty
+- **WHEN** the replacement account completes
+- **THEN** reservation settlement commits before the deferred health write
+
+#### Scenario: Cancel after queued mid-loop penalty still flushes health
+
+- **GIVEN** a keyed stream that queued a deferred mid-loop health penalty
+- **WHEN** the request is cancelled before the replacement settles
+- **AND** cleanup confirms settlement or fail-safe release
+- **THEN** the deferred health write still runs
+
+#### Scenario: Cancel during deferred health flush still applies the penalty
+
+- **GIVEN** a keyed stream whose settlement already committed
+- **AND** deferred health flush is awaiting an account-health write
+- **WHEN** the request is cancelled during that await
+- **THEN** the deferred health write still completes for the failed account
+
+#### Scenario: Cancel mid deferred health write does not double-count
+
+- **GIVEN** a keyed stream whose settlement already committed
+- **AND** deferred health flush has applied in-memory health for a queued entry
+- **AND** the flush is still awaiting persistence or extra `record_errors`
+- **WHEN** the request is cancelled during that await
+- **THEN** cleanup MUST NOT replay the same queued entry
+- **AND** `_handle_stream_error` and extra `record_errors` for that entry apply exactly once
+
+#### Scenario: Deferred health flush keeps later entries after one failure
+
+- **GIVEN** a keyed stream that deferred health for more than one failed account
+- **WHEN** the first deferred health write raises
+- **THEN** later deferred health writes are still attempted
+
+#### Scenario: Unconfirmed settlement keeps deferred health unapplied
+
+- **GIVEN** a keyed stream that deferred a mid-loop health penalty
+- **WHEN** neither primary settlement nor fail-safe release confirms settlement
+- **THEN** the deferred health write does not run
+
+#### Scenario: Failed ordered settlement transfers release retry ownership
+
+- **GIVEN** keyed mid-loop failover transferred reservation settlement ownership from the request
+- **WHEN** ordered settlement and its immediate fail-safe release both fail
+- **THEN** tracked persistence cleanup retries reservation release
+- **AND** the request path does not apply the deferred account-health write
+
+#### Scenario: Cancelled fallback does not retry a confirmed release
+
+- **GIVEN** ordering-sensitive settlement transferred reservation ownership from the request
+- **AND** the immediate fail-safe release confirms after the primary attempt is cancelled
+- **WHEN** cancellation is observed while that fallback is still running
+- **THEN** tracked persistence cleanup MUST NOT start a retrying release
+- **AND** deferred health MAY flush after that confirmed release
+
+#### Scenario: Shutdown drains detached deferred health
+
+- **GIVEN** cancellation leaves a post-settlement account-health penalty for cancel-safe background flush
+- **WHEN** graceful shutdown drains persistence tasks
+- **THEN** the drain waits for that deferred health flush within its configured timeout
+
+#### Scenario: Deferred route-backoff failure preserves queued stream health
+
+- **GIVEN** confirmed settlement or release with a deferred route backoff and an independent queued stream-health penalty
+- **WHEN** the deferred route-backoff write fails
+- **THEN** cleanup still attempts the queued stream-health penalty
+
+#### Scenario: Retried backoff failure preserves later cancelled-flush entries
+
+- **GIVEN** confirmed settlement with a retained route backoff and multiple queued stream-health penalties
+- **AND** cancellation interrupts the flush after its current queued penalty completes
+- **WHEN** final cleanup retries the route backoff and that write fails again
+- **THEN** cleanup tracks and flushes the later queued stream-health penalties
+
+### Requirement: API-key collection routes preserve trailing-slash behavior
+
+The API-key collection operations MUST serve both `/api/api-keys` and
+`/api/api-keys/` directly. Equivalent route forms MUST use the same
+authentication, validation, persistence, and response contracts, and the
+unslashed form MUST NOT depend on an HTTP redirect or the dashboard SPA
+fallback.
+
+#### Scenario: List API keys through either collection URL
+
+- **WHEN** a dashboard client sends `GET /api/api-keys` or
+  `GET /api/api-keys/`
+- **THEN** both requests return the same API-key collection response directly
+- **AND** neither request returns an HTTP redirect
+
+#### Scenario: Create an API key through either collection URL
+
+- **WHEN** a dashboard client sends the same valid creation payload to
+  `POST /api/api-keys` or `POST /api/api-keys/`
+- **THEN** both requests run the API-key creation operation directly
+- **AND** neither request depends on redirect handling to preserve the request
+  body
+
+### Requirement: Previously issued API key compatibility
+
+The system MUST continue authenticating an already-issued API key by its stored
+SHA-256 hash regardless of whether its plaintext suffix uses the current
+48-character hexadecimal format or the earlier 43-character base64url format.
+
+#### Scenario: Authenticate an already-issued base64url key
+
+- **GIVEN** an API key created before the generated-key format correction has a stored hash
+- **WHEN** the client authenticates with that unchanged plaintext key
+- **THEN** the system authenticates it through the existing hash lookup
+- **AND** the system does not require key rotation or data migration
+
+### Requirement: Subscription-backed transcription reservations survive cancellation safely
+
+The system MUST reserve API-key usage before forwarding an authenticated subscription-backed transcription request, and MUST release that owned reservation exactly once when cancellation interrupts upstream forwarding. The cancellation-deferring release MUST finish despite active AnyIO cancellation. If release persistence succeeds, the reservation MUST reach `released` state and its reserved quota MUST be restored before the original cancellation propagates. If release persistence fails after the existing bounded persistence retries, the system MUST emit cancellation-neutral cleanup diagnostics, MUST propagate the original cancellation, and MUST leave the reservation eligible for stale-reservation reclamation.
+
+#### Scenario: Cancelled subscription transcription releases its reservation
+
+- **GIVEN** a limited API key has created an owned reservation for a subscription-backed transcription request
+- **WHEN** cancellation interrupts the request while upstream transcription forwarding is in flight
+- **THEN** the request owner finishes releasing the reservation exactly once despite active cancellation
+- **AND** the reservation reaches `released` state and its reserved quota is restored
+- **AND** the original cancellation propagates after cleanup completes
+- **AND** stale-reservation reclamation is not required for that request
+
+#### Scenario: Failed cancellation release remains recoverable
+
+- **GIVEN** cancellation interrupts a limited subscription-backed transcription request after its reservation is created
+- **AND** the immediate release attempt exhausts the existing bounded persistence retries
+- **WHEN** release persistence reports failure
+- **THEN** the proxy emits cancellation-neutral cleanup diagnostics
+- **AND** the original cancellation propagates
+- **AND** stale-reservation reclamation remains eligible to release the reservation and restore its reserved quota
+
+### Requirement: One-time API-key secret responses prevent storage
+
+Every successful response containing a full plain API key MUST include
+`Cache-Control: no-store, no-cache, must-revalidate, private`,
+`Pragma: no-cache`, and `Expires: 0`. This applies to both create URL forms and
+regeneration. The policy MUST NOT alter payload, generation, persistence,
+authorization, errors, or logging; plain keys MUST remain absent from logs.
+
+#### Scenario: Create through either collection URL
+
+- **WHEN** an authorized admin creates a key through either URL form
+- **THEN** all three directives are present
+- **AND** the existing one-time plain-key payload remains
+
+#### Scenario: Regenerate a key
+
+- **WHEN** an authorized admin regenerates a key
+- **THEN** all three directives are present
+- **AND** the existing regenerated-key payload remains
+
+#### Scenario: Unauthorized write stays rejected
+
+- **WHEN** a read-only principal attempts create or regenerate
+- **THEN** existing 403 behavior remains
+- **AND** no plain key or secret-response headers are returned
 

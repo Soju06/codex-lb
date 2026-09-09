@@ -19,10 +19,12 @@ from unittest.mock import MagicMock
 import aiohttp
 import pytest
 
+import app.modules.accounts.auth_manager as auth_manager_module
 import app.modules.proxy.account_cache as account_cache_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
@@ -33,6 +35,7 @@ from app.db.models import Account, AccountStatus, StickySession, StickySessionKi
 from app.db.session import SessionLocal
 from app.db.snapshot import clone_row
 from app.dependencies import get_proxy_service_for_app
+from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -163,6 +166,59 @@ async def test_auth_invalidation_does_not_overwrite_access_only_repair(async_cli
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("refresh_code", ["account_suspended", "account_deleted", "unknown_permanent_error"])
+async def test_stream_auth_recovery_preserves_refresh_deactivation(async_client, monkeypatch, path, refresh_code):
+    monkeypatch.setattr(auth_manager_module, "_REFRESH_SINGLEFLIGHT", auth_manager_module._RefreshSingleflight())
+    account_a = await _import_account(async_client, "acc_disabled_a", "disabled-a@example.com")
+    await _import_account(async_client, "acc_disabled_b", "disabled-b@example.com")
+    cache_key = "disabled-auth-owner"
+    async with SessionLocal() as session:
+        session.add(StickySession(key=cache_key, kind=StickySessionKind.PROMPT_CACHE, account_id=account_a))
+        await session.commit()
+
+    refreshes = []
+    attempts = []
+
+    async def refresh_tokens(self, token, *, account):
+        refreshes.append(account.id)
+        raise proxy_module.RefreshError(refresh_code, "Permanent refresh rejection", True)
+
+    async def stream(payload, headers, access_token, account_id, **kwargs):
+        attempts.append(account_id)
+        if account_id == "acc_disabled_a":
+            raise ProxyResponseError(401, openai_error("token_expired", "Expired access"), failure_phase="status")
+        yield _success_sse_event()
+
+    monkeypatch.setattr(AuthManager, "_refresh_tokens", refresh_tokens)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
+    for _ in range(2):
+        response = await async_client.post(
+            path,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "hi",
+                "input": "hello",
+                "prompt_cache_key": cache_key,
+                "stream": True,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert _extract_events(response.text.splitlines())[-1]["type"] == "response.completed"
+
+    assert attempts == ["acc_disabled_a", "acc_disabled_b", "acc_disabled_b"]
+    assert refreshes == [account_a]
+    async with SessionLocal() as session:
+        row = await session.get(Account, account_a)
+        assert row is not None
+        assert row.status == AccountStatus.DEACTIVATED
+        assert row.deactivation_reason == PERMANENT_FAILURE_CODES.get(refresh_code, "Permanent refresh rejection")
+    peer_cache = account_cache_module.RoutingAvailabilityCache(SessionLocal)
+    await peer_cache.refresh_from_db()
+    assert peer_cache.is_unavailable(account_a)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "boundary",
     [
@@ -170,6 +226,11 @@ async def test_auth_invalidation_does_not_overwrite_access_only_repair(async_cli
         "unresolved_tool",
         "unknown_field",
         "unknown_reasoning",
+        "reasoning_only",
+        "reasoning_without_answer",
+        "reasoning_after_prior_answer",
+        "reasoning_second_incomplete_turn",
+        "reasoning_unresolved_call",
         "file",
         "previous_response",
         "turn_state",
@@ -189,6 +250,21 @@ async def test_stream_auth_recovery_preserves_ownership(async_client, monkeypatc
         payload["input"][0]["unknown_account_state"] = "opaque"
     elif boundary == "unknown_reasoning":
         payload["input"].insert(0, {"type": "reasoning", "unknown_account_state": "opaque"})
+    elif boundary.startswith("reasoning_"):
+        reasoning = {"type": "reasoning", "id": "rs_old", "encrypted_content": "opaque", "summary": []}
+        answer = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Prior answer"}]}
+        user = {"role": "user", "content": "New question"}
+        if boundary == "reasoning_only":
+            payload["input"] = [reasoning]
+        elif boundary == "reasoning_without_answer":
+            payload["input"] = [reasoning, user]
+        elif boundary == "reasoning_after_prior_answer":
+            payload["input"] = [answer, reasoning, user]
+        elif boundary == "reasoning_second_incomplete_turn":
+            payload["input"] = [user, reasoning, answer, user, reasoning, user]
+        else:
+            call = {"type": "function_call", "call_id": "call_missing", "name": "read", "arguments": "{}"}
+            payload["input"] = [reasoning, call, user]
     elif boundary == "file":
 
         async def file_owner(*args, **kwargs):
@@ -942,7 +1018,7 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 @pytest.mark.asyncio
 async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch):
     """Connect-phase 429/usage_limit_reached on A should fail over to B before any downstream event."""
-    await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
+    account_a_id = await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
     await _import_account(async_client, "acc_stream_429_b", "stream429b@example.com")
 
     seen_account_ids: list[str | None] = []
@@ -970,6 +1046,11 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
     assert len(completed) == 1
     assert len(failed) == 0
     assert seen_account_ids[:2] == ["acc_stream_429_a", "acc_stream_429_b"]
+
+    async with SessionLocal() as session:
+        exhausted_account = await session.get(Account, account_a_id)
+        assert exhausted_account is not None
+        assert exhausted_account.status == AccountStatus.RATE_LIMITED
 
 
 @pytest.mark.asyncio

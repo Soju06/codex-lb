@@ -7,13 +7,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, delete, func, or_, select, text, update
+from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import extract_id_token_claims, resolve_seat_identity
+from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.balancer.logic import reauth_reason_blocks_routing
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
@@ -47,6 +49,7 @@ from app.modules.accounts.usage_time_rollup import (
     mirror_account_hard_delete_into_time_rollups,
     mirror_account_soft_delete_into_time_rollups,
 )
+from app.modules.proxy.account_cache import clear_account_routing_unavailable, get_account_selection_cache
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 from app.modules.usage.plan_downgrade_observations import discard_plan_downgrade_observations
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
@@ -298,9 +301,6 @@ class AccountsRepository:
             _store_request_usage_summaries(cache_key, summaries, ttl_seconds, generation)
             return dict(summaries)
         return summaries
-
-    async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
-        return await self.get_active_by_chatgpt_account_id(chatgpt_account_id) is not None
 
     async def get_active_by_chatgpt_account_id(self, chatgpt_account_id: str) -> Account | None:
         result = await self._session.execute(
@@ -1270,6 +1270,11 @@ class AccountsRepository:
                 values["workspace_label"] = workspace_label
             if seat_type is not None:
                 values["seat_type"] = seat_type
+            repaired_rejection = and_(
+                Account.status == AccountStatus.REAUTH_REQUIRED,
+                Account.deactivation_reason == PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+                Account.access_token_encrypted != access_token_encrypted,
+            )
             stmt = (
                 update(Account)
                 .where(Account.id == account_id)
@@ -1277,12 +1282,28 @@ class AccountsRepository:
                 # the upstream exchange, so a concurrent rotation is never
                 # clobbered by a slower writer.
                 .where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
-                .values(**values)
-                .returning(Account.id)
+                .values(
+                    **values,
+                    # Authentication rejection belongs to the replaced access
+                    # credentials. Reconcile it atomically without changing
+                    # independent operator, quota, or reset state.
+                    status=case((repaired_rejection, AccountStatus.ACTIVE), else_=Account.status),
+                    deactivation_reason=case((repaired_rejection, None), else_=Account.deactivation_reason),
+                )
+                .returning(Account.status, Account.deactivation_reason)
             )
             result = await self._session.execute(stmt)
+            rotated = result.one_or_none()
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            if rotated is None:
+                return False
+            status, reason = rotated
+            if status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED) and not (
+                status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(reason)
+            ):
+                clear_account_routing_unavailable(account_id)
+            get_account_selection_cache().invalidate()
+            return True
 
     async def update_account_metadata(
         self,

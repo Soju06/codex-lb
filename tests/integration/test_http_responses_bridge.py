@@ -23,6 +23,7 @@ from sqlalchemy import select, update
 
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage as _FakeUpstreamMessage
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
 from app.core.utils.request_id import (
@@ -213,7 +214,6 @@ def _make_app_settings(
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         stream_idle_timeout_seconds=300.0,
         openai_prompt_cache_key_derivation_enabled=True,
     )
@@ -291,24 +291,6 @@ def _install_bridge_settings_with_limits(
             prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
         ),
     )
-
-
-class _FakeUpstreamMessage:
-    def __init__(
-        self,
-        kind: str,
-        *,
-        text: str | None = None,
-        close_code: int | None = None,
-        error: str | None = None,
-        error_code: str | None = None,
-    ) -> None:
-        self.kind = kind
-        self.text = text
-        self.close_code = close_code
-        self.error = error
-        self.error_code = error_code
-        self.data = None
 
 
 class _FakeBridgeUpstreamWebSocket:

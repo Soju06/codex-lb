@@ -29,7 +29,7 @@ body:
     id: version
     attributes:
       label: codex-lb version
-      placeholder: "1.17.0"
+      placeholder: "1.25.0 (dashboard status bar, `GET /api/runtime/version`, or the deployed image tag)"
     validations:
       required: true
 

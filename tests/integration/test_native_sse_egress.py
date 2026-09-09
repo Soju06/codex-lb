@@ -8,13 +8,14 @@ import socket
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import aiohttp
 import anyio
 import pytest
 
+import app.core.clients.native_egress as native_module
 import app.core.clients.proxy as proxy_module
 from app.core.clients.codex import CodexClient
 from app.core.clients.native_egress import SubprocessNativeEgressClient
@@ -202,6 +203,71 @@ def _stream(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["sse", "json", "error"])
+async def test_buffered_native_burst_preserves_responses_result(
+    tmp_path: Path, routed: bool, response_kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(native_module, "_NATIVE_STREAM_QUEUE_LIMIT", 64)
+    handshake = json.loads(
+        (Path(__file__).resolve().parents[2] / "crates/codex-lb-protocol/tests/fixtures/handshake-v1.json").read_text()
+    )
+    terminal = {"type": "response.completed", "response": {"id": "burst-result", "output": []}}
+    expected = [{"type": "response.output_text.delta", "delta": str(index)} for index in range(256)] + [terminal]
+    error = {"error": {"message": "burst error " * 256, "type": "invalid_request_error", "code": "burst_error"}}
+    body = json.dumps(error if response_kind == "error" else terminal["response"])
+    helper = tmp_path / "buffered-helper"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import base64, json, sys\n"
+        f"handshake = {handshake!r}\n"
+        "assert json.loads(sys.stdin.readline()) == handshake['client_hello']\n"
+        "print(json.dumps(handshake['server_hello']), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    command = json.loads(line)\n"
+        "    request_id = command['request_id']\n"
+        "    if command['type'] == 'cancel':\n"
+        "        print(json.dumps({'type': 'cancelled', 'request_id': request_id}), flush=True)\n"
+        "        continue\n"
+        f"    kind, body, payloads = {response_kind!r}, {body!r}, {expected!r}\n"
+        "    events = [{'type': 'head', 'status': 429 if kind == 'error' else 200,\n"
+        "               'http_version': 'HTTP/2.0', 'headers': [['content-type',\n"
+        "               'text/event-stream' if kind == 'sse' else 'application/json']]}]\n"
+        "    if kind == 'sse':\n"
+        "        events.extend({'type': 'responses_event', 'text': 'data: ' + json.dumps(payload) + '\\n\\n',\n"
+        "                       'more': False, 'event_type': payload['type'], 'python_normalization': False}\n"
+        "                      for payload in payloads)\n"
+        "    else:\n"
+        "        body = body.encode() + b' ' * 256\n"
+        "        events.extend({'type': 'chunk', 'data': base64.b64encode(body[i:i+1]).decode()}\n"
+        "                      for i in range(len(body)))\n"
+        "    events.append({'type': 'end'})\n"
+        "    sys.stdout.write(''.join(json.dumps(dict(event, request_id=request_id)) + '\\n' for event in events))\n"
+        "    sys.stdout.flush()\n"
+    )
+    helper.chmod(0o700)
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        stream = _stream(
+            "http://127.0.0.1:12345",
+            client,
+            "buffered-burst",
+            stream=response_kind != "json",
+            routed=routed,
+            raise_for_status=True,
+        )
+        if response_kind == "error":
+            with pytest.raises(ProxyResponseError) as exc_info:
+                await asyncio.wait_for(_collect(stream), timeout=5)
+            assert exc_info.value.status_code == 429
+            assert exc_info.value.payload == error
+        else:
+            result = await asyncio.wait_for(_collect(stream), timeout=5)
+            assert [_payload(event) for event in result] == (expected if response_kind == "sse" else [terminal])
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_native_proxy_frames_large_non_utf8_sse_without_python_scanning(
     monkeypatch: pytest.MonkeyPatch,
     native_worker: SubprocessNativeEgressClient,
@@ -240,6 +306,42 @@ async def test_native_proxy_frames_large_non_utf8_sse_without_python_scanning(
         events = [event async for event in _stream(base_url, native_worker, "large-event", routed=routed)]
 
     assert events == [expected_event]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ready_count", [1, 257])
+async def test_native_proxy_flushes_ready_event_before_reading_quiet_upstream(
+    native_worker: SubprocessNativeEgressClient,
+    routed: bool,
+    ready_count: int,
+) -> None:
+    ready = [
+        f'data: {{"type":"response.output_text.delta","delta":"{index}"}}\n\n'.encode() for index in range(ready_count)
+    ]
+    completed = b'data: {"type":"response.completed","response":{"id":"resp_ready"}}\n\n'
+    release_upstream = asyncio.Event()
+
+    async def handler(
+        _reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        _head: bytes,
+        _body: bytes,
+    ) -> None:
+        await _start_chunked_response(writer)
+        await _write_chunk(writer, b"".join(ready))
+        await release_upstream.wait()
+        await _write_chunk(writer, completed)
+        await _finish_chunks(writer)
+
+    async with _serve_http(handler) as base_url:
+        events = _stream(base_url, native_worker, "ready-before-read", routed=routed)
+        try:
+            for block in ready:
+                assert await asyncio.wait_for(anext(events), timeout=2.0) == block.decode()
+            release_upstream.set()
+            assert await asyncio.wait_for(_collect(events), timeout=2.0) == [completed.decode()]
+        finally:
+            await cast(AsyncGenerator[str, None], events).aclose()
 
 
 @pytest.mark.asyncio
@@ -734,6 +836,119 @@ _COMPACT_EVENTS = (
     b'{"object":"response","id":"resp_compact","output":[]}}\n\n'
 )
 
+_COMPACT_CASES = json.loads(
+    (Path(__file__).resolve().parents[2] / "crates/codex-lb-responses/tests/fixtures/compact-v1.json").read_text()
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _COMPACT_CASES, ids=[case["name"] for case in _COMPACT_CASES])
+async def test_native_compact_collection_matches_python_public_result(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    tmp_path: Path,
+    routed: bool,
+    case: dict[str, Any],
+) -> None:
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        body = "".join(case["blocks"]).encode()
+        if body:
+            await _write_chunk(writer, body)
+        await _finish_chunks(writer)
+
+    async def outcome(
+        base_url: str, worker: SubprocessNativeEgressClient, session: aiohttp.ClientSession | None
+    ) -> object:
+        try:
+            result = await _compact(base_url, worker, monkeypatch, routed=routed, session=session)
+            return result.model_dump()
+        except ProxyResponseError as exc:
+            return exc.status_code, exc.payload, exc.failure_phase
+
+    async with _serve_http(handler) as base_url, aiohttp.ClientSession() as session:
+        missing = SubprocessNativeEgressClient(tmp_path / "missing-helper")
+        expected = await outcome(base_url, missing, session)
+
+        def forbidden_collection(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("native compact must not enter the Python collector")
+
+        monkeypatch.setattr(proxy_module, "_compact_response_payload_from_sse", forbidden_collection)
+        assert await outcome(base_url, native_worker, None) == expected
+    assert not native_worker._streams
+
+
+@pytest.mark.asyncio
+async def test_native_compact_large_result_is_fragmented_and_stops_before_late_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    routed: bool,
+) -> None:
+    monkeypatch.setattr(native_module, "_NATIVE_STREAM_QUEUE_LIMIT", 64)
+    items = [{"index": i, "padding": "한글" * 4096, "integer": 10**70} for i in range(96)]
+    blocks = [
+        json.dumps({"type": "response.output_item.done", "output_index": i, "item": item}, ensure_ascii=False)
+        for i, item in enumerate(items)
+    ]
+    blocks.append(json.dumps({"type": "response.completed", "response": {"object": "response.compact", "id": "large"}}))
+    body = "".join("data: " + block + "\n\n" for block in blocks).encode() + b"data: " + b"x" * 100_000 + b"\n\n"
+    monkeypatch.setattr(proxy_module.get_settings(), "max_sse_event_bytes", 64 * 1024)
+    original_read = native_module._read_event
+    fragments: list[int] = []
+
+    async def read_event(stdout: asyncio.StreamReader) -> dict[str, object]:
+        event = await original_read(stdout)
+        if event.get("type") == "compact":
+            fragments.append(len(str(event["text"]).encode()))
+        assert event.get("type") != "sse", "compact intermediate events must stay in Rust"
+        return event
+
+    monkeypatch.setattr(native_module, "_read_event", read_event)
+    closed = asyncio.Event()
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        await _write_chunk(writer, body)
+        await reader.read()
+        closed.set()
+
+    async with _serve_http(handler) as base_url:
+        result = await asyncio.wait_for(_compact(base_url, native_worker, monkeypatch, routed=routed), timeout=5)
+        await asyncio.wait_for(closed.wait(), timeout=2)
+    assert result.model_extra is not None
+    assert result.model_extra["output"] == items
+    assert len(fragments) > 64
+    assert max(fragments) <= 16 * 1024
+
+
+@pytest.mark.asyncio
+async def test_native_compact_escaped_surrogate_key_preserves_python_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    routed: bool,
+    tmp_path: Path,
+) -> None:
+    body = (
+        b'data: {"type":"response.output_item.done","item":{}}\n\n'
+        b'data: {"type":"response.completed","response":{"object":"response.compact","\\ud800":1}}\n\n'
+    )
+
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        await _write_chunk(writer, body)
+        await _finish_chunks(writer)
+
+    async with _serve_http(handler) as base_url, aiohttp.ClientSession() as session:
+        missing = SubprocessNativeEgressClient(tmp_path / "missing-helper")
+        with pytest.raises(ProxyResponseError) as expected:
+            await asyncio.wait_for(_compact(base_url, missing, monkeypatch, routed=routed, session=session), 2)
+        with pytest.raises(ProxyResponseError) as actual:
+            await asyncio.wait_for(_compact(base_url, native_worker, monkeypatch, routed=routed), 2)
+        assert actual.value.status_code == expected.value.status_code == 502
+        assert actual.value.payload == expected.value.payload
+        assert actual.value.failure_phase == expected.value.failure_phase == "parse"
+    assert not native_worker._streams
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("content_type", ["text/event-stream", "Text/Event-Stream; charset=utf-8", None, ""])
@@ -750,6 +965,7 @@ async def test_native_compact_frames_and_returns_before_body_eof(
         raise AssertionError("compact native SSE must bypass the Python byte scanner")
 
     monkeypatch.setattr(proxy_module, "_find_sse_separator", forbidden_python_scan)
+    monkeypatch.setattr(proxy_module, "_compact_response_payload_from_sse", forbidden_python_scan)
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, body: bytes) -> None:
         requests.append(json.loads(body))
@@ -1112,3 +1328,132 @@ async def test_native_compact_routed_fallback_keeps_metadata_and_never_replays_a
     assert not replays
     assert trace == proxy_module.UpstreamProxyRouteTrace("account_bound", "compact-fallback", "selected", True)
     assert not native_worker._streams
+
+
+_STREAM_CASES = json.loads(
+    (Path(__file__).resolve().parents[2] / "crates/codex-lb-responses/tests/fixtures/stream-v1.json").read_text()
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _STREAM_CASES, ids=[case["name"] for case in _STREAM_CASES])
+@pytest.mark.parametrize("sdk", [False, True])
+async def test_native_stream_interpretation_matches_public_python_result(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    routed: bool,
+    case: dict[str, Any],
+    sdk: bool,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("app.core.errors.time.time", lambda: 1700000000)
+    body = case["block"].encode() + b'data: {"type":"response.completed","response":{"id":"end"}}\n\n'
+
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        await _write_chunk(writer, body)
+        await _finish_chunks(writer)
+
+    async def outcome(base_url: str, worker: SubprocessNativeEgressClient, session: aiohttp.ClientSession) -> list[str]:
+        route = (
+            ResolvedUpstreamRoute(
+                mode="account_bound",
+                pool_id="stream-parity",
+                endpoint=ResolvedProxyEndpoint("stream-proxy", "http", "127.0.0.1", urlsplit(base_url).port or 80),
+            )
+            if routed
+            else None
+        )
+        return await _collect(
+            stream_responses(
+                _request("interpretation"),
+                {"authorization": "Bearer test"},
+                "test-access-token",
+                "test-account",
+                base_url="http://upstream.invalid" if routed else base_url,
+                session=session,
+                route=route,
+                codex_client=CodexClient(session, native_egress_client=worker) if routed else None,
+                upstream_stream_transport_override="http",
+                allow_direct_egress=False,
+                suppress_live_usage=True,
+                native_egress_client=worker,
+                enforce_openai_sdk_contract=sdk,
+            )
+        )
+
+    async with _serve_http(handler) as base_url, aiohttp.ClientSession() as session:
+        missing = SubprocessNativeEgressClient(tmp_path / "missing-helper")
+        expected = await outcome(base_url, missing, session)
+        assert await outcome(base_url, native_worker, session) == expected
+    assert not native_worker._streams
+
+
+@pytest.mark.asyncio
+async def test_native_interpretation_drains_large_fragments_without_python_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+    native_worker: SubprocessNativeEgressClient,
+    routed: bool,
+) -> None:
+    monkeypatch.setattr(native_module, "_NATIVE_STREAM_QUEUE_LIMIT", 2)
+    block = 'data: {"type":"response.text.delta","delta":' + json.dumps("한글😀" * 12000) + "}\n\n"
+    expected = proxy_module._normalize_sse_event_block(block)
+    terminal = 'data: {"type":"response.completed","response":{"id":"done"}}\n\n'
+    fragments: list[int] = []
+    read = native_module._read_event
+
+    async def record(stdout: asyncio.StreamReader) -> dict[str, object]:
+        event = await read(stdout)
+        if event.get("type") == "responses_event":
+            fragments.append(len(str(event["text"]).encode()))
+        return event
+
+    monkeypatch.setattr(native_module, "_read_event", record)
+    normalizer = proxy_module._normalize_sse_event_block
+    classifier = proxy_module._normalize_stream_payload_for_http_block
+
+    def require_native(block: str) -> str:
+        assert isinstance(block, native_module.NativeResponsesEvent)
+        assert not block.python_normalization
+        return normalizer(block)
+
+    def require_metadata(block: str, *, enforce_openai_sdk_contract: bool = True) -> tuple[str, str | None]:
+        assert isinstance(block, native_module.NativeResponsesEvent)
+        assert not block.python_normalization
+        return classifier(block, enforce_openai_sdk_contract=enforce_openai_sdk_contract)
+
+    monkeypatch.setattr(proxy_module, "_normalize_sse_event_block", require_native)
+    monkeypatch.setattr(proxy_module, "_normalize_stream_payload_for_http_block", require_metadata)
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        await _write_chunk(writer, (block + terminal).encode())
+        await reader.read()  # Completion must release the response before EOF.
+
+    async with _serve_http(handler) as base_url:
+        result = await asyncio.wait_for(_collect(_stream(base_url, native_worker, "interpreted", routed=routed)), 5)
+    assert result == [expected, terminal]
+    assert len(fragments) > 2
+    assert max(fragments) <= 16 * 1024
+    assert not native_worker._streams
+
+
+@pytest.mark.asyncio
+async def test_native_long_event_type_uses_bounded_python_handoff(
+    native_worker: SubprocessNativeEgressClient, routed: bool
+) -> None:
+    kind = "vendor." + "x" * (20 * 1024)
+    block = f'event: {kind}\ndata: {{"type":"{kind}"}}\n\n'
+    terminal = 'data: {"type":"response.completed","response":{"id":"end"}}\n\n'
+
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
+        await _start_chunked_response(writer)
+        await _write_chunk(writer, (block + terminal).encode())
+        await _finish_chunks(writer)
+
+    async with _serve_http(handler) as base_url:
+        result = await _collect(_stream(base_url, native_worker, "long-kind", routed=routed))
+    assert result == [block, terminal]
+    assert isinstance(result[0], native_module.NativeResponsesEvent)
+    assert result[0].event_type is None
+    assert result[0].python_normalization

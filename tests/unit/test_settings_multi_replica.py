@@ -40,20 +40,6 @@ def test_settings_multi_replica_defaults():
     assert settings.shutdown_drain_timeout_seconds == 30
     assert settings.http_connector_limit == 100
     assert settings.http_connector_limit_per_host == 50
-    assert settings.http_downstream_transport_policy == "smart"
-
-
-@pytest.mark.parametrize("policy", ["smart", "always_http", "always_websocket", "pinned"])
-def test_settings_http_downstream_transport_policy_from_env(monkeypatch, policy: str):
-    monkeypatch.setenv("CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY", policy)
-    settings = Settings()
-    assert settings.http_downstream_transport_policy == policy
-
-
-def test_settings_http_downstream_transport_policy_rejects_unknown(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY", "sometimes")
-    with pytest.raises(ValidationError):
-        Settings()
 
 
 def test_settings_metrics_enabled_from_env(monkeypatch):
@@ -303,22 +289,23 @@ def test_settings_upstream_websocket_proxy_env_can_be_explicitly_disabled(monkey
     assert settings.upstream_websocket_trust_env is False
 
 
-def test_settings_workers_per_instance_defaults_to_one(monkeypatch):
+def test_settings_workers_per_instance_unset_is_accepted(monkeypatch):
     # The default (one worker per instance) requires no operator action and is
     # accepted exactly as before: caps are partitioned per replica via the ring.
+    # CODEX_LB_WORKERS_PER_INSTANCE is a startup guard, not a Settings field.
     monkeypatch.delenv("CODEX_LB_WORKERS_PER_INSTANCE", raising=False)
 
     settings = Settings()
 
-    assert settings.workers_per_instance == 1
+    assert "workers_per_instance" not in Settings.model_fields
+    assert not hasattr(settings, "workers_per_instance")
 
 
-def test_settings_workers_per_instance_explicit_one_is_accepted(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_WORKERS_PER_INSTANCE", "1")
+@pytest.mark.parametrize("declared", ["1", " 1 "])
+def test_settings_workers_per_instance_explicit_one_is_accepted(monkeypatch, declared: str):
+    monkeypatch.setenv("CODEX_LB_WORKERS_PER_INSTANCE", declared)
 
-    settings = Settings()
-
-    assert settings.workers_per_instance == 1
+    Settings()
 
 
 def test_settings_rejects_multiple_workers_per_instance(monkeypatch):
@@ -334,3 +321,29 @@ def test_settings_rejects_multiple_workers_per_instance(monkeypatch):
     assert "CODEX_LB_WORKERS_PER_INSTANCE" in message
     assert "not supported" in message
     assert "scale horizontally via replicas" in message
+
+
+def test_settings_rejects_multiple_workers_per_instance_declared_in_lowercase(monkeypatch):
+    # pydantic-settings matched the former field case-insensitively
+    # (case_sensitive=False); the guard must not let a lowercase declaration
+    # slip past what the field used to reject.
+    monkeypatch.delenv("CODEX_LB_WORKERS_PER_INSTANCE", raising=False)
+    monkeypatch.setenv("codex_lb_workers_per_instance", "2")
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+
+    assert "CODEX_LB_WORKERS_PER_INSTANCE" in str(exc_info.value)
+    assert "not supported" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("declared", ["0", "-1", "two"])
+def test_settings_rejects_non_positive_workers_per_instance(monkeypatch, declared: str):
+    monkeypatch.setenv("CODEX_LB_WORKERS_PER_INSTANCE", declared)
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+
+    message = str(exc_info.value)
+    assert "CODEX_LB_WORKERS_PER_INSTANCE" in message
+    assert "only CODEX_LB_WORKERS_PER_INSTANCE=1 (the default) is supported" in message

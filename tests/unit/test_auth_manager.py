@@ -125,6 +125,23 @@ class _DummyRepo:
             "seat_type": seat_type,
             "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
         }
+        latest = self.accounts_by_id.get(account_id)
+        if latest is not None:
+            latest.access_token_encrypted = access_token_encrypted
+            latest.refresh_token_encrypted = refresh_token_encrypted
+            latest.id_token_encrypted = id_token_encrypted
+            latest.last_refresh = last_refresh
+            for field, value in (
+                ("plan_type", plan_type),
+                ("email", email),
+                ("chatgpt_account_id", chatgpt_account_id),
+                ("chatgpt_user_id", chatgpt_user_id),
+                ("workspace_id", workspace_id),
+                ("workspace_label", workspace_label),
+                ("seat_type", seat_type),
+            ):
+                if value is not None:
+                    setattr(latest, field, value)
         return True
 
     async def update_account_metadata(

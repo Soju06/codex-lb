@@ -31,6 +31,7 @@ from app.core.clients.native_egress import close_discovered_native_egress_client
 from app.core.config.key_fingerprint import verify_encryption_key_fingerprint
 from app.core.config.settings import (
     _bridge_advertise_hostname_is_replica_specific,
+    _parse_port_value,
     get_settings,
     warn_removed_settings,
 )
@@ -1100,16 +1101,6 @@ def _local_api_port() -> int | None:
     port = _parse_port_value(raw.strip()) if raw is not None else None
     if port is None:
         port = _port_from_argv()
-    return port
-
-
-def _parse_port_value(raw: str) -> int | None:
-    try:
-        port = int(raw)
-    except ValueError:
-        return None
-    if port <= 0:
-        return None
     return port
 
 

@@ -374,6 +374,8 @@ class Settings(BaseSettings):
     upstream_route_cache_ttl_seconds: float = Field(default=60.0, ge=0)
     quota_planner_scheduler_enabled: bool = True
     automations_scheduler_enabled: bool = True
+    # T3 (dashboard home: dashboard_settings.telemetry_consent). Headless
+    # first-boot opt-out fallback; a persisted dashboard decision always wins.
     telemetry_enabled: bool | None = None
     telemetry_endpoint: str = "https://telemetry.tokmaxxing.com"
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
@@ -418,6 +420,9 @@ class Settings(BaseSettings):
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
+    # T1 (topology). Raw socket-peer CIDRs allowed to call the proxy without an
+    # API key: a fact of this replica's network namespace (sidecar, pod CIDR),
+    # like the trusted-proxy CIDRs below.
     proxy_unauthenticated_client_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     firewall_trust_proxy_headers: bool = False
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
@@ -438,6 +443,9 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("FORWARDED_ALLOW_IPS", "CODEX_LB_FORWARDED_ALLOW_IPS"),
     )
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
+    # T1 (topology). Last link of the ``dashboard_auth_mode`` trust chain:
+    # whether a loopback ``Host`` header may unlock a >30d session TTL depends
+    # on how this deployment's reverse proxy rewrites it (policy D2).
     dashboard_trust_loopback_host_header_for_long_sessions: bool = False
 
     def upstream_websocket_proxy_env(self) -> Mapping[str, str | None]:
@@ -484,6 +492,8 @@ class Settings(BaseSettings):
     connect_address: str | None = None
     proxy_token_refresh_limit: int = Field(default=64, ge=0)
     proxy_upstream_websocket_connect_limit: int = Field(default=128, ge=0)
+    # T1 (topology). Capacity of a per-process asyncio.Semaphore, sized with
+    # the replica's resources like ``bulkhead_proxy_limit``.
     proxy_response_create_limit: int = Field(default=256, ge=0)
     proxy_compact_response_create_limit: int = Field(default=64, ge=0)
     proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)

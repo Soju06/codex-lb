@@ -10,13 +10,17 @@ Each ``CODEX_LB_*`` field belongs to exactly one tier:
 - ``T2`` secret: encrypted in the database, env is at most a seed.
 - ``T3`` behaviour tunable / feature flag: the dashboard (``dashboard_settings``)
   is the management surface. A T3 field that has no ``dashboard_settings``
-  column of the same name MUST be listed in ``MIGRATING`` until it gets one.
+  column of the same name MUST either name its existing database home in
+  ``DASHBOARD_HOMES`` (``table.column``) or be listed in ``MIGRATING`` until
+  it gets one.
 - ``T4`` incident debug: env allowed, dashboard toggle recommended.
 
 ``scripts/check_settings_tiers.py`` (run by ``make lint``) fails when a field
-is missing here, when a T3 field has neither a dashboard column nor a
-``MIGRATING`` entry, or when ``.env.example`` mentions a T2-T4 field. Entries
-for fields that no longer exist only warn, so removals can land in either order.
+is missing here, when a T3 field has none of a same-name dashboard column, a
+``DASHBOARD_HOMES`` mapping or a ``MIGRATING`` entry, when a ``DASHBOARD_HOMES``
+target names a column that does not exist, or when ``.env.example`` mentions a
+T2-T4 field. Entries for fields that no longer exist only warn, so removals can
+land in either order.
 """
 
 from __future__ import annotations
@@ -115,7 +119,9 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "model_registry_client_version": "T1",
     "model_registry_snapshot_max_age_seconds": "T1",
     "model_context_window_overrides": "T3",
-    "proxy_unauthenticated_client_cidrs": "T3",
+    # raw socket-peer CIDRs of this replica's network namespace; sibling of the
+    # trusted-proxy CIDRs below, not of the firewall allowlist (projected IPs)
+    "proxy_unauthenticated_client_cidrs": "T1",
     # trusted-proxy topology; policy §2 T1 example
     "firewall_trust_proxy_headers": "T1",
     # trusted-proxy topology; policy §2 T1 example
@@ -125,7 +131,9 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "forwarded_allow_ips": "T1",
     # reverse-proxy deployment dependent, self-lockout risk from the dashboard (policy D2)
     "dashboard_auth_mode": "T1",
-    "dashboard_trust_loopback_host_header_for_long_sessions": "T3",
+    # last link of the dashboard_auth_mode trust chain: whether a loopback Host
+    # header is believed is a per-deployment reverse-proxy fact (policy D2)
+    "dashboard_trust_loopback_host_header_for_long_sessions": "T1",
     # header name is fixed by the reverse-proxy deployment (policy D2)
     "dashboard_auth_proxy_header": "T1",
     "metrics_enabled": "T1",
@@ -145,7 +153,8 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "connect_address": "T1",
     "proxy_token_refresh_limit": "T3",
     "proxy_upstream_websocket_connect_limit": "T3",
-    "proxy_response_create_limit": "T3",
+    # per-process asyncio.Semaphore capacity, same class as bulkhead_proxy_limit
+    "proxy_response_create_limit": "T1",
     "proxy_compact_response_create_limit": "T3",
     "proxy_admission_wait_timeout_seconds": "T3",
     "proxy_account_response_create_limit": "T3",
@@ -207,7 +216,6 @@ MIGRATING: Final[dict[str, str]] = {
     "sticky_session_cleanup_enabled": "backlog",
     "quota_planner_scheduler_enabled": "gates quota_planner_settings.mode; fold into it",
     "automations_scheduler_enabled": "backlog",
-    "telemetry_enabled": "dashboard_settings.telemetry_consent (env stays the pre-first-boot opt-out seed)",
     "conversation_archive_enabled": "backlog",
     "max_decompressed_body_bytes": "backlog",
     "max_decompressed_responses_body_bytes": "backlog",
@@ -216,13 +224,19 @@ MIGRATING: Final[dict[str, str]] = {
     "images_default_model": "backlog",
     "model_registry_enabled": "backlog",
     "model_context_window_overrides": "backlog",
-    "proxy_unauthenticated_client_cidrs": "api_firewall_allowlist (related table)",
-    "dashboard_trust_loopback_host_header_for_long_sessions": "backlog",
     "proxy_token_refresh_limit": "backlog",
     "proxy_upstream_websocket_connect_limit": "backlog",
-    "proxy_response_create_limit": "backlog",
     "proxy_compact_response_create_limit": "backlog",
     "proxy_admission_wait_timeout_seconds": "backlog",
     "proxy_refresh_failure_cooldown_seconds": "backlog",
     "usage_refresh_auth_failure_cooldown_seconds": "backlog",
+}
+
+# T3 fields whose database home already exists under a different column name
+# (or in another configuration table). Value = ``table.column``; the checker
+# fails when the column does not exist. The field's environment variable is the
+# fallback while that column holds no decision, per the precedence rule.
+DASHBOARD_HOMES: Final[dict[str, str]] = {
+    # persisted decision > CODEX_LB_TELEMETRY_ENABLED > default (telemetry spec)
+    "telemetry_enabled": "dashboard_settings.telemetry_consent",
 }

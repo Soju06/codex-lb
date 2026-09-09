@@ -178,9 +178,9 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` | T3 (dashboard) | `int` | `1800` |
 | `CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS` | T3 | `float` | `5.0` |
 | `CODEX_LB_PROXY_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `600.0` |
-| `CODEX_LB_PROXY_RESPONSE_CREATE_LIMIT` | T3 | `int` | `256` |
+| `CODEX_LB_PROXY_RESPONSE_CREATE_LIMIT` | T1 | `int` | `256` |
 | `CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT` | T3 | `int` | `64` |
-| `CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS` | T3 | `list[str]` | `[]` |
+| `CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS` | T1 | `list[str]` | `[]` |
 | `CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT` | T3 | `int` | `128` |
 
 ## OAuth
@@ -253,7 +253,7 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_DASHBOARD_AUTH_MODE` | T1 | `'standard' \| 'trusted_header' \| 'disabled'` | `'standard'` |
 | `CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER` | T1 | `str` | `'Remote-User'` |
 | `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` | T0 | `str \| None` | `None` |
-| `CODEX_LB_DASHBOARD_TRUST_LOOPBACK_HOST_HEADER_FOR_LONG_SESSIONS` | T3 | `bool` | `False` |
+| `CODEX_LB_DASHBOARD_TRUST_LOOPBACK_HOST_HEADER_FOR_LONG_SESSIONS` | T1 | `bool` | `False` |
 
 ## Conversation archive
 

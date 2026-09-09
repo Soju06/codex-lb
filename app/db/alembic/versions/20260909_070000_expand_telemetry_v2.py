@@ -1,4 +1,9 @@
-"""Persist telemetry v2 notice and completed-day acknowledgement."""
+"""Persist telemetry v2 notice and completed-day acknowledgement.
+
+Revision ID: 20260909_070000_expand_telemetry_v2
+Revises: 20260909_060000_add_report_rollup
+Create Date: 2026-09-09
+"""
 
 from __future__ import annotations
 
@@ -11,16 +16,34 @@ branch_labels = None
 depends_on = None
 
 
+def _columns() -> set[str]:
+    return {column["name"] for column in sa.inspect(op.get_bind()).get_columns("dashboard_settings")}
+
+
 def upgrade() -> None:
-    op.add_column(
-        "dashboard_settings",
-        sa.Column("telemetry_notice_version", sa.Integer(), server_default=sa.text("0"), nullable=False),
-    )
-    op.add_column(
-        "dashboard_settings", sa.Column("telemetry_day_acknowledged_date", sa.DateTime(timezone=True), nullable=True)
-    )
+    # Idempotent like 20260806_000000_add_anonymous_telemetry: the legacy
+    # revision-id remap path re-applies head on an already-upgraded database.
+    columns = _columns()
+    with op.batch_alter_table("dashboard_settings") as batch_op:
+        if "telemetry_notice_version" not in columns:
+            batch_op.add_column(
+                sa.Column(
+                    "telemetry_notice_version",
+                    sa.Integer(),
+                    server_default=sa.text("0"),
+                    nullable=False,
+                )
+            )
+        if "telemetry_day_acknowledged_date" not in columns:
+            batch_op.add_column(
+                sa.Column("telemetry_day_acknowledged_date", sa.DateTime(timezone=True), nullable=True)
+            )
 
 
 def downgrade() -> None:
-    op.drop_column("dashboard_settings", "telemetry_day_acknowledged_date")
-    op.drop_column("dashboard_settings", "telemetry_notice_version")
+    columns = _columns()
+    with op.batch_alter_table("dashboard_settings") as batch_op:
+        if "telemetry_day_acknowledged_date" in columns:
+            batch_op.drop_column("telemetry_day_acknowledged_date")
+        if "telemetry_notice_version" in columns:
+            batch_op.drop_column("telemetry_notice_version")

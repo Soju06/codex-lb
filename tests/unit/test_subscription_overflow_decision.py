@@ -1162,6 +1162,66 @@ async def test_pinned_with_excluded_input_is_refused(env: _Env) -> None:
     assert env.bulkhead.in_flight(SRC) == 0
 
 
+def _image_message(text: str = "what is this") -> dict[str, JsonValue]:
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": text},
+            {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "auto"},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_pinned_input_image_without_vision_is_refused_and_the_pin_kept(env: _Env) -> None:
+    """§7.2 P16: a pin overrides portability except for what the source model cannot see."""
+
+    env.pins.live(_pin_record(thread_pin_key(_thread_key()), now=env.clock.now()))
+    result = await env.resolve(payload=_payload(input=[_user("hi"), _image_message()]))
+    assert isinstance(result, JSONResponse) and result.status_code == 400
+    body = _body(result)
+    assert body["error"]["code"] == UNSUPPORTED_INPUT_CODE
+    assert body["error"]["type"] == "invalid_request_error"
+    assert "images" in _message(body)
+    assert env.outcomes == ["pinned_unsupported_input"]
+    assert env.executor.deleted == [], "the pin is kept"
+    assert env.service.cleanup_actions == [], "nothing is touched or dispatched"
+    assert env.bulkhead.in_flight(SRC) == 0
+    assert env.view_calls == 0, "the pin still overrides the rest of the portability verdict"
+
+
+@pytest.mark.asyncio
+async def test_pinned_input_image_with_vision_is_dispatched(env: _Env) -> None:
+    env.sources[SRC].models[0].supports_vision = True
+    env.pins.live(_pin_record(thread_pin_key(_thread_key()), now=env.clock.now()))
+    result = await env.resolve(payload=_payload(input=[_user("hi"), _image_message()]))
+    assert isinstance(result, OverflowDispatch) and result.kind == DISPATCH_KIND_PINNED
+    assert env.outcomes == ["dispatched_pinned"]
+    result.claims.release_if_unowned()
+
+
+@pytest.mark.asyncio
+async def test_anchored_input_image_without_vision_is_refused(env: _Env) -> None:
+    api_key = _api_key()
+    env.pins.live(
+        _pin_record(
+            anchor_pin_key("key_1", "resp_src_1"), now=env.clock.now(), kind=PIN_KIND_ANCHOR, api_key_id="key_1"
+        )
+    )
+    result = await env.resolve(
+        SDK,
+        _payload(store=None, previous_response_id="resp_src_1", input=[_image_message()]),
+        api_key,
+        route=ROUTE_V1_RESPONSES,
+    )
+    assert isinstance(result, JSONResponse) and result.status_code == 400
+    assert _body(result)["error"]["code"] == UNSUPPORTED_INPUT_CODE
+    assert env.outcomes == ["pinned_unsupported_input"]
+    assert env.executor.deleted == []
+    assert env.bulkhead.in_flight(SRC) == 0
+
+
 @pytest.mark.asyncio
 async def test_pinned_fails_fast_while_the_breaker_is_open(env: _Env) -> None:
     """Mutant: pinned ignores the open breaker. Transient => 503, never 429 and never 400."""

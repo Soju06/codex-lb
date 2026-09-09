@@ -1359,6 +1359,18 @@ def _unportable_item_type(input_items: list[JsonValue], supported_tool_types: fr
     return None
 
 
+def input_carries_image_parts(input_items: JsonValue) -> bool:
+    """Whether a Responses ``input`` carries an ``input_image`` part in message content or tool output.
+
+    The vision step of ``responses_payload_is_provider_portable`` on its own,
+    for the pinned/anchored overflow dispatch: a pin overrides body
+    portability except for what the source model cannot see (design §7.2
+    P16). A non-list ``input`` (a bare string) carries no parts.
+    """
+
+    return isinstance(input_items, list) and _input_carries_image_parts(input_items)
+
+
 def _input_carries_image_parts(input_items: list[JsonValue]) -> bool:
     """Whether any message ``content`` or tool ``output`` part is an ``input_image``."""
 

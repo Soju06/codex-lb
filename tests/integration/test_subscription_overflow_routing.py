@@ -1456,6 +1456,73 @@ async def test_compaction_on_a_pinned_thread_is_refused(
 
 
 @pytest.mark.asyncio
+async def test_pinned_thread_with_an_image_is_refused_without_vision_and_served_with_it(
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§7.2 P16: an ``input_image`` on a pinned thread needs the source model's vision; the pin is kept either way."""
+
+    attempts = _forbid_subscription_stream(monkeypatch)
+    scene = await _exhausted_scene(async_client, source_upstream, tag="vision")
+    thread_id = "thr_vision"
+    await _write_pin(thread_pin_key(_thread_key(thread_id)), kind=PIN_KIND_THREAD, source_id=scene.source_id)
+    await _pool_is_healthy(async_client, tag="vision")
+    body = {
+        **_codex_body(),
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "what is this"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "auto"},
+                ],
+            }
+        ],
+    }
+    headers = _native_headers(thread_id)
+
+    refused = await async_client.post(CODEX_ROUTE, json=body, headers=headers)
+    assert refused.status_code == 400, refused.text
+    error = refused.json()["error"]
+    assert error["code"] == UNSUPPORTED_INPUT_CODE
+    assert error["type"] == "invalid_request_error"
+    assert "images" in error["message"]
+    assert scene.state.requests == []
+    assert len(await _pin_rows()) == 1, "a refused turn keeps its pin"
+
+    # The operator declares vision on the source model: the same turn is served by the pinned source.
+    listed = await async_client.get("/api/model-sources/")
+    assert listed.status_code == 200, listed.text
+    (source,) = [entry for entry in listed.json()["sources"] if entry["id"] == scene.source_id]
+    models = [
+        {**{key: value for key, value in entry.items() if key not in {"id", "sourceId", "createdAt", "updatedAt"}}}
+        for entry in source["models"]
+    ]
+    for entry in models:
+        entry["supportsVision"] = True
+    updated = await async_client.patch(f"/api/model-sources/{scene.source_id}", json={"models": models})
+    assert updated.status_code == 200, updated.text
+
+    async with async_client.stream("POST", CODEX_ROUTE, json=body, headers=headers) as response:
+        assert response.status_code == 200, await response.aread()
+        text = (await response.aread()).decode()
+    await _drain(async_client)
+    created, terminals = _lifecycle(_events(text))
+    assert created == ["resp_dispatch_1"]
+    assert terminals == ["response.completed"]
+    assert len(scene.state.requests) == 1
+    parts = scene.state.requests[0]["input"][0]["content"]
+    assert [part["type"] for part in parts] == ["input_text", "input_image"]
+    # The thread pin is kept; ``store`` was omitted, so the served dispatch also anchored the source response.
+    pins = await _pin_rows()
+    assert [(pin.kind, pin.pin_key) for pin in pins] == [
+        (PIN_KIND_ANCHOR, anchor_pin_key(None, "resp_dispatch_1")),
+        (PIN_KIND_THREAD, thread_pin_key(_thread_key(thread_id))),
+    ]
+    assert attempts == []
+
+
+@pytest.mark.asyncio
 async def test_pinned_thread_model_switch_listed_serves_unlisted_refuses(
     async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
 ) -> None:

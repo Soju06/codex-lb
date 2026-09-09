@@ -81,6 +81,7 @@ from app.modules.proxy.model_source_pins import (
     thread_pin_key,
 )
 from app.modules.proxy.replay_safety import (
+    input_carries_image_parts,
     is_binding_turn_state,
     responses_payload_is_provider_portable,
     strip_input_item_ids,
@@ -216,6 +217,11 @@ PIN_EXPIRED_MESSAGE = (
 UNSUPPORTED_INPUT_MESSAGE = (
     "This conversation is being served by the overflow model source, which cannot take file references or "
     "compaction yet; start a new conversation."
+)
+# 400 variant (P16): an ``input_image`` on a pinned/anchored conversation whose source model lacks vision.
+UNSUPPORTED_VISION_MESSAGE = (
+    "This conversation is being served by the overflow model source, whose model cannot take images; "
+    "remove the image or start a new conversation."
 )
 COMPACT_DENIAL_MESSAGE = (
     "This conversation is being served by the overflow model source and cannot be compacted there yet; "
@@ -1295,6 +1301,22 @@ def _claim_for_pinned(decision: _Decision, source: ModelSource) -> SourceAdmissi
     return claims
 
 
+def _pinned_unsupported(
+    decision: _Decision, *, cause: str, kind: DispatchKind, source: ModelSource, message: str
+) -> JSONResponse:
+    """400 ``subscription_overflow_unsupported_input`` for input the pinned source cannot take; the pin is kept."""
+
+    record_overflow_outcome(decision.route, "pinned_unsupported_input")
+    logger.warning(
+        "subscription_overflow_pinned_unservable cause=%s kind=%s route=%s source_id=%s",
+        cause,
+        kind,
+        decision.route,
+        source.id,
+    )
+    return _permanent_denial(UNSUPPORTED_INPUT_CODE, message)
+
+
 async def _dispatch_bound(
     decision: _Decision,
     record: PinRecord,
@@ -1303,7 +1325,8 @@ async def _dispatch_bound(
     kind: DispatchKind,
     neutral_release: bool,
 ) -> OverflowDispatch | Response | None:
-    """Shared pinned/anchored dispatch: unservable -> 400 (or neutral release); excluded input -> 400; claims -> 503."""
+    """Shared pinned/anchored dispatch: unservable -> 400 (or neutral release); excluded input or an image the
+    source model cannot see -> 400 (pin kept); claims -> 503."""
 
     if state == "expired":
         return await _unservable_answer(decision, record, cause="tombstone", kind=kind, neutral_release=neutral_release)
@@ -1312,15 +1335,16 @@ async def _dispatch_bound(
         return await _unservable_answer(decision, record, cause=resolved, kind=kind, neutral_release=neutral_release)
     source, model = resolved
     if decision.source_route_excluded:
-        record_overflow_outcome(decision.route, "pinned_unsupported_input")
-        logger.warning(
-            "subscription_overflow_pinned_unservable cause=unsupported_input kind=%s route=%s source_id=%s",
-            kind,
-            decision.route,
-            source.id,
+        return _pinned_unsupported(
+            decision, cause="unsupported_input", kind=kind, source=source, message=UNSUPPORTED_INPUT_MESSAGE
         )
-        return _permanent_denial(UNSUPPORTED_INPUT_CODE, UNSUPPORTED_INPUT_MESSAGE)
     body = _source_body(decision.payload)
+    # A pin overrides body portability except for what the source model cannot
+    # see (design §7.2 P16): an ``input_image`` needs its ``supports_vision``.
+    if not source_model_supports_vision(source, model) and input_carries_image_parts(body.get("input")):
+        return _pinned_unsupported(
+            decision, cause="unsupported_vision", kind=kind, source=source, message=UNSUPPORTED_VISION_MESSAGE
+        )
     claims = _claim_for_pinned(decision, source)
     if not isinstance(claims, SourceAdmission):
         return claims

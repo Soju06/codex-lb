@@ -37,7 +37,7 @@ async def test_consent_api_get_preview_and_put_persists_without_restart(
     assert initial["active"] is True
     assert set(initial["preview"]) == {"heartbeat", "day"}
     assert initial["preview"]["heartbeat"]["metrics"]["schema_version"] == 2
-    assert initial["preview"]["metrics"]["consent"] == "undecided"
+    assert initial["preview"]["heartbeat"]["metrics"]["consent"] == "undecided"
     assert initial["preview"]["heartbeat"]["instance_id"] == initial["preview"]["heartbeat"]["metrics"]["instance_id"]
 
     response = await async_client.put("/api/settings/telemetry", json={"enabled": False})

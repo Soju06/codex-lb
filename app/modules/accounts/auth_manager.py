@@ -25,7 +25,11 @@ from app.core.auth.refresh import (
     refresh_access_token,
     should_refresh,
 )
-from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
+from app.core.balancer import (
+    PERMANENT_FAILURE_CODES,
+    account_status_for_permanent_failure,
+    reauth_reason_blocks_routing,
+)
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
@@ -1062,7 +1066,9 @@ class AuthManager:
             if applied:
                 account.status = status
                 account.deactivation_reason = reason
-                if status == AccountStatus.DEACTIVATED:
+                if status == AccountStatus.DEACTIVATED or (
+                    status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(reason)
+                ):
                     mark_account_routing_unavailable(account.id)
                 get_account_selection_cache().invalidate()
                 return None

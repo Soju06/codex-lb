@@ -2073,6 +2073,42 @@ async def test_persist_cas_deadline_lands_final_guarded_persist(monkeypatch):
     assert None not in repo.update_attempts
 
 
+@pytest.mark.asyncio
+async def test_permanent_refresh_reauth_blocked_reason_publishes_routing_invalidation(monkeypatch):
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_auth_manager_token_revoked",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+    routing_marks: list[str] = []
+    monkeypatch.setattr(
+        auth_manager_module,
+        "mark_account_routing_unavailable",
+        lambda account_id: routing_marks.append(account_id),
+    )
+
+    result = await manager._handle_permanent_refresh_failure(
+        account,
+        RefreshError("token_revoked", "access token revoked", True),
+        auth_manager_module._refresh_token_material_fingerprint(manager._encryptor, account.refresh_token_encrypted),
+    )
+
+    assert result is None
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert account.deactivation_reason == "Authentication token revoked - re-login required"
+    assert routing_marks == [account.id]
+
+
 class _TokenCasPeerRotationOnFinalPersistRepo(_DummyRepo):
     """Real compare-and-set repo where the deadline cuts the retry loop after one
     same-plaintext re-encryption miss, then a genuinely DIFFERENT peer rotation

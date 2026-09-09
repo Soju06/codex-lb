@@ -17172,6 +17172,199 @@ async def test_stream_with_retry_keyed_refresh_connect_settles_before_account_he
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_keyed_token_revoked_quarantines_routing_before_settlement(monkeypatch):
+    """A keyed token revocation leaves routing immediately but defers health.
+
+    The request can move only after the encrypted reasoning bookkeeping is
+    projected into an account-neutral replay. Routing must nevertheless retire
+    the revoked account before the shared API-key reservation settles; the
+    durable REAUTH_REQUIRED health write remains in the post-settlement queue.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_token_revoked_a")
+    account_b = _make_account("acc_keyed_token_revoked_b")
+    api_key = _make_api_key_data("key_keyed_token_revoked")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_token_revoked",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    stream_account_ids: list[str] = []
+    effects: list[str] = []
+    mark_routing_unavailable = MagicMock(side_effect=lambda account_id: effects.append(f"route:{account_id}"))
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        stream_settlement.usage_settlement_transferred = True
+        effects.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        effects.append(f"health:{account.id}:{code}")
+        return {"failure_class": "non_retryable"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = cast(set[str], kwargs["exclude_account_ids"])
+        return AccountSelection(
+            account=account_b if account_a.id in excluded else account_a,
+            error_message=None,
+        )
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_account_ids.append(account.id)
+        if account is account_a:
+            raise proxy_service._RetryableStreamError(
+                "token_revoked",
+                cast(UpstreamError, {"message": "access token revoked"}),
+                exclude_account=True,
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyed_token_revoked_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(streaming_retry_module, "mark_account_routing_unavailable", mark_routing_unavailable)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [
+                {"type": "message", "role": "user", "content": "first question"},
+                {"type": "reasoning", "id": "rs_revoked", "encrypted_content": "opaque-state", "summary": []},
+                {
+                    "type": "message",
+                    "id": "msg_revoked",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"type": "message", "role": "user", "content": "continue"},
+            ],
+            "stream": True,
+            "prompt_cache_key": "keyed-token-revoked",
+        }
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-token-revoked"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["response"]["id"] == "resp_keyed_token_revoked_ok"
+    assert stream_account_ids == [account_a.id, account_b.id]
+    assert effects.index(f"route:{account_a.id}") < effects.index("settle")
+    assert effects.index("settle") < effects.index(f"health:{account_a.id}:token_revoked")
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_token_revoked_without_replacement_preserves_auth_error(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_token_revoked_no_replacement")
+    mark_permanent_failure = AsyncMock()
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = cast(set[str], kwargs["exclude_account_ids"])
+        if account.id in excluded:
+            return AccountSelection(account=None, error_message="No active accounts", error_code="no_accounts")
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream_once(selected: Account, *_args: object, **_kwargs: object):
+        assert selected is account
+        raise proxy_service._RetryableStreamError(
+            "token_revoked",
+            cast(UpstreamError, {"message": "access token revoked"}),
+            exclude_account=True,
+        )
+        yield ""
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", mark_permanent_failure)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda selected, **_k: selected))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [
+                {"type": "message", "role": "user", "content": "first question"},
+                {"type": "reasoning", "id": "rs_revoked", "encrypted_content": "opaque-state", "summary": []},
+                {
+                    "type": "message",
+                    "id": "msg_revoked",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"type": "message", "role": "user", "content": "continue"},
+            ],
+            "stream": True,
+            "prompt_cache_key": "token-revoked-no-replacement",
+        }
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-token-revoked-no-replacement"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    failed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert failed["response"]["error"] == {
+        "code": "token_revoked",
+        "message": "access token revoked",
+        "type": "authentication_error",
+    }
+    mark_permanent_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_with_retry_keyed_queued_penalty_flushes_on_cancel(monkeypatch):
     """Cancel after a queued keyed mid-loop penalty must still flush health.
 

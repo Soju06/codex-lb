@@ -66,6 +66,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
 )
+from app.modules.proxy.account_cache import mark_account_routing_unavailable
 from app.modules.proxy.affinity import (
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
@@ -668,6 +669,11 @@ class _StreamingRetryMixin:
             ``_settle_stream_usage_before_pending_penalty`` flushes health
             after settlement (same ordering as compact keyed mid-loop health).
             """
+            if failed_code == "token_revoked":
+                # Routing must stop immediately even when keyed-stream health is
+                # queued until reservation settlement. The durable
+                # REAUTH_REQUIRED write remains owned by the post-settlement path.
+                mark_account_routing_unavailable(failed_account.id)
             if api_key is not None and api_key_reservation is not None:
                 pending_post_refresh_transient_penalties.append(
                     (
@@ -1666,6 +1672,11 @@ class _StreamingRetryMixin:
                         event = response_failed_event(
                             last_retryable_stream_error.code,
                             error_message,
+                            error_type=(
+                                "authentication_error"
+                                if last_retryable_stream_error.code == "token_revoked"
+                                else "server_error"
+                            ),
                             response_id=request_id,
                         )
                         yield format_sse_event(event)
@@ -3411,6 +3422,11 @@ class _StreamingRetryMixin:
                 event = response_failed_event(
                     last_retryable_stream_error.code,
                     retries_exhausted_msg,
+                    error_type=(
+                        "authentication_error"
+                        if last_retryable_stream_error.code == "token_revoked"
+                        else "server_error"
+                    ),
                     response_id=request_id,
                 )
                 if last_retryable_stream_error.code in SYNTHETIC_TRANSPORT_FAILURE_CODES:

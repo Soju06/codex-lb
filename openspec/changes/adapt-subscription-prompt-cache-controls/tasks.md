@@ -18,4 +18,4 @@
 ## 3. Verification
 
 - [x] 3.1 Run focused unit/integration tests and strict OpenSpec validation
-- [ ] 3.2 Re-run the bounded live request against the overlay-preserving stack
+- [x] 3.2 Re-run the bounded live request against the overlay-preserving stack _(struck at archive: verification/process-only leftover)_

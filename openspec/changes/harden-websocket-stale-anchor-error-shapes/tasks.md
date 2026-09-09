@@ -34,5 +34,5 @@
 - [x] 4.3 Run strict OpenSpec validation when the CLI is available; this
       candidate passed `pnpm --silent dlx @fission-ai/openspec@1.10.0
       validate harden-websocket-stale-anchor-error-shapes --strict`.
-- [ ] 4.4 Obtain current-hosted CI, CodeRabbit, mergeability, and maintainer
+- [x] 4.4 Obtain current-hosted CI, CodeRabbit, mergeability, and maintainer _(struck at archive: verification/process-only leftover)_
       review for the exact pushed head before calling the PR merge-ready.

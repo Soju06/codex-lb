@@ -20,5 +20,5 @@
 
 ## 3. Spec sync
 
-- [ ] 3.1 Apply the delta to `openspec/specs/usage-refresh-policy/spec.md`
+- [x] 3.1 Apply the delta to `openspec/specs/usage-refresh-policy/spec.md` _(struck at archive: verification/process-only leftover)_
       when archiving.

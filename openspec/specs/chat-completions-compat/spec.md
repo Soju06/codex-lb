@@ -23,6 +23,7 @@ payload. Invalid payloads MUST return a 4xx response with an OpenAI error envelo
 #### Scenario: Minimal valid chat request
 - **WHEN** the client sends `{ "model": "gpt-4.1", "messages": [{"role":"user","content":"hi"}] }`
 - **THEN** the service accepts the request and begins a response (streaming or non-streaming based on `stream`)
+
 ### Requirement: Enforce message content type rules
 The service MUST enforce role-specific message content rules: `system` and `developer` messages MUST contain text-only content, while `user` messages MAY contain text, image, or file content parts per OpenAI chat spec. Unsupported content types MUST return an OpenAI error envelope.
 
@@ -98,6 +99,7 @@ definitions and `tool_choice`, including built-in Responses tools accepted by `/
 #### Scenario: web_search_preview tool normalized in mapping
 - **WHEN** the client sends `tools=[{"type":"web_search_preview"}]`
 - **THEN** the mapped Responses request includes a tool with type `web_search`
+
 ### Requirement: Reject file_id in Chat Completions
 The service MUST reject chat `file` content parts that include `file_id` and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
 
@@ -275,3 +277,77 @@ When a Responses-shaped chat payload uses a flat Responses function tool, strict
   `strict: true` but a violating `parameters` schema
 - **THEN** the proxy returns `HTTP 400` with `error.code = "invalid_function_parameters"` and `error.param = "tools[<index>].parameters"`
 - **AND** no upstream connection is opened
+
+### Requirement: Chat Completions reject truncated upstream Responses streams
+
+`POST /v1/chat/completions` MUST classify upstream Responses iterator
+exhaustion before a terminal `response.completed`, `response.incomplete`,
+`response.failed`, or `error` event as `upstream_stream_truncated`. The error
+MUST use OpenAI error type `server_error`. Partial content received before the
+exhaustion MUST NOT be presented as a successfully completed non-streaming Chat
+Completion.
+
+#### Scenario: Streaming upstream EOF emits error and done
+
+- **WHEN** a streaming Chat Completions request receives zero or more
+  non-terminal upstream Responses events
+- **AND** the upstream iterator reaches EOF before a terminal event
+- **THEN** the proxy MUST emit an OpenAI error chunk with code
+  `upstream_stream_truncated`
+- **AND** the proxy MUST terminate the stream with `data: [DONE]`
+
+#### Scenario: Collected upstream EOF returns an error envelope
+
+- **WHEN** a non-streaming Chat Completions request receives zero or more
+  non-terminal upstream Responses events
+- **AND** the upstream iterator reaches EOF before a terminal event
+- **THEN** the proxy MUST return HTTP 502
+- **AND** the response body MUST be an OpenAI error envelope with code
+  `upstream_stream_truncated` and type `server_error`
+- **AND** the proxy MUST NOT return a `chat.completion` success object
+
+#### Scenario: Explicit terminal events retain existing behavior
+
+- **WHEN** the upstream iterator emits `response.completed`,
+  `response.incomplete`, `response.failed`, or `error`
+- **THEN** the proxy MUST preserve the existing Chat Completions mapping for
+  that event
+- **AND** the proxy MUST preserve existing usage, tool-call, and upstream
+  generator cleanup behavior
+
+### Requirement: Chat Completions passthrough fields are shape-checked, not deep-validated
+
+The service MUST treat the `messages`, `tools` and `input` fields of `/v1/chat/completions` requests as opaque JSON: it MUST NOT re-validate or coerce their nested values against a per-field type schema. Message structure MUST be enforced by the chat mapping rules (messages are objects with a string `role` from the supported set; content, `tool_calls` and `tool_call_id` rules) and each violation MUST return a 4xx OpenAI `invalid_request_error`; because these rules run at the request level, such envelopes carry no per-item `error.param` path. Message keys the mapping does not inspect MUST NOT be rejected for their type: `refusal` of any non-string type is ignored (it contributes a refusal content part only when it is a non-empty string), `name`/`call_id`/`tool_call_id` values are type-checked only where the mapping for that role consumes them, and an assistant `tool_calls` of `null` is treated as omitted (a present, non-null `tool_calls` MUST still be an array). `tools` MUST be an array and `messages` MUST be an array when present, and neither may nest objects/arrays deeper than 200 levels; violations MUST return HTTP 400 with `error.param` naming the field. Non-finite numbers (for example `1e400`) inside these fields serialize as `null` in the mapped payload. Tool definitions MUST reach the mapped Responses tools byte-for-byte apart from the documented chat-to-Responses tool normalization.
+
+#### Scenario: Non-array chat tools are rejected with the tools param
+
+- **WHEN** a client sends `/v1/chat/completions` with `tools` set to `null`, a string, a number, or an object
+- **THEN** the proxy returns HTTP 400 with `error.type = "invalid_request_error"` and `error.param = "tools"`
+
+#### Scenario: Non-array chat messages are rejected with the messages param
+
+- **WHEN** a client sends `/v1/chat/completions` with `messages` set to a string, a number, or an object
+- **THEN** the proxy returns HTTP 400 with `error.type = "invalid_request_error"` and `error.param = "messages"`
+
+#### Scenario: Deeply nested chat fields are rejected with the field param
+
+- **WHEN** a client sends `/v1/chat/completions` with `messages` content or `tools[].function.parameters` nested more than 200 levels deep
+- **THEN** the proxy returns HTTP 400 with `error.type = "invalid_request_error"` and `error.param` naming `messages` or `tools`
+
+#### Scenario: Uninspected assistant keys are accepted regardless of type
+
+- **WHEN** a client sends an assistant message with string `content` and `"refusal"` set to `null`, a number, a boolean, an array or an object, or with `"tool_calls": null`
+- **THEN** the request is accepted
+- **AND** the mapped Responses input is identical to the same message without that key
+
+#### Scenario: Malformed message shapes are still rejected
+
+- **WHEN** a client sends a message that is not an object, has a non-string `role`, an assistant message whose `tool_calls` is present, non-null and not an array, or a tool message whose `tool_call_id` is not a non-empty string
+- **THEN** the proxy returns a 4xx OpenAI `invalid_request_error`
+
+#### Scenario: Chat tool parameter schemas are forwarded verbatim
+
+- **GIVEN** a chat function tool whose `function.parameters` schema contains nested objects, arrays, floats, booleans and nulls
+- **WHEN** the service maps the request to Responses
+- **THEN** the mapped tool's `parameters` is byte-identical to the client's JSON
+

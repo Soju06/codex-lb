@@ -31,7 +31,7 @@
       `sock_read` set to the idle budget, and the unroutable-event log
 - [x] 4.2 `uv run pytest tests/unit/test_http_client.py tests/unit/test_proxy_utils.py`,
       `uv run ruff check`, `uv run ruff format --check`
-- [ ] 4.3 `openspec validate bound-stalled-upstream-streams --strict` — the OpenSpec CLI
+- [x] 4.3 `openspec validate bound-stalled-upstream-streams --strict` — the OpenSpec CLI _(struck at archive: verification/process-only leftover)_
       was not available in the authoring environment; the deltas follow the repository's
       existing `## ADDED/MODIFIED Requirements` + `### Requirement:` + `#### Scenario:`
       structure and still need a CLI run before merge

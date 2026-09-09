@@ -296,7 +296,13 @@ For a non-native request, the service MUST:
 
 Resolving the fingerprint version for an outbound request MUST NOT perform a
 blocking network call on the request path; the version is read from an
-in-process cache that is refreshed by existing background refresh paths.
+in-process cache. Every replica MUST warm that cache when its model refresh
+loop starts and MUST refresh it on every loop tick regardless of scheduler
+leadership (the lookup is a public release lookup that carries no account
+credential), so a non-leader replica never presents the configured
+client-version fallback beyond its first tick. A warm-up failure MUST NOT stop
+the model refresh tick. The configured fallback (`model_registry_client_version`)
+SHALL track the current public Codex CLI release.
 
 #### Scenario: non-native SDK http request is rewritten to the Codex CLI fingerprint
 
@@ -387,6 +393,19 @@ in-process cache that is refreshed by existing background refresh paths.
 - **AND** the outbound `version` header uses that same configured default
 - **AND** resolving the version does not perform a network call on the request path
 
+#### Scenario: Non-leader replica warms the client version itself
+
+- **GIVEN** a replica that does not hold the scheduler leader lease (for example the live color of a blue/green pair whose standby still holds the lease)
+- **WHEN** its model refresh loop ticks
+- **THEN** it fetches and caches the current Codex client version before the leader-gated model refresh
+- **AND** non-native requests it forwards carry that version in `User-Agent` and `version` instead of the configured fallback
+
+#### Scenario: Version warm-up failure does not stop the refresh tick
+
+- **GIVEN** the public release lookup fails on a replica
+- **WHEN** its model refresh loop ticks
+- **THEN** the failure is logged, the cached or fallback version is kept, and the leader-gated refresh (or non-leader reconcile) still runs
+
 ### Requirement: OAuth token exchange must use a proxy pool when active proxy bindings exist
 
 When any active `AccountProxyBinding` records exist in the database, OAuth token exchange (authorization code exchange, device code request, and device token poll) MUST resolve a route from the configured default pool before opening a network connection. If no default pool can be resolved, the OAuth operation MUST fail closed with a descriptive error instead of silently falling back to direct egress. When no active proxy bindings exist, direct egress or environment proxy MAY be used as before.
@@ -441,10 +460,23 @@ The upstream SSE event reader MUST NOT rescan previously scanned buffer bytes on
 
 The shared upstream TCP connectors MUST configure connection keepalive of at least 90 seconds and a DNS cache TTL of at least 300 seconds, so consecutive interactive requests reuse pooled connections and resolved names instead of re-handshaking per turn.
 
+Because pooled connections outlive the requests that opened them, the connectors MUST
+also enable OS-level TCP keepalive probes on upstream sockets, so a connection dropped
+by an intermediary is reported as a transport error rather than waiting for an
+application-level timeout. Probe tuning beyond enabling keepalive is best-effort:
+platforms that do not expose the per-socket knobs MUST still enable keepalive and MUST
+NOT fail client construction.
+
 #### Scenario: Connector construction pins reuse settings
 
 - **WHEN** the shared HTTP client initializes its direct TCP connectors
 - **THEN** they are constructed with `keepalive_timeout >= 90` and `ttl_dns_cache >= 300`
+
+#### Scenario: Pooled sockets carry keepalive probes
+
+- **WHEN** the shared HTTP client creates an upstream socket
+- **THEN** `SO_KEEPALIVE` is enabled on that socket
+- **AND** client construction succeeds even when per-socket probe tuning is unavailable
 
 ### Requirement: Packaged native egress is preferred only across a replay-safe boundary
 
@@ -912,3 +944,133 @@ socket merely because it classified a terminal event.
 
 - **WHEN** a native Live WebSocket receives text or binary frames
 - **THEN** the helper emits the existing opaque WebSocket events
+
+### Requirement: Upstream streaming requests are bounded before the first response byte
+
+A streaming upstream request MUST reach response headers within the effective stream
+idle timeout. The bound applies from the moment the request is issued, so a connection
+that is established but never answered fails on the same budget as a stream that stops
+mid-flight.
+
+Exceeding the bound MUST be reported with the existing `stream_idle_timeout` error code
+and failure detail, MUST release every resource the attempt holds — including the
+per-session response-create gate and any account lease — and MUST be eligible for the
+same retry and failover handling as an idle timeout observed after the first byte.
+
+Non-streaming control calls (token refresh, usage fetch, compaction) keep their own
+timeouts and are unaffected.
+
+#### Scenario: Established connection never returns response headers
+
+- **GIVEN** an upstream connection that completes its TCP and TLS handshake
+- **AND** the peer sends no response headers
+- **WHEN** the effective stream idle timeout elapses
+- **THEN** the attempt fails with `stream_idle_timeout`
+- **AND** the failure is recorded before the request budget would have expired
+
+#### Scenario: Response headers inside the bound stream normally
+
+- **GIVEN** an upstream request whose response headers arrive before the idle timeout
+- **WHEN** the stream then produces events with gaps shorter than the idle timeout
+- **THEN** the request completes normally
+- **AND** the pre-header bound does not truncate the stream
+
+### Requirement: Routed streaming upstream responses are released when the consumer stops before EOF
+
+When an upstream streaming request is issued through a resolved upstream proxy route,
+the response body is consumed unbuffered and the consumer routinely stops before the
+body reaches EOF: on the terminal stream event, on the stream idle timeout, on
+cancellation, on downstream disconnect, and when the response is mapped to an error
+before the body is drained. On every such exit the proxy MUST release or close the
+upstream response object before it closes the per-stream client that owns the
+connection, so the connection is returned or closed synchronously and no connection
+object is left to be finalized by the garbage collector.
+
+The release MUST work for every response shape the routed path can receive: an
+aiohttp response (`release()`), a native egress response (`aclose()`), and a buffered
+or duck-typed response that exposes neither (no-op). Responses obtained through a
+SOCKS route MUST release the wrapped response before closing the private session that
+carried it.
+
+Release MUST run only after the last event block has been yielded to the consumer and
+MUST NOT change the forwarded bytes, the error mapping, the retry classification, or
+the cancellation semantics of the stream.
+
+#### Scenario: Terminal event arrives while upstream holds the connection open
+
+- **GIVEN** a routed HTTP stream whose upstream emits `response.completed` and then keeps the connection open
+- **WHEN** the proxy stops reading on the terminal event
+- **THEN** the upstream response is released before the per-stream client is closed
+- **AND** no `Unclosed connection` event is reported to the event loop exception handler after a full garbage collection
+- **AND** the forwarded event blocks are byte-identical to the upstream frames
+
+#### Scenario: Stream idle timeout
+
+- **GIVEN** a routed HTTP stream whose upstream goes silent after the first event
+- **WHEN** the stream idle timeout elapses
+- **THEN** the synthetic `stream_idle_timeout` failure event is yielded as before
+- **AND** the upstream response is released before the per-stream client is closed
+
+#### Scenario: Cancellation or downstream disconnect mid-stream
+
+- **GIVEN** a routed HTTP stream that is cancelled, or whose consumer calls `aclose()`, while a body read is pending
+- **WHEN** the stream generator unwinds
+- **THEN** the upstream response is released before the per-stream client is closed
+- **AND** the cancellation propagates to the caller unchanged
+
+#### Scenario: Error status mapped before the body is drained
+
+- **GIVEN** a routed HTTP stream whose upstream answers with a non-2xx status
+- **WHEN** the proxy raises the mapped `ProxyResponseError`
+- **THEN** the upstream response is released before the per-stream client is closed
+
+#### Scenario: Response without a release method
+
+- **GIVEN** a routed response object that exposes neither `release()`, `close()` nor `aclose()`
+- **WHEN** the stream ends
+- **THEN** teardown is a no-op for the response and the stream result is unchanged
+
+### Requirement: Native HTTP response compression remains representation-consistent
+
+Native HTTP egress MUST preserve the caller's compression-negotiation presence and value when constructing the upstream request. When a supported response coding is negotiated, the helper MUST decode the upstream response before relaying its body to the Python adapter. Headers relayed with the decoded body MUST describe the decoded representation and MUST NOT retain the stale upstream `Content-Encoding` or the encoded entity's `Content-Length`. This behavior MUST apply without changing direct or account-routed request ownership, replay policy, or streaming delivery.
+
+#### Scenario: Native helper relays a gzip JSON response
+
+- **GIVEN** a direct or account-routed native HTTP request advertises `Accept-Encoding: gzip`
+- **WHEN** the upstream responds with a gzip-encoded JSON or SSE body and encoded-entity headers
+- **THEN** the helper relays the decoded representation bytes
+- **AND** the relayed headers omit the stale gzip content encoding and encoded content length
+- **AND** the existing JSON or SSE adapter can consume the original representation
+
+#### Scenario: Inbound request omits compression negotiation
+
+- **GIVEN** a direct or account-routed native HTTP request has no `Accept-Encoding` header
+- **WHEN** the helper constructs the upstream request
+- **THEN** the upstream request MUST also omit `Accept-Encoding`
+- **AND** the helper MUST NOT synthesize a response-coding advertisement
+
+#### Scenario: Inbound request includes compression negotiation
+
+- **GIVEN** a direct or account-routed native HTTP request includes an `Accept-Encoding` value using gzip, deflate, Brotli, or zstd
+- **WHEN** the helper constructs and executes the upstream request
+- **THEN** it MUST forward the inbound `Accept-Encoding` value unchanged
+- **AND** the native HTTP client MUST have decoders enabled for gzip, deflate, Brotli, and zstd
+- **AND** a response using any enabled coding MUST be decoded before relay to Python
+
+### Requirement: Native helper stream events are bounded per request by a byte budget
+
+Events the native egress helper emits for one request MUST be buffered between the shared helper reader and that request's consumer in a per-request queue bounded by a queued-payload byte budget (32 MiB) together with an event-count cap (4096). Queued bytes MUST be released as the consumer drains. A burst of small framed events or a body made of large chunks that fits the byte budget MUST NOT fail a consumer that is still draining. Only when a request's queue exceeds its budget MAY the reader fail that request with `consumer_backpressure`, drop its queued events, cancel the helper-side request, and continue serving other requests.
+
+#### Scenario: Burst of small framed events drains without failure
+
+- **GIVEN** the helper has 2000 small body events for one request buffered in its output pipe
+- **WHEN** the consumer starts reading after the burst landed
+- **THEN** the consumer receives the complete body and the request is not failed
+
+#### Scenario: A consumer that stops draining is bounded by bytes
+
+- **GIVEN** a request whose consumer does not read while the helper emits 48 chunks of 1 MiB
+- **WHEN** the queued payload exceeds 32 MiB
+- **THEN** that request fails with `consumer_backpressure`
+- **AND** other requests on the same helper keep being served
+

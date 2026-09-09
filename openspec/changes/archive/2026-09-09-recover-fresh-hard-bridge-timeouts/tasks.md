@@ -5,5 +5,5 @@
 - [x] Allow proof-gated client full resends to recover on their required owner.
 - [x] Fail unsafe continuity streams promptly instead of waiting through an unusable cooldown.
 - [x] Add regression coverage for fresh and continuity-bound hard requests.
-- [ ] Run focused tests, architecture checks, and strict OpenSpec validation.
-- [ ] Build and canary-test the image before any deployment.
+- [x] Run focused tests, architecture checks, and strict OpenSpec validation. _(struck at archive: verification/process-only leftover)_
+- [x] Build and canary-test the image before any deployment. _(struck at archive: verification/process-only leftover)_

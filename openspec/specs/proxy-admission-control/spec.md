@@ -763,3 +763,125 @@ The same bounded-callback contract applies to waits that re-attach to one owned 
 - **AND** the pending chunk task's done-callback count does not grow with the
   number of elapsed ticks
 
+### Requirement: Fresh hard bridge requests may recover across accounts
+
+When a hard HTTP bridge request is still pre-response and has no
+`previous_response_id`, hard continuity anchor, proxy-injected anchor, or
+account-scoped file ownership, pre-response recovery MAY exclude the failed
+session account and select another eligible account. The request MUST retain
+its original request body and deadline. Requests carrying any of those
+continuity or ownership markers MUST remain pinned to the required account.
+
+#### Scenario: Fresh hard request switches after silent upstream failure
+
+- **GIVEN** a hard session-header request has sent `response.create`
+- **AND** upstream has not emitted `response.created` or any response event
+- **AND** the request has no previous-response, turn-state, proxy-injected
+  anchor, or account-scoped file ownership
+- **WHEN** pre-response recovery retries the request
+- **THEN** the failed account is excluded from selection
+- **AND** another eligible account may receive the unchanged request body
+- **AND** the original request deadline remains in force
+
+#### Scenario: Eventless watchdog gives fresh requests one bounded recovery
+
+- **GIVEN** a hard session-header request has reached the eventless
+  `response.created` watchdog without response events
+- **AND** the request has no previous-response, turn-state, proxy-injected
+  anchor, or account-scoped file ownership
+- **WHEN** the client-safe watchdog deadline expires
+- **THEN** the proxy attempts the same bounded pre-response recovery once
+- **AND** the failed account is excluded when recovery selects a replacement
+- **AND** if recovery is unavailable, the proxy preserves the existing
+  terminal timeout behavior
+
+#### Scenario: Fresh account recovery bypasses a stale retry circuit
+
+- **GIVEN** a hard session key has an active retry cooldown from repeated
+  pre-response failures
+- **AND** the pending request is fresh, self-contained, and has no continuity
+  or account-ownership marker
+- **WHEN** bounded pre-response recovery is attempted
+- **THEN** the request may bypass that cooldown once to exclude the failed
+  account
+- **AND** continuity-bound requests remain subject to the retry cooldown
+
+#### Scenario: Continuity-bound hard request remains pinned
+
+- **GIVEN** a hard request has a previous-response id, continuity anchor,
+  proxy-injected anchor, or account-scoped file ownership
+- **WHEN** pre-response recovery retries the request
+- **THEN** the original account remains required
+- **AND** the request is not replayed through another account
+
+#### Scenario: Proof-gated client full resend replays on the continuity owner
+
+- **GIVEN** a hard request has a previous-response id and a client-provided
+  full resend whose input body has passed the bridge's retry-safety checks
+- **AND** upstream has not emitted `response.created` or any response event
+- **WHEN** bounded pre-response recovery is attempted
+- **THEN** the bridge may strip the previous-response id and replay the verified
+  full body once
+- **AND** recovery remains pinned to the original continuity owner
+- **AND** an unverified continuation remains fail-closed
+
+#### Scenario: Unsafe continuity timeout does not wait through an unusable cooldown
+
+- **GIVEN** a hard continuation has no proof-gated full resend available
+- **AND** the retry circuit is cooling down after repeated pre-response failures
+- **WHEN** the downstream keepalive window expires
+- **THEN** the proxy fails the stream closed immediately
+- **AND** it does not hold the client connection open until the cooldown ends
+- **AND** the client may retry with its continuity payload intact
+
+### Requirement: WebSocket response-create lease cleanup is cancellation-safe
+
+When WebSocket terminal cleanup has captured an account response-create lease, it MUST complete the asynchronous lease release even if the surrounding task is cancelled while waiting for the load-balancer runtime lock. Cleanup MUST retain the existing response-create gate release semantics.
+
+#### Scenario: Cancellation under lease-release contention returns the account slot
+
+- **GIVEN** a WebSocket request owns an account response-create lease and its
+  response-create gate
+- **AND** the load-balancer runtime lock is held by another task
+- **WHEN** terminal cleanup is cancelled while releasing the account lease
+- **THEN** the account response-create slot MUST be returned after the lock is
+  freed
+- **AND** the request state does not retain the released lease
+- **AND** the response-create gate cleanup semantics remain unchanged
+
+### Requirement: Helm default leaves global backpressure disabled
+
+The Helm chart MUST default `config.backpressureMaxConcurrentRequests` to
+`0` so a default install sets
+`CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS` to `"0"`. A value of `0`
+MUST leave the process-wide backpressure semaphore uninstalled. A positive
+operator override MUST still render into that ConfigMap key. The default
+MUST NOT install one global concurrent-request cap across proxy HTTP,
+websocket, compact, and dashboard traffic.
+
+#### Scenario: Default Helm ConfigMap disables global backpressure
+
+- **WHEN** the chart is rendered with default values
+- **THEN** the ConfigMap `CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS`
+  value is `"0"`
+
+#### Scenario: Explicit Helm override renders the global cap
+
+- **WHEN** an operator sets `config.backpressureMaxConcurrentRequests=37`
+- **THEN** the ConfigMap `CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS`
+  value is `"37"`
+
+### Requirement: Live stream lease release survives caller cancellation
+
+The proxy SHALL prevent caller cancellation from interrupting release after a
+Live handler has selected an account stream lease. The handler MUST complete
+or explicitly settle the release before propagating the cancellation.
+
+#### Scenario: Cancellation arrives during contended Live lease release
+
+- **GIVEN** a Live handler owns an account stream lease
+- **AND** release of that lease has started but is suspended
+- **WHEN** caller cancellation is delivered repeatedly while release remains suspended
+- **THEN** the release completes exactly once
+- **AND** the account slot is returned before cancellation propagates
+

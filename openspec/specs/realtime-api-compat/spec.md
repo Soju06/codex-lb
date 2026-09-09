@@ -3,9 +3,7 @@
 ## Purpose
 
 Define private Codex Live Voice call-owner continuity, authenticated sideband routing, transport privacy, and dashboard/operator contracts without implementing the public OpenAI Realtime API.
-
 ## Requirements
-
 ### Requirement: Realtime call creation binds the final account under a required proxy key
 
 The proxy SHALL require a registered proxy API key for `POST /backend-api/codex/realtime/calls` even when ordinary proxy API-key authentication is disabled. After a successful upstream response with a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{call_id}`, where `{call_id}` is a bounded ASCII `rtc_...` or canonical UUID, it MUST bind the call immutably to the final ChatGPT account that completed the request. Relative paths without the leading `/`, unrelated path prefixes, abbreviated `/live/...` or `/realtime/calls/...` paths, and paths with extra segments are unsupported. The binding MUST be scoped to the proxy key, MUST persist across replicas as only a bounded digest in a reserved non-user-forgeable namespace, MUST expire after a fixed interval, and MUST NOT persist the raw call id, API key, OAuth token, SDP, attestation value, or frame body. Private call-creation diagnostics, including caller-local AuthManager metadata work and process-global shared refresh work, MUST redact internal account identifiers and suppress exception details; shared refresh diagnostics MUST use the strict policy regardless of which caller creates the singleflight task.
@@ -154,3 +152,19 @@ The capability MUST use existing configuration and key registration. It MUST add
 - **WHEN** an operator starts the base proxy and dashboard without adding configuration for this capability
 - **THEN** existing startup and ordinary proxy/dashboard behavior remain available
 - **AND** no public model or documented public Realtime route advertises this private transport
+
+### Requirement: Live cancellation completes account-lease cleanup
+
+The Live WebSocket proxy MUST release its selected account lease exactly once
+when the downstream handler is cancelled. Cancellation MUST be deferred while
+that release is in progress, without changing the established upstream and
+downstream close behavior.
+
+#### Scenario: Cancelled Live handler waits for lease release
+
+- **WHEN** the downstream Live handler is cancelled while account-lease release
+  is waiting on load-balancer cleanup
+- **THEN** the release completes exactly once
+- **AND** both peer cleanup paths retain their existing close semantics
+- **AND** the original cancellation is raised afterward
+

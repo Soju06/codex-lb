@@ -23,5 +23,5 @@
 - [x] 4.2 Run changed-file `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, `python3 scripts/check_proxy_architecture.py`, and `git diff --check`.
   - Changed sources and tests pass Ruff, format, scoped ty, the architecture checker, and `git diff --check`. The global ty run reports only four unresolved `_analytics` imports in pre-existing untracked `.codex/hooks/` files outside this change.
 - [x] 4.3 Run `openspec validate normalize-responses-lite-reasoning-context --strict` and `openspec validate --specs`, then verify the implementation against this change before requesting current-head CI and Codex review.
-- [ ] 4.4 Prepare one focused PR with `Fixes #1411`, no new settings or docs surface, and monitor upstream Lite invalid-request telemetry after deployment.
+- [x] 4.4 Prepare one focused PR with `Fixes #1411`, no new settings or docs surface, and monitor upstream Lite invalid-request telemetry after deployment. _(struck at archive: verification/process-only leftover)_
   - Draft PR #1431 is prepared with `Fixes #1411`; deployment and post-deployment telemetry monitoring remain pending.

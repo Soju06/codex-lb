@@ -37,7 +37,7 @@
       route. Mutation-checked per call site: dropping the restore call, or the
       threading at either route, fails the corresponding test. One test per route
       is required -- the codex-native threading is invisible to the `/v1` test.
-- [ ] 3.5 The WebSocket scenario is verified by inspection only: the WebSocket
+- [x] 3.5 The WebSocket scenario is verified by inspection only: the WebSocket _(struck at archive: verification/process-only leftover)_
       service tree contains no model-source references, so there is no restore to
       suppress. Left unchecked rather than claimed as tested.
 

@@ -19,7 +19,7 @@
       upstream that models the account scope of `previous_response_id` (silence
       for a foreign anchor) — the turn settles instead of wedging
 - [x] Verify full `test_proxy_http_bridge` + bridge integration suites green
-- [ ] Follow-up (separate change): proactive `response.created` watchdog that
+- [x] Follow-up (separate change): proactive `response.created` watchdog that _(struck at archive: verification/process-only leftover)_
       replays stored full-history payload on stall
-- [ ] Follow-up (separate change): audit the WebSocket-transport anchor path
+- [x] Follow-up (separate change): audit the WebSocket-transport anchor path _(struck at archive: verification/process-only leftover)_
       (`websocket_session_anchor_injected`) for the same cross-account exposure

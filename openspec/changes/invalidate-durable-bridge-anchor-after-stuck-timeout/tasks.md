@@ -28,4 +28,4 @@
 
 ## 5. Sequencing
 
-- [ ] 5.1 Push this change as a proposal-forward PR (spec + working implementation for the confirmed-safe, full-resend-gated subset) and ask the maintainer to confirm the delta-only scope boundary before considering any follow-up that would need to extend coverage to that shape.
+- [x] 5.1 Push this change as a proposal-forward PR (spec + working implementation for the confirmed-safe, full-resend-gated subset) and ask the maintainer to confirm the delta-only scope boundary before considering any follow-up that would need to extend coverage to that shape. _(struck at archive: verification/process-only leftover)_

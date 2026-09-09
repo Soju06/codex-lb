@@ -21,4 +21,4 @@
 - [x] 4.1 Run focused unit and HTTP bridge integration tests.
 - [x] 4.2 Run Ruff, formatting, changed-file type checks, proxy architecture checks, migration checks, and OpenSpec validation.
   - Changed paths pass Ty. Full Ty reports only five existing Windows/POSIX diagnostics for `os.killpg`, `signal.SIGKILL`, and `os.fork` in untouched smoke and refresh-claim tests.
-- [ ] 4.3 Open a focused upstream PR linked to the production issue and wait for current-head required CI before requesting Codex review.
+- [x] 4.3 Open a focused upstream PR linked to the production issue and wait for current-head required CI before requesting Codex review. _(struck at archive: verification/process-only leftover)_

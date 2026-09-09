@@ -12,5 +12,5 @@
 
 - [x] 3.1 Add focused regression tests for four-digit full-value Cost rendering.
 - [x] 3.2 Run focused Reports tests, frontend typecheck, and lint.
-- [ ] 3.3 Run strict OpenSpec validation if the repository tool is available. (Not run: validator is unavailable in this checkout.)
+- [x] 3.3 Run strict OpenSpec validation if the repository tool is available. (Not run: validator is unavailable in this checkout.) _(struck at archive: verification/process-only leftover)_
 - [x] 3.4 Run an independent GPT-5.6 SOL review on the final diff and address blocking findings.

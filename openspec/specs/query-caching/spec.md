@@ -226,14 +226,12 @@ status, model, account, API key, and search filters. The filter MUST use a bound
 query parameter and MUST not change request routing or unrelated response data.
 
 #### Scenario: Conversation-only filtering returns matching rows
-
 - **GIVEN** request logs contain rows for `conv-a` and `conv-b`
 - **WHEN** the request-log listing is requested with
   `conversation_id=conv-a`
 - **THEN** only rows with conversation ID `conv-a` are returned
 
 #### Scenario: Conversation filtering composes with existing filters
-
 - **GIVEN** matching conversation rows differ by status, model, account, API
   key, timeframe, or search text
 - **WHEN** a conversation filter and existing filters are requested together
@@ -249,7 +247,6 @@ represented as zero. The top-level listing total MUST remain consistent with the
 filtered request count.
 
 #### Scenario: Aggregates ignore pagination
-
 - **GIVEN** a filtered conversation has twelve matching requests across multiple
   pages with a total stored cost of `1.23`
 - **WHEN** page one and a later page are requested with different limit or
@@ -258,14 +255,12 @@ filtered request count.
 - **AND** both responses report `conversation.aggregatedCostUsd` as `1.23`
 
 #### Scenario: No matching rows return zero aggregates
-
 - **GIVEN** a conversation filter and active filters match no request logs
 - **WHEN** the request-log listing is requested
 - **THEN** the response reports `conversation.requestCount` as `0`
 - **AND** the response reports `conversation.aggregatedCostUsd` as `0`
 
 #### Scenario: No conversation filter returns null metadata
-
 - **GIVEN** the request-log listing is requested without `conversation_id`
 - **WHEN** the response is generated
 - **THEN** the response's `conversation` metadata is null
@@ -277,7 +272,6 @@ addition to every existing filter dimension. Requests for different
 conversation IDs MUST not reuse one another's cached listing count.
 
 #### Scenario: Different conversation IDs have isolated cached totals
-
 - **GIVEN** two listing requests differ only by conversation ID
 - **WHEN** their listing counts are served through the cache
 - **THEN** each request uses its own cache entry and filtered total
@@ -291,7 +285,6 @@ equivalent database-specific expression with the same null-and-blank exclusion
 semantics.
 
 #### Scenario: Empty conversation IDs do not inflate aggregates
-
 - **GIVEN** the active filtered range contains repeated `conv-a` values and
   rows whose conversation IDs are null, `''`, and `'   '`
 - **WHEN** dashboard or report conversation aggregates are calculated
@@ -310,14 +303,12 @@ conversation appearing in both the folded segment and the raw tail of one
 display bucket still counts once.
 
 #### Scenario: One conversation across model groups counts once per bucket
-
 - **GIVEN** a bucket contains two non-warmup request logs for `conv-a` under
   different models and one log for `conv-b`
 - **WHEN** the dashboard conversation trend aggregate is calculated
 - **THEN** that bucket's conversation count is `2`
 
 #### Scenario: One conversation across the fold boundary counts once per bucket
-
 - **GIVEN** a display bucket containing rows for `conv-a` below the
   conversation watermark (rollup-served) and above it (raw-served)
 - **WHEN** the dashboard conversation trend aggregate is calculated
@@ -1017,4 +1008,19 @@ use the live derived timestamp.
 - **WHEN** their derived timestamps differ
 - **THEN** the count query executes once
 - **AND** each membership query uses its live timestamp
+
+### Requirement: Conversation collection URLs preserve trailing-slash behavior
+
+`GET /api/conversations` and `GET /api/conversations/` MUST both serve the
+conversation collection response with identical filtering, pagination, and
+default-window behavior. The detail route MUST require a non-empty detail
+segment so the trailing-slash collection URL cannot be interpreted as an
+empty conversation ID and return a detail not-found response.
+
+#### Scenario: Trailing-slash collection URL lists conversations
+
+- **GIVEN** the conversation collection is requested with a trailing slash
+- **WHEN** the API handles `GET /api/conversations/`
+- **THEN** it returns the same collection envelope as `GET /api/conversations`
+- **AND** it does not invoke detail lookup for an empty conversation ID
 

@@ -7,6 +7,7 @@ import json
 import logging
 import pickle
 import subprocess
+import sys
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -42,12 +43,13 @@ from app.core.clients.proxy_websocket import (
     WebsocketsUpstreamWebSocket,
 )
 from app.core.clock import REAL_SCHEDULER, RealScheduler
+from app.core.config.dashboard_overrides import dashboard_overrides_bound, with_dashboard_overrides
 from app.core.config.settings import Settings
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
 from app.core.openai.models import OpenAIError, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
-from app.db.models import AccountStatus, Base, HttpBridgeSessionState
+from app.db.models import AccountStatus, Base, DashboardSettings, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
@@ -3471,19 +3473,25 @@ def test_codex_prewarm_eligibility_is_enabled_flag_alone() -> None:
         # M3 codex prewarm: a non-NULL dashboard column wins in both directions.
         (False, True, True),
         (True, False, False),
-        # NULL (or a snapshot without the attribute) inherits the env alias.
+        # NULL inherits the deprecated env alias.
         (True, None, True),
         (False, None, False),
     ],
 )
-def test_codex_prewarm_eligibility_prefers_dashboard_snapshot_over_env(
+def test_codex_prewarm_eligibility_prefers_dashboard_overlay_over_env(
     env_enabled: bool, column_value: bool | None, expected: bool
 ) -> None:
-    settings = _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=env_enabled)
-    row = SimpleNamespace(http_responses_session_bridge_codex_prewarm_enabled=column_value)
-    assert proxy_service._http_bridge_prewarm_enabled(settings, row) is expected
-    assert proxy_service._http_bridge_prewarm_enabled(settings, SimpleNamespace()) is env_enabled
-    assert proxy_service._http_bridge_prewarm_enabled(settings, None) is env_enabled
+    """The switch is dashboard-managed through the request-bound overlay, so the
+    helper stays a one-argument read of the ``Settings`` the facade returns."""
+    base = _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=env_enabled)
+    row = DashboardSettings()
+    row.http_responses_session_bridge_codex_prewarm_enabled = column_value
+
+    with dashboard_overrides_bound(row):
+        assert proxy_service._http_bridge_prewarm_enabled(with_dashboard_overrides(base)) is expected
+
+    # Unbound (startup, schedulers): the env alias, then the code default.
+    assert proxy_service._http_bridge_prewarm_enabled(with_dashboard_overrides(base)) is env_enabled
 
 
 @pytest.mark.asyncio
@@ -3507,7 +3515,14 @@ async def test_maybe_prewarm_http_bridge_session_not_applicable_when_disabled(
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
-        lambda: _make_app_settings(),
+        lambda: with_dashboard_overrides(_make_app_settings()),
+    )
+    # The switch comes from the request-bound overlay: the disabled path must
+    # not fall back to reading the settings cache (and so the database) itself.
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(side_effect=AssertionError("prewarm must not read the settings cache"))),
     )
 
     await service._maybe_prewarm_http_bridge_session(
@@ -3526,9 +3541,32 @@ async def test_maybe_prewarm_http_bridge_session_not_applicable_when_disabled(
 # disabled switch never reaches the lock and reports ``not_applicable``. That
 # makes the two outcomes a cheap discriminator for "the switch was honoured".
 _PREWARM_SHAPED_TEXT = '{"model":"gpt-5.2","input":"hi","generate":false}'
+# The same body without ``generate: false`` is a real prewarm candidate: the
+# lock body builds a warm-up copy and sends it upstream.
+_PREWARM_CANDIDATE_TEXT = '{"model":"gpt-5.2","input":"hi"}'
 
 
-def _make_prewarm_candidate() -> tuple[proxy_service._WebSocketRequestState, proxy_service._HTTPBridgeSession]:
+class _SpyPrewarmLock:
+    """``prewarm_lock`` stand-in that reports whether it is currently held."""
+
+    def __init__(self) -> None:
+        self._lock = anyio.Lock()
+        self.held = False
+        self.enter_count = 0
+
+    async def __aenter__(self) -> None:
+        await self._lock.acquire()
+        self.held = True
+        self.enter_count += 1
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.held = False
+        self._lock.release()
+
+
+def _make_prewarm_candidate(
+    text: str = _PREWARM_SHAPED_TEXT,
+) -> tuple[proxy_service._WebSocketRequestState, proxy_service._HTTPBridgeSession]:
     state = proxy_service._WebSocketRequestState(
         request_id="req-prewarm-dashboard",
         model="gpt-5.2",
@@ -3536,7 +3574,7 @@ def _make_prewarm_candidate() -> tuple[proxy_service._WebSocketRequestState, pro
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=1.0,
-        request_text=_PREWARM_SHAPED_TEXT,
+        request_text=text,
         transport="http",
     )
     session = _make_bridge_session()
@@ -3565,99 +3603,118 @@ async def test_maybe_prewarm_http_bridge_session_honours_dashboard_switch_over_e
     expected_status: str,
     expected_prewarmed: bool,
 ) -> None:
-    from app.db.models import DashboardSettings
-
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     state, session = _make_prewarm_candidate()
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
-        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=env_enabled),
+        lambda: with_dashboard_overrides(
+            _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=env_enabled)
+        ),
     )
     row = DashboardSettings()
     row.http_responses_session_bridge_codex_prewarm_enabled = column_value
-    monkeypatch.setattr(
-        http_bridge_request_submit_module,
-        "_service_get_settings_cache",
-        lambda: SimpleNamespace(get=AsyncMock(return_value=row)),
-    )
 
-    await service._maybe_prewarm_http_bridge_session(
-        session,
-        request_state=state,
-        text_data=state.request_text or "{}",
-    )
+    # The request entry point binds this snapshot once per request; the bridge
+    # then reads the folded value straight off ``Settings``.
+    with dashboard_overrides_bound(row):
+        await service._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=state,
+            text_data=state.request_text or "{}",
+        )
 
     assert state.prewarm_status == expected_status
     assert session.prewarmed is expected_prewarmed
 
 
 @pytest.mark.asyncio
-async def test_maybe_prewarm_http_bridge_session_reads_the_settings_snapshot_once_before_the_lock(
+async def test_maybe_prewarm_http_bridge_session_adds_no_settings_read_under_the_prewarm_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """M3 codex prewarm: the dashboard switch is resolved from the settings-cache
-    snapshot exactly once, BEFORE ``prewarm_lock``, and nothing opens a database
-    session while the lock is held (issues #1971/#1972 wedged keyed submits on a
-    settings read under a bridge lock)."""
+    """M3 codex prewarm: driving a full prewarm body (warm-up built, admitted,
+    sent upstream, completed) adds no settings-cache read of its own, because the
+    dashboard switch arrives on the request-bound overlay.
+
+    A settings read under ``prewarm_lock`` can refresh the cache, run a DB query
+    and suspend while the lock is held; issues #1971/#1972 wedged every keyed
+    submit on exactly that pattern. The lock body's admission gate has its own
+    snapshot read that predates this change, so the assertion is scoped by call
+    site: no read is attributed to ``_maybe_prewarm_http_bridge_session``
+    itself, and any read taken while the lock is held comes from that
+    pre-existing helper. Either way nothing may open a database session.
+    """
     from unittest.mock import MagicMock
 
     import app.core.config.settings_cache as settings_cache_module
     from app.core.config.settings_cache import SettingsCache
-    from app.db.models import DashboardSettings
-
-    class _SpyLock:
-        def __init__(self) -> None:
-            self._lock = anyio.Lock()
-            self.held = False
-            self.enter_count = 0
-
-        async def __aenter__(self) -> None:
-            await self._lock.acquire()
-            self.held = True
-            self.enter_count += 1
-
-        async def __aexit__(self, *exc: object) -> None:
-            self.held = False
-            self._lock.release()
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    state, session = _make_prewarm_candidate()
-    lock = _SpyLock()
+    state, session = _make_prewarm_candidate(_PREWARM_CANDIDATE_TEXT)
+    lock = _SpyPrewarmLock()
     session.prewarm_lock = cast(Any, lock)
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    service._http_bridge_sessions[session.key] = session
+    # Env alias off: only the dashboard column can enable the prewarm below.
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: with_dashboard_overrides(_make_app_settings()))
 
     row = DashboardSettings()
     row.http_responses_session_bridge_codex_prewarm_enabled = True
-    # A real cache holding a fresh row: ``get()`` must serve it without a
-    # session-factory call, and the path must not bypass the cache either.
+    # A real cache holding a fresh row: ``get()`` serves it from memory, so any
+    # call that did reach the database would trip the session-factory guard.
     cache = SettingsCache()
     cache._cached_settings = row
     cache._cached_at = time.monotonic()
     session_factory = MagicMock(side_effect=AssertionError("prewarm path must not open a DB session"))
     monkeypatch.setattr(settings_cache_module, "SessionLocal", session_factory)
-    lock_held_at_read: list[bool] = []
+    reads: list[tuple[str, bool]] = []
     real_get = cache.get
 
     async def spying_get() -> DashboardSettings:
-        lock_held_at_read.append(lock.held)
+        reads.append((sys._getframe(1).f_code.co_name, lock.held))
         return await real_get()
 
     monkeypatch.setattr(cache, "get", spying_get)
-    monkeypatch.setattr(http_bridge_request_submit_module, "_service_get_settings_cache", lambda: cache)
+    # One seam covers both the module-level ``get_settings_cache`` the admission
+    # gate uses and the bridge's ``_service_get_settings_cache`` indirection.
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: cache)
 
-    await service._maybe_prewarm_http_bridge_session(
-        session,
-        request_state=state,
-        text_data=state.request_text or "{}",
-    )
+    sent: list[str] = []
 
-    # The dashboard value (on) was honoured against the env alias (off) ...
-    assert state.prewarm_status == "skipped"
+    async def fake_send(
+        target_session: proxy_service._HTTPBridgeSession,
+        warmup_state: proxy_service._WebSocketRequestState,
+        text: str,
+        **kwargs: Any,
+    ) -> None:
+        del target_session, kwargs
+        sent.append(text)
+        # Stand in for the upstream: end the warm-up stream immediately.
+        queue = warmup_state.event_queue
+        assert queue is not None
+        queue.put_nowait(None)
+
+    monkeypatch.setattr(http_bridge_request_submit_module, "_send_http_bridge_request_text_with_archive_id", fake_send)
+
+    with dashboard_overrides_bound(row):
+        await service._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=state,
+            text_data=state.request_text or "{}",
+        )
+
+    # The dashboard value (on) was honoured against the env alias (off) and a
+    # real warm-up went upstream under the lock.
+    assert state.prewarm_status == "success"
     assert session.prewarmed is True
     assert lock.enter_count == 1
-    # ... from exactly one snapshot read taken before the lock, with no DB access.
-    assert lock_held_at_read == [False]
+    assert len(sent) == 1
+    assert json.loads(sent[0])["generate"] is False
+    # The prewarm path itself reads no snapshot, before or under the lock ...
+    assert [caller for caller, _ in reads if caller == "_maybe_prewarm_http_bridge_session"] == []
+    # ... and the only reads under the lock are the admission gate's own, which
+    # must actually have happened -- otherwise the body was never driven and the
+    # assertion above would be vacuous.
+    assert reads == [("_acquire_request_state_response_create_admission", True)]
     session_factory.assert_not_called()
 
 

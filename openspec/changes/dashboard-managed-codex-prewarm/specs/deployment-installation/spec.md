@@ -66,8 +66,9 @@ environment) whose
 `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` variable is a
 deprecated alias that applies only while the column is NULL and that joins the
 removed-settings warning list in the next minor release. The bridge MUST
-resolve the switch from the settings-cache snapshot before taking a session's
-prewarm lock and MUST NOT read settings again under that lock.
+resolve the switch before it takes a session's prewarm lock, from the dashboard
+overrides the request entry point already bound, and MUST NOT add a settings
+read under that lock.
 `database_pool_size` and `database_max_overflow` MUST remain
 operator-configurable settings, and `soft_drain_enabled` and
 `deterministic_failover_enabled` MUST remain the failover subsystem's only

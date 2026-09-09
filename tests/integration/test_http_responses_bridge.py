@@ -21,9 +21,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 
+import app.core.middleware.dashboard_overrides as dashboard_overrides_middleware_module
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage as _FakeUpstreamMessage
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
 from app.core.utils.request_id import (
@@ -249,7 +251,14 @@ def _install_proxy_settings(
     admission_wait_timeout_seconds: float = 0.05,
 ) -> None:
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(dashboard_settings))
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    # The request entry point binds the dashboard overlay from the settings-cache
+    # snapshot, and the proxy facade applies it to every ``Settings`` read; point
+    # the middleware at the same fake row so the dashboard-managed switches (M3
+    # codex prewarm) reach the bridge the way they do in production.
+    monkeypatch.setattr(
+        dashboard_overrides_middleware_module, "get_settings_cache", lambda: _SettingsCache(dashboard_settings)
+    )
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: with_dashboard_overrides(app_settings))
     # The admission wait is a fixed constant (ADMISSION_WAIT_TIMEOUT_SECONDS); the
     # bridge tests shorten it through the service's module-level seam.
     monkeypatch.setattr(proxy_module, "_proxy_admission_wait_timeout_seconds", lambda: admission_wait_timeout_seconds)

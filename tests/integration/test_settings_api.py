@@ -2009,20 +2009,29 @@ async def test_settings_api_codex_prewarm_round_trip_with_provenance(async_clien
 
 @pytest.mark.asyncio
 async def test_settings_api_codex_prewarm_dashboard_value_reaches_the_bridge_resolver_without_restart(async_client):
-    """M3 codex prewarm: the bridge resolves the switch from the settings-cache
-    snapshot, so a dashboard PUT flips it for the next new Codex session with the
-    process (and its startup ``Settings``) untouched."""
+    """M3 codex prewarm: the bridge reads the switch off the ``Settings`` the
+    request entry point overlaid with the settings-cache snapshot, so a dashboard
+    PUT flips it for the next new Codex session with the process (and its startup
+    ``Settings``) untouched."""
+    from app.core.config.dashboard_overrides import effective_settings
     from app.core.config.settings import get_settings
     from app.modules.proxy._service.http_bridge.helpers import _http_bridge_prewarm_enabled
 
     startup_settings = get_settings()
+
+    async def prewarm_enabled_for_the_next_request() -> bool:
+        # What ``DashboardOverridesMiddleware`` binds and the proxy facade
+        # applies, without standing up a request.
+        snapshot = await get_settings_cache().get()
+        return _http_bridge_prewarm_enabled(effective_settings(snapshot, startup_settings))
+
     assert startup_settings.http_responses_session_bridge_codex_prewarm_enabled is False
-    assert _http_bridge_prewarm_enabled(startup_settings, await get_settings_cache().get()) is False
+    assert await prewarm_enabled_for_the_next_request() is False
 
     enabled = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": True})
     assert enabled.status_code == 200
-    assert _http_bridge_prewarm_enabled(startup_settings, await get_settings_cache().get()) is True
+    assert await prewarm_enabled_for_the_next_request() is True
 
     cleared = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": None})
     assert cleared.status_code == 200
-    assert _http_bridge_prewarm_enabled(startup_settings, await get_settings_cache().get()) is False
+    assert await prewarm_enabled_for_the_next_request() is False

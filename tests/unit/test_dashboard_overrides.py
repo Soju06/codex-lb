@@ -7,6 +7,7 @@ import pytest
 
 import app.core.middleware.dashboard_overrides as middleware_module
 from app.core.config.dashboard_overrides import (
+    DASHBOARD_SWITCH_SETTINGS,
     DASHBOARD_TIMEOUT_SETTINGS,
     dashboard_overrides,
     dashboard_overrides_bound,
@@ -32,6 +33,35 @@ def test_dashboard_overrides_returns_only_non_null_timeout_columns() -> None:
     row = _row(proxy_request_budget_seconds=900.0, sse_keepalive_interval_seconds=0.0)
 
     assert dashboard_overrides(row) == {"proxy_request_budget_seconds": 900.0, "sse_keepalive_interval_seconds": 0.0}
+
+
+def test_dashboard_switch_column_overrides_the_environment_alias() -> None:
+    """M3 codex prewarm: the behaviour switch rides the same overlay as the
+    timeouts, so its consumer keeps reading it off ``Settings`` -- no extra
+    snapshot read, and no ``await`` in the path that reads it."""
+    name = "http_responses_session_bridge_codex_prewarm_enabled"
+    assert name in DASHBOARD_SWITCH_SETTINGS
+    env_off = Settings().model_copy(update={name: False})
+    env_on = Settings().model_copy(update={name: True})
+    row = DashboardSettings()
+
+    row.http_responses_session_bridge_codex_prewarm_enabled = True
+    assert dashboard_overrides(row) == {name: True}
+    with dashboard_overrides_bound(row):
+        assert getattr(with_dashboard_overrides(env_off), name) is True
+
+    # ``false`` is a dashboard value, not "unset": it wins over an enabled alias.
+    row.http_responses_session_bridge_codex_prewarm_enabled = False
+    assert dashboard_overrides(row) == {name: False}
+    with dashboard_overrides_bound(row):
+        assert getattr(with_dashboard_overrides(env_on), name) is False
+
+    # NULL column: the deprecated environment alias keeps applying.
+    row.http_responses_session_bridge_codex_prewarm_enabled = None
+    assert dashboard_overrides(row) == {}
+    with dashboard_overrides_bound(row):
+        assert getattr(with_dashboard_overrides(env_on), name) is True
+        assert getattr(with_dashboard_overrides(env_off), name) is False
 
 
 def test_with_dashboard_overrides_is_identity_outside_a_bound_context() -> None:

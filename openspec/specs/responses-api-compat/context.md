@@ -265,3 +265,35 @@ OpenSpec change first.
 - Post-deploy: correlate retry-circuit `opened`, `half_open`, and `reset` events with bridge `pending` and `response_events_seen` diagnostics. An idle `pending=0` retirement must not precede an immediate two-failure cooldown.
 - Post-deploy: monitor `previous_response_not_found` on `/backend-api/codex/responses`; recurring spikes show repeated continuity failures, which may come from malformed client identifiers, server-side invalidation, or connection lifecycle. Clients should perform the documented full-context retry without `previous_response_id`. Investigate socket-lifecycle remediation only when a separate close-reason, reconnect, or transport diagnostic correlates with the failures.
 - Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`
+
+
+## HTTP continuation promotion
+
+Healthy native HTTP requests use normal policy. The proxy cannot infer every
+client-local WebSocket failure from HTTP alone; it uses its existing 60-second
+upstream-connect failure marker as concrete failure evidence. Operator HTTP
+pins, image and size bypasses remain effective. No new retry/session registry.
+
+History-only locality is soft, scoped by the bridge's full API-key identifier,
+and hashes the complete first user item plus instructions and model. No client
+prompt cache field is overwritten. Identical initial prompts may share an idle
+connection, but neither histories nor response anchors are merged; the complete
+request is sent each time. Existing hard-continuity paths retain their guarded
+incremental replay. Conversation IDs get their own hashed locality and are never
+combined with an injected previous_response_id.
+
+Chat keeps the existing stream conversion/usage/error/cleanup pipeline and uses
+the bridge only after the source-routing branch. Backend stream=false retains
+its native non-streaming upstream contract. No claimed latency percentage:
+connection reuse is measured separately from admission and successful transport.
+
+For example, a Chat client sending `[user(task), assistant(answer), user(next)]`
+without session headers can open a bridge connection. Appending the next
+assistant/user pair reuses that connection while sending the entire new history.
+The same initial task under a different API key selects a separate connection.
+
+Chat binds existing settlement ownership signals while advancing its bridged
+stream. Predispatch failures and cancellation release origin-owned reservations;
+accepted or delivery-ambiguous owner forwards retain their settlement owner.
+Context bindings do not span yields because startup probes and consumers may
+advance the stream from different tasks.

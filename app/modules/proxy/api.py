@@ -5,8 +5,8 @@ import json
 import logging
 import math
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
@@ -245,6 +245,7 @@ from app.modules.model_sources.selection import (
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy._service.observability import record_http_bridge_routing
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
     _bind_propagated_capacity_startup_wait,
@@ -2349,6 +2350,53 @@ def _responses_cleanup_scheduler(service: object) -> _ResponsesCleanupScheduler 
     return None
 
 
+async def _guard_chat_bridge_reservation(
+    stream: AsyncIterator[str],
+    *,
+    reservation: ApiKeyUsageReservationData | None,
+    service: object,
+) -> AsyncIterator[str]:
+    cleanup = _ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=reservation,
+        scheduler=_responses_cleanup_scheduler(service),
+        request_id=ensure_request_id(),
+    )
+    ready, dispatched, rejected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @contextmanager
+    def settlement_signals() -> Iterator[None]:
+        ready_token = _bind_propagated_responses_service_cleanup_ready(ready)
+        dispatched_token = _bind_propagated_responses_owner_forward_dispatched(dispatched)
+        rejected_token = _bind_propagated_responses_owner_forward_rejected(rejected)
+        try:
+            yield
+        finally:
+            _reset_propagated_responses_owner_forward_rejected(rejected_token)
+            _reset_propagated_responses_owner_forward_dispatched(dispatched_token)
+            _reset_propagated_responses_service_cleanup_ready(ready_token)
+
+    try:
+        while True:
+            # Startup probes and response consumers can run in different tasks.
+            # Never retain a ContextVar token across a yield to either caller.
+            with settlement_signals():
+                try:
+                    line = await anext(stream)
+                except StopAsyncIteration:
+                    break
+            yield line
+    finally:
+        with anyio.CancelScope(shield=True), settlement_signals():
+            await _close_responses_stream_best_effort(stream, action="chat bridge")
+            if _responses_origin_may_release_reservation(
+                service_cleanup_ready_event=ready,
+                owner_forward_dispatched_event=dispatched,
+                owner_forward_rejected_event=rejected,
+            ):
+                await cleanup.release(action="chat bridge")
+
+
 def _select_codex_usage_limit(
     limits: list[V1UsageLimitResponse],
     window: str,
@@ -4301,6 +4349,7 @@ def _raw_optional_string(raw: Mapping[str, JsonValue], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+@v1_router.post("/chat/completions/", include_in_schema=False)
 @v1_router.post(
     "/chat/completions",
     response_model=ChatCompletionResult,
@@ -4402,6 +4451,11 @@ async def v1_chat_completions(
         )
         if admission_denial is not None:
             return admission_denial
+    bridge_active = (
+        await _http_bridge_active_for_request(responses_payload, request.headers, api_key, preferred=True)
+        if source is None
+        else False
+    )
     reservation = await _enforce_request_limits(
         api_key,
         request_model=request_model,
@@ -4425,17 +4479,38 @@ async def v1_chat_completions(
             prohibit_fast_mode=prohibit_fast_mode,
         )
     responses_payload.stream = True
-    stream = context.service.stream_responses(
-        responses_payload,
-        request.headers,
-        codex_session_affinity=False,
-        propagate_http_errors=True,
-        openai_cache_affinity=True,
-        api_key=api_key,
-        api_key_reservation=reservation,
-        suppress_text_done_events=True,
-        client_ip=resolve_request_client_host(request),
-    )
+    if bridge_active:
+        downstream_turn_state = proxy_affinity_module.ensure_http_downstream_turn_state(request.headers)
+        rate_limit_headers = {
+            **rate_limit_headers,
+            **proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state),
+        }
+        stream = context.service.stream_http_responses(
+            responses_payload,
+            request.headers,
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=True,
+            client_ip=resolve_request_client_host(request),
+            downstream_turn_state=downstream_turn_state,
+            http_bridge_active=True,
+        )
+        stream = _guard_chat_bridge_reservation(stream, reservation=reservation, service=context.service)
+    else:
+        stream = context.service.stream_responses(
+            responses_payload,
+            request.headers,
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=True,
+            client_ip=resolve_request_client_host(request),
+        )
     startup_probe_timeout = (
         _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
         if cursor_compat_client
@@ -4461,7 +4536,8 @@ async def v1_chat_completions(
         _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
         if cursor_compat_client and _is_context_length_startup_error(startup_error):
-            await _release_reservation(reservation)
+            if not bridge_active:
+                await _release_reservation(reservation)
             if payload.stream:
                 return _cursor_context_limit_usage_stream(
                     payload,
@@ -6689,6 +6765,7 @@ async def _http_bridge_active_for_request(
 ) -> bool:
     base_settings = proxy_service_module.get_settings()
     if not preferred or not base_settings.http_responses_session_bridge_enabled:
+        record_http_bridge_routing(stage="admission", reason="bridge_disabled" if preferred else "route_disabled")
         return False
     if policy_already_applied:
         # The origin already made the authoritative policy decision before

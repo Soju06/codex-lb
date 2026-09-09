@@ -4513,8 +4513,8 @@ When a downstream HTTP/SSE request (`request_transport == "http"`) resolves its 
 
 Precedence (highest first), evaluated before the policy:
 
-1. An explicit `upstream_stream_transport` override of `"http"` or
-   `"websocket"` wins outright.
+1. Outside the existing recent upstream WS failure cooldown, an explicit
+   `upstream_stream_transport` override of `"http"` or `"websocket"` wins.
 2. Oversized-payload bypass and image / image-generation bypass force
    upstream HTTP.
 3. The effective policy (per-API-key `transport_policy_override` when
@@ -4535,7 +4535,17 @@ Policy values and behavior:
   - a `prompt_cache_key` present on the request model, **OR**
   - a Codex session header (`session_id`, `x-codex-session-id`, or
     `x-codex-conversation-id`), **OR**
-  - an `x-codex-turn-state` continuity header.
+  - an `x-codex-turn-state` continuity header, **OR**
+  - a non-empty `conversation` identifier, **OR**
+  - a structured tool-result input item (`function_call_output`,
+    `custom_tool_call_output`, or `apply_patch_call_output`), **OR**
+  - an assistant message followed by new user input in the supplied history.
+
+Tool declarations, instruction messages, and user-only input sequences MUST NOT
+alone count as continuation evidence. The existing recent upstream WS failure
+cooldown MUST force upstream HTTP before these policy choices, including an
+explicit WebSocket preference; clearing or expiring the marker restores normal
+eligibility.
 
 When a policy decision keeps upstream WebSocket, the proxy MUST preserve
 the configured/base downstream transport mode passed to the upstream
@@ -4555,7 +4565,7 @@ through to the global `http_downstream_transport_policy`.
   upstream transport resolves to `"websocket"`
 - **AND** a downstream HTTP request carries no `previous_response_id`, no
   `prompt_cache_key`, no Codex session header, and no `x-codex-turn-state`
-  header
+  header, conversation identifier, tool result, or assistant-to-user history
 - **WHEN** the proxy resolves the upstream transport
 - **THEN** the request MUST be sent over upstream HTTP `POST`
 
@@ -4613,6 +4623,7 @@ through to the global `http_downstream_transport_policy`.
 #### Scenario: explicit websocket override still beats the policy
 
 - **GIVEN** `upstream_stream_transport` is explicitly `"websocket"`
+- **AND** no recent upstream WS failure marker is active
 - **WHEN** a single-shot downstream HTTP request with no sticky signals
   resolves the upstream transport under any policy
 - **THEN** the explicit override MUST win and the request MUST use
@@ -6951,7 +6962,7 @@ Direct Responses HTTP/SSE requests sent through native egress MUST preserve the 
 
 ### Requirement: HTTP session bridge admission obeys downstream transport policy
 
-Before an HTTP/SSE Responses request enters the upstream WebSocket session bridge, the proxy MUST apply the same explicit-transport precedence and effective `http_downstream_transport_policy` used by the ordinary streaming retry path. An explicit upstream `http` selection MUST bypass the bridge, an explicit upstream `websocket` selection MUST retain it, and otherwise the per-key override or global policy MUST decide. A bridge bypass MUST continue through the ordinary HTTP streaming path without changing request or response shapes.
+Before an HTTP/SSE Responses request enters the upstream WebSocket session bridge, the proxy MUST apply the same explicit-transport precedence and effective `http_downstream_transport_policy` used by the ordinary streaming retry path. Outside the existing recent upstream WS failure cooldown, an explicit upstream `http` selection MUST bypass the bridge, an explicit upstream `websocket` selection MUST retain it, and otherwise the per-key override or global policy MUST decide. A bridge bypass MUST continue through the ordinary HTTP streaming path without changing request or response shapes.
 
 #### Scenario: Always-HTTP bypasses an enabled bridge
 
@@ -6972,7 +6983,7 @@ Before an HTTP/SSE Responses request enters the upstream WebSocket session bridg
 
 #### Scenario: Explicit transport wins before bridge admission
 
-- **GIVEN** the HTTP Responses session bridge is enabled
+- **GIVEN** the HTTP Responses session bridge is enabled and no recent upstream WS failure marker is active
 - **WHEN** upstream transport is explicitly `http`
 - **THEN** the bridge is bypassed under every policy
 - **BUT WHEN** upstream transport is explicitly `websocket`
@@ -7101,27 +7112,28 @@ streams.
 - **AND** existing request-log and account-health error handling remains
   unchanged
 
-### Requirement: Native Codex HTTP attempts preserve client transport choice
+### Requirement: Native Codex HTTP attempts preserve verified transport fallback
 
-For a downstream HTTP/SSE Responses request identified as a native Codex
-request by the existing first-party `User-Agent` or `originator` rules, the
-proxy MUST retain upstream HTTP when transport is otherwise controlled by the
-HTTP downstream policy. This native pin MUST take precedence over sticky
-continuation signals and the `smart` or `always_websocket` policy, but it MUST
-NOT override an explicit operator `upstream_stream_transport="websocket"` or
-an existing higher-precedence mandatory transport rail. Native downstream
-WebSocket requests MUST remain on their dedicated WebSocket path.
+Native Codex HTTP/SSE requests SHALL follow the same effective HTTP transport
+policy as other HTTP requests. First-party User-Agent or originator identity
+alone MUST NOT imply a previous WS failure or force upstream HTTP. The existing
+recent upstream WS connect-failure marker and explicit upstream HTTP preference
+MUST preserve HTTP fallback. Native downstream WebSocket requests MUST remain
+on their dedicated WebSocket path.
 
-#### Scenario: Codex HTTP fallback is not promoted again
+#### Scenario: Healthy native HTTP continuation is promoted
+- **GIVEN** a native Codex HTTP request carries continuation evidence
+- **WHEN** upstream transport is automatic, HTTP policy is smart, and no recent WS failure is active
+- **THEN** the request is eligible for the upstream WS bridge
 
-- **GIVEN** a native Codex client retries a WebSocket turn as an HTTP request
-- **AND** the HTTP request carries a prompt cache key or Codex session header
-- **WHEN** the configured transport is automatic and the HTTP policy is smart
+#### Scenario: Verified Codex HTTP fallback is retained during outage
+- **GIVEN** the existing recent upstream WS connect-failure marker is active
+- **WHEN** a native Codex HTTP request arrives
 - **THEN** codex-lb sends the attempt upstream over HTTP
+- **AND** normal promotion eligibility returns when the marker clears or expires
 
-#### Scenario: Explicit WebSocket remains authoritative
-
-- **GIVEN** a native Codex HTTP request
+#### Scenario: Explicit WebSocket remains authoritative when healthy
+- **GIVEN** a native Codex HTTP request with no active WS transport failure marker
 - **WHEN** the operator explicitly configures upstream WebSocket transport
 - **THEN** the explicit WebSocket selection remains authoritative
 
@@ -10682,3 +10694,70 @@ original upstream code is retained for account-health recovery.
 - **AND** the request-log error code is `previous_response_owner_unavailable`
 - **AND** no raw stale-anchor identifier or source-ownership detail is exposed
 
+
+
+### Requirement: Structured HTTP continuation promotion
+Under automatic upstream transport and smart HTTP policy, the proxy SHALL
+recognize a non-empty conversation identifier, a tool-result input item, or an
+assistant response followed by new user input as continuation evidence, in
+addition to existing response, cache, session and turn-state identifiers.
+Tool declarations, instruction messages, and multiple user-only messages SHALL
+NOT alone constitute continuation evidence.
+
+#### Scenario: Full-history agent turn
+- **WHEN** a smart HTTP request contains user, assistant, then user input without explicit continuity metadata
+- **THEN** it is eligible for the upstream WS bridge
+- **AND** the complete input remains intact unless existing verified hard-continuity rules authorize trimming
+
+#### Scenario: Native identity without failure evidence
+- **WHEN** a native Codex HTTP request has continuation evidence and upstream WS is healthy
+- **THEN** the same smart/override policy as other HTTP requests applies
+- **AND** native identity alone MUST NOT force HTTP
+
+#### Scenario: Real upstream outage
+- **WHEN** the existing recent upstream WS failure marker is active
+- **THEN** HTTP entry paths MUST use upstream HTTP during its existing cooldown
+- **AND** normal WS eligibility MUST return when it expires or clears
+
+### Requirement: Inferred continuation locality remains soft
+History-only bridge requests SHALL use a deterministic locality key based on
+complete initial user input and instruction context, isolated by API-key scope.
+Conversation identifiers SHALL have distinct locality from inferred histories.
+Inferred locality SHALL NOT authorize previous-response injection, cross-account
+replay, or dropping client history. Explicit turn/session ownership SHALL retain
+precedence and existing recovery/fork/queue safeguards.
+
+#### Scenario: Repeated history without response headers
+- **WHEN** two compatible multi-turn requests retain the same initial user input and instructions
+- **THEN** they can reuse the same healthy upstream connection without replaying response headers
+- **AND** divergent complete initial inputs MUST NOT share an inferred locality key merely because their first 512 characters match
+
+### Requirement: Chat Completions uses HTTP bridge policy
+Subscription-backed Chat Completions SHALL apply the same HTTP bridge admission
+and fallback policy to its converted Responses request for streaming and
+non-streaming clients. Chat chunks, JSON, usage, error envelopes, reservation
+settlement and source routing SHALL preserve their existing public contracts.
+
+#### Scenario: Chat trailing slash uses the same handler
+- **WHEN** a client posts to `/v1/chat/completions/`
+- **THEN** the same authentication, routing, bridge and response contract as `/v1/chat/completions` SHALL apply
+
+#### Scenario: Chat tool loop reuses upstream connection
+- **WHEN** successive Chat requests include tool results and retain compatible initial context
+- **THEN** eligible requests reuse the upstream WS bridge
+- **AND** clients still receive Chat Completions responses
+
+#### Scenario: Chat bridge fails before settlement handoff
+- **WHEN** bridge startup fails or is cancelled before dispatch or service settlement ownership
+- **THEN** the originating API releases its usage reservation
+- **AND** an ambiguous owner-forward dispatch MUST NOT release the reservation without a definitive rejection
+
+### Requirement: HTTP bridge routing reasons are observable
+The proxy SHALL emit structured admission and bypass reasons and bounded-label
+counters, and SHALL count bridge create/reuse/close/reconnect/idle-eviction events.
+Metrics SHALL NOT label raw request, conversation, session, account or API-key identifiers.
+
+#### Scenario: Identify policy exclusion and transport fallback
+- **WHEN** a request remains HTTP because it is single-turn, policy-pinned, bridge-disabled, oversized, image-capable, or affected by a recent WS outage
+- **THEN** its routing diagnostics distinguish that reason
+- **AND** admission counters MUST NOT be represented as successful WS connections

@@ -6828,7 +6828,7 @@ def test_http_downstream_always_websocket_policy_keeps_websocket_without_sticky_
     )
 
 
-def test_native_codex_http_fallback_bypasses_sticky_websocket_bridge() -> None:
+def test_native_codex_http_without_failure_enters_sticky_websocket_bridge() -> None:
     dashboard_settings = _make_proxy_settings()
     dashboard_settings.http_downstream_transport_policy = "always_websocket"
     dashboard_settings.upstream_stream_transport = "auto"
@@ -6844,7 +6844,7 @@ def test_native_codex_http_fallback_bypasses_sticky_websocket_bridge() -> None:
             dashboard_settings=dashboard_settings,
             base_settings=base_settings,
         )
-        is False
+        is True
     )
 
 
@@ -7009,7 +7009,7 @@ async def test_http_downstream_sticky_smart_policy_preserves_auto_transport_mode
 
 
 @pytest.mark.asyncio
-async def test_native_codex_http_fallback_preserves_http_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_native_codex_http_without_failure_preserves_auto_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = await _capture_stream_retry_transport(
         monkeypatch,
         dashboard_policy="always_websocket",
@@ -7017,7 +7017,7 @@ async def test_native_codex_http_fallback_preserves_http_transport(monkeypatch: 
         headers={"user-agent": "codex_exec/0.150.1 (Ubuntu; x86_64)", "originator": "codex_exec"},
     )
 
-    assert transport == "http"
+    assert transport == "auto"
 
 
 @pytest.mark.asyncio

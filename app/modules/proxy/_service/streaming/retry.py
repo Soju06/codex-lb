@@ -55,6 +55,7 @@ from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
     _record_continuity_fail_closed,
     _record_upstream_transport_decision,
+    record_http_bridge_routing,
 )
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
@@ -73,6 +74,7 @@ from app.modules.proxy._service.support import (
     _TransientStreamError,
     _WebSocketUpstreamControl,
     configured_upstream_stream_transport,
+    upstream_websocket_transport_recently_failed,
 )
 from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
@@ -82,7 +84,6 @@ from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _sticky_key_for_responses_request,
-    _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
     _websocket_continuity_key_from_headers,
 )
@@ -98,6 +99,7 @@ from app.modules.proxy.helpers import (
     is_upstream_burst_rejection,
     is_upstream_model_capacity_error,
 )
+from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
@@ -114,12 +116,7 @@ def _facade() -> Any:
 
 
 def _http_downstream_request_is_sticky(payload: ResponsesRequest, headers: Mapping[str, str]) -> bool:
-    return (
-        payload.previous_response_id is not None
-        or _prompt_cache_key_from_request_model(payload) is not None
-        or _sticky_key_from_session_header(headers) is not None
-        or _sticky_key_from_turn_state_header(headers) is not None
-    )
+    return http_continuation_signal(payload, headers) is not None
 
 
 _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR = "_codex_lb_post_refresh_transient_exhausted"
@@ -218,14 +215,17 @@ def _http_bridge_allowed_by_transport_policy(
     """Apply ordinary HTTP transport precedence before entering the WS bridge."""
 
     configured_transport, explicit_transport = _resolved_configured_stream_transport(dashboard_settings)
-    if explicit_transport:
-        return configured_transport == "websocket"
-    if _is_native_codex_request(headers):
-        # A first-party Codex client owns its WebSocket -> HTTP fallback. Once
-        # it submits HTTP, sticky metadata must not promote it back to WS.
-        return False
-    policy, _override_applied = _effective_http_downstream_transport_policy(api_key, dashboard_settings)
-    return _resolve_http_downstream_transport(policy, payload=payload, headers=headers) == "websocket"
+    if upstream_websocket_transport_recently_failed():
+        reason, allowed = "recent_ws_failure", False
+    elif explicit_transport:
+        reason, allowed = f"explicit_{configured_transport}", configured_transport == "websocket"
+    else:
+        policy, _override_applied = _effective_http_downstream_transport_policy(api_key, dashboard_settings)
+        allowed = _resolve_http_downstream_transport(policy, payload=payload, headers=headers) == "websocket"
+        signal = http_continuation_signal(payload, headers)
+        reason = f"smart_{signal or 'single_turn'}" if policy == "smart" else policy
+    record_http_bridge_routing(stage="admission", reason=reason)
+    return allowed
 
 
 async def _iter_account_capacity_recovery_wait(
@@ -398,8 +398,8 @@ class _StreamingRetryMixin:
                 and upstream_stream_transport == "websocket"
             ):
                 sticky = upstream_transport_sticky
-                if _is_native_codex_request(headers):
-                    policy = "native_codex_http"
+                if upstream_websocket_transport_recently_failed():
+                    policy = "recent_ws_failure"
                     override_applied = False
                     upstream_transport_policy_label = policy
                     upstream_stream_transport = "http"
@@ -426,6 +426,9 @@ class _StreamingRetryMixin:
                 upstream_stream_transport,
                 request_id,
             )
+        if request_transport == _REQUEST_TRANSPORT_HTTP and upstream_websocket_transport_recently_failed():
+            upstream_stream_transport = "http"
+            upstream_transport_policy_label = "recent_ws_failure"
         if rewritten_file_account_id is None and not file_account_resolution_complete:
             proxy._raise_for_unsupported_input_image_references(payload)
             rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)

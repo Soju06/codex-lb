@@ -68,6 +68,18 @@ if PROMETHEUS_AVAILABLE:
         ["downstream_transport", "upstream_transport", "policy", "sticky", "status"],
         registry=REGISTRY,
     )
+    http_bridge_routing_total = Counter(
+        "codex_lb_http_bridge_routing_total",
+        "HTTP bridge routing evaluations by stage and reason (not connection successes)",
+        ["stage", "reason"],
+        registry=REGISTRY,
+    )
+    http_bridge_connections_total = Counter(
+        "codex_lb_http_bridge_connections_total",
+        "HTTP bridge connection lifecycle events",
+        ["event"],
+        registry=REGISTRY,
+    )
     upstream_request_duration_seconds = Histogram(
         "codex_lb_upstream_request_duration_seconds",
         "Upstream request duration",
@@ -447,6 +459,8 @@ else:
     request_duration_seconds: HistogramLike | None = None
     upstream_requests_total: CounterLike | None = None
     upstream_transport_decisions_total: CounterLike | None = None
+    http_bridge_routing_total: CounterLike | None = None
+    http_bridge_connections_total: CounterLike | None = None
     upstream_request_duration_seconds: HistogramLike | None = None
     upstream_reasoning_replay_400_total: CounterLike | None = None
     image_requests_total: CounterLike | None = None
@@ -580,4 +594,6 @@ __all__ = [
     "upstream_request_duration_seconds",
     "upstream_requests_total",
     "upstream_transport_decisions_total",
+    "http_bridge_routing_total",
+    "http_bridge_connections_total",
 ]

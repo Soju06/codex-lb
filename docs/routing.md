@@ -90,3 +90,32 @@ Since the WP-E fix in #2124 the HTTP Responses session bridge returns the pool's
 ---
 
 *Specs: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture) · [model-source-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-source-routing) · [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*
+
+## HTTP to WebSocket promotion
+
+Owning spec: [Responses API compatibility](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat).
+
+With automatic upstream transport and the default `smart` HTTP policy, Responses
+and subscription-backed Chat Completions can reuse upstream WebSocket connections
+when requests carry response/cache/session identifiers, a `conversation`, tool
+results, or an assistant response followed by new user input. A first request
+containing only a user message remains HTTP. Native Codex HTTP callers follow
+this policy too; their User-Agent alone does not indicate a WebSocket failure.
+
+Real recent upstream WS failures temporarily keep requests on HTTP (the existing
+60-second cooldown). Explicit HTTP policy, image-capable requests and oversized
+payloads also bypass the bridge. Source-routed Chat requests keep their source.
+
+Clients resending full history need not retain response headers to reuse a
+connection. Inferred locality uses complete initial user input and instructions,
+scoped to the API key. It remains a connection preference: the full history is
+preserved, and an inferred key never authorizes response-anchor injection.
+
+The dashboard's HTTP badge describes client-to-LB transport; the upstream field
+shows the LB-to-provider transport. `codex_lb_http_bridge_routing_total` separates
+`admission` from `bypass` with bounded reasons such as `smart_history`,
+`smart_tool_result`, `smart_single_turn`, `recent_ws_failure`, `payload_size` and
+`image`. Structured `http_bridge_routing` logs include the request ID.
+`codex_lb_http_bridge_connections_total{event="reuse"}` measures actual connection
+reuse; admission counts are not successful-connection counts. Existing TTFT and
+queue latency metrics should be compared alongside reuse when measuring benefits.

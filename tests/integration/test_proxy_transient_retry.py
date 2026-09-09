@@ -839,7 +839,12 @@ async def test_stream_model_entitlement_rejection_keeps_account_health_after_fai
 
 
 @pytest.mark.asyncio
-async def test_stream_safety_policy_rejection_keeps_account_health_and_original_failure(async_client, monkeypatch):
+@pytest.mark.parametrize("status_code", [None, 400, 500])
+async def test_stream_safety_policy_rejection_keeps_account_health_and_original_failure(
+    async_client,
+    monkeypatch,
+    status_code,
+):
     """A routed policy block is request-scoped and must not poison its account."""
     imported_account_id = await _import_account(
         async_client,
@@ -850,40 +855,63 @@ async def test_stream_safety_policy_rejection_keeps_account_health_and_original_
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
-        yield _sse_event(
-            {
-                "type": "response.failed",
-                "response": {
-                    "error": {
-                        "code": "misalignment_policy_violation",
-                        "message": _SAFETY_POLICY_REJECTION_MESSAGE,
-                    }
-                },
-            }
+        if status_code is None:
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "error": {
+                            "code": "misalignment_policy_violation",
+                            "message": _SAFETY_POLICY_REJECTION_MESSAGE,
+                        }
+                    },
+                }
+            )
+            return
+        raise ProxyResponseError(
+            status_code,
+            openai_error(
+                "misalignment_policy_violation",
+                _SAFETY_POLICY_REJECTION_MESSAGE,
+                error_type="invalid_request_error",
+            ),
+            failure_phase="status",
         )
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
-        assert resp.status_code == 200
-        lines = [line async for line in resp.aiter_lines() if line]
+        assert resp.status_code == (200 if status_code is None else status_code)
+        lines = [line async for line in resp.aiter_lines() if line] if status_code is None else []
+        response_body = None
+        if status_code == 400:
+            await resp.aread()
+            response_body = resp.json()
 
-    events = _extract_events(lines)
-    failed = [event for event in events if event.get("type") == "response.failed"]
-    assert len(failed) == 1
-    assert failed[0]["response"]["error"] == {
-        "code": "misalignment_policy_violation",
-        "message": _SAFETY_POLICY_REJECTION_MESSAGE,
-    }
-    assert len(seen_account_ids) == 1, "a non-retryable policy block must not fan out"
+    if status_code is None:
+        events = _extract_events(lines)
+        failed = [event for event in events if event.get("type") == "response.failed"]
+        assert len(failed) == 1
+        assert failed[0]["response"]["error"] == {
+            "code": "misalignment_policy_violation",
+            "message": _SAFETY_POLICY_REJECTION_MESSAGE,
+        }
+        assert len(seen_account_ids) == 1, "a non-retryable policy block must not fan out"
+    elif status_code == 400:
+        assert response_body["error"]["code"] == "misalignment_policy_violation"
+        assert response_body["error"]["message"] == _SAFETY_POLICY_REJECTION_MESSAGE
 
     from app.dependencies import get_proxy_service_for_app
 
     service = get_proxy_service_for_app(async_client._transport.app)
     runtime = service._load_balancer._runtime.get(imported_account_id)
-    assert runtime is None or runtime.error_count == 0
-    assert runtime is None or runtime.last_error_at is None
+    if status_code in (None, 400):
+        assert runtime is None or runtime.error_count == 0
+        assert runtime is None or runtime.last_error_at is None
+    else:
+        assert runtime is not None
+        assert runtime.error_count >= 1
 
 
 @pytest.mark.asyncio

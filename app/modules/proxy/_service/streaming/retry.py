@@ -3190,6 +3190,7 @@ class _StreamingRetryMixin:
                             account,
                             _upstream_error_from_openai(error),
                             error_code,
+                            http_status=exc.status_code,
                         )
                     if propagate_http_errors:
                         raise

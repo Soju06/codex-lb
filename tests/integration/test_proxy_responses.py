@@ -27,13 +27,12 @@ from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service import request_log as request_log_module
-from app.modules.proxy._service import support as proxy_support_module
 from app.modules.proxy._service.streaming import helpers as streaming_helpers_module
-from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.proxy.affinity import _extract_model_class
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.integration
 
@@ -65,20 +64,18 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     proxy_module.get_settings().proxy_request_budget_seconds = 4.0
     monkeypatch.setattr(proxy_client_module, "discover_native_egress_client", lambda: None)
 
-    # Change only each owning module's clock binding; asyncio deadlines keep
-    # their real monotonic clock. Quarter-second offsets are exact in binary.
+    # Inject the service clock used by the production timing seam; asyncio's
+    # scheduler and real deadlines remain untouched.
     started_at = time.monotonic()
-    clock = SimpleNamespace(now=started_at)
-    controlled_time = SimpleNamespace(monotonic=lambda: clock.now)
-    for module in (streaming_retry_module, streaming_mixin_module, proxy_support_module):
-        monkeypatch.setattr(module, "time", controlled_time)
+    clock = VirtualClock(monotonic_value=started_at, epoch_value=time.time())
     service = get_proxy_service_for_app(app_instance)
+    service._clock = clock
     admission = service._get_work_admission()
     acquire = admission.acquire_response_create
 
     async def timed_admission(*args, **kwargs):
         lease = await acquire(*args, **kwargs)
-        clock.now = started_at + 0.5
+        clock.step_to(started_at + 0.5)
         return lease
 
     monkeypatch.setattr(admission, "acquire_response_create", timed_admission)
@@ -128,7 +125,7 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     class ScriptedContent:
         async def iter_chunked(self, _size):
             for offset, block in blocks:
-                clock.now = started_at + offset
+                clock.step_to(started_at + offset)
                 yield block.encode()
 
     class ScriptedResponse:

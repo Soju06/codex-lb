@@ -272,15 +272,16 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.streaming.helpers import (
     _classify_terminal_stream_error_frame,
     _HTTPPhaseLatencies,
-    _handle_stream_error as _handle_stream_error_helper,
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
     _observe_terminal_stream_error_frame,
     _openai_error_fields,
     _publish_http_response_owner,
-    _raw_stream_error_code_or_upstream,
     _rewrite_malformed_stream_error_event,
     _stream_transport_failure_event_or_raise,
+)
+from app.modules.proxy._service.streaming.helpers import (
+    _handle_stream_error as _handle_stream_error_helper,
 )
 from app.modules.proxy._service.streaming.helpers import _raw_stream_error_fields as _raw_error_fields
 from app.modules.proxy._service.streaming.helpers import (
@@ -597,7 +598,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             iterator = _facade()._stream_iterator_after_capacity_admission(stream)
             try:
                 first = await iterator.__anext__()
-                first_observed_at = time.monotonic()
+                first_observed_at = clock.monotonic()
             except StopAsyncIteration:
                 response_create_lease.release()
                 await proxy._load_balancer.release_account_lease(account_response_create_lease)
@@ -778,7 +779,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                         terminal_event_seen = True
                     if latencies.first_token_ms is None:
                         latencies.first_token_ms = _ttft_event_latency_ms(
-                            event_type, first_payload, ttft_reasoning_deltas, attempt_started_at
+                            event_type,
+                            first_payload,
+                            ttft_reasoning_deltas,
+                            attempt_started_at,
+                            now=clock.monotonic(),
                         )
                     settlement.downstream_visible = True
                     if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
@@ -794,7 +799,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.downstream_visible = True
                     yield line
                     continue
-                event_payload, event_type = latencies.parse_event(line, attempt_started_at, time.monotonic())
+                event_payload, event_type = latencies.parse_event(line, attempt_started_at, clock.monotonic())
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 _publish_http_response_owner(proxy, event, event_payload, line, account_id_value, api_key, session_id)
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
@@ -933,7 +938,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.account_health_error = False
                 if latencies.first_token_ms is None:
                     latencies.first_token_ms = _ttft_event_latency_ms(
-                        event_type, event_payload, ttft_reasoning_deltas, attempt_started_at
+                        event_type,
+                        event_payload,
+                        ttft_reasoning_deltas,
+                        attempt_started_at,
+                        now=clock.monotonic(),
                     )
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,
@@ -1039,7 +1048,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
             )
             if latencies.first_token_ms is None:
-                latencies.first_token_ms = _finalize_ttft_latency_ms(ttft_reasoning_deltas, attempt_started_at)
+                latencies.first_token_ms = _finalize_ttft_latency_ms(
+                    ttft_reasoning_deltas,
+                    attempt_started_at,
+                    now=clock.monotonic(),
+                )
             settlement.status = status
             settlement.model = model
             settlement.service_tier = service_tier

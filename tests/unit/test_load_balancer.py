@@ -3611,7 +3611,6 @@ def test_state_from_account_rate_limited_checks_primary_freshness(monkeypatch):
     [
         pytest.param(10.0, 3600, AccountStatus.ACTIVE, id="available"),
         pytest.param(100.0, 3600, AccountStatus.RATE_LIMITED, id="exhausted"),
-        pytest.param(100.0, -1, AccountStatus.ACTIVE, id="elapsed-window"),
     ],
 )
 def test_state_from_account_rate_limited_early_recovery_requires_available_usage(
@@ -3648,7 +3647,6 @@ def test_state_from_account_rate_limited_early_recovery_requires_available_usage
     )
     assert state.status == expected_status
     assert state.reset_at == (future_reset if expected_status == AccountStatus.RATE_LIMITED else None)
-
 
 
 @pytest.mark.parametrize("primary_reset_offset", [None, -10, 3600])

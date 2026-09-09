@@ -105,6 +105,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     StickySelectionRequest,
     _clone_account,
     _StickySelectionOutcome,
+    prepare_selection_states,
     run_sticky_selection_path,
 )
 from app.modules.proxy._load_balancer.sticky_selection import (
@@ -1617,36 +1618,15 @@ class LoadBalancer:
         soft_drain_enabled: bool | None = None,
         model: str | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]:
-        self._reclaim_stale_account_leases_locked(
-            routing_tunables=routing_tunables,
+        return prepare_selection_states(
+            self,
+            selection_inputs,
+            build_states=_build_states,
+            required_account_id=required_account_id,
             redact_sensitive_details=redact_sensitive_details,
-        )
-        self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
-        states, account_map = _build_states(
-            accounts=selection_inputs.accounts,
-            latest_primary=selection_inputs.latest_primary,
-            latest_secondary=selection_inputs.latest_secondary,
-            latest_monthly=selection_inputs.latest_monthly,
-            runtime=self._runtime,
-            now=self._clock.time(),
-            routing_policy_override=selection_inputs.routing_policy_override,
-            ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-            encryptor=self._encryptor,
             routing_tunables=routing_tunables,
-            # C2-3 resilience toggles: an explicit value (opportunistic admission)
-            # wins; selection carries it on its inputs.
-            soft_drain_enabled=(
-                soft_drain_enabled
-                if soft_drain_enabled is not None
-                else getattr(selection_inputs, "soft_drain_enabled", None)
-            ),
+            soft_drain_enabled=soft_drain_enabled,
             model=model,
-        )
-        if required_account_id is None:
-            return states, account_map
-        return (
-            [state for state in states if state.account_id == required_account_id],
-            {account_id: account for account_id, account in account_map.items() if account_id == required_account_id},
         )
 
     async def _get_account_lock(self, account_id: str) -> asyncio.Lock:

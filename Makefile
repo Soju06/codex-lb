@@ -25,6 +25,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_account_deletion_background.py \
 	tests/integration/test_request_usage_time_rollup.py \
 	tests/integration/test_request_usage_rollup_parity.py \
+	tests/integration/test_conversation_presence_union.py \
 	tests/integration/test_migrations.py::test_request_usage_time_rollups_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_conversation_presence_rollup_migration_upgrade_and_downgrade \
 	tests/integration/test_data_retention.py \

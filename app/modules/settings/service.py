@@ -1,15 +1,52 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
-from app.core.config.settings import get_settings
+from app.core.config.settings import Settings, get_settings
+from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     get_additional_quota_definition,
 )
+
+type SettingSource = Literal["dashboard", "env", "default"]
+type SettingScalar = int | float | str | bool
+
+
+@dataclass(frozen=True, slots=True)
+class InheritableValue[T: SettingScalar]:
+    """Effective value of a dashboard-tier setting and where it came from.
+
+    ``source`` is ``"dashboard"`` when the dashboard column is non-NULL,
+    ``"env"`` when the column is NULL and the environment value differs from
+    the code default, and ``"default"`` otherwise. ``env_value`` is ``None``
+    for database-only settings that have no environment fallback.
+    """
+
+    value: T
+    source: SettingSource
+    env_value: T | None
+    default: T
+
+
+def resolve_inheritable[T: SettingScalar](
+    column_value: T | None, env_value: T | None, default: T
+) -> InheritableValue[T]:
+    """Resolve one inheritable setting as code default < environment < dashboard.
+
+    This is the only place that combines the three layers; call sites must not
+    re-implement the precedence (``configuration-tiers``).
+    """
+    if column_value is not None:
+        return InheritableValue(column_value, "dashboard", env_value, default)
+    if env_value is not None and env_value != default:
+        return InheritableValue(env_value, "env", env_value, default)
+    return InheritableValue(default, "default", env_value, default)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +108,9 @@ class DashboardSettingsData:
     request_log_retention_override_days: int | None
     usage_history_retention_override_days: int | None
     version: int
+    # Effective value, source and fallbacks of every inheritable setting, keyed
+    # by setting name; the settings API exposes it as ``provenance``.
+    provenance: Mapping[str, InheritableValue[int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,77 +183,7 @@ class SettingsService:
 
     async def get_settings(self) -> DashboardSettingsData:
         row = await self._repository.get_or_create()
-        return DashboardSettingsData(
-            sticky_threads_enabled=row.sticky_threads_enabled,
-            upstream_stream_transport=row.upstream_stream_transport,
-            prohibit_fast_mode=row.prohibit_fast_mode,
-            http_downstream_transport_policy=row.http_downstream_transport_policy,
-            proxy_account_response_create_limit=_effective_response_create_limit(
-                row.proxy_account_response_create_limit
-            ),
-            proxy_account_response_create_limit_override=row.proxy_account_response_create_limit,
-            proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
-            proxy_account_stream_limit_override=row.proxy_account_stream_limit,
-            proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
-                row.proxy_account_stream_recovery_reserve
-            ),
-            proxy_account_stream_recovery_reserve_override=row.proxy_account_stream_recovery_reserve,
-            proxy_api_key_fair_share_congestion_threshold_pct=_effective_api_key_fair_share_threshold_pct(
-                row.proxy_api_key_fair_share_congestion_threshold_pct
-            ),
-            proxy_api_key_fair_share_congestion_threshold_pct_override=(
-                row.proxy_api_key_fair_share_congestion_threshold_pct
-            ),
-            upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
-            upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
-            prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
-            prefer_earlier_reset_window=row.prefer_earlier_reset_window,
-            show_reset_credit_badges=row.show_reset_credit_badges,
-            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
-            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
-            routing_strategy=row.routing_strategy,
-            relative_availability_power=row.relative_availability_power,
-            relative_availability_top_k=row.relative_availability_top_k,
-            single_account_id=row.single_account_id,
-            subscription_overflow_source_id=row.subscription_overflow_source_id,
-            subscription_overflow_drain_until=row.subscription_overflow_drain_until,
-            openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
-            dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
-            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
-                row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
-            ),
-            http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
-            sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
-            sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
-            sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
-            additional_quota_routing_policies=_parse_additional_quota_routing_policies(
-                row.additional_quota_routing_policies_json
-            ),
-            warmup_model=row.warmup_model,
-            import_without_overwrite=row.import_without_overwrite,
-            totp_required_on_login=row.totp_required_on_login,
-            totp_configured=row.totp_secret_encrypted is not None,
-            api_key_auth_enabled=row.api_key_auth_enabled,
-            hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
-            limit_warmup_enabled=row.limit_warmup_enabled,
-            limit_warmup_windows=row.limit_warmup_windows,
-            limit_warmup_model=row.limit_warmup_model,
-            limit_warmup_prompt=row.limit_warmup_prompt,
-            limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
-            limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
-            limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
-            limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
-            weekly_pace_working_days=row.weekly_pace_working_days,
-            weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
-            guest_access_enabled=row.guest_access_enabled,
-            guest_password_configured=row.guest_password_hash is not None,
-            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
-            request_log_retention_days=_effective_retention_days(row.request_log_retention_days),
-            usage_history_retention_days=_effective_retention_days(row.usage_history_retention_days),
-            request_log_retention_override_days=row.request_log_retention_days,
-            usage_history_retention_override_days=row.usage_history_retention_days,
-            version=row.version,
-        )
+        return _settings_data(row)
 
     async def update_settings(
         self,
@@ -291,101 +261,113 @@ class SettingsService:
             clear_request_log_retention=payload.clear_request_log_retention_override,
             clear_usage_history_retention=payload.clear_usage_history_retention_override,
         )
-        return DashboardSettingsData(
-            sticky_threads_enabled=row.sticky_threads_enabled,
-            upstream_stream_transport=row.upstream_stream_transport,
-            prohibit_fast_mode=row.prohibit_fast_mode,
-            http_downstream_transport_policy=row.http_downstream_transport_policy,
-            proxy_account_response_create_limit=_effective_response_create_limit(
-                row.proxy_account_response_create_limit
-            ),
-            proxy_account_response_create_limit_override=row.proxy_account_response_create_limit,
-            proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
-            proxy_account_stream_limit_override=row.proxy_account_stream_limit,
-            proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
-                row.proxy_account_stream_recovery_reserve
-            ),
-            proxy_account_stream_recovery_reserve_override=row.proxy_account_stream_recovery_reserve,
-            proxy_api_key_fair_share_congestion_threshold_pct=_effective_api_key_fair_share_threshold_pct(
-                row.proxy_api_key_fair_share_congestion_threshold_pct
-            ),
-            proxy_api_key_fair_share_congestion_threshold_pct_override=(
-                row.proxy_api_key_fair_share_congestion_threshold_pct
-            ),
-            upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
-            upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
-            prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
-            prefer_earlier_reset_window=row.prefer_earlier_reset_window,
-            show_reset_credit_badges=row.show_reset_credit_badges,
-            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
-            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
-            routing_strategy=row.routing_strategy,
-            relative_availability_power=row.relative_availability_power,
-            relative_availability_top_k=row.relative_availability_top_k,
-            single_account_id=row.single_account_id,
-            subscription_overflow_source_id=row.subscription_overflow_source_id,
-            subscription_overflow_drain_until=row.subscription_overflow_drain_until,
-            openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
-            dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
-            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
-                row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
-            ),
-            http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
-            sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
-            sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
-            sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
-            additional_quota_routing_policies=_parse_additional_quota_routing_policies(
-                row.additional_quota_routing_policies_json
-            ),
-            warmup_model=row.warmup_model,
-            import_without_overwrite=row.import_without_overwrite,
-            totp_required_on_login=row.totp_required_on_login,
-            totp_configured=row.totp_secret_encrypted is not None,
-            api_key_auth_enabled=row.api_key_auth_enabled,
-            hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
-            limit_warmup_enabled=row.limit_warmup_enabled,
-            limit_warmup_windows=row.limit_warmup_windows,
-            limit_warmup_model=row.limit_warmup_model,
-            limit_warmup_prompt=row.limit_warmup_prompt,
-            limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
-            limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
-            limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
-            limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
-            weekly_pace_working_days=row.weekly_pace_working_days,
-            weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
-            guest_access_enabled=row.guest_access_enabled,
-            guest_password_configured=row.guest_password_hash is not None,
-            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
-            request_log_retention_days=_effective_retention_days(row.request_log_retention_days),
-            usage_history_retention_days=_effective_retention_days(row.usage_history_retention_days),
-            request_log_retention_override_days=row.request_log_retention_days,
-            usage_history_retention_override_days=row.usage_history_retention_days,
-            version=row.version,
-        )
+        return _settings_data(row)
 
 
 _ROUTING_POLICIES = frozenset({"inherit", "normal", "burn_first", "preserve"})
 
-
-def _effective_response_create_limit(value: int | None) -> int:
-    return get_settings().proxy_account_response_create_limit if value is None else value
-
-
-def _effective_stream_limit(value: int | None) -> int:
-    return get_settings().proxy_account_stream_limit if value is None else value
-
-
-def _effective_stream_recovery_reserve(value: int | None) -> int:
-    return get_settings().proxy_account_stream_recovery_reserve if value is None else value
-
-
-def _effective_api_key_fair_share_threshold_pct(value: int | None) -> int:
-    return get_settings().proxy_api_key_fair_share_congestion_threshold_pct if value is None else value
+# Inheritable settings with an environment fallback: the ``dashboard_settings``
+# column, the ``Settings`` field and the provenance key share one name.
+_ENVIRONMENT_INHERITABLE_SETTINGS = (
+    "proxy_account_response_create_limit",
+    "proxy_account_stream_limit",
+    "proxy_account_stream_recovery_reserve",
+    "proxy_api_key_fair_share_congestion_threshold_pct",
+)
+# Retention has no environment fallback: NULL = never set from the dashboard =
+# disabled; 0 = explicitly disabled.
+_RETENTION_DISABLED_DAYS = 0
 
 
-def _effective_retention_days(value: int | None) -> int:
-    # NULL = never set from the dashboard = disabled; 0 = explicitly disabled.
-    return 0 if value is None else value
+def _resolve_environment_inheritable(row: DashboardSettings, name: str) -> InheritableValue[int]:
+    return resolve_inheritable(
+        getattr(row, name),
+        getattr(get_settings(), name),
+        Settings.model_fields[name].default,
+    )
+
+
+def _resolve_inheritable_settings(row: DashboardSettings) -> dict[str, InheritableValue[int]]:
+    resolved = {name: _resolve_environment_inheritable(row, name) for name in _ENVIRONMENT_INHERITABLE_SETTINGS}
+    resolved["request_log_retention_days"] = resolve_inheritable(
+        row.request_log_retention_days, None, _RETENTION_DISABLED_DAYS
+    )
+    resolved["usage_history_retention_days"] = resolve_inheritable(
+        row.usage_history_retention_days, None, _RETENTION_DISABLED_DAYS
+    )
+    return resolved
+
+
+def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
+    resolved = _resolve_inheritable_settings(row)
+    return DashboardSettingsData(
+        sticky_threads_enabled=row.sticky_threads_enabled,
+        upstream_stream_transport=row.upstream_stream_transport,
+        prohibit_fast_mode=row.prohibit_fast_mode,
+        http_downstream_transport_policy=row.http_downstream_transport_policy,
+        proxy_account_response_create_limit=resolved["proxy_account_response_create_limit"].value,
+        proxy_account_response_create_limit_override=row.proxy_account_response_create_limit,
+        proxy_account_stream_limit=resolved["proxy_account_stream_limit"].value,
+        proxy_account_stream_limit_override=row.proxy_account_stream_limit,
+        proxy_account_stream_recovery_reserve=resolved["proxy_account_stream_recovery_reserve"].value,
+        proxy_account_stream_recovery_reserve_override=row.proxy_account_stream_recovery_reserve,
+        proxy_api_key_fair_share_congestion_threshold_pct=(
+            resolved["proxy_api_key_fair_share_congestion_threshold_pct"].value
+        ),
+        proxy_api_key_fair_share_congestion_threshold_pct_override=(
+            row.proxy_api_key_fair_share_congestion_threshold_pct
+        ),
+        upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
+        upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
+        prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
+        prefer_earlier_reset_window=row.prefer_earlier_reset_window,
+        show_reset_credit_badges=row.show_reset_credit_badges,
+        auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
+        show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
+        routing_strategy=row.routing_strategy,
+        relative_availability_power=row.relative_availability_power,
+        relative_availability_top_k=row.relative_availability_top_k,
+        single_account_id=row.single_account_id,
+        subscription_overflow_source_id=row.subscription_overflow_source_id,
+        subscription_overflow_drain_until=row.subscription_overflow_drain_until,
+        openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
+        dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
+            row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
+        ),
+        http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
+        sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
+        sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
+        sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
+        additional_quota_routing_policies=_parse_additional_quota_routing_policies(
+            row.additional_quota_routing_policies_json
+        ),
+        warmup_model=row.warmup_model,
+        import_without_overwrite=row.import_without_overwrite,
+        totp_required_on_login=row.totp_required_on_login,
+        totp_configured=row.totp_secret_encrypted is not None,
+        api_key_auth_enabled=row.api_key_auth_enabled,
+        hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
+        limit_warmup_enabled=row.limit_warmup_enabled,
+        limit_warmup_windows=row.limit_warmup_windows,
+        limit_warmup_model=row.limit_warmup_model,
+        limit_warmup_prompt=row.limit_warmup_prompt,
+        limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
+        limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
+        limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
+        limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
+        weekly_pace_working_days=row.weekly_pace_working_days,
+        weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
+        guest_access_enabled=row.guest_access_enabled,
+        guest_password_configured=row.guest_password_hash is not None,
+        limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+        request_log_retention_days=resolved["request_log_retention_days"].value,
+        usage_history_retention_days=resolved["usage_history_retention_days"].value,
+        request_log_retention_override_days=row.request_log_retention_days,
+        usage_history_retention_override_days=row.usage_history_retention_days,
+        version=row.version,
+        provenance=resolved,
+    )
 
 
 def _normalize_additional_quota_key(raw_quota_key: str) -> str | None:

@@ -32,6 +32,17 @@ const AdditionalQuotaRoutingPolicySchema = z.enum([
   "burn_first",
   "preserve",
 ]);
+const SettingScalarSchema = z.union([z.number(), z.string(), z.boolean()]);
+
+// Where an inheritable setting's effective value comes from: the dashboard
+// column, the environment (column NULL, env differs from the code default) or
+// the code default. Keyed by the backend setting name (snake_case).
+export const SettingProvenanceSchema = z.object({
+  source: z.enum(["dashboard", "env", "default"]),
+  envValue: SettingScalarSchema.nullable().optional().default(null),
+  default: SettingScalarSchema.nullable().optional().default(null),
+});
+
 const AdditionalQuotaPolicySchema = z.object({
   quotaKey: z.string(),
   displayLabel: z.string(),
@@ -162,6 +173,8 @@ export const DashboardSettingsSchema = z
     usageHistoryRetentionDays: z.number().int().min(0).max(3650).optional().default(0),
     requestLogRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
     usageHistoryRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
+    // Optional so responses from backends that predate provenance still parse.
+    provenance: z.record(z.string(), SettingProvenanceSchema).optional(),
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -304,6 +317,7 @@ export type DashboardSettings = Omit<
   Partial<StickyThresholdPresenceFlags> &
   Partial<StickyThresholdValues>;
 export type SettingsUpdateRequest = z.infer<typeof SettingsUpdateRequestSchema>;
+export type SettingProvenance = z.infer<typeof SettingProvenanceSchema>;
 export type AdditionalQuotaRoutingPolicy = z.infer<typeof AdditionalQuotaRoutingPolicySchema>;
 
 export const UpstreamProxyEndpointSchema = z.object({

@@ -16,6 +16,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import type { ModelSource } from "@/features/model-sources/schemas";
+import { InheritBadge } from "@/features/settings/components/inherit-badge";
 import { SubscriptionOverflowSettings } from "@/features/settings/components/subscription-overflow-settings";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type {
@@ -793,13 +794,14 @@ export function RoutingSettings({
                 <span className="block text-[11px] text-muted-foreground">
                   {t("settings.routing.accountCapacity.responseCreateDescription")}
                 </span>
-                {draft.proxyAccountResponseCreateLimit.trim() === "" ? (
-                  <span className="block text-[11px] text-muted-foreground">
-                    {t("settings.routing.accountCapacity.inheritHint", {
-                      value: settings.proxyAccountResponseCreateLimitEnvironmentValue,
-                    })}
-                  </span>
-                ) : null}
+                <InheritBadge
+                  settings={settings}
+                  name="proxy_account_response_create_limit"
+                  field="proxyAccountResponseCreateLimit"
+                  busy={busy}
+                  onSave={onSave}
+                  fallbackValue={settings.proxyAccountResponseCreateLimitEnvironmentValue}
+                />
               </label>
               <label className="block space-y-1">
                 <span className="block text-[11px] font-medium text-muted-foreground">
@@ -820,13 +822,14 @@ export function RoutingSettings({
                 <span className="block text-[11px] text-muted-foreground">
                   {t("settings.routing.accountCapacity.streamDescription")}
                 </span>
-                {draft.proxyAccountStreamLimit.trim() === "" ? (
-                  <span className="block text-[11px] text-muted-foreground">
-                    {t("settings.routing.accountCapacity.inheritHint", {
-                      value: settings.proxyAccountStreamLimitEnvironmentValue,
-                    })}
-                  </span>
-                ) : null}
+                <InheritBadge
+                  settings={settings}
+                  name="proxy_account_stream_limit"
+                  field="proxyAccountStreamLimit"
+                  busy={busy}
+                  onSave={onSave}
+                  fallbackValue={settings.proxyAccountStreamLimitEnvironmentValue}
+                />
               </label>
               <label className="block space-y-1">
                 <span className="block text-[11px] font-medium text-muted-foreground">
@@ -847,13 +850,14 @@ export function RoutingSettings({
                 <span className="block text-[11px] text-muted-foreground">
                   {t("settings.routing.accountCapacity.streamRecoveryReserveDescription")}
                 </span>
-                {draft.proxyAccountStreamRecoveryReserve.trim() === "" ? (
-                  <span className="block text-[11px] text-muted-foreground">
-                    {t("settings.routing.accountCapacity.inheritHint", {
-                      value: settings.proxyAccountStreamRecoveryReserveEnvironmentValue,
-                    })}
-                  </span>
-                ) : null}
+                <InheritBadge
+                  settings={settings}
+                  name="proxy_account_stream_recovery_reserve"
+                  field="proxyAccountStreamRecoveryReserve"
+                  busy={busy}
+                  onSave={onSave}
+                  fallbackValue={settings.proxyAccountStreamRecoveryReserveEnvironmentValue}
+                />
               </label>
               <label className="block space-y-1">
                 <span className="block text-[11px] font-medium text-muted-foreground">
@@ -877,13 +881,14 @@ export function RoutingSettings({
                 <span className="block text-[11px] text-muted-foreground">
                   {t("settings.routing.accountCapacity.fairShareThresholdDescription")}
                 </span>
-                {draft.proxyApiKeyFairShareCongestionThresholdPct.trim() === "" ? (
-                  <span className="block text-[11px] text-muted-foreground">
-                    {t("settings.routing.accountCapacity.inheritHint", {
-                      value: settings.proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue,
-                    })}
-                  </span>
-                ) : null}
+                <InheritBadge
+                  settings={settings}
+                  name="proxy_api_key_fair_share_congestion_threshold_pct"
+                  field="proxyApiKeyFairShareCongestionThresholdPct"
+                  busy={busy}
+                  onSave={onSave}
+                  fallbackValue={settings.proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue}
+                />
               </label>
             </div>
             <Button

@@ -899,6 +899,15 @@ class DashboardSettings(Base):
     proxy_downstream_websocket_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     sse_keepalive_interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     # end C2-1 timeouts
+    # C2-2 routing/overload: dashboard-managed routing weights and overload
+    # isolation. NULL inherits the process environment value (or the code
+    # default) at read time; a non-NULL value wins over the environment.
+    proxy_overload_isolation_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proxy_account_error_rate_weighting_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    proxy_account_inflight_penalty_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_account_lease_token_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_account_lease_ttl_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end C2-2 routing/overload
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )

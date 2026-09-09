@@ -39,6 +39,12 @@ class SettingsRepository:
             proxy_account_stream_limit=None,
             proxy_account_stream_recovery_reserve=None,
             proxy_api_key_fair_share_congestion_threshold_pct=None,
+            # C2-2 routing/overload: same tri-state rule, seeded NULL.
+            proxy_overload_isolation_seconds=None,
+            proxy_account_error_rate_weighting_enabled=None,
+            proxy_account_inflight_penalty_pct=None,
+            proxy_account_lease_token_weight=None,
+            proxy_account_lease_ttl_seconds=None,
             upstream_proxy_routing_enabled=False,
             upstream_proxy_default_pool_id=None,
             prefer_earlier_reset_accounts=True,
@@ -112,6 +118,18 @@ class SettingsRepository:
         clear_proxy_account_stream_recovery_reserve: bool = False,
         proxy_api_key_fair_share_congestion_threshold_pct: int | None = None,
         clear_proxy_api_key_fair_share_congestion_threshold_pct: bool = False,
+        # C2-2 routing/overload
+        proxy_overload_isolation_seconds: int | None = None,
+        clear_proxy_overload_isolation_seconds: bool = False,
+        proxy_account_error_rate_weighting_enabled: bool | None = None,
+        clear_proxy_account_error_rate_weighting_enabled: bool = False,
+        proxy_account_inflight_penalty_pct: float | None = None,
+        clear_proxy_account_inflight_penalty_pct: bool = False,
+        proxy_account_lease_token_weight: float | None = None,
+        clear_proxy_account_lease_token_weight: bool = False,
+        proxy_account_lease_ttl_seconds: float | None = None,
+        clear_proxy_account_lease_ttl_seconds: bool = False,
+        # end C2-2 routing/overload
         upstream_proxy_routing_enabled: bool | None = None,
         upstream_proxy_default_pool_id: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
@@ -221,6 +239,28 @@ class SettingsRepository:
             settings.proxy_api_key_fair_share_congestion_threshold_pct = (
                 proxy_api_key_fair_share_congestion_threshold_pct
             )
+        # C2-2 routing/overload
+        if clear_proxy_overload_isolation_seconds:
+            settings.proxy_overload_isolation_seconds = None
+        elif proxy_overload_isolation_seconds is not None:
+            settings.proxy_overload_isolation_seconds = proxy_overload_isolation_seconds
+        if clear_proxy_account_error_rate_weighting_enabled:
+            settings.proxy_account_error_rate_weighting_enabled = None
+        elif proxy_account_error_rate_weighting_enabled is not None:
+            settings.proxy_account_error_rate_weighting_enabled = proxy_account_error_rate_weighting_enabled
+        if clear_proxy_account_inflight_penalty_pct:
+            settings.proxy_account_inflight_penalty_pct = None
+        elif proxy_account_inflight_penalty_pct is not None:
+            settings.proxy_account_inflight_penalty_pct = proxy_account_inflight_penalty_pct
+        if clear_proxy_account_lease_token_weight:
+            settings.proxy_account_lease_token_weight = None
+        elif proxy_account_lease_token_weight is not None:
+            settings.proxy_account_lease_token_weight = proxy_account_lease_token_weight
+        if clear_proxy_account_lease_ttl_seconds:
+            settings.proxy_account_lease_ttl_seconds = None
+        elif proxy_account_lease_ttl_seconds is not None:
+            settings.proxy_account_lease_ttl_seconds = proxy_account_lease_ttl_seconds
+        # end C2-2 routing/overload
         if upstream_proxy_routing_enabled is not None:
             settings.upstream_proxy_routing_enabled = upstream_proxy_routing_enabled
         settings.upstream_proxy_default_pool_id = upstream_proxy_default_pool_id or None

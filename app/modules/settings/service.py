@@ -40,6 +40,14 @@ class DashboardSettingsData:
     proxy_account_stream_recovery_reserve_override: int | None
     proxy_api_key_fair_share_congestion_threshold_pct: int
     proxy_api_key_fair_share_congestion_threshold_pct_override: int | None
+    # C2-2 routing/overload: effective values; the dashboard-stored value and
+    # the fallbacks are reported through ``provenance``.
+    proxy_overload_isolation_seconds: int
+    proxy_account_error_rate_weighting_enabled: bool
+    proxy_account_inflight_penalty_pct: float
+    proxy_account_lease_token_weight: float
+    proxy_account_lease_ttl_seconds: float
+    # end C2-2 routing/overload
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -119,6 +127,18 @@ class DashboardSettingsUpdateData:
     clear_proxy_account_stream_recovery_reserve: bool
     proxy_api_key_fair_share_congestion_threshold_pct: int | None
     clear_proxy_api_key_fair_share_congestion_threshold_pct: bool
+    # C2-2 routing/overload (tri-state: value = store, clear flag = inherit)
+    proxy_overload_isolation_seconds: int | None
+    clear_proxy_overload_isolation_seconds: bool
+    proxy_account_error_rate_weighting_enabled: bool | None
+    clear_proxy_account_error_rate_weighting_enabled: bool
+    proxy_account_inflight_penalty_pct: float | None
+    clear_proxy_account_inflight_penalty_pct: bool
+    proxy_account_lease_token_weight: float | None
+    clear_proxy_account_lease_token_weight: bool
+    proxy_account_lease_ttl_seconds: float | None
+    clear_proxy_account_lease_ttl_seconds: bool
+    # end C2-2 routing/overload
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -229,6 +249,18 @@ class SettingsService:
             clear_proxy_api_key_fair_share_congestion_threshold_pct=(
                 payload.clear_proxy_api_key_fair_share_congestion_threshold_pct
             ),
+            # C2-2 routing/overload
+            proxy_overload_isolation_seconds=payload.proxy_overload_isolation_seconds,
+            clear_proxy_overload_isolation_seconds=payload.clear_proxy_overload_isolation_seconds,
+            proxy_account_error_rate_weighting_enabled=payload.proxy_account_error_rate_weighting_enabled,
+            clear_proxy_account_error_rate_weighting_enabled=payload.clear_proxy_account_error_rate_weighting_enabled,
+            proxy_account_inflight_penalty_pct=payload.proxy_account_inflight_penalty_pct,
+            clear_proxy_account_inflight_penalty_pct=payload.clear_proxy_account_inflight_penalty_pct,
+            proxy_account_lease_token_weight=payload.proxy_account_lease_token_weight,
+            clear_proxy_account_lease_token_weight=payload.clear_proxy_account_lease_token_weight,
+            proxy_account_lease_ttl_seconds=payload.proxy_account_lease_ttl_seconds,
+            clear_proxy_account_lease_ttl_seconds=payload.clear_proxy_account_lease_ttl_seconds,
+            # end C2-2 routing/overload
             upstream_proxy_routing_enabled=payload.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
@@ -316,6 +348,13 @@ _ENVIRONMENT_INHERITABLE_SETTINGS = (
     "proxy_account_stream_recovery_reserve",
     "proxy_api_key_fair_share_congestion_threshold_pct",
     *DASHBOARD_TIMEOUT_SETTINGS,  # C2-1 timeouts
+    # C2-2 routing/overload
+    "proxy_overload_isolation_seconds",
+    "proxy_account_error_rate_weighting_enabled",
+    "proxy_account_inflight_penalty_pct",
+    "proxy_account_lease_token_weight",
+    "proxy_account_lease_ttl_seconds",
+    # end C2-2 routing/overload
 )
 # Retention has no environment fallback: NULL = never set from the dashboard =
 # disabled; 0 = explicitly disabled.
@@ -393,6 +432,13 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         proxy_api_key_fair_share_congestion_threshold_pct_override=(
             row.proxy_api_key_fair_share_congestion_threshold_pct
         ),
+        # C2-2 routing/overload
+        proxy_overload_isolation_seconds=resolved["proxy_overload_isolation_seconds"].value,
+        proxy_account_error_rate_weighting_enabled=resolved["proxy_account_error_rate_weighting_enabled"].value,
+        proxy_account_inflight_penalty_pct=resolved["proxy_account_inflight_penalty_pct"].value,
+        proxy_account_lease_token_weight=resolved["proxy_account_lease_token_weight"].value,
+        proxy_account_lease_ttl_seconds=resolved["proxy_account_lease_ttl_seconds"].value,
+        # end C2-2 routing/overload
         upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,

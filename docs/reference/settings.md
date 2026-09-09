@@ -164,10 +164,10 @@ anything else belongs in `app/core/config/settings.py`.
 | --- | --- | --- | --- |
 | `CODEX_LB_PROXY_ACCOUNT_CAP_PARTITION_SCALE_DOWN_SECONDS` | T1 | `int` | `60` |
 | `CODEX_LB_PROXY_ACCOUNT_CAPS_SCOPE` | T1 | `'partitioned' \| 'replica'` | `'partitioned'` |
-| `CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED` | T3 | `bool` | `True` |
-| `CODEX_LB_PROXY_ACCOUNT_INFLIGHT_PENALTY_PCT` | T3 | `float` | `2.5` |
-| `CODEX_LB_PROXY_ACCOUNT_LEASE_TOKEN_WEIGHT` | T3 | `float` | `1.0` |
-| `CODEX_LB_PROXY_ACCOUNT_LEASE_TTL_SECONDS` | T3 | `float` | `900.0` |
+| `CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED` | T3 (dashboard) | `bool` | `True` |
+| `CODEX_LB_PROXY_ACCOUNT_INFLIGHT_PENALTY_PCT` | T3 (dashboard) | `float` | `2.5` |
+| `CODEX_LB_PROXY_ACCOUNT_LEASE_TOKEN_WEIGHT` | T3 (dashboard) | `float` | `1.0` |
+| `CODEX_LB_PROXY_ACCOUNT_LEASE_TTL_SECONDS` | T3 (dashboard) | `float` | `900.0` |
 | `CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT` | T3 (dashboard) | `int` | `4` |
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT` | T3 (dashboard) | `int` | `8` |
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` | T3 (dashboard) | `int` | `1` |
@@ -175,7 +175,7 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_PROXY_API_KEY_FAIR_SHARE_CONGESTION_THRESHOLD_PCT` | T3 (dashboard) | `int` | `0` |
 | `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT` | T3 | `int` | `64` |
 | `CODEX_LB_PROXY_DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT_SECONDS` | T3 (dashboard) | `float` | `120.0` |
-| `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` | T3 | `int` | `1800` |
+| `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` | T3 (dashboard) | `int` | `1800` |
 | `CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS` | T3 | `float` | `5.0` |
 | `CODEX_LB_PROXY_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `600.0` |
 | `CODEX_LB_PROXY_RESPONSE_CREATE_LIMIT` | T3 | `int` | `256` |

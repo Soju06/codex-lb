@@ -125,6 +125,31 @@ router = APIRouter(
 )
 
 
+# C2-2 routing/overload
+_ROUTING_OVERLOAD_SETTINGS: tuple[str, ...] = (
+    "proxy_overload_isolation_seconds",
+    "proxy_account_error_rate_weighting_enabled",
+    "proxy_account_inflight_penalty_pct",
+    "proxy_account_lease_token_weight",
+    "proxy_account_lease_ttl_seconds",
+)
+
+
+def _dashboard_value(payload: DashboardSettingsUpdateRequest, name: str) -> Any:
+    """Tri-state read: the value when the field was sent (``None`` for an explicit
+    null), ``None`` when it was omitted (unchanged)."""
+    return getattr(payload, name) if name in payload.model_fields_set else None
+
+
+def _clears_dashboard_value(payload: DashboardSettingsUpdateRequest, name: str) -> bool:
+    """True only for an explicit ``null``: the setting returns to inheriting the
+    environment value or code default."""
+    return name in payload.model_fields_set and getattr(payload, name) is None
+
+
+# end C2-2 routing/overload
+
+
 def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
     environment_settings = get_app_settings()
     additional_quota_policies = [
@@ -180,6 +205,13 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         proxy_api_key_fair_share_congestion_threshold_pct_override=(
             settings.proxy_api_key_fair_share_congestion_threshold_pct_override
         ),
+        # C2-2 routing/overload
+        proxy_overload_isolation_seconds=settings.proxy_overload_isolation_seconds,
+        proxy_account_error_rate_weighting_enabled=settings.proxy_account_error_rate_weighting_enabled,
+        proxy_account_inflight_penalty_pct=settings.proxy_account_inflight_penalty_pct,
+        proxy_account_lease_token_weight=settings.proxy_account_lease_token_weight,
+        proxy_account_lease_ttl_seconds=settings.proxy_account_lease_ttl_seconds,
+        # end C2-2 routing/overload
         upstream_proxy_routing_enabled=settings.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
@@ -647,13 +679,27 @@ def _elapsed_ms(started: float) -> int:
 
 
 # C2-1 timeouts
+# Dashboard-managed fields the timeout-invariant rules read: the C2-1 timeouts
+# and request budgets plus the C2-2 account lease TTL (``account-lease-ttl-
+# covers-*``), so one PUT-time check sees the merged effective values — a TTL
+# below a dashboard budget and a budget above a dashboard TTL are both caught.
+_TIMEOUT_INVARIANT_DASHBOARD_SETTINGS: tuple[str, ...] = (
+    *DASHBOARD_TIMEOUT_SETTINGS,
+    "proxy_account_lease_ttl_seconds",  # C2-2 routing/overload
+)
+
+
 def _proposed_timeout_settings(payload: DashboardSettingsUpdateRequest, current, startup_settings) -> dict[str, float]:
     """Effective timeout values after ``payload`` is applied: value = store, null = inherit, absent = current."""
     proposed: dict[str, float] = {}
-    for name in DASHBOARD_TIMEOUT_SETTINGS:
+    for name in _TIMEOUT_INVARIANT_DASHBOARD_SETTINGS:
         if name in payload.model_fields_set:
             value = getattr(payload, name)
-            proposed[name] = float(value if value is not None else getattr(startup_settings, name))
+            if value is None:  # inherit: the environment value, or the process default for a partial fake
+                value = getattr(startup_settings, name, None)
+                if value is None:
+                    value = getattr(settings_module.get_settings(), name)
+            proposed[name] = float(value)
         else:
             proposed[name] = float(getattr(current, name))
     return proposed
@@ -685,12 +731,14 @@ def _validate_timeout_invariants(payload: DashboardSettingsUpdateRequest, curren
     the effective settings — dashboard value, else environment, else default —
     before and after the change; only violations the change introduces are
     rejected, so a deployment whose environment already violates a rule can
-    still edit unrelated fields.
+    still edit unrelated fields. The C2-2 account lease TTL takes part in the
+    same evaluation, so lowering a budget below a dashboard TTL, or storing a
+    TTL below an effective budget, is rejected on the merged values.
     """
-    if not set(DASHBOARD_TIMEOUT_SETTINGS) & payload.model_fields_set:
+    if not set(_TIMEOUT_INVARIANT_DASHBOARD_SETTINGS) & payload.model_fields_set:
         return
     before = _EffectiveTimeoutView(
-        startup_settings, {name: float(getattr(current, name)) for name in DASHBOARD_TIMEOUT_SETTINGS}
+        startup_settings, {name: float(getattr(current, name)) for name in _TIMEOUT_INVARIANT_DASHBOARD_SETTINGS}
     )
     after = _EffectiveTimeoutView(startup_settings, _proposed_timeout_settings(payload, current, startup_settings))
     before_ids = {violation.rule.id for violation in find_timeout_invariant_violations(cast(Any, before))}
@@ -828,7 +876,7 @@ async def update_settings(
                 "proxyAccountStreamRecoveryReserve must not exceed proxyAccountStreamLimit",
                 code="invalid_proxy_account_stream_recovery_reserve",
             )
-        _validate_timeout_invariants(payload, current, startup_settings)  # C2-1 timeouts
+        _validate_timeout_invariants(payload, current, startup_settings)  # C2-1 timeouts + C2-2 lease TTL
         timeout_fields = {name: _timeout_field(payload, name) for name in DASHBOARD_TIMEOUT_SETTINGS}
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
@@ -880,6 +928,30 @@ async def update_settings(
                     "proxy_api_key_fair_share_congestion_threshold_pct" in payload.model_fields_set
                     and payload.proxy_api_key_fair_share_congestion_threshold_pct is None
                 ),
+                # C2-2 routing/overload
+                proxy_overload_isolation_seconds=_dashboard_value(payload, "proxy_overload_isolation_seconds"),
+                clear_proxy_overload_isolation_seconds=_clears_dashboard_value(
+                    payload, "proxy_overload_isolation_seconds"
+                ),
+                proxy_account_error_rate_weighting_enabled=_dashboard_value(
+                    payload, "proxy_account_error_rate_weighting_enabled"
+                ),
+                clear_proxy_account_error_rate_weighting_enabled=_clears_dashboard_value(
+                    payload, "proxy_account_error_rate_weighting_enabled"
+                ),
+                proxy_account_inflight_penalty_pct=_dashboard_value(payload, "proxy_account_inflight_penalty_pct"),
+                clear_proxy_account_inflight_penalty_pct=_clears_dashboard_value(
+                    payload, "proxy_account_inflight_penalty_pct"
+                ),
+                proxy_account_lease_token_weight=_dashboard_value(payload, "proxy_account_lease_token_weight"),
+                clear_proxy_account_lease_token_weight=_clears_dashboard_value(
+                    payload, "proxy_account_lease_token_weight"
+                ),
+                proxy_account_lease_ttl_seconds=_dashboard_value(payload, "proxy_account_lease_ttl_seconds"),
+                clear_proxy_account_lease_ttl_seconds=_clears_dashboard_value(
+                    payload, "proxy_account_lease_ttl_seconds"
+                ),
+                # end C2-2 routing/overload
                 upstream_proxy_routing_enabled=(
                     payload.upstream_proxy_routing_enabled
                     if payload.upstream_proxy_routing_enabled is not None
@@ -1121,6 +1193,7 @@ async def update_settings(
             "proxy_account_stream_limit",
             "proxy_account_stream_recovery_reserve",
             "proxy_api_key_fair_share_congestion_threshold_pct",
+            *_ROUTING_OVERLOAD_SETTINGS,  # C2-2 routing/overload
             "upstream_proxy_routing_enabled",
             "upstream_proxy_default_pool_id",
             "prefer_earlier_reset_accounts",
@@ -1196,6 +1269,15 @@ async def update_settings(
             and field_name not in changed_fields
         ):
             changed_fields.append(field_name)
+    # C2-2 routing/overload: a value that moved between layers without changing
+    # the effective number (dashboard set to the inherited value, or cleared)
+    # is still a change worth auditing.
+    for field_name in _ROUTING_OVERLOAD_SETTINGS:
+        if field_name not in changed_fields and current.provenance.get(field_name) != updated.provenance.get(
+            field_name
+        ):
+            changed_fields.append(field_name)
+    # end C2-2 routing/overload
     if upstream_route_inputs_changed:
         # Durably bump ``upstream_route`` (with the coalesced retry fallback)
         # rather than relying solely on the ``settings`` bump issued above:

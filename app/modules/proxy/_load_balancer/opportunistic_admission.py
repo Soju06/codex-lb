@@ -45,6 +45,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _filter_states_for_account_caps,
     _select_account_preferring_budget_safe,
 )
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._load_balancer.types import AccountConcurrencyCaps, AccountLease, AccountLeaseKind, RuntimeState
 
 # Preserve the established observability surface while implementation moves to
@@ -72,6 +73,7 @@ class StatesBuilder(Protocol):
         routing_policy_override: str | None = None,
         ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
         encryptor: TokenEncryptor | None = None,
+        routing_tunables: RoutingTunables | None = None,
         soft_drain_enabled: bool | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
@@ -97,10 +99,11 @@ class OpportunisticAdmissionOwner(Protocol):
         *,
         required_account_id: str | None,
         redact_sensitive_details: bool,
+        routing_tunables: RoutingTunables,
         soft_drain_enabled: bool | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
-    def _detached_runtime_snapshot(self) -> dict[str, RuntimeState]: ...
+    def _detached_runtime_snapshot(self, *, routing_tunables: RoutingTunables) -> dict[str, RuntimeState]: ...
 
 
 def apply_lease_release(runtime: RuntimeState, lease: AccountLease) -> AccountLease | None:
@@ -179,6 +182,8 @@ class OpportunisticAdmissionRequest:
     stream_reserve_slots: int
     record_account_cap_rejection: AccountCapRejectionCallback
     build_states: StatesBuilder
+    # C2-2 routing/overload: dashboard snapshot resolved once by the caller.
+    routing_tunables: RoutingTunables
     observe_only: bool = False
     # C2-3 resilience toggles: dashboard soft-drain value resolved by the
     # caller's snapshot; None inherits the env alias / default.
@@ -198,6 +203,7 @@ def _observe_selection_states(
     selection_inputs: SelectionInputsProtocol,
     *,
     build_states: StatesBuilder,
+    routing_tunables: RoutingTunables,
     soft_drain_enabled: bool | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     """Build the states ordinary selection would build, on a detached copy of the runtime.
@@ -209,7 +215,7 @@ def _observe_selection_states(
     stale leases already expired, so the states — and therefore the selector's
     answer — are identical to a live build.
     """
-    runtime_snapshot = owner._detached_runtime_snapshot()
+    runtime_snapshot = owner._detached_runtime_snapshot(routing_tunables=routing_tunables)
     return build_states(
         accounts=selection_inputs.accounts,
         latest_primary=selection_inputs.latest_primary,
@@ -220,6 +226,7 @@ def _observe_selection_states(
         routing_policy_override=selection_inputs.routing_policy_override,
         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
         encryptor=owner._encryptor,
+        routing_tunables=routing_tunables,
         soft_drain_enabled=soft_drain_enabled,
     )
 
@@ -272,6 +279,7 @@ async def run_opportunistic_admission(
             owner,
             selection_inputs,
             build_states=request.build_states,
+            routing_tunables=request.routing_tunables,
             soft_drain_enabled=request.soft_drain_enabled,
         )
         selection_states, cap_closed = _account_cap_closed(request, states)
@@ -283,6 +291,7 @@ async def run_opportunistic_admission(
                 selection_inputs,
                 required_account_id=None,
                 redact_sensitive_details=False,
+                routing_tunables=request.routing_tunables,
                 soft_drain_enabled=request.soft_drain_enabled,
             )
             selection_states, cap_closed = _account_cap_closed(request, states)

@@ -352,6 +352,12 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "proxy_account_stream_limit",
         "proxy_account_stream_recovery_reserve",
         "proxy_api_key_fair_share_congestion_threshold_pct",
+        # C2-2 routing/overload
+        "proxy_overload_isolation_seconds",
+        "proxy_account_error_rate_weighting_enabled",
+        "proxy_account_inflight_penalty_pct",
+        "proxy_account_lease_token_weight",
+        "proxy_account_lease_ttl_seconds",
         "request_log_retention_days",
         "usage_history_retention_days",
         "soft_drain_enabled",
@@ -1701,3 +1707,255 @@ async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disable
 
     assert response.status_code == 200
     assert response.json()["autoRedeemResetCreditsBeforeExpiry"] is True
+
+
+# --- C2-2 routing/overload: dashboard-managed routing weights and isolation ---
+
+_ROUTING_OVERLOAD_FIELDS = {
+    "proxyOverloadIsolationSeconds": ("proxy_overload_isolation_seconds", 1800),
+    "proxyAccountErrorRateWeightingEnabled": ("proxy_account_error_rate_weighting_enabled", True),
+    "proxyAccountInflightPenaltyPct": ("proxy_account_inflight_penalty_pct", 2.5),
+    "proxyAccountLeaseTokenWeight": ("proxy_account_lease_token_weight", 1.0),
+    "proxyAccountLeaseTtlSeconds": ("proxy_account_lease_ttl_seconds", 900.0),
+}
+
+
+@pytest.mark.asyncio
+async def test_settings_api_routing_overload_settings_round_trip(async_client, monkeypatch):
+    from app.modules.settings import service as settings_service
+
+    # Fresh row: every column is NULL and the test environment leaves the
+    # fields at their code defaults.
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    initial_payload = initial.json()
+    for camel, (snake, default) in _ROUTING_OVERLOAD_FIELDS.items():
+        assert initial_payload[camel] == default
+        assert initial_payload["provenance"][snake] == {"source": "default", "envValue": default, "default": default}
+
+    # Dashboard values win, including 0 and false.
+    configured = await async_client.put(
+        "/api/settings",
+        json={
+            "proxyOverloadIsolationSeconds": 0,
+            "proxyAccountErrorRateWeightingEnabled": False,
+            "proxyAccountInflightPenaltyPct": 7.5,
+            "proxyAccountLeaseTokenWeight": 0.25,
+            "proxyAccountLeaseTtlSeconds": 1200,
+        },
+    )
+    assert configured.status_code == 200
+    configured_payload = configured.json()
+    assert configured_payload["proxyOverloadIsolationSeconds"] == 0
+    assert configured_payload["proxyAccountErrorRateWeightingEnabled"] is False
+    assert configured_payload["proxyAccountInflightPenaltyPct"] == 7.5
+    assert configured_payload["proxyAccountLeaseTokenWeight"] == 0.25
+    assert configured_payload["proxyAccountLeaseTtlSeconds"] == 1200.0
+    for _camel, (snake, default) in _ROUTING_OVERLOAD_FIELDS.items():
+        assert configured_payload["provenance"][snake]["source"] == "dashboard"
+        assert configured_payload["provenance"][snake]["default"] == default
+
+    # Omitting the fields leaves the dashboard values untouched.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["proxyAccountLeaseTtlSeconds"] == 1200.0
+    assert unchanged.json()["provenance"]["proxy_account_lease_ttl_seconds"]["source"] == "dashboard"
+
+    # An explicit null returns to inheritance; with the environment differing
+    # from the default the value comes from the environment.
+    inherited = settings_service.get_settings().model_copy(
+        update={"proxy_account_lease_ttl_seconds": 1800.0, "proxy_overload_isolation_seconds": 600}
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put(
+        "/api/settings",
+        json={"proxyAccountLeaseTtlSeconds": None, "proxyOverloadIsolationSeconds": None},
+    )
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["proxyAccountLeaseTtlSeconds"] == 1800.0
+    assert cleared_payload["provenance"]["proxy_account_lease_ttl_seconds"] == {
+        "source": "env",
+        "envValue": 1800.0,
+        "default": 900.0,
+    }
+    assert cleared_payload["proxyOverloadIsolationSeconds"] == 600
+    assert cleared_payload["provenance"]["proxy_overload_isolation_seconds"]["source"] == "env"
+    # The other three are still dashboard-owned.
+    assert cleared_payload["provenance"]["proxy_account_inflight_penalty_pct"]["source"] == "dashboard"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"proxyOverloadIsolationSeconds": -1},
+        {"proxyOverloadIsolationSeconds": 1.5},
+        {"proxyAccountInflightPenaltyPct": -0.1},
+        {"proxyAccountInflightPenaltyPct": 100.5},
+        {"proxyAccountLeaseTokenWeight": -1},
+        {"proxyAccountLeaseTtlSeconds": 0},
+        {"proxyAccountErrorRateWeightingEnabled": 2},
+    ],
+)
+async def test_settings_api_rejects_out_of_bounds_routing_overload_values(async_client, payload):
+    response = await async_client.put("/api/settings", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overload_isolation_window_controls_the_balancer_without_restart(async_client):
+    """The isolation window the balancer applies follows the dashboard value.
+
+    The process environment still says 1800 s (the code default in the test
+    environment); once the dashboard stores 240 s the next request snapshot
+    hands the balancer 240 s and the overload funnel isolates for that long.
+    """
+    from datetime import datetime, timezone
+
+    from app.core.crypto import TokenEncryptor
+    from app.modules.proxy._load_balancer.overload_backoff import (
+        OVERLOAD_ISOLATION_TRIP_LEVEL,
+        OVERLOAD_TRIP_COUNT,
+        record_upstream_overload,
+    )
+    from app.modules.proxy.load_balancer import LoadBalancer, effective_routing_tunables
+    from tests.simulation.virtual_time import VirtualClock
+
+    response = await async_client.put("/api/settings", json={"proxyOverloadIsolationSeconds": 240})
+    assert response.status_code == 200
+
+    # The request path reads one cached snapshot and hands it to the balancer.
+    snapshot = effective_routing_tunables(await get_settings_cache().get())
+    assert snapshot.overload_isolation_seconds == 240.0
+    assert effective_routing_tunables().overload_isolation_seconds == 1800.0  # environment untouched
+
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(cast(Any, None), clock=clock)
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc-dashboard-isolation",
+        chatgpt_account_id="workspace-acc-dashboard-isolation",
+        email="isolation@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access"),
+        refresh_token_encrypted=encryptor.encrypt("refresh"),
+        id_token_encrypted=encryptor.encrypt("id"),
+        last_refresh=datetime.now(tz=timezone.utc),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    lease = await balancer.acquire_account_lease(account.id, kind="response_create", routing_tunables=snapshot)
+    await balancer.release_account_lease(lease)
+    runtime = balancer._runtime[account.id]
+    runtime.overload_backoff_level = OVERLOAD_ISOLATION_TRIP_LEVEL - 1
+    runtime.overload_last_trip_at = clock.time()
+    for _ in range(OVERLOAD_TRIP_COUNT):
+        await record_upstream_overload(balancer, account)
+
+    assert runtime.overload_isolated_until == pytest.approx(clock.time() + 240.0)
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_dashboard_lease_ttl_below_request_budgets(async_client):
+    """The dashboard lease TTL is held to the ``account-lease-ttl-covers-*`` invariants.
+
+    With the default 600 s proxy and 180 s compact request budgets a 120 s TTL
+    would let stale reclaim take a response-create lease away from a healthy
+    request, so the write is rejected by the same PUT-time check the C2-1
+    timeouts use and nothing is stored.
+    """
+    response = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": 120})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "timeout_invariant_violation"
+    assert "account-lease-ttl-covers-proxy-budget" in response.json()["error"]["message"]
+    assert "account-lease-ttl-covers-compact-budget" in response.json()["error"]["message"]
+
+    current = await async_client.get("/api/settings")
+    assert current.json()["provenance"]["proxy_account_lease_ttl_seconds"]["source"] == "default"
+
+    accepted = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": 600})
+    assert accepted.status_code == 200
+    assert accepted.json()["proxyAccountLeaseTtlSeconds"] == 600.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_lease_ttl_and_request_budgets_are_checked_on_effective_values(async_client):
+    """One combined check over the merged dashboard values (C2-1 budgets + C2-2 lease TTL).
+
+    A TTL is judged against the *effective* budgets (dashboard value when set,
+    else environment), and a budget raised from the dashboard is judged against
+    the *effective* TTL, so neither side can be driven past the other.
+    """
+    # (a) Dashboard proxy budget 900 (env 600) — accepted: the effective TTL (default 900) still covers it.
+    response = await async_client.put("/api/settings", json={"proxyRequestBudgetSeconds": 900})
+    assert response.status_code == 200
+    assert response.json()["provenance"]["proxy_request_budget_seconds"]["source"] == "dashboard"
+
+    # A TTL of 700 satisfies the environment budget (600) but not the dashboard one (900) → rejected.
+    response = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": 700})
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "timeout_invariant_violation"
+    assert "account-lease-ttl-covers-proxy-budget" in body["error"]["message"]
+    assert "proxy_request_budget_seconds=900" in body["error"]["message"]
+    current = await async_client.get("/api/settings")
+    assert current.json()["provenance"]["proxy_account_lease_ttl_seconds"]["source"] == "default"
+
+    # (c) A TTL that covers the effective budgets is stored.
+    response = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": 1200})
+    assert response.status_code == 200
+    assert response.json()["provenance"]["proxy_account_lease_ttl_seconds"]["source"] == "dashboard"
+
+    # (b) Raising the compact budget above the dashboard TTL (1200) is rejected on the effective TTL.
+    response = await async_client.put("/api/settings", json={"compactRequestBudgetSeconds": 1500})
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "timeout_invariant_violation"
+    assert "account-lease-ttl-covers-compact-budget" in body["error"]["message"]
+    assert "proxy_account_lease_ttl_seconds=1200" in body["error"]["message"]
+    current = await async_client.get("/api/settings")
+    assert current.json()["provenance"]["compact_request_budget_seconds"]["source"] == "default"
+
+    # (c) Valid combinations pass: a compact budget under the TTL, and TTL + budget raised in one PUT.
+    response = await async_client.put("/api/settings", json={"compactRequestBudgetSeconds": 1000})
+    assert response.status_code == 200
+    assert response.json()["compactRequestBudgetSeconds"] == 1000.0
+    response = await async_client.put(
+        "/api/settings",
+        json={"proxyAccountLeaseTtlSeconds": 1600, "compactRequestBudgetSeconds": 1500},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["proxyAccountLeaseTtlSeconds"] == 1600.0
+    assert payload["compactRequestBudgetSeconds"] == 1500.0
+
+    # Clearing the TTL is judged on the inherited TTL (env 900) against the effective budgets (900 / 1500) → rejected.
+    response = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": None})
+    assert response.status_code == 400
+    assert "account-lease-ttl-covers-compact-budget" in response.json()["error"]["message"]
+
+    # Clearing the compact budget first (back to env 180) lets the TTL inherit again.
+    response = await async_client.put("/api/settings", json={"compactRequestBudgetSeconds": None})
+    assert response.status_code == 200
+    response = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": None})
+    assert response.status_code == 200
+    assert response.json()["provenance"]["proxy_account_lease_ttl_seconds"]["source"] == "default"
+    assert response.json()["proxyAccountLeaseTtlSeconds"] == 900.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_reads_inherited_penalty_above_the_dashboard_write_cap(async_client, monkeypatch):
+    """An environment penalty above 100 is valid for ``Settings`` and must stay readable."""
+    from app.modules.settings import service as settings_service
+
+    inherited = settings_service.get_settings().model_copy(update={"proxy_account_inflight_penalty_pct": 150.0})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["proxyAccountInflightPenaltyPct"] == 150.0
+    assert response.json()["provenance"]["proxy_account_inflight_penalty_pct"]["source"] == "env"
+
+    rejected = await async_client.put("/api/settings", json={"proxyAccountInflightPenaltyPct": 150})
+    assert rejected.status_code == 422

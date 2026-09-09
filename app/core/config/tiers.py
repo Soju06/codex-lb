@@ -223,11 +223,6 @@ MIGRATING: Final[dict[str, str]] = {
     "proxy_response_create_limit": "backlog",
     "proxy_compact_response_create_limit": "backlog",
     "proxy_admission_wait_timeout_seconds": "backlog",
-    "proxy_account_inflight_penalty_pct": "backlog",
-    "proxy_overload_isolation_seconds": "backlog",
-    "proxy_account_error_rate_weighting_enabled": "backlog",
-    "proxy_account_lease_token_weight": "backlog",
-    "proxy_account_lease_ttl_seconds": "backlog",
     "proxy_refresh_failure_cooldown_seconds": "backlog",
     "usage_refresh_auth_failure_cooldown_seconds": "backlog",
 }

@@ -44,8 +44,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.balancer.logic import AccountState
-from app.core.config.settings import get_settings
 from app.db.models import Account
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._load_balancer.types import RuntimeState
 
 logger = logging.getLogger(__name__)
@@ -80,13 +80,16 @@ OVERLOAD_ISOLATION_TRIP_LEVEL = 3
 
 @dataclass(frozen=True, slots=True)
 class OverloadIsolationPolicy:
-    """Operator knob for the isolation stage (``CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS``)."""
+    """Operator knob for the isolation stage: the dashboard setting
+    ``proxy_overload_isolation_seconds`` (environment fallback
+    ``CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS``), resolved through
+    ``RoutingTunables`` (C2-2 routing/overload)."""
 
     seconds: float = 1800.0
 
     @classmethod
-    def from_settings(cls) -> OverloadIsolationPolicy:
-        return cls(seconds=float(get_settings().proxy_overload_isolation_seconds))
+    def from_tunables(cls, tunables: RoutingTunables) -> OverloadIsolationPolicy:
+        return cls(seconds=float(tunables.overload_isolation_seconds))
 
     @property
     def enabled(self) -> bool:
@@ -156,7 +159,13 @@ def record_overload_rejection_locked(
     return deadline
 
 
-async def record_upstream_overload(balancer: Any, account: Account, *, redact_account_id: bool = False) -> None:
+async def record_upstream_overload(
+    balancer: Any,
+    account: Account,
+    *,
+    redact_account_id: bool = False,
+    isolation: OverloadIsolationPolicy | None = None,
+) -> None:
     """Record one upstream overload rejection for ``account`` at the balancer clock.
 
     Observations are taken where account health is written (the
@@ -166,7 +175,10 @@ async def record_upstream_overload(balancer: Any, account: Account, *, redact_ac
     runtime_map = getattr(balancer, "_runtime", None)
     if not isinstance(runtime_map, dict):
         return
-    isolation = OverloadIsolationPolicy.from_settings()
+    if isolation is None:
+        # C2-2 routing/overload: the error funnel carries no request snapshot;
+        # use the balancer's most recent one (no settings read under a lock).
+        isolation = OverloadIsolationPolicy.from_tunables(balancer.current_routing_tunables())
     lock = await balancer._get_account_lock(account.id)
     async with lock:
         now = float(balancer._clock.time())

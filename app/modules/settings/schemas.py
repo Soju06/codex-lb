@@ -66,6 +66,16 @@ class DashboardSettingsResponse(DashboardModel):
     proxy_api_key_fair_share_congestion_threshold_pct: int = Field(ge=0, le=100)
     proxy_api_key_fair_share_congestion_threshold_pct_environment_value: int = Field(ge=0, le=100)
     proxy_api_key_fair_share_congestion_threshold_pct_override: int | None = Field(default=None, ge=0, le=100)
+    # C2-2 routing/overload: effective values (dashboard column, else the
+    # environment, else the code default); ``provenance[<name>]`` says which.
+    # Only the ``Settings`` bounds apply here: an inherited environment value
+    # above the dashboard write cap (penalty > 100) must still be readable.
+    proxy_overload_isolation_seconds: int = Field(ge=0)
+    proxy_account_error_rate_weighting_enabled: bool
+    proxy_account_inflight_penalty_pct: float = Field(ge=0)
+    proxy_account_lease_token_weight: float = Field(ge=0)
+    proxy_account_lease_ttl_seconds: float = Field(gt=0)
+    # end C2-2 routing/overload
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool
@@ -170,6 +180,16 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     proxy_account_stream_limit: int | None = Field(default=None, ge=0)
     proxy_account_stream_recovery_reserve: int | None = Field(default=None, ge=0)
     proxy_api_key_fair_share_congestion_threshold_pct: int | None = Field(default=None, ge=0, le=100)
+    # C2-2 routing/overload: tri-state like the caps above (omitted = unchanged,
+    # null = inherit, value = store). Bounds mirror the ``Settings`` fields; the
+    # in-flight penalty is additionally capped at 100 because it is added to a
+    # percentage that saturates there.
+    proxy_overload_isolation_seconds: int | None = Field(default=None, ge=0)
+    proxy_account_error_rate_weighting_enabled: bool | None = None
+    proxy_account_inflight_penalty_pct: float | None = Field(default=None, ge=0, le=100)
+    proxy_account_lease_token_weight: float | None = Field(default=None, ge=0)
+    proxy_account_lease_ttl_seconds: float | None = Field(default=None, gt=0)
+    # end C2-2 routing/overload
     upstream_proxy_routing_enabled: bool | None = None
     upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool | None = None

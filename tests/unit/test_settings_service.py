@@ -63,8 +63,19 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
             proxy_account_stream_limit=12,
             proxy_account_stream_recovery_reserve=1,
             proxy_api_key_fair_share_congestion_threshold_pct=0,
+            # C2-2 routing/overload: the lease TTL differs from its default.
+            proxy_overload_isolation_seconds=1800,
+            proxy_account_error_rate_weighting_enabled=True,
+            proxy_account_inflight_penalty_pct=2.5,
+            proxy_account_lease_token_weight=1.0,
+            proxy_account_lease_ttl_seconds=300.0,
         ),
     )
+    row.proxy_overload_isolation_seconds = None
+    row.proxy_account_error_rate_weighting_enabled = False
+    row.proxy_account_inflight_penalty_pct = None
+    row.proxy_account_lease_token_weight = None
+    row.proxy_account_lease_ttl_seconds = None
 
     settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
 
@@ -73,6 +84,11 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         "proxy_account_stream_limit": InheritableValue(12, "env", 12, 8),
         "proxy_account_stream_recovery_reserve": InheritableValue(3, "dashboard", 1, 1),
         "proxy_api_key_fair_share_congestion_threshold_pct": InheritableValue(0, "default", 0, 0),
+        "proxy_overload_isolation_seconds": InheritableValue(1800, "default", 1800, 1800),
+        "proxy_account_error_rate_weighting_enabled": InheritableValue(False, "dashboard", True, True),
+        "proxy_account_inflight_penalty_pct": InheritableValue(2.5, "default", 2.5, 2.5),
+        "proxy_account_lease_token_weight": InheritableValue(1.0, "default", 1.0, 1.0),
+        "proxy_account_lease_ttl_seconds": InheritableValue(300.0, "env", 300.0, 900.0),
         "request_log_retention_days": InheritableValue(30, "dashboard", None, 0),
         "usage_history_retention_days": InheritableValue(0, "default", None, 0),
         # C2-3 resilience toggles: NULL columns, env double without the fields
@@ -92,6 +108,8 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
             for name in DASHBOARD_TIMEOUT_SETTINGS
         },
     }
+    assert settings.proxy_account_error_rate_weighting_enabled is False
+    assert settings.proxy_account_lease_ttl_seconds == 300.0
     # The flat effective fields come from the same resolution.
     assert settings.proxy_account_stream_limit == 12
     assert settings.proxy_account_stream_recovery_reserve == 3

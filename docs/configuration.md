@@ -26,7 +26,7 @@ The remaining settings (timeouts, connection pools, bulkheads, session bridge, l
 - [Database backends](database.md)
 - [Troubleshooting](troubleshooting.md)
 
-Runtime behavior such as the routing strategy, upstream stream transport, per-account limits, and the upstream timeouts and request budgets (Settings → Advanced → Upstream timeouts: connect timeout, proxy/compact/transcription budgets, stream idle timeout, downstream WebSocket idle timeout, SSE keepalive interval) is configured live in the dashboard under **Settings** — no restart required. The resilience toggles (soft drain, deterministic failover, circuit breaker) live there too, under **Settings → Advanced → Resilience**; their `CODEX_LB_*` variables remain a deprecated fallback for one release while the dashboard value is unset.
+Runtime behavior such as the routing strategy, upstream stream transport, per-account limits, the routing weights and overload isolation window (Settings → Advanced → Routing: in-flight penalty, leased-token weight, lease TTL, overload isolation seconds, error-rate weighting), and the upstream timeouts and request budgets (Settings → Advanced → Upstream timeouts: connect timeout, proxy/compact/transcription budgets, stream idle timeout, downstream WebSocket idle timeout, SSE keepalive interval) is configured live in the dashboard under **Settings** — no restart required. The resilience toggles (soft drain, deterministic failover, circuit breaker) live there too, under **Settings → Advanced → Resilience**; their `CODEX_LB_*` variables remain a deprecated fallback for one release while the dashboard value is unset.
 
 ## Where settings live
 

@@ -116,6 +116,15 @@ export const DashboardSettingsSchema = z
       .nullable()
       .optional()
       .default(null),
+    // C2-2 routing/overload: effective values; `provenance[<snake_name>]`
+    // says whether the dashboard, the environment or the default owns each.
+    proxyOverloadIsolationSeconds: z.number().int().min(0).optional().default(1800),
+    proxyAccountErrorRateWeightingEnabled: z.boolean().optional().default(true),
+    // Response side keeps the environment bound only (an inherited env value
+    // above the dashboard write cap of 100 must still parse).
+    proxyAccountInflightPenaltyPct: z.number().min(0).optional().default(2.5),
+    proxyAccountLeaseTokenWeight: z.number().min(0).optional().default(1),
+    proxyAccountLeaseTtlSeconds: z.number().positive().optional().default(900),
     openaiCacheAffinityMaxAgeSeconds: z
       .number()
       .int()
@@ -242,6 +251,13 @@ export const SettingsUpdateRequestSchema = z
     proxyAccountStreamLimit: z.number().int().min(0).nullable().optional(),
     proxyAccountStreamRecoveryReserve: z.number().int().min(0).nullable().optional(),
     proxyApiKeyFairShareCongestionThresholdPct: z.number().int().min(0).max(100).nullable().optional(),
+    // C2-2 routing/overload: tri-state like the caps (absent = unchanged,
+    // null = inherit, value = store); bounds mirror the backend schema.
+    proxyOverloadIsolationSeconds: z.number().int().min(0).nullable().optional(),
+    proxyAccountErrorRateWeightingEnabled: z.boolean().nullable().optional(),
+    proxyAccountInflightPenaltyPct: z.number().min(0).max(100).nullable().optional(),
+    proxyAccountLeaseTokenWeight: z.number().min(0).nullable().optional(),
+    proxyAccountLeaseTtlSeconds: z.number().positive().nullable().optional(),
     openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
     dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
     stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),

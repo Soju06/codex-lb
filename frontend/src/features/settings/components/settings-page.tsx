@@ -38,6 +38,16 @@ const TotpSettings = lazy(() =>
   import("@/features/settings/components/totp-settings").then((m) => ({ default: m.TotpSettings })),
 );
 
+// C2-2 routing/overload: a layer move (dashboard <-> inherited) without a
+// value change must still reset the routing form's drafts.
+const ROUTING_OVERLOAD_PROVENANCE_KEYS = [
+  "proxy_overload_isolation_seconds",
+  "proxy_account_error_rate_weighting_enabled",
+  "proxy_account_inflight_penalty_pct",
+  "proxy_account_lease_token_weight",
+  "proxy_account_lease_ttl_seconds",
+] as const;
+
 const FIREWALL_LAYOUT_QUERY_KEYS = [
   ["accounts", "list"],
   ["settings", "upstream-proxy"],
@@ -209,6 +219,12 @@ export function SettingsPage() {
                    settings.proxyAccountStreamRecoveryReserveOverride,
                    settings.proxyApiKeyFairShareCongestionThresholdPct,
                    settings.proxyApiKeyFairShareCongestionThresholdPctOverride,
+                   settings.proxyOverloadIsolationSeconds,
+                   settings.proxyAccountErrorRateWeightingEnabled,
+                   settings.proxyAccountInflightPenaltyPct,
+                   settings.proxyAccountLeaseTokenWeight,
+                   settings.proxyAccountLeaseTtlSeconds,
+                   ...ROUTING_OVERLOAD_PROVENANCE_KEYS.map((name) => settings.provenance?.[name]?.source ?? ""),
                 ].join(":")}
                 settings={settings}
                 accounts={accountsQuery.data ?? []}

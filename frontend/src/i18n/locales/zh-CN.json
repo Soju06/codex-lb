@@ -1337,7 +1337,6 @@
   "settings.retention.description": "按后台计划自动清理过期的请求日志和用量历史。",
   "settings.retention.daysSuffix": "天",
   "settings.retention.inheritPlaceholder": "未配置",
-  "settings.retention.inheritedHint": "未配置：生效值 {{value}} 天（0 表示禁用）",
   "settings.retention.save": "保存保留策略",
   "settings.retention.requestLogs.label": "请求日志保留",
   "settings.retention.requestLogs.description": "删除超过该天数的请求日志。0 表示禁用删除；非零值至少为 30 天。留空则保持未配置（禁用）。",

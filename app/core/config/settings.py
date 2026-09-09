@@ -318,6 +318,7 @@ class Settings(BaseSettings):
     # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
     oauth_callback_host: str = _default_oauth_callback_host()
+    # T3 → dashboard (deprecated env alias, remove next minor)
     auth_guardian_enabled: bool = True
     # T3 → dashboard (deprecated env alias, remove next minor)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
@@ -328,6 +329,7 @@ class Settings(BaseSettings):
     # migration ``20260312_000000`` reads the same env name directly because
     # migrations must not depend on ``Settings``.
     additional_quota_registry_file: Path | None = None
+    # T3 → dashboard (deprecated env alias, remove next minor)
     rate_limit_reset_credits_refresh_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
     # T3 → dashboard (deprecated env alias, remove next minor)
@@ -376,6 +378,7 @@ class Settings(BaseSettings):
     # disables caching. Admin mutations invalidate durably through the
     # cache-invalidation bus, so this only bounds out-of-band database edits.
     upstream_route_cache_ttl_seconds: float = Field(default=60.0, ge=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     automations_scheduler_enabled: bool = True
     # T3 (dashboard home: dashboard_settings.telemetry_consent). Headless
     # first-boot opt-out fallback; a persisted dashboard decision always wins.

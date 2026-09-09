@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from app.core.config.background_jobs import BACKGROUND_JOB_SETTINGS, auth_guardian_blocked_by_topology
 from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 
 # Re-exported: the resolver lives in ``app.core.config.inheritable`` so hot
@@ -101,6 +102,14 @@ class DashboardSettingsData:
     soft_drain_enabled: bool
     deterministic_failover_enabled: bool
     circuit_breaker_enabled: bool
+    # M2 background jobs: effective values (dashboard column, else the deprecated
+    # env alias, else the code default); provenance carries the source. The
+    # guardian additionally reports whether the static topology blocks it.
+    auth_guardian_enabled: bool
+    auth_guardian_blocked_by_topology: bool
+    automations_scheduler_enabled: bool
+    rate_limit_reset_credits_refresh_enabled: bool
+    # end M2 background jobs
     version: int
     # C2-1 timeouts: effective values (dashboard column, else environment,
     # else code default); the column values are exposed through ``provenance``.
@@ -204,6 +213,14 @@ class DashboardSettingsUpdateData:
     clear_deterministic_failover_enabled: bool = False
     circuit_breaker_enabled: bool | None = None
     clear_circuit_breaker_enabled: bool = False
+    # M2 background jobs: tri-state like the resilience toggles.
+    auth_guardian_enabled: bool | None = None
+    clear_auth_guardian_enabled: bool = False
+    automations_scheduler_enabled: bool | None = None
+    clear_automations_scheduler_enabled: bool = False
+    rate_limit_reset_credits_refresh_enabled: bool | None = None
+    clear_rate_limit_reset_credits_refresh_enabled: bool = False
+    # end M2 background jobs
     # C2-1 timeouts (tri-state like the caps: value = store, clear = NULL,
     # neither = untouched).
     upstream_connect_timeout_seconds: float | None = None
@@ -336,6 +353,14 @@ class SettingsService:
             clear_deterministic_failover_enabled=payload.clear_deterministic_failover_enabled,
             circuit_breaker_enabled=payload.circuit_breaker_enabled,
             clear_circuit_breaker_enabled=payload.clear_circuit_breaker_enabled,
+            # M2 background jobs
+            auth_guardian_enabled=payload.auth_guardian_enabled,
+            clear_auth_guardian_enabled=payload.clear_auth_guardian_enabled,
+            automations_scheduler_enabled=payload.automations_scheduler_enabled,
+            clear_automations_scheduler_enabled=payload.clear_automations_scheduler_enabled,
+            rate_limit_reset_credits_refresh_enabled=payload.rate_limit_reset_credits_refresh_enabled,
+            clear_rate_limit_reset_credits_refresh_enabled=payload.clear_rate_limit_reset_credits_refresh_enabled,
+            # end M2 background jobs
             # C2-1 timeouts
             upstream_connect_timeout_seconds=payload.upstream_connect_timeout_seconds,
             clear_upstream_connect_timeout_seconds=payload.clear_upstream_connect_timeout_seconds,
@@ -417,6 +442,15 @@ def _resolve_environment_toggle(row: DashboardSettings, name: str) -> Inheritabl
     return resolve_inheritable(getattr(row, name), bool(getattr(get_settings(), name, default)), default)
 
 
+def _auth_guardian_blocked_by_topology() -> bool:
+    # M2 background jobs: startup-settings fakes in tests may lack the topology
+    # fields; only a real ``Settings`` can describe the ring.
+    startup = get_settings()
+    if not isinstance(startup, Settings):
+        return False
+    return auth_guardian_blocked_by_topology(startup)
+
+
 def warn_environment_shadowed_by_dashboard(row: DashboardSettings, settings: Settings | None = None) -> list[str]:
     """Log one startup WARN naming env vars that are set but ignored because the dashboard owns the value.
 
@@ -427,7 +461,8 @@ def warn_environment_shadowed_by_dashboard(row: DashboardSettings, settings: Set
     environment = settings if settings is not None else get_settings()
     shadowed = [
         name
-        for name in _ENVIRONMENT_INHERITABLE_SETTINGS
+        # M2 background jobs: their env aliases are shadowed the same way.
+        for name in (*_ENVIRONMENT_INHERITABLE_SETTINGS, *BACKGROUND_JOB_SETTINGS)
         if name in environment.model_fields_set and getattr(row, name, None) is not None
     ]
     if shadowed:
@@ -452,6 +487,8 @@ def _resolve_inheritable_settings(
         row.usage_history_retention_days, None, _RETENTION_DISABLED_DAYS
     )
     for name in RESILIENCE_TOGGLE_SETTINGS:  # C2-3 resilience toggles
+        resolved[name] = _resolve_environment_toggle(row, name)
+    for name in BACKGROUND_JOB_SETTINGS:  # M2 background jobs
         resolved[name] = _resolve_environment_toggle(row, name)
     return resolved
 
@@ -539,6 +576,12 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         soft_drain_enabled=bool(resolved["soft_drain_enabled"].value),
         deterministic_failover_enabled=bool(resolved["deterministic_failover_enabled"].value),
         circuit_breaker_enabled=bool(resolved["circuit_breaker_enabled"].value),
+        # M2 background jobs
+        auth_guardian_enabled=bool(resolved["auth_guardian_enabled"].value),
+        auth_guardian_blocked_by_topology=_auth_guardian_blocked_by_topology(),
+        automations_scheduler_enabled=bool(resolved["automations_scheduler_enabled"].value),
+        rate_limit_reset_credits_refresh_enabled=bool(resolved["rate_limit_reset_credits_refresh_enabled"].value),
+        # end M2 background jobs
         version=row.version,
         # C2-1 timeouts
         upstream_connect_timeout_seconds=float(resolved["upstream_connect_timeout_seconds"].value),

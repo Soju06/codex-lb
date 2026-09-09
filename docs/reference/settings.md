@@ -176,7 +176,7 @@ anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
-| `CODEX_LB_AUTH_GUARDIAN_ENABLED` | T3 | `bool` | `True` |
+| `CODEX_LB_AUTH_GUARDIAN_ENABLED` | T3 (dashboard) | `bool` | `True` |
 | `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS` | T3 | `int` | `8` |
 
 ## Usage
@@ -184,7 +184,7 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE` | T1 | `Path \| None` | `None` |
-| `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` | T3 | `bool` | `True` |
+| `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` | T3 (dashboard) | `bool` | `True` |
 
 ## Model registry
 
@@ -225,7 +225,7 @@ anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
-| `CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED` | T3 | `bool` | `True` |
+| `CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED` | T3 (dashboard) | `bool` | `True` |
 
 ## Multi-replica
 

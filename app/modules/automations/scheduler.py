@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from app.core.config.settings import get_settings
+from app.core.config.background_jobs import background_job_enabled
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -25,6 +26,10 @@ _INTERVAL_SECONDS = 30
 class AutomationsScheduler:
     interval_seconds: int
     enabled: bool
+    # M2 background jobs: the loop always runs; each tick reads the effective
+    # ``automations_scheduler_enabled`` toggle from the settings cache and skips
+    # while it is False, so a dashboard pause applies on the next tick.
+    dashboard_enabled: Callable[[], Awaitable[bool]] = field(default_factory=lambda: _dashboard_automations_enabled)
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -55,6 +60,9 @@ class AutomationsScheduler:
                 continue
 
     async def _run_due_once(self) -> None:
+        if not await self.dashboard_enabled():
+            logger.debug("Automations scheduler skipped tick: paused in the dashboard settings")
+            return
         await _get_leader_election().run_if_leader(self._run_due_as_leader)
 
     async def _run_due_as_leader(self) -> None:
@@ -70,9 +78,12 @@ class AutomationsScheduler:
                 logger.exception("Automations scheduler loop failed")
 
 
+async def _dashboard_automations_enabled() -> bool:
+    return await background_job_enabled("automations_scheduler_enabled")
+
+
 def build_automations_scheduler() -> AutomationsScheduler:
-    settings = get_settings()
     return AutomationsScheduler(
         interval_seconds=_INTERVAL_SECONDS,
-        enabled=settings.automations_scheduler_enabled,
+        enabled=True,
     )

@@ -98,6 +98,11 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         "circuit_breaker_enabled": InheritableValue(False, "default", False, False),
         # M3 codex prewarm: NULL column, env double without the field -> off.
         "http_responses_session_bridge_codex_prewarm_enabled": InheritableValue(False, "default", False, False),
+        # M2 background jobs: NULL columns, env double without the fields ->
+        # code defaults (every scheduler on).
+        "auth_guardian_enabled": InheritableValue(True, "default", True, True),
+        "automations_scheduler_enabled": InheritableValue(True, "default", True, True),
+        "rate_limit_reset_credits_refresh_enabled": InheritableValue(True, "default", True, True),
         # C2-1 timeouts: NULL columns and a startup fake without the fields
         # resolve to the code default.
         **{
@@ -476,3 +481,41 @@ async def test_settings_data_resolves_codex_prewarm_switch_with_provenance(
 
     assert data.http_responses_session_bridge_codex_prewarm_enabled is expected.value
     assert data.provenance["http_responses_session_bridge_codex_prewarm_enabled"] == expected
+
+
+# --- M2 background jobs -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_settings_data_resolves_background_job_toggles_with_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M2 background jobs: dashboard column > deprecated env alias > default, plus the topology flag."""
+    row = DashboardSettings()
+    row.auth_guardian_enabled = None
+    row.automations_scheduler_enabled = False
+    row.rate_limit_reset_credits_refresh_enabled = None
+    # A real Settings so the topology gate is evaluated: two-replica ring
+    # without leader election blocks the guardian whatever the toggle says.
+    startup = Settings(
+        _env_file=None,
+        auth_guardian_enabled=True,
+        automations_scheduler_enabled=True,
+        rate_limit_reset_credits_refresh_enabled=False,
+        leader_election_enabled=False,
+        http_responses_session_bridge_instance_id="pod-a",
+        http_responses_session_bridge_instance_ring=["pod-a", "pod-b"],
+    )
+    monkeypatch.setattr(settings_service_module, "get_settings", lambda: startup)
+    service = SettingsService(cast(SettingsRepository, _Repository()))
+
+    data = await service.get_settings()
+
+    assert data.auth_guardian_enabled is True
+    assert data.auth_guardian_blocked_by_topology is True
+    assert data.automations_scheduler_enabled is False
+    assert data.rate_limit_reset_credits_refresh_enabled is False
+    assert data.provenance["auth_guardian_enabled"] == InheritableValue(True, "default", True, True)
+    assert data.provenance["automations_scheduler_enabled"] == InheritableValue(False, "dashboard", True, True)
+    assert data.provenance["rate_limit_reset_credits_refresh_enabled"] == InheritableValue(False, "env", False, True)
+
+    startup.leader_election_enabled = True
+    assert (await service.get_settings()).auth_guardian_blocked_by_topology is False

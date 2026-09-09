@@ -566,6 +566,10 @@ export function createDashboardSettings(
 		deterministicFailoverEnabled: true,
 		circuitBreakerEnabled: false,
 		httpResponsesSessionBridgeCodexPrewarmEnabled: false,
+		authGuardianEnabled: true,
+		authGuardianBlockedByTopology: false,
+		automationsSchedulerEnabled: true,
+		rateLimitResetCreditsRefreshEnabled: true,
 		...overrides,
 	});
 }

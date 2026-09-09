@@ -65,7 +65,7 @@ Every `Settings` field declared T3 MUST have a `dashboard_settings` column of th
 
 - **GIVEN** a T3 field that is still environment-only
 - **WHEN** it is listed in `MIGRATING`
-- **THEN** the entry's value is the target dashboard column, table or setting it folds into (for example `rate_limit_reset_credits_refresh_enabled → fold into auto_redeem_reset_credits_before_expiry`), or `"backlog"` when none has been designed
+- **THEN** the entry's value is the target dashboard column, table or setting it folds into (for example `model_context_window_overrides → backlog`, or `<field> → fold into <existing dashboard setting>` when the field folds into a setting that already has a column), or `"backlog"` when none has been designed
 
 #### Scenario: Column lands and the entry is deleted
 

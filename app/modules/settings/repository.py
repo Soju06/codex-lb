@@ -95,6 +95,10 @@ class SettingsRepository:
             circuit_breaker_enabled=None,
             # M3 codex prewarm: NULL = inherit the env alias / default (off).
             http_responses_session_bridge_codex_prewarm_enabled=None,
+            # M2 background jobs: NULL = inherit the env alias / default.
+            auth_guardian_enabled=None,
+            automations_scheduler_enabled=None,
+            rate_limit_reset_credits_refresh_enabled=None,
         )
         self._session.add(row)
         try:
@@ -186,6 +190,13 @@ class SettingsRepository:
         clear_deterministic_failover_enabled: bool = False,
         circuit_breaker_enabled: bool | None = None,
         clear_circuit_breaker_enabled: bool = False,
+        # M2 background jobs (tri-state like the resilience toggles)
+        auth_guardian_enabled: bool | None = None,
+        clear_auth_guardian_enabled: bool = False,
+        automations_scheduler_enabled: bool | None = None,
+        clear_automations_scheduler_enabled: bool = False,
+        rate_limit_reset_credits_refresh_enabled: bool | None = None,
+        clear_rate_limit_reset_credits_refresh_enabled: bool = False,
         # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
         # inherit, neither = untouched).
         upstream_connect_timeout_seconds: float | None = None,
@@ -394,6 +405,22 @@ class SettingsRepository:
             settings.circuit_breaker_enabled = None
         elif circuit_breaker_enabled is not None:
             settings.circuit_breaker_enabled = circuit_breaker_enabled
+        # M2 background jobs: clear flag resets to NULL (inherit the env alias
+        # / code default); a non-None value is dashboard-owned.
+        for column_name, value, clear in (
+            ("auth_guardian_enabled", auth_guardian_enabled, clear_auth_guardian_enabled),
+            ("automations_scheduler_enabled", automations_scheduler_enabled, clear_automations_scheduler_enabled),
+            (
+                "rate_limit_reset_credits_refresh_enabled",
+                rate_limit_reset_credits_refresh_enabled,
+                clear_rate_limit_reset_credits_refresh_enabled,
+            ),
+        ):
+            if clear:
+                setattr(settings, column_name, None)
+            elif value is not None:
+                setattr(settings, column_name, value)
+        # end M2 background jobs
         # C2-1 timeouts
         for column_name, value, clear in (
             (

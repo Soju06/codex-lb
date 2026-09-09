@@ -90,6 +90,10 @@ vi.mock("@/features/settings/components/model-catalogue-settings", () => ({
   ModelCatalogueSettings: () => <div>Model Catalogue Settings</div>,
 }));
 
+vi.mock("@/features/settings/components/background-jobs-settings", () => ({
+  BackgroundJobsSettings: () => <div>Background Jobs Settings</div>,
+}));
+
 vi.mock("@/features/settings/components/data-retention-settings", () => ({
   DataRetentionSettings: (props: unknown) => {
     dataRetentionSettingsMock(props);

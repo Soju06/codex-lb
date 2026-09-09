@@ -214,8 +214,10 @@ Phase 1 (24 removed, 1 added; zero-risk internals):
   of them breaks login.
 - Auth guardian tuning (7): interval 21600, max refresh age 43200, batch
   size 100, concurrency 3, jitter 300.0, failure backoff base 300.0 / max
-  3600.0 — constants in `app/core/auth/guardian.py`;
-  `CODEX_LB_AUTH_GUARDIAN_ENABLED` remains the single switch.
+  3600.0 — constants in `app/core/auth/guardian.py`; the single switch
+  is the dashboard setting `auth_guardian_enabled`
+  (`CODEX_LB_AUTH_GUARDIAN_ENABLED` is a deprecated fallback while the
+  dashboard value is unset).
 - Debug log booleans (6): the `CODEX_LB_LOG_PROXY_*` /
   `CODEX_LB_LOG_UPSTREAM_*` booleans became `CODEX_LB_TRACE` channels
   (`shape`, `shape_raw_cache_key`, `payload`, `service_tier`,
@@ -388,7 +390,11 @@ Behaviour is unchanged; each env name gets the one-release WARN.
   `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` (always on),
   `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS` (60 s).
   `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` is NOT in this batch:
-  it migrates to a dashboard toggle in a later change.
+  it migrated to the dashboard setting
+  `rate_limit_reset_credits_refresh_enabled`
+  (`dashboard-managed-background-jobs`), where it joins
+  `auth_guardian_enabled` and `automations_scheduler_enabled` under
+  Settings → Advanced → Background jobs.
 - Scheduler toggles: `CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED`,
   `CODEX_LB_MODEL_REGISTRY_ENABLED` (always on),
   `CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED` (folded into the dashboard

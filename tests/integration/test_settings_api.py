@@ -365,6 +365,10 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "circuit_breaker_enabled",
         # M3 codex prewarm
         "http_responses_session_bridge_codex_prewarm_enabled",
+        # M2 background jobs
+        "auth_guardian_enabled",
+        "automations_scheduler_enabled",
+        "rate_limit_reset_credits_refresh_enabled",
         # C2-1 timeouts
         "upstream_connect_timeout_seconds",
         "proxy_request_budget_seconds",
@@ -1834,11 +1838,11 @@ async def test_retention_override_tri_state_echo_capture_and_clear(async_client)
 
 
 @pytest.mark.asyncio
-async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(async_client, monkeypatch):
-    from types import SimpleNamespace
-
-    disabled = SimpleNamespace(rate_limit_reset_credits_refresh_enabled=False)
-    monkeypatch.setattr("app.modules.settings.api.get_app_settings", lambda: disabled)
+async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(async_client):
+    # M2 background jobs: the gate reads the effective (dashboard) toggle, not the env alias.
+    disabled = await async_client.put("/api/settings", json={"rateLimitResetCreditsRefreshEnabled": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["rateLimitResetCreditsRefreshEnabled"] is False
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -1850,20 +1854,40 @@ async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(a
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "reset_credit_polling_disabled"
+    assert "Background jobs" in response.json()["error"]["message"]
+
+    # Re-enabling polling in the same request satisfies the gate: the proposed
+    # effective value is what counts, and so does clearing the dashboard value
+    # back to the inherited (env default = on) layer.
+    both = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": True, "rateLimitResetCreditsRefreshEnabled": True},
+    )
+    assert both.status_code == 200
+    assert both.json()["autoRedeemResetCreditsBeforeExpiry"] is True
+    reset = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": False, "rateLimitResetCreditsRefreshEnabled": False},
+    )
+    assert reset.status_code == 200
+    cleared = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": True, "rateLimitResetCreditsRefreshEnabled": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["provenance"]["rate_limit_reset_credits_refresh_enabled"]["source"] == "default"
 
 
 @pytest.mark.asyncio
-async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disabled(async_client, monkeypatch):
-    from types import SimpleNamespace
-
+async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disabled(async_client):
     async with SessionLocal() as session:
         await session.execute(
-            text("UPDATE dashboard_settings SET auto_redeem_reset_credits_before_expiry = 1 WHERE id = 1")
+            text(
+                "UPDATE dashboard_settings SET auto_redeem_reset_credits_before_expiry = 1, "
+                "rate_limit_reset_credits_refresh_enabled = 0 WHERE id = 1"
+            )
         )
         await session.commit()
-
-    disabled = SimpleNamespace(rate_limit_reset_credits_refresh_enabled=False)
-    monkeypatch.setattr("app.modules.settings.api.get_app_settings", lambda: disabled)
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -1874,6 +1898,82 @@ async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disable
 
     assert response.status_code == 200
     assert response.json()["autoRedeemResetCreditsBeforeExpiry"] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_api_background_job_toggles_round_trip_with_provenance(async_client, monkeypatch):
+    """M2 background jobs: default -> dashboard -> cleared/env -> unchanged on omit, plus the topology flag."""
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    for camel in ("authGuardianEnabled", "automationsSchedulerEnabled", "rateLimitResetCreditsRefreshEnabled"):
+        assert payload[camel] is True
+    assert payload["authGuardianBlockedByTopology"] is False
+    for name in ("auth_guardian_enabled", "automations_scheduler_enabled", "rate_limit_reset_credits_refresh_enabled"):
+        assert payload["provenance"][name] == {"source": "default", "envValue": True, "default": True}
+
+    # Storing a value (including the inherited one) makes the toggle dashboard-owned.
+    stored = await async_client.put(
+        "/api/settings",
+        json={
+            "authGuardianEnabled": True,
+            "automationsSchedulerEnabled": False,
+            "rateLimitResetCreditsRefreshEnabled": False,
+        },
+    )
+    assert stored.status_code == 200
+    stored_payload = stored.json()
+    assert stored_payload["authGuardianEnabled"] is True
+    assert stored_payload["automationsSchedulerEnabled"] is False
+    assert stored_payload["rateLimitResetCreditsRefreshEnabled"] is False
+    for name in ("auth_guardian_enabled", "automations_scheduler_enabled", "rate_limit_reset_credits_refresh_enabled"):
+        assert stored_payload["provenance"][name]["source"] == "dashboard"
+
+    # Explicit null clears the column; a deprecated env alias that differs from
+    # the default is inherited, and the topology gate is reported alongside.
+    inherited = settings_service.get_settings().model_copy(
+        update={
+            "auth_guardian_enabled": False,
+            "leader_election_enabled": False,
+            "http_responses_session_bridge_instance_ring": ["pod-a", "pod-b"],
+        }
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put(
+        "/api/settings", json={"authGuardianEnabled": None, "rateLimitResetCreditsRefreshEnabled": None}
+    )
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["authGuardianEnabled"] is False
+    assert cleared_payload["authGuardianBlockedByTopology"] is True
+    assert cleared_payload["provenance"]["auth_guardian_enabled"] == {
+        "source": "env",
+        "envValue": False,
+        "default": True,
+    }
+    assert cleared_payload["provenance"]["rate_limit_reset_credits_refresh_enabled"] == {
+        "source": "default",
+        "envValue": True,
+        "default": True,
+    }
+    assert cleared_payload["automationsSchedulerEnabled"] is False
+    assert cleared_payload["provenance"]["automations_scheduler_enabled"]["source"] == "dashboard"
+
+    # Omitting the fields (any unrelated save) leaves every toggle as it was.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    unchanged_payload = unchanged.json()
+    assert unchanged_payload["provenance"]["auth_guardian_enabled"]["source"] == "env"
+    assert unchanged_payload["provenance"]["automations_scheduler_enabled"]["source"] == "dashboard"
+    assert unchanged_payload["provenance"]["rate_limit_reset_credits_refresh_enabled"]["source"] == "default"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.auth_guardian_enabled is None
+        assert row.automations_scheduler_enabled is False
+        assert row.rate_limit_reset_credits_refresh_enabled is None
 
 
 # --- C2-2 routing/overload: dashboard-managed routing weights and isolation ---

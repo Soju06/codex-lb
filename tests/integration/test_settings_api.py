@@ -2273,7 +2273,21 @@ async def test_model_context_window_override_delete_without_row_is_not_found(asy
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload", [{"contextWindow": 0}, {"contextWindow": -1}, {"contextWindow": 1.5}, {}])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"contextWindow": 0},
+        {"contextWindow": -1},
+        {"contextWindow": 1.5},
+        # A token count is an integer: a float, a numeric string and a bool are
+        # operator mistakes, not values to coerce into a stored window.
+        {"contextWindow": 515000.0},
+        {"contextWindow": "515000"},
+        {"contextWindow": True},
+        {"contextWindow": None},
+        {},
+    ],
+)
 async def test_model_context_window_override_rejects_invalid_window(async_client, payload):
     response = await async_client.put(f"{_OVERRIDES_PATH}/gpt-5.4", json=payload)
     assert response.status_code == 422
@@ -2281,11 +2295,13 @@ async def test_model_context_window_override_rejects_invalid_window(async_client
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("slug", ["%20", "gpt%205.4", "a%09b", "x" * 257])
+# The padded variants must be rejected, not silently trimmed into "gpt-5.4".
+@pytest.mark.parametrize("slug", ["%20", "gpt%205.4", "a%09b", "%20gpt-5.4", "gpt-5.4%20", "x" * 257])
 async def test_model_context_window_override_rejects_invalid_slug(async_client, slug):
     response = await async_client.put(f"{_OVERRIDES_PATH}/{slug}", json={"contextWindow": 1000})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_model_slug"
+    assert (await async_client.get(_OVERRIDES_PATH)).json() == {"overrides": []}
 
 
 @pytest.mark.asyncio

@@ -716,17 +716,19 @@ _MODEL_SLUG_MAX_LENGTH = 256
 
 
 def _validate_model_slug(slug: str) -> str:
-    normalized = slug.strip()
+    # The raw segment is validated, never trimmed: silently storing " gpt-5.4 "
+    # as "gpt-5.4" would make the row the operator sees disagree with the slug
+    # they wrote, and the requirement rejects any slug containing whitespace.
     if (
-        not normalized
-        or len(normalized) > _MODEL_SLUG_MAX_LENGTH
-        or any(character.isspace() or not character.isprintable() for character in normalized)
+        not slug
+        or len(slug) > _MODEL_SLUG_MAX_LENGTH
+        or any(character.isspace() or not character.isprintable() for character in slug)
     ):
         raise DashboardBadRequestError(
             f"Model slug must be 1-{_MODEL_SLUG_MAX_LENGTH} printable characters without whitespace",
             code="invalid_model_slug",
         )
-    return normalized
+    return slug
 
 
 async def _model_context_window_overrides_response(context: SettingsContext) -> ModelContextWindowOverridesResponse:

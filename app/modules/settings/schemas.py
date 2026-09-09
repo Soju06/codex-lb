@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, StrictInt, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
@@ -369,7 +369,10 @@ class ModelContextWindowOverridesResponse(DashboardModel):
 
 
 class ModelContextWindowOverrideUpsertRequest(DashboardModel):
-    context_window: int = Field(ge=1)
+    # StrictInt, not ``int``: a reported context window is a token count, so a
+    # bool, a float or a numeric string is an operator mistake to surface as a
+    # 422 rather than silently coerce into a stored window.
+    context_window: StrictInt = Field(ge=1)
 
 
 # end M4 model catalogue

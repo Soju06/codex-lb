@@ -567,9 +567,11 @@ The reset-confirmed exception SHALL apply only to a Free account with a still-fu
 
 This constraint applies to every recovery path that writes account status, including the usage-refresh reconcile path. A usage refresh that observes available quota for a `RATE_LIMITED` account with `blocked_at` set MUST NOT rewrite the account to `ACTIVE` or clear its markers while the effective persisted cooldown is running unless the strict reset-confirmed exception succeeds. The replica that observed the current 429 MAY still recover earlier through its runtime-cooldown-gated fresh-usage path only when its runtime block marker is at least as recent as the effective persisted `blocked_at`; leftover runtime state from an earlier 429 MUST NOT unlock early recovery of a newer block. `RATE_LIMITED` rows without `blocked_at` keep the existing fresh-usage recovery. Generic 429 and Retry-After cooldowns without matching reset evidence, reset timestamp jitter, exhausted post-reset windows, and non-Free account exhaustion MUST remain protected until their ordinary recovery condition is met.
 
-Early recovery MUST require that the applicable blocked window shows
-available quota after the existing window normalization. A newer sample
-that still reports exhaustion in an unexpired blocked window MUST NOT
+Early recovery MUST require available quota in every derived window that
+remains applicable to the account after the existing plan and window
+normalization, including the effective secondary or monthly window.
+Recovery MUST NOT check only primary usage: a newer sample that still
+reports exhaustion in any applicable unexpired window MUST NOT
 clear the upstream block merely because the observing replica's short
 runtime cooldown has elapsed. This requirement MUST NOT promote advisory
 usage exhaustion into a block on an otherwise active account.

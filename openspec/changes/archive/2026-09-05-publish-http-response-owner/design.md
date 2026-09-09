@@ -1,12 +1,12 @@
 ## Context
 
-Native HTTP `_stream_once` extracts authoritative upstream response IDs, but its final log write is detached. `_resolve_websocket_previous_response_owner` checks the existing process cache and then request logs. A real-route, two-account SQLite run produced35 failures in96 immediate follow-ups after terminal and EOF. Delaying100 ms or publishing through the existing cache produced0 failures in96 attempts. The cache experiment published at log scheduling; the production design must cover the earlier client-visible ID boundary.
+Native HTTP `_stream_once` extracts authoritative upstream response IDs, but its final log write is detached. `_resolve_websocket_previous_response_owner` checks the existing process cache and then request logs. A real-route, two-account SQLite run produced 35 failures in 96 immediate follow-ups after terminal and EOF. Delaying 100 ms or publishing through the existing cache produced 0 failures in 96 attempts. The cache experiment published at log scheduling; the production design must cover the earlier client-visible ID boundary.
 
 ## Goals / Non-Goals
 
 **Goals:** Make an upstream response ID discoverable under the correct account and caller scope before that ID is exposed downstream on HTTP; keep log persistence detached.
 
-**Non-Goals:** New registry/schema, all-log synchronization, transport promotion, upstream response availability guarantees, cross-replica readiness, automatic retries, or a general continuity rewrite. Current CLI0.153.2 HTTP fallback is unanchored full history; this fix is not attributed to that ordinary fallback.
+**Non-Goals:** New registry/schema, all-log synchronization, transport promotion, upstream response availability guarantees, cross-replica readiness, automatic retries, or a general continuity rewrite. Current CLI 0.153.2 HTTP fallback is unanchored full history; this fix is not attributed to that ordinary fallback.
 
 ## Decisions
 

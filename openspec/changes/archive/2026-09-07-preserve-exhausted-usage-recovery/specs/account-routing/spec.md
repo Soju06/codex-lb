@@ -27,9 +27,11 @@ unlock early recovery of a newer block. `RATE_LIMITED` rows without
 `blocked_at` (stale window-derived markings) keep the existing fresh-usage
 recovery.
 
-Early recovery MUST require that the applicable blocked window shows
-available quota after the existing window normalization. A newer sample
-that still reports exhaustion in an unexpired blocked window MUST NOT
+Early recovery MUST require available quota in every derived window that
+remains applicable to the account after the existing plan and window
+normalization, including the effective secondary or monthly window.
+Recovery MUST NOT check only primary usage: a newer sample that still
+reports exhaustion in any applicable unexpired window MUST NOT
 clear the upstream block merely because the observing replica's short
 runtime cooldown has elapsed. This requirement MUST NOT promote advisory
 usage exhaustion into a block on an otherwise active account.

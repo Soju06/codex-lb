@@ -368,11 +368,16 @@ class ModelContextWindowOverridesResponse(DashboardModel):
     overrides: list[ModelContextWindowOverrideResponse]
 
 
+# The column is a database ``Integer``, so PostgreSQL rejects anything wider at
+# commit time; bounding the request turns that 500 into a 422.
+MAX_MODEL_CONTEXT_WINDOW = 2_147_483_647
+
+
 class ModelContextWindowOverrideUpsertRequest(DashboardModel):
     # StrictInt, not ``int``: a reported context window is a token count, so a
     # bool, a float or a numeric string is an operator mistake to surface as a
     # 422 rather than silently coerce into a stored window.
-    context_window: StrictInt = Field(ge=1)
+    context_window: StrictInt = Field(ge=1, le=MAX_MODEL_CONTEXT_WINDOW)
 
 
 # end M4 model catalogue

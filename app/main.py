@@ -578,7 +578,10 @@ async def lifespan(app: FastAPI):
     cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_upstream_route_cache().clear)
     # M4 model catalogue: the per-model context window override rows are
     # invalidated through the settings namespace as well.
-    cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_model_context_window_overrides_cache().clear)
+    cache_poller.on_invalidation(
+        NAMESPACE_SETTINGS,
+        lambda: get_model_context_window_overrides_cache().invalidate(propagate=False),
+    )
     # The bus carries no payload, so a peer redeem clears this replica's whole
     # reset-credits store; the refresh scheduler repopulates it on its next tick.
     cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)

@@ -2285,6 +2285,8 @@ async def test_model_context_window_override_delete_without_row_is_not_found(asy
         {"contextWindow": "515000"},
         {"contextWindow": True},
         {"contextWindow": None},
+        # Wider than the database Integer column: a 422, not a commit-time 500.
+        {"contextWindow": 2_147_483_648},
         {},
     ],
 )
@@ -2302,6 +2304,24 @@ async def test_model_context_window_override_rejects_invalid_slug(async_client, 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_model_slug"
     assert (await async_client.get(_OVERRIDES_PATH)).json() == {"overrides": []}
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_concurrent_creates_of_one_slug_both_succeed(async_client):
+    # Create-or-replace is one upsert statement, so two writers racing on the
+    # same previously absent slug cannot leave one of them with a primary-key 500.
+    import asyncio
+
+    responses = await asyncio.gather(
+        *(
+            async_client.put(f"{_OVERRIDES_PATH}/gpt-5.4", json={"contextWindow": window})
+            for window in (515_000, 400_000)
+        )
+    )
+    assert [response.status_code for response in responses] == [200, 200]
+    listed = (await async_client.get(_OVERRIDES_PATH)).json()["overrides"]
+    assert [entry["slug"] for entry in listed] == ["gpt-5.4"]
+    assert listed[0]["contextWindow"] in {515_000, 400_000}
 
 
 @pytest.mark.asyncio

@@ -1583,8 +1583,10 @@ export const handlers = [
     return HttpResponse.json(state.modelContextWindowOverrides);
   }),
 
-  http.put("/api/settings/model-context-window-overrides/:slug", async ({ params, request }) => {
-    const slug = decodeURIComponent(String(params.slug)).trim();
+  http.put("/api/settings/model-context-window-overrides/:slug*", async ({ params, request }) => {
+    // `:slug*` and no trim: the backend routes the slug as a path segment
+    // (vendor/model) and rejects — never trims — a slug with whitespace.
+    const slug = decodeURIComponent(String(params.slug));
     const payload = await parseJsonBody(request, z.object({ contextWindow: z.number().int().positive() }));
     if (!payload) {
       return HttpResponse.json(
@@ -1609,7 +1611,7 @@ export const handlers = [
     return HttpResponse.json(state.modelContextWindowOverrides);
   }),
 
-  http.delete("/api/settings/model-context-window-overrides/:slug", ({ params }) => {
+  http.delete("/api/settings/model-context-window-overrides/:slug*", ({ params }) => {
     const slug = decodeURIComponent(String(params.slug));
     const existing = state.modelContextWindowOverrides.overrides.find((entry) => entry.slug === slug);
     if (!existing || existing.source !== "dashboard") {

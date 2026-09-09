@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -486,6 +488,9 @@ class SettingsRepository:
 
 
 # M4 model catalogue: dashboard rows of the per-model context window overrides.
+_UPSERT_INSERT_FNS = {"postgresql": pg_insert, "sqlite": sqlite_insert}
+
+
 class ModelContextWindowOverridesRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -500,16 +505,26 @@ class ModelContextWindowOverridesRepository:
         """``slug -> context_window`` for every dashboard row."""
         return {row.slug: row.context_window for row in await self.list_all()}
 
-    async def upsert(self, slug: str, context_window: int) -> ModelContextWindowOverride:
-        row = await self._session.get(ModelContextWindowOverride, slug)
-        if row is None:
-            row = ModelContextWindowOverride(slug=slug, context_window=context_window)
-            self._session.add(row)
-        else:
-            row.context_window = context_window
+    async def upsert(self, slug: str, context_window: int) -> None:
+        """Create or replace the row for ``slug`` in one statement.
+
+        A read-then-insert would let two concurrent creates of the same new slug
+        both miss and one fail the primary key, turning a documented
+        create-or-replace into a 500. ``updated_at`` is set explicitly because
+        the ORM ``onupdate`` does not fire for a Core insert.
+        """
+        dialect = self._session.get_bind().dialect.name
+        insert_fn = _UPSERT_INSERT_FNS.get(dialect)
+        if insert_fn is None:
+            raise RuntimeError(f"model_context_window_overrides upsert unsupported for dialect={dialect!r}")
+        statement = insert_fn(ModelContextWindowOverride).values(slug=slug, context_window=context_window)
+        await self._session.execute(
+            statement.on_conflict_do_update(
+                index_elements=[ModelContextWindowOverride.slug],
+                set_={"context_window": context_window, "updated_at": func.now()},
+            )
+        )
         await self._session.commit()
-        await self._session.refresh(row)
-        return row
 
     async def delete(self, slug: str) -> bool:
         row = await self._session.get(ModelContextWindowOverride, slug)

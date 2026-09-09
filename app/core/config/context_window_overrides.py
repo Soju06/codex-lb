@@ -102,22 +102,44 @@ class ModelContextWindowOverridesCache:
             from app.db.session import SessionLocal
             from app.modules.settings.repository import ModelContextWindowOverridesRepository
 
-            async with SessionLocal() as session:
-                rows = await ModelContextWindowOverridesRepository(session).by_slug()
+            try:
+                async with SessionLocal() as session:
+                    rows = await ModelContextWindowOverridesRepository(session).by_slug()
+            except Exception:
+                # The catalog must not 500 because the database is briefly
+                # unreachable: keep serving the last known rows (like
+                # ``SettingsCache.cached_row``) and retry on the next call. The
+                # timestamp is deliberately not refreshed.
+                if self._cached is None:
+                    raise
+                return self._cached
             self._cached = rows
             self._cached_at = now
             return rows
 
     def clear(self) -> None:
+        """Drop the snapshot without taking the lock.
+
+        Only for process-local resets with no concurrent load (test teardown);
+        every runtime path goes through ``invalidate``.
+        """
         self._cached = None
         self._cached_at = 0.0
 
     async def invalidate(self, *, propagate: bool = True) -> None:
         """Drop the snapshot and, unless ``propagate`` is False, durably bump the
-        cross-replica ``settings`` namespace before returning (the poller
-        callback registered for that namespace calls ``clear`` directly, so a
-        remote bump never re-bumps)."""
-        self.clear()
+        cross-replica ``settings`` namespace before returning.
+
+        The clear happens under the lock, like ``SettingsCache``: a catalog build
+        already inside ``get`` and awaiting the database must finish before the
+        snapshot is dropped, otherwise it would install its pre-write rows
+        afterwards and keep serving the old window until the TTL expires. The
+        poller callback registered for the namespace passes ``propagate=False``
+        so a remote bump never re-bumps (feedback-loop prevention).
+        """
+        async with self._lock:
+            self._cached = None
+            self._cached_at = 0.0
         if propagate:
             poller = get_cache_invalidation_poller()
             if poller is not None:

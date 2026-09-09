@@ -756,6 +756,7 @@ async def get_model_context_window_overrides(
 
 @router.put(MODEL_CONTEXT_WINDOW_OVERRIDES_PATH + "/{slug:path}", response_model=ModelContextWindowOverridesResponse)
 async def put_model_context_window_override(
+    request: Request,
     slug: str,
     payload: ModelContextWindowOverrideUpsertRequest,
     _write_access=Depends(require_dashboard_write_access),
@@ -766,11 +767,19 @@ async def put_model_context_window_override(
     # The catalog reads a cached snapshot of the rows: clear + durably bump
     # before responding so every replica reports the new window.
     await get_model_context_window_overrides_cache().invalidate()
+    # Audited like every other dashboard settings write: this one changes what
+    # the model catalog advertises to every client.
+    AuditService.log_async(
+        "settings_changed",
+        actor_ip=request.client.host if request.client else None,
+        details={"changed_fields": ["model_context_window_overrides"], "slug": normalized},
+    )
     return await _model_context_window_overrides_response(context)
 
 
 @router.delete(MODEL_CONTEXT_WINDOW_OVERRIDES_PATH + "/{slug:path}", response_model=ModelContextWindowOverridesResponse)
 async def delete_model_context_window_override(
+    request: Request,
     slug: str,
     _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
@@ -781,6 +790,11 @@ async def delete_model_context_window_override(
             "Model context window override not found", code="model_context_window_override_not_found"
         )
     await get_model_context_window_overrides_cache().invalidate()
+    AuditService.log_async(
+        "settings_changed",
+        actor_ip=request.client.host if request.client else None,
+        details={"changed_fields": ["model_context_window_overrides"], "slug": normalized},
+    )
     return await _model_context_window_overrides_response(context)
 
 

@@ -219,3 +219,24 @@ async def test_settings_audit_records_subscription_overflow_designation_and_drai
         "subscription_overflow_source_id",
         "subscription_overflow_drain_until",
     ]
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_writes_are_audited(async_client) -> None:
+    """A row that changes what the catalog advertises to every client is audited
+    like any other dashboard settings write, on both store and delete."""
+    path = "/api/settings/model-context-window-overrides"
+
+    stored = await async_client.put(f"{path}/gpt-5.4", json={"contextWindow": 515_000})
+    assert stored.status_code == 200
+    store_log = await _wait_for_settings_changed_audit_log()
+    assert store_log.details is not None
+    store_details = json.loads(store_log.details)
+    assert store_details["changed_fields"] == ["model_context_window_overrides"]
+    assert store_details["slug"] == "gpt-5.4"
+
+    removed = await async_client.delete(f"{path}/gpt-5.4")
+    assert removed.status_code == 200
+    delete_log = await _wait_for_settings_changed_audit_log(after_id=store_log.id)
+    assert delete_log.details is not None
+    assert json.loads(delete_log.details)["slug"] == "gpt-5.4"

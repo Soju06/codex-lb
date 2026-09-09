@@ -10327,7 +10327,6 @@ def _http_bridge_recovery_request_eligible(
     turn_state_anchor = proxy_affinity_module._sticky_key_from_turn_state_header(headers or {})
     if not bridge_active or (payload.previous_response_id is None and turn_state_anchor is None):
         return False
-    settings = proxy_service_module.get_settings()
     # Turn-state-only requests are admitted to the recovery-capable stream so
     # the submit path can first prove a durable predecessor by advancing its
     # operation anchor. The streaming layer marks an exception recovery-safe

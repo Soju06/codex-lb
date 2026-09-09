@@ -895,6 +895,12 @@ follow the budget instead, so the watchdog never outlives it.
 
 ## REMOVED Requirements
 
+### Requirement: Repeated zero-event idle failures poison dead anchors
+
+**Reason**: The anchor-poison threshold is fixed at the retry circuit's own opening threshold (`_HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD`, two consecutive failures; `http_responses_session_bridge_anchor_poison_failure_threshold` was constantized). The requirement's "configured poison threshold" wording and its scenario "A dead anchor is bypassed before the poison threshold is reached" (GIVEN a configured threshold greater than two) describe a configuration that no longer exists. Re-added below under a name that states the fixed threshold, with that scenario replaced.
+
+**Migration**: None at shipped defaults. A deployment that had set the threshold to 1 now abandons a dead anchor on the second eventless strike instead of the first (see the proposal's Impact).
+
 ### Requirement: Operation-fenced hard turns preserve client retry budget during cooldown
 
 **Reason**: The durable operation ledger is always on (`http_responses_session_bridge_operation_ledger_enabled` was constantized), so the "Operation ledger disabled remains fail closed" scenario describes a configuration that no longer exists. Re-added below without that scenario.
@@ -958,3 +964,67 @@ A hard turn-state HTTP bridge request arriving during retry-circuit cooldown MUS
 - **THEN** the proxy renews and revalidates the durable owner lease before the
   wait completes
 - **AND** it fails closed if durable ownership changes during the wait
+
+### Requirement: Repeated zero-event idle failures poison dead anchors at the circuit threshold
+
+For hard HTTP bridge keys, repeated zero-event idle failures MUST use the
+existing durable retry-circuit counter to identify an anchor that should no
+longer remain addressable; the counter resets on a completed response, so a run of consecutive failures proves the anchor never advanced. Both ambiguous eventless transport classes — `stream_idle_timeout` (including its aliased diagnostics) and `stream_incomplete` — MUST be able to trigger anchor poisoning at the threshold; a `clean_close` outcome MUST NOT itself trigger anchor poisoning. When consecutive failures for the same hard bridge
+key reach the poison threshold, the proxy MUST abandon durable
+continuity for that session and retire the bridge even when admission waiters
+exist, and the shared retirement boundary MUST clear the poisoned durable anchor even when no admission waiter exists, while the session still owns its durable lease. If the clear cannot be confirmed on the waiterless retirement path, the proxy MUST re-attempt it when a later eligible eventless failure at or above the threshold retires the session. The poison threshold IS the retry circuit's own opening threshold
+(`_HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD`, two consecutive failures): a
+fixed application constant, not a runtime setting.
+
+Because the poison threshold coincides with the circuit's opening threshold,
+the eventless poison-class strike that opens the circuit is also the strike
+that authorizes the abandonment. The circuit opening MUST therefore quarantine
+the key independently of the durable clear, as specified under the
+silent-session quarantine requirement, so a full-resend probe after the
+circuit opens is planned without the dead anchor even while that clear is
+still awaiting I/O.
+
+#### Scenario: Admission waiters cannot defer anchor poisoning forever
+- **GIVEN** a hard durable bridge key has admission waiters
+- **AND** repeated zero-event idle failures for that same key reach the poison
+  threshold
+- **WHEN** the reader failure path would normally defer retirement for the
+  admission waiter
+- **THEN** the proxy clears the durable continuity anchors
+- **AND** retires the session despite the admission waiter
+- **AND** the next attach starts from fresh durable state rather than the
+  poisoned previous-response anchor
+
+#### Scenario: Lease liveness comparison is timezone-safe
+- **GIVEN** a durable bridge session whose `lease_expires_at` was read from a `timestamptz` column (offset-aware) on PostgreSQL
+- **WHEN** the dead-owner classifier evaluates lease liveness against the application's naive-UTC clock
+- **THEN** both timestamps MUST be normalized to naive UTC before comparison
+- **AND** the anchored-lookup path MUST NOT raise on mixed-awareness datetimes
+
+#### Scenario: Repeated eventless stream_incomplete failures poison the anchor
+- **GIVEN** a hard durable bridge key has a stored durable anchor
+- **AND** every anchored attempt fails eventlessly with `stream_incomplete` (for example a masked upstream previous-response rejection)
+- **WHEN** consecutive failures for that key reach the poison threshold
+- **THEN** the proxy clears the durable continuity anchors under the session's owner epoch
+- **AND** the next attach starts from fresh durable state instead of looping through retry-circuit cooldown
+
+#### Scenario: Waiterless retirement poisons the anchor at the threshold
+- **GIVEN** a hard durable bridge key fails eventlessly with no admission waiters
+- **WHEN** the shared retirement boundary records the eventless failure that reaches the poison threshold
+- **THEN** the proxy clears the durable continuity anchors before releasing the durable lease
+
+#### Scenario: Failed waiterless clear is re-attempted on the next threshold failure
+- **GIVEN** the waiterless retirement path reached the poison threshold but the durable continuity clear could not be confirmed
+- **WHEN** the next eligible eventless failure for the same key retires the session
+- **THEN** the proxy re-attempts the durable continuity clear under the new session's owner epoch
+
+#### Scenario: Clean closes never trigger anchor poisoning
+- **WHEN** a `clean_close` retry-circuit outcome is recorded for a hard bridge key, at any consecutive-failure count
+- **THEN** that outcome does not clear the durable continuity anchors
+
+#### Scenario: The probe after the circuit opens is planned without the dead anchor
+
+- **GIVEN** a hard durable bridge key has two consecutive eventless `stream_incomplete` failures, which open the circuit and reach the poison threshold in the same strike
+- **WHEN** the cooldown expires and the next full-resend request is admitted as the probe
+- **THEN** the key is quarantined and the probe is planned without the dead anchor
+- **AND** the probe resends full history rather than the dead anchor

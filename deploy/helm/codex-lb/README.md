@@ -776,11 +776,14 @@ names are pruned from the warning list afterwards and stay inert).
 | `CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED` (#2261) | `config.promptCacheKeyDerivationEnabled` | None: proxy-generated prompt-cache-key derivation is always on (it was never turned off in any deployment). |
 | `CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED` (#2261) | `config.stickySessionCleanupEnabled` | None: the sticky-session cleanup loop always runs (its interval was already a fixed constant). |
 | The other 25 `constantize-core-tunables` names (#2261): upstream SSE / websocket frame and `response.create` budgets, the upstream compact timeout, OAuth and token-refresh timeouts, refresh claim TTL and failure cooldown, admission wait and gate sizes, usage / reset-credits fetch and refresh cadences, the always-on usage refresh / live ingestion / model registry / quota planner switches, HTTP ingress body budgets, inline image fetching and its host allowlist, `CODEX_LB_IMAGES_DEFAULT_MODEL` | `extraEnv` only | None: fixed application constants equal to the former defaults (see `docs/reference/settings.md`). |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS`, `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS` (#2256) | `config.sessionBridgeIdleTtlSeconds`, `config.sessionBridgeCodexIdleTtlSeconds` | None: fixed application constants equal to the former chart defaults (120 s for API sessions, 900 s for Codex sessions). |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS`, `..._ANCHOR_POISON_FAILURE_THRESHOLD`, `..._SERVER_RECOVERY_MAX_ATTEMPTS`, `..._CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS`, `..._OPERATION_LEDGER_ENABLED` (#2256) | `extraEnv` only | None: fixed application constants (300 s stuck gate, poison threshold = retry-circuit threshold of 2, 6 recovery attempts, 0-2 s clean-close jitter, operation ledger always on). An `ANCHOR_POISON_FAILURE_THRESHOLD=1`, `CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS=0` or `OPERATION_LEDGER_ENABLED=false` override no longer has any effect. |
 
 `values.schema.json` does not reject unknown `config.*` keys, so values files or
 `--reuse-values` state that still carry `config.upstreamStreamTransport`,
-`config.cacheAffinityMaxAgeSeconds`, `config.promptCacheKeyDerivationEnabled` or
-`config.stickySessionCleanupEnabled` render fine and are ignored (nothing
+`config.cacheAffinityMaxAgeSeconds`, `config.promptCacheKeyDerivationEnabled`,
+`config.stickySessionCleanupEnabled`, `config.sessionBridgeIdleTtlSeconds` or
+`config.sessionBridgeCodexIdleTtlSeconds` render fine and are ignored (nothing
 references them). Drop them at your convenience, and drop the raw names from
 `extraEnv` to silence the startup WARN.
 

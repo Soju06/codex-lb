@@ -47667,3 +47667,28 @@ async def test_retry_http_bridge_precreated_request_refuses_a_third_send_after_a
     assert request_state.replay_count == 1
     assert request_state.clean_close_replay_count == 0
     assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+
+
+def test_http_bridge_runtime_config_reads_idle_ttl_constant_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The API idle TTL is a fixed module constant, not a Settings field. The
+    # runtime config must read it from the module at call time, so the test
+    # seam (and any future change of the constant) takes effect without
+    # rebuilding Settings.
+    dashboard_settings = cast(
+        Any,
+        SimpleNamespace(
+            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=1800,
+            http_responses_session_bridge_gateway_safe_mode=False,
+        ),
+    )
+    app_settings = _make_app_settings()
+
+    default_config = http_bridge_helpers_module._http_bridge_runtime_config(dashboard_settings, app_settings)
+    assert default_config.idle_ttl_seconds == 120.0
+
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_IDLE_TTL_SECONDS", 45.0)
+
+    runtime_config = http_bridge_helpers_module._http_bridge_runtime_config(dashboard_settings, app_settings)
+
+    assert runtime_config.idle_ttl_seconds == 45.0
+    assert runtime_config.codex_idle_ttl_seconds == 900.0

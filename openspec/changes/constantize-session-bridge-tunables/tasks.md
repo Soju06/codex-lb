@@ -16,11 +16,14 @@
   `http_responses_session_bridge_enabled` to T4.
 - [x] `timeout_invariants.py`: the `2x stuck gate < bridge budget` rule reads the
   constant through `_expr`; regression test monkeypatches the constant.
-- [x] Regenerate `docs/reference/settings.md`; lower `[settings_fields].max` to 123.
+- [x] Regenerate `docs/reference/settings.md`; lower `[settings_fields].max` to 96.
 - [x] Helm: drop the idle-TTL keys/values; make pod identity env unconditional;
   update the chart README; Helm regression tests.
 - [x] Convert bridge test seams to module-constant monkeypatches; add
   `_REMOVED_SETTINGS` coverage for the seven names.
+- [x] Spec delta: REMOVED/ADDED "Repeated zero-event idle failures poison dead anchors"
+  -> "... at the circuit threshold" (fixed threshold wording; the
+  above-two-threshold bypass scenario is replaced).
 - [x] Verification: `make lint`, `uv run ty check`, full bridge test files, unit
   suite, `make migration-check`, simplicity budgets, `helm template`,
   `openspec validate --specs --strict`.

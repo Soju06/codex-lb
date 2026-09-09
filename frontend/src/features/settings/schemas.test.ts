@@ -545,7 +545,7 @@ describe("TelemetrySnapshotEnvelopeSchema", () => {
     expect(TelemetrySnapshotEnvelopeSchema.safeParse(missingTimestamp).success).toBe(false);
 
     const missingNested = structuredClone(createTelemetrySnapshotEnvelope());
-    delete (missingNested!.heartbeat.metrics.usage_7d.request_kinds as Record<string, unknown>).unknown;
+    delete (missingNested!.metrics.usage_7d.request_kinds as Record<string, unknown>).unknown;
     expect(TelemetrySnapshotEnvelopeSchema.safeParse(missingNested).success).toBe(false);
   });
 });
@@ -558,7 +558,7 @@ describe("TelemetryConsentSchema", () => {
       active: true,
       preview: createTelemetrySnapshotEnvelope(),
     });
-    expect(withPreview.preview?.heartbeat.metrics.schema_version).toBe(2);
+    expect(withPreview.preview?.metrics!.schema_version).toBe(2);
 
     const withoutPreview = TelemetryConsentSchema.parse({
       state: "enabled",

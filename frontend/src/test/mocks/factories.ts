@@ -53,6 +53,7 @@ import type {
 	DashboardSettings,
 	SubscriptionOverflowPreflight,
 	TelemetryConsent,
+	TelemetrySnapshotEnvelope,
 	UpstreamProxyAdmin,
 } from "@/features/settings/schemas";
 import {
@@ -565,7 +566,7 @@ export function createDashboardSettings(
 	});
 }
 
-export function createTelemetrySnapshotEnvelope(): TelemetryConsent["preview"] {
+export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
 	const heartbeat = TelemetrySnapshotEnvelopeSchema.parse({
 		instance_id: "00000000-0000-4000-8000-000000000000",
 		timestamp: "2026-08-06T00:00:00Z",
@@ -637,7 +638,8 @@ export function createTelemetrySnapshotEnvelope(): TelemetryConsent["preview"] {
 			},
 		},
 	});
-	return { heartbeat, day: { schema_version: 2, instance_id: heartbeat.instance_id, utc_date: "2026-08-05", dimensions: { models: [], clients: [], transport: [], upstream_transport: [], service_tier: [], request_kinds: { responses: 0, chat: 0, images: 0, unknown: 0 }, global: { name: "global", requests: 0, latency_ms: { sample_count: 0, buckets: {} }, ttft_ms: { sample_count: 0, buckets: {} }, tps: { sample_count: 0, buckets: {} } } }, errors: { upstream_error_class: {}, failure_phase: {}, http_status_class: {}, outcomes: { success: 0, error: 0, cancelled: 0 } } } };
+	return heartbeat;
+
 }
 
 export function createTelemetryConsent(
@@ -651,11 +653,12 @@ export function createTelemetryConsent(
 	};
 	// Mirror the backend: the base GET attaches a preview envelope only for
 	// the undecided/default (consent dialog) case; explicit overrides win.
+	const heartbeat = createTelemetrySnapshotEnvelope();
 	const preview =
 		"preview" in overrides
-			? overrides.preview
+			? (overrides.preview && "heartbeat" in overrides.preview ? overrides.preview : overrides.preview ? { heartbeat: overrides.preview, day: { schema_version: 2, instance_id: (overrides.preview as TelemetrySnapshotEnvelope).instance_id, utc_date: "2026-08-05", dimensions: { models: [], clients: [], transport: [], upstream_transport: [], service_tier: [], request_kinds: { responses: 0, chat: 0, images: 0, unknown: 0 }, global: { name: "global", requests: 0, latency_ms: { sample_count: 0, buckets: {} }, ttft_ms: { sample_count: 0, buckets: {} }, tps: { sample_count: 0, buckets: {} } } }, errors: { upstream_error_class: {}, failure_phase: {}, http_status_class: {}, outcomes: { success: 0, error: 0, cancelled: 0 } } } } : null)
 			: base.state === "undecided" && base.source === "default"
-				? createTelemetrySnapshotEnvelope()
+				? { heartbeat, day: { schema_version: 2, instance_id: heartbeat.instance_id, utc_date: "2026-08-05", dimensions: { models: [], clients: [], transport: [], upstream_transport: [], service_tier: [], request_kinds: { responses: 0, chat: 0, images: 0, unknown: 0 }, global: { name: "global", requests: 0, latency_ms: { sample_count: 0, buckets: {} }, ttft_ms: { sample_count: 0, buckets: {} }, tps: { sample_count: 0, buckets: {} } } }, errors: { upstream_error_class: {}, failure_phase: {}, http_status_class: {}, outcomes: { success: 0, error: 0, cancelled: 0 } } } }
 				: null;
 	return TelemetryConsentSchema.parse({ ...base, preview });
 }

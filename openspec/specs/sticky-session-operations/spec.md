@@ -989,3 +989,363 @@ or penalize the upstream account.
 - **WHEN** required lineage cannot be read or established durably
 - **THEN** the request fails before ordinary account selection or dispatch
 
+### Requirement: Compact previous_response_id anchors are account-scoped
+
+codex-lb MUST NOT inject a compact `previous_response_id` anchor whose owning account differs from the account that will serve the request.
+
+The HTTP-bridge compact-anchor injection reduces payload size by replacing
+already-stored history with a proxy-supplied `previous_response_id`, and a
+`previous_response_id` can only be resumed by the account that created it. The
+rule applies to every injection site that runs after the serving account is
+bound: the session-level anchor (`session.last_completed_response_id`) and the
+owner-forward recovery anchor (`durable_lookup.latest_response_id`, injected
+after a rebind that is allowed to land on a different account).
+
+codex-lb MUST record the account that owns `last_completed_response_id` whenever
+that value is set — from a real upstream `response.completed` (the session's
+current account) or from a durable-session restore (the durable owner account) —
+and keep the two in sync.
+
+Injection sites that run before the serving account is bound stay covered by the
+existing required-continuity-owner pin, which fails the request rather than
+serving a proxy-injected anchor on a different account.
+
+#### Scenario: Anchor injected when the serving account owns it
+
+- **WHEN** a Codex session follow-up turn is eligible for compact-anchor injection
+- **AND** the account that owns `last_completed_response_id` equals the session's
+  serving account
+- **THEN** codex-lb injects `previous_response_id = last_completed_response_id`
+  and trims the already-stored history prefix
+
+#### Scenario: Anchor skipped after cross-account failover
+
+- **WHEN** a Codex session follow-up turn is eligible for compact-anchor injection
+- **AND** the account that owns `last_completed_response_id` differs from the
+  session's serving account (for example the session failed over after the durable
+  owner account became unavailable)
+- **THEN** codex-lb MUST NOT inject the anchor
+- **AND** codex-lb resends the full history to the serving account so continuity
+  is preserved without an unresolvable `previous_response_id`
+- **AND** the request MUST NOT stall waiting for a `response.created` that upstream
+  will never send for an anchor the serving account does not own
+
+#### Scenario: Owner-forward recovery anchor skipped after a cross-account rebind
+
+- **WHEN** an owner forward fails and the local recovery rebind binds the session
+  to an account other than the durable record's owner
+- **AND** the durable record still carries a `latest_response_id` the recovery
+  request would otherwise anchor on
+- **THEN** codex-lb MUST NOT inject that anchor
+- **AND** the recovery request keeps its full input instead of a trimmed suffix
+
+#### Scenario: Declined anchors are observable
+
+- **WHEN** codex-lb declines a compact anchor because the serving account does not
+  own it
+- **THEN** codex-lb logs a `cross_account_anchor_declined` bridge event naming the
+  injection site, the anchor's owning account, and the full-history-resend outcome
+
+### Requirement: Idle bridge sessions are swept without request traffic
+
+The system MUST evict idle HTTP-bridge sessions on every replica independently of whether that replica is receiving bridge requests. The sweep MUST reuse the same eligibility the request path applies — a session with pending or queued work, an admission waiter, a handoff in progress, or an unanchored reservation, and a session still inside its idle TTL, MUST NOT be evicted — and MUST close evicted sessions through the existing bounded close path so a slow upstream-reader cancellation cannot block the caller. A sweep failure MUST NOT interrupt the loop that drives it, and MUST NOT prevent the other per-replica bridge upkeep that shares that loop from running.
+
+#### Scenario: A replica with no bridge traffic still evicts idle sessions
+
+- **GIVEN** a replica holds an idle bridge session past its idle TTL and receives no further bridge requests
+- **WHEN** the sweep runs
+- **THEN** the session is detached from the registry and closed, releasing its upstream WebSocket
+
+#### Scenario: Sweep eligibility matches the request path
+
+- **GIVEN** a session with pending work whose idle TTL has elapsed, and a session used moments ago
+- **WHEN** the sweep runs
+- **THEN** neither session is evicted
+
+#### Scenario: One failing upkeep pass does not skip the other
+
+- **GIVEN** the durable-ownership reconcile raises on a heartbeat tick
+- **WHEN** that tick runs
+- **THEN** the idle sweep still runs and the heartbeat loop continues
+
+#### Scenario: Sweeping an empty registry does nothing
+
+- **WHEN** the sweep runs with no registered bridge sessions
+- **THEN** no session is closed and no cleanup work is scheduled
+
+### Requirement: File-pin required owner does not rewrite thread locality
+
+A resolved live `input_file.file_id` pin MUST be selected as the required owner without consulting or rewriting the current-Codex thread-scoped soft mapping. The process-session compatibility row MAY still be consulted as independent hard ownership. If that raw row conflicts with the pin account, the request MUST fail closed. A missing process-session preference MAY still initialize insert-if-absent.
+
+#### Scenario: File-pinned request owner overrides thread locality
+
+- **GIVEN** a request carries a `thread-id` whose bounded mapping points to account A
+- **AND** its `input_file.file_id` is durably pinned to account B
+- **WHEN** the request is routed
+- **THEN** account B is treated as the required owner
+- **AND** the thread mapping is neither consulted as an owner nor rewritten
+
+#### Scenario: File pin still conflicts with a raw process-session owner
+
+- **GIVEN** a raw process-session `codex_session` row points to account A
+- **AND** a live file pin points to account B
+- **WHEN** the request is routed
+- **THEN** the service fails with `continuity_owner_conflict` before upstream dispatch
+- **AND** neither the raw row nor the thread row is rewritten
+
+### Requirement: Thread-scoped current Codex restarts still abandon a raw process-session owner
+
+A self-contained Codex goal-continuation restart that also carries a distinct `thread-id` MUST still be eligible for the existing process-session abandonment exception. The request's thread-scoped locality source MUST NOT prevent the one-shot abandonment capability or the compare-and-set retirement of the raw process-session row.
+
+The retirement write MUST remain scoped to `session_header`
+interpretation of that raw key. An explicit `turn_state` lookup of the
+same text MUST stay hard-bound to the stored account. After a
+successful retirement, later same-thread turns that have no new hard
+owner MUST keep continuity on the replacement account and MUST NOT
+treat the `session_header`-abandoned raw row as live hard ownership.
+
+Ordinary incremental, file-pinned, conversation-bound, and unresolved
+tool-state requests MUST remain fail-closed on their required owner.
+
+#### Scenario: Goal restart with process session and thread-id abandons the unavailable raw owner
+
+- **GIVEN** a process-session identifier has a raw legacy `codex_session` mapping to account A
+- **AND** account A is paused, rate-limited, or quota-exceeded
+- **AND** account B is eligible
+- **AND** the request also carries a distinct `thread-id`
+- **WHEN** Codex sends the recognized goal-continuation marker with an account-neutral self-contained full resend and no other continuity dependency
+- **THEN** the proxy marks the still-current raw mapping to account A abandoned only for process-session interpretation
+- **AND** it routes the restarted turn to account B
+- **AND** subsequent same-thread continuity remains on account B
+
+#### Scenario: Thread-id on a goal restart cannot erase colliding explicit turn-state ownership
+
+- **GIVEN** a raw legacy `codex_session` row was written as explicit turn-state ownership for account A
+- **AND** a later request carries the same text as a process-session header plus a distinct `thread-id`
+- **WHEN** a marked self-contained goal restart abandons that text for process-session interpretation
+- **THEN** the restart may select account B
+- **AND** an explicit turn-state lookup of the same text remains hard-bound to account A
+
+#### Scenario: Account-dependent thread-scoped restart stays fail-closed
+
+- **GIVEN** a process-session identifier has a raw legacy mapping to unavailable account A
+- **AND** the request carries a distinct `thread-id`
+- **AND** the body has a previous response, conversation, file pin, or unresolved tool state
+- **WHEN** the request is selected
+- **THEN** the request fails closed on account A
+- **AND** the raw mapping is neither deleted nor rebound
+
+### Requirement: Same-owner sticky refresh writes are coalesced
+
+When selection retains the existing pinned owner of a TTL-based sticky mapping, the
+mapping write exists only to advance the mapping's freshness timestamp. The system
+MUST skip that write when the same request's owner lookup already observed the row
+with a freshness timestamp younger than a bounded skip window, so concurrent requests
+of one hot session do not serialize on the same row's lock.
+
+The skip window MUST NOT exceed 1% of the mapping's configured TTL and MUST NOT
+exceed 15 seconds, so a mapping's effective expiry — on both the read-path TTL check
+and the background cleanup loop — moves at most that window earlier than today's
+write-per-request behavior.
+
+The skip decision MUST be derived from row state observed in the current request's
+database lookup, not from cross-request in-process state, so any number of workers or
+replicas remain correct. The lookup MUST report the skip as a deadline (the observed
+freshness timestamp plus the skip window), and the write path MUST revalidate that
+deadline against the clock at the moment the write would otherwise be issued — a
+deadline that lapsed while the request was being admitted no longer authorizes a
+skip. A row whose observed freshness timestamp lies in the future (clock skew or a
+restored row) MUST NOT be skippable at all.
+
+A skip MUST apply only to a pure freshness rewrite. The following writes MUST remain
+immediate and unconditional: rebinding the mapping to a different account, deleting
+the mapping, restoring a provisional owner after failed admission, initializing a
+seed mapping, and any upsert against a row carrying an abandonment marker (whose
+write also clears the marker columns). In particular, a retention write that would
+initialize a missing seed mapping MUST NOT be skipped even when the retained row
+itself was observed fresh, because the seed initialization piggybacks on that write.
+A raw legacy owner that shadows the namespaced row MUST NOT inherit the namespaced
+row's freshness observation.
+
+#### Scenario: Hot same-owner retention skips the redundant refresh write
+
+- **GIVEN** a `prompt_cache` mapping pinned to an eligible account
+- **AND** the request's owner lookup observed the row fresher than the skip window
+  with no abandonment marker
+- **WHEN** selection retains the pinned account
+- **THEN** the request routes to the pinned account
+- **AND** no sticky-session write is issued for the retention
+
+#### Scenario: Retention outside the skip window refreshes write-through
+
+- **GIVEN** a `prompt_cache` mapping pinned to an eligible account
+- **AND** the row's freshness timestamp is older than the skip window but inside the TTL
+- **WHEN** selection retains the pinned account
+- **THEN** the mapping's freshness timestamp is advanced by a write
+
+#### Scenario: Rebind is never coalesced
+
+- **GIVEN** a soft mapping whose row was observed fresher than the skip window
+- **WHEN** selection rebinds the mapping to a different account
+- **THEN** the rebind is persisted immediately
+
+#### Scenario: A skipped refresh does not clobber a concurrent rebind
+
+- **GIVEN** a request that observed a fresh same-owner row and skipped its refresh write
+- **AND** a concurrent request rebinds the same mapping to another account
+- **WHEN** both requests complete
+- **THEN** the mapping's owner is the rebind target
+
+#### Scenario: A retention that must initialize a missing seed is never skipped
+
+- **GIVEN** a thread mapping observed fresher than the skip window
+- **AND** the corresponding process seed mapping does not exist
+- **WHEN** selection retains the thread mapping's pinned account
+- **THEN** the retention write is issued and the seed mapping is initialized
+
+#### Scenario: A deadline that lapsed during admission writes through
+
+- **GIVEN** a request whose lookup observed the row inside the skip window
+- **AND** admission latency carried the request past the observed skip deadline
+- **WHEN** the retention write would be issued
+- **THEN** the deadline is revalidated and the freshness write is performed
+
+#### Scenario: A future freshness timestamp is never skippable
+
+- **GIVEN** a mapping whose freshness timestamp lies ahead of the current clock
+- **WHEN** the owner lookup evaluates the skip window
+- **THEN** no skip deadline is reported and retention writes through
+
+### Requirement: File-pin reconnect provenance preserves existing routing eligibility
+
+HTTP-bridge reconnect MUST mark a live required file-pin owner as a continuity
+owner. Existing account-neutral replay provenance MUST remain unchanged. A
+non-file previous-response or other require-preferred owner MUST retain its
+ordinary required-preferred provenance and its existing single-account and
+API-key assignment-scope eligibility semantics.
+
+#### Scenario: File-pin reconnect carries continuity provenance
+
+- **GIVEN** a live file pin requires `account_a` during HTTP-bridge reconnect
+- **WHEN** reconnect selects an account
+- **THEN** it MUST pass `account_a` as a required preferred account
+- **AND** it MUST mark `account_a` as a continuity owner
+- **AND** it MUST disable fallback to another account
+
+#### Scenario: Previous-response owner retains required-preferred semantics
+
+- **GIVEN** a non-file previous-response reconnect requires `account_b`
+- **WHEN** reconnect selects an account
+- **THEN** it MUST pass `account_b` as a required preferred account
+- **AND** it MUST NOT newly mark `account_b` as a continuity owner
+- **AND** dashboard single-account routing MUST NOT narrow that required owner
+- **AND** API-key assignment scope MUST still determine its eligibility
+
+### Requirement: File-pin provenance preserves single-account behavior without weakening scope
+
+A required file-pin continuity owner MUST bypass dashboard single-account
+narrowing, matching the existing required-preferred behavior. It MUST NOT
+become eligible outside API-key assignment scope, and security authorization
+scope MUST remain unchanged.
+
+#### Scenario: Dashboard account differs from in-scope file owner
+
+- **GIVEN** dashboard single-account routing selects `account_x`
+- **AND** an in-scope live file pin requires `account_a`
+- **WHEN** reconnect selection runs
+- **THEN** it MUST select only `account_a`
+- **AND** it MUST NOT narrow the lookup to `account_x`
+
+#### Scenario: File owner is outside API-key assignment scope
+
+- **GIVEN** a live file pin requires `account_a`
+- **AND** the API key assignment scope excludes `account_a`
+- **WHEN** reconnect selection runs
+- **THEN** `account_a` MUST remain ineligible
+- **AND** selection MUST NOT serve the reconnect from an out-of-scope account
+
+### Requirement: Canonical prompt-cache bridges preserve hard replica continuity
+
+When durable lookup resolves an incoming turn-state or previous-response
+reference to a live bridge whose canonical key is `prompt_cache`, the origin
+replica MUST treat that request as hard bridge continuity for replica-owner
+routing. If the live owner is another reachable replica, the origin MUST use
+the authenticated internal owner-forward transport and MUST NOT attempt a soft
+local prompt-cache rebind. Preserving the canonical prompt-cache key MUST NOT
+weaken the hard continuation evidence or expose `bridge_instance_mismatch` for
+an ordinary cross-replica continuation. A request carrying only prompt-cache
+locality and no hard continuation evidence MUST retain the existing soft local
+rebind behavior. Explicit recovery paths that have already established that
+owner forwarding is unavailable MAY retain their bounded local-rebind
+behavior.
+
+#### Scenario: Turn-state continuation forwards to the canonical prompt-cache owner
+
+- **GIVEN** a turn-state alias resolves to a live bridge canonically keyed by prompt cache on replica A
+- **WHEN** the continuation arrives on replica B
+- **THEN** replica B forwards the request internally to replica A
+- **AND** it does not attempt to claim the canonical bridge locally
+- **AND** replica B leaves no local inflight creation reservation for the forwarded bridge key
+
+#### Scenario: Previous-response continuation forwards to the canonical prompt-cache owner
+
+- **GIVEN** a previous-response reference resolves to a live bridge canonically keyed by prompt cache on replica A
+- **WHEN** the continuation arrives on replica B
+- **THEN** replica B forwards the request internally to replica A
+- **AND** the client does not receive `bridge_instance_mismatch`
+
+#### Scenario: Prompt-cache-only locality remains soft
+
+- **GIVEN** a request has prompt-cache locality but no turn-state, previous-response, or other hard continuity evidence
+- **WHEN** its locality owner is another replica
+- **THEN** the receiving replica may use the existing soft local-rebind path
+
+### Requirement: Detached durable bridge rows are not continuity owner evidence
+
+When account invalidation (deactivation, re-authentication demand, proxy-binding change, or deletion) detaches a durable HTTP-bridge row, leaving it `CLOSED` with no owner account, no owner instance, and no turn-state or previous-response anchor, durable request-target lookup MUST NOT report that row as a lookup hit, whether resolved by canonical key or by alias. A request whose only durable evidence would have been such a row MUST proceed as a request without durable bridge state, and its claim MUST re-own the same canonical row. A `CLOSED` row that still names its owner account MUST remain durable owner evidence.
+
+#### Scenario: Hard thread continuation survives owner account invalidation
+
+- **GIVEN** a Codex `thread_header` bridge row was detached because its owner account was deactivated
+- **AND** the account was later reactivated
+- **WHEN** the client continues that thread without `previous_response_id`
+- **THEN** the durable lookup reports no durable row for the thread
+- **AND** the request is served by ordinary account selection instead of failing closed with `previous_response_owner_unavailable`
+- **AND** the selected account's claim reuses the detached canonical row
+
+#### Scenario: Ordinarily released closed row keeps its owner
+
+- **GIVEN** a bridge row was released normally and is `CLOSED` while still naming its owner account and latest response anchor
+- **WHEN** a request resolves that canonical key
+- **THEN** the durable lookup still returns the row with its owner account
+
+### Requirement: Owner forwarding rejects illegal reconstructed header metadata
+
+Owner-forwarded HTTP bridge requests MUST validate reconstructed bridge
+metadata before building signatures or posting headers to another owner.
+Metadata values that become signed bridge headers MUST NOT contain illegal HTTP
+header control characters. If original affinity, downstream turn-state,
+file-owner, client-IP, origin/target instance, or reservation metadata contains
+such a character, the proxy MUST fail closed with the structured
+`bridge_forward_invalid` error instead of sending the owner request. Ordinary
+client headers with illegal HTTP control characters MUST be omitted from the
+forwarded header map.
+
+#### Scenario: Unsafe reservation metadata fails closed
+
+- **GIVEN** an owner-forward request carries API-key reservation metadata
+- **AND** one reservation field contains an illegal HTTP header control
+  character
+- **WHEN** the origin builds the owner-forward request
+- **THEN** it returns `bridge_forward_invalid`
+- **AND** it does not omit only the reservation headers while keeping the owner
+  as reservation-settlement authority
+
+#### Scenario: Unsafe client header is omitted
+
+- **GIVEN** an owner-forward request includes an ordinary client header with an
+  illegal HTTP header control character
+- **WHEN** the origin builds the owner-forward request
+- **THEN** that client header is not forwarded
+- **AND** the signed bridge-forward metadata remains valid
+

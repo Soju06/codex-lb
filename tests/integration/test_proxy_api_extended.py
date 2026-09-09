@@ -41,11 +41,10 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture(autouse=True)
 async def _force_usage_weighted_routing(async_client) -> None:
-    current = await async_client.get("/api/settings")
-    assert current.status_code == 200
-    payload = current.json()
-    payload["routingStrategy"] = "usage_weighted"
-    response = await async_client.put("/api/settings", json=payload)
+    # Minimal patch on purpose: echoing the GET body back would store every
+    # inheritable effective value (account caps, timeouts) as an explicit
+    # dashboard value and override the Settings these tests monkeypatch.
+    response = await async_client.put("/api/settings", json={"routingStrategy": "usage_weighted"})
     assert response.status_code == 200
 
 

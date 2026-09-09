@@ -35,6 +35,15 @@ class SettingsCache:
                 self._cached_at = now
                 return settings
 
+    def cached_row(self) -> DashboardSettings | None:
+        """The last row this cache loaded, even if past its TTL (``None`` before the first load).
+
+        For callers that must not fail when a refresh is impossible (the
+        request-scoped dashboard overrides) and prefer the last known dashboard
+        values over silently reverting to the environment.
+        """
+        return self._cached_settings
+
     async def invalidate(self, *, propagate: bool = True) -> None:
         """Drop the cached settings row and, unless ``propagate`` is False, durably
         bump the cross-replica ``settings`` namespace before returning.

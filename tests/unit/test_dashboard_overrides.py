@@ -98,19 +98,31 @@ async def test_middleware_falls_back_to_environment_when_snapshot_is_unavailable
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _BrokenCache:
+        def __init__(self) -> None:
+            self.last_row: DashboardSettings | None = None
+
         async def get(self) -> DashboardSettings:
             raise RuntimeError("database unavailable")
 
-    monkeypatch.setattr(middleware_module, "get_settings_cache", lambda: _BrokenCache())
+        def cached_row(self) -> DashboardSettings | None:
+            return self.last_row
+
+    cache = _BrokenCache()
+    monkeypatch.setattr(middleware_module, "get_settings_cache", lambda: cache)
     base = Settings()
-    seen: list[Settings] = []
+    seen: list[float] = []
 
     async def app(scope: Any, receive: Any, send: Any) -> None:
-        seen.append(with_dashboard_overrides(base))
+        seen.append(with_dashboard_overrides(base).proxy_request_budget_seconds)
 
-    await DashboardOverridesMiddleware(app)({"type": "http", "path": "/"}, cast(Any, None), cast(Any, None))
+    middleware = DashboardOverridesMiddleware(app)
+    # Nothing loaded yet: the environment value applies.
+    await middleware({"type": "http", "path": "/"}, cast(Any, None), cast(Any, None))
+    # A refresh failure after a successful load keeps the last dashboard values.
+    cache.last_row = _row(proxy_request_budget_seconds=900.0)
+    await middleware({"type": "http", "path": "/"}, cast(Any, None), cast(Any, None))
 
-    assert seen == [base]
+    assert seen == [base.proxy_request_budget_seconds, 900.0]
 
 
 def test_warn_environment_shadowed_by_dashboard_only_when_env_is_set_and_column_is_set(

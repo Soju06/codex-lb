@@ -176,13 +176,15 @@ export const DashboardSettingsSchema = z
     // C2-1 timeouts: effective values (dashboard column, else environment,
     // else code default); `provenance[<snake_name>]` says which. Optional with
     // the code defaults so older backends still parse.
-    upstreamConnectTimeoutSeconds: z.number().positive().optional().default(8),
-    proxyRequestBudgetSeconds: z.number().positive().optional().default(600),
-    compactRequestBudgetSeconds: z.number().positive().optional().default(180),
-    transcriptionRequestBudgetSeconds: z.number().positive().optional().default(120),
-    streamIdleTimeoutSeconds: z.number().positive().optional().default(7200),
-    proxyDownstreamWebsocketIdleTimeoutSeconds: z.number().positive().optional().default(120),
-    sseKeepaliveIntervalSeconds: z.number().min(0).optional().default(10),
+    // Unbounded like the backend response: an environment value the server
+    // accepts must still render (the update schema below keeps the bounds).
+    upstreamConnectTimeoutSeconds: z.number().optional().default(8),
+    proxyRequestBudgetSeconds: z.number().optional().default(600),
+    compactRequestBudgetSeconds: z.number().optional().default(180),
+    transcriptionRequestBudgetSeconds: z.number().optional().default(120),
+    streamIdleTimeoutSeconds: z.number().optional().default(7200),
+    proxyDownstreamWebsocketIdleTimeoutSeconds: z.number().optional().default(120),
+    sseKeepaliveIntervalSeconds: z.number().optional().default(10),
     // Optional so responses from backends that predate provenance still parse.
     provenance: z.record(z.string(), SettingProvenanceSchema).optional(),
     // C2-3 resilience toggles: effective values; `provenance[<snake_name>]`

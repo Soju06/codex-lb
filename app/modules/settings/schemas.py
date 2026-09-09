@@ -125,14 +125,16 @@ class DashboardSettingsResponse(DashboardModel):
     circuit_breaker_enabled: bool
     version: int = Field(ge=1)
     # C2-1 timeouts: effective values; ``provenance[<name>]`` says whether the
-    # dashboard, the environment or the code default supplied each one.
-    upstream_connect_timeout_seconds: float = Field(gt=0)
-    proxy_request_budget_seconds: float = Field(gt=0)
-    compact_request_budget_seconds: float = Field(gt=0)
-    transcription_request_budget_seconds: float = Field(gt=0)
-    stream_idle_timeout_seconds: float = Field(gt=0)
-    proxy_downstream_websocket_idle_timeout_seconds: float = Field(gt=0)
-    sse_keepalive_interval_seconds: float = Field(ge=0)
+    # dashboard, the environment or the code default supplied each one. No
+    # bounds here: an environment value the ``Settings`` model accepts must
+    # never make ``GET /api/settings`` fail (the update request is bounded).
+    upstream_connect_timeout_seconds: float
+    proxy_request_budget_seconds: float
+    compact_request_budget_seconds: float
+    transcription_request_budget_seconds: float
+    stream_idle_timeout_seconds: float
+    proxy_downstream_websocket_idle_timeout_seconds: float
+    sse_keepalive_interval_seconds: float
     # end C2-1 timeouts
     # Provenance of every inheritable setting keyed by its setting name (the
     # ``dashboard_settings`` column / ``Settings`` field name). Additive: the

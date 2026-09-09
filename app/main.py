@@ -31,6 +31,7 @@ from app.core.clients.native_egress import close_discovered_native_egress_client
 from app.core.config.dashboard_overrides import effective_settings
 from app.core.config.key_fingerprint import verify_encryption_key_fingerprint
 from app.core.config.settings import (
+    Settings,
     _bridge_advertise_hostname_is_replica_specific,
     _parse_port_value,
     get_settings,
@@ -64,7 +65,7 @@ from app.core.retention.scheduler import build_data_retention_scheduler
 from app.core.runtime_logging import install_redacting_loop_exception_handler
 from app.core.scheduling.leader_election import get_leader_election
 from app.core.shutdown import close_control_plane_task_admission
-from app.core.timeout_invariants import validate_runtime_timeout_invariants
+from app.core.timeout_invariants import validate_runtime_timeout_invariants, validate_timeout_invariants
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
@@ -448,6 +449,24 @@ async def _purge_operation_spool_on_startup(*, retention_seconds: float) -> int:
     return operation_purge_result.deleted_operations
 
 
+async def _report_dashboard_timeout_overrides(settings: Settings) -> None:
+    """Best-effort startup report on the dashboard-managed timeouts (C2-1).
+
+    Names env aliases the dashboard shadows and logs (never raises) invariant
+    violations of the effective values — a stored dashboard value can break a
+    combination the environment alone satisfies. A snapshot read failure must
+    not abort boot: the environment fallback stays in force until the cache
+    recovers.
+    """
+    try:
+        dashboard_settings_row = await get_settings_cache().get()
+    except Exception:  # noqa: BLE001 - startup must not depend on the snapshot
+        logger.debug("dashboard settings snapshot unavailable at startup; environment timeouts apply", exc_info=True)
+        return
+    warn_environment_shadowed_by_dashboard(dashboard_settings_row, settings)
+    validate_timeout_invariants(effective_settings(dashboard_settings_row, settings), strict=False, log=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
@@ -471,6 +490,7 @@ async def lifespan(app: FastAPI):
     reload_additional_quota_registry()
     settings = get_settings()
     warn_removed_settings()
+    validate_runtime_timeout_invariants(settings)
     # Anchor round-robin tie-break decorrelation to this replica's stable bridge
     # instance identity so peer replicas spread exact ties across equally-good
     # accounts instead of all herding onto the lexicographically-first account.
@@ -483,13 +503,7 @@ async def lifespan(app: FastAPI):
     if _auto_bootstrap_token:
         log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
-    # Dashboard-managed timeouts (C2-1) take precedence over the environment, so
-    # the startup invariants are checked on the effective values once the
-    # settings row is readable: a stored dashboard value can fix (or break) an
-    # environment combination, and the WARN names env aliases it shadows.
-    dashboard_settings_row = await get_settings_cache().get()
-    warn_environment_shadowed_by_dashboard(dashboard_settings_row, settings)
-    validate_runtime_timeout_invariants(effective_settings(dashboard_settings_row, settings))
+    await _report_dashboard_timeout_overrides(settings)
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready is True:
         startup_module.mark_bridge_durable_schema_ready()

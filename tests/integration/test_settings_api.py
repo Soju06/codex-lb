@@ -502,6 +502,30 @@ async def test_settings_api_timeout_round_trip_with_provenance_and_null_clear(as
 
 
 @pytest.mark.asyncio
+async def test_settings_api_reports_environment_timeouts_outside_the_put_bounds(async_client, monkeypatch):
+    """An env value the Settings model accepts must never make GET fail, even if PUT would reject it."""
+    from app.modules.settings import service as settings_service
+
+    # ``upstream_connect_timeout_seconds`` is unbounded in Settings; 0 is a legal environment value.
+    inherited = settings_service.get_settings().model_copy(update={"upstream_connect_timeout_seconds": 0.0})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["upstreamConnectTimeoutSeconds"] == 0.0
+    assert payload["provenance"]["upstream_connect_timeout_seconds"] == {
+        "source": "env",
+        "envValue": 0.0,
+        "default": 8.0,
+    }
+
+    # The same value is not accepted as a dashboard value.
+    rejected = await async_client.put("/api/settings", json={"upstreamConnectTimeoutSeconds": 0})
+    assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_settings_api_rejects_timeouts_that_break_invariants_against_effective_values(async_client):
     # Connect timeout above the (default 600 s) effective proxy budget.
     response = await async_client.put("/api/settings", json={"upstreamConnectTimeoutSeconds": 700})

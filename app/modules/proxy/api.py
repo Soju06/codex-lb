@@ -216,6 +216,9 @@ from app.modules.model_sources.forwarding import (
     forward_chat_completion,
 )
 from app.modules.model_sources.forwarding import (
+    empty_stream_error as source_empty_stream_error,
+)
+from app.modules.model_sources.forwarding import (
     forward_audio_transcription as forward_source_audio_transcription,
 )
 from app.modules.model_sources.forwarding import (
@@ -5484,11 +5487,13 @@ async def _source_chat_completion_response(
                 reservation=reservation,
                 stream=stream.body,
                 usage_holder=stream.usage_holder,
+                upstream_status_code=stream.upstream_status_code,
                 rate_limit_headers=rate_limit_headers,
             )
         body = _source_chat_stream_with_settlement(
             stream.body,
             usage_holder=stream.usage_holder,
+            upstream_status_code=stream.upstream_status_code,
             request=request,
             source=source,
             api_key=api_key,
@@ -5634,6 +5639,7 @@ async def _buffered_limited_source_chat_stream_response(
     reservation: ApiKeyUsageReservationData | None,
     stream: AsyncIterator[bytes],
     usage_holder: SourceUsageHolder,
+    upstream_status_code: int,
     rate_limit_headers: Mapping[str, str],
 ) -> Response:
     chunks: list[bytes] = []
@@ -5646,6 +5652,10 @@ async def _buffered_limited_source_chat_stream_response(
                 buffer_limit_exceeded = True
                 break
             chunks.append(chunk)
+        if not chunks and not buffer_limit_exceeded:
+            # The source closed before its first chunk and nothing reached
+            # the client: the open's own verdict, before any byte (decision 50).
+            raise source_empty_stream_error(upstream_status_code)
         if buffer_limit_exceeded:
             # Returning while the generator is suspended at a yield would keep
             # the leased upstream session/response open until GC finalizes the
@@ -5987,6 +5997,7 @@ async def _source_chat_stream_with_settlement(
     stream: AsyncIterator[_SourceStreamChunkT],
     *,
     usage_holder: SourceUsageHolder,
+    upstream_status_code: int,
     request: Request,
     source: ModelSource,
     api_key: ApiKeyData | None,
@@ -5996,8 +6007,11 @@ async def _source_chat_stream_with_settlement(
     status = "success"
     error_code: str | None = None
     error_message: str | None = None
+    row_upstream_status_code: int | None = None
+    chunk_relayed = False
     try:
         async for chunk in stream:
+            chunk_relayed = True
             yield chunk
     except (asyncio.CancelledError, GeneratorExit):
         # Client disconnect surfaces as CancelledError (task cancellation) or
@@ -6051,6 +6065,16 @@ async def _source_chat_stream_with_settlement(
                 api_key.id if api_key else None,
                 model,
             )
+        if not chunk_relayed:
+            # The source closed before its first chunk. The client already
+            # holds the ``200``, so the body ended as the clean empty stream
+            # ``main`` relayed (the reservation was released above with no
+            # usage); the row keeps the open's verdict (decision 50).
+            verdict = source_empty_stream_error(upstream_status_code)
+            status = "error"
+            error_code = _source_error_code(verdict.payload)
+            error_message = _source_error_message(verdict.payload)
+            row_upstream_status_code = verdict.upstream_status_code
     finally:
         await _await_cleanup_deferring_cancellation(
             _log_source_chat_completion(
@@ -6063,7 +6087,7 @@ async def _source_chat_stream_with_settlement(
                 timings=usage_holder.timings,
                 error_code=error_code,
                 error_message=error_message,
-                upstream_status_code=None,
+                upstream_status_code=row_upstream_status_code,
             )
         )
 

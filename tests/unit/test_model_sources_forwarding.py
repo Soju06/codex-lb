@@ -1631,19 +1631,22 @@ async def test_stream_chat_completion_cancelled_during_prompt_processing_release
 
 
 @pytest.mark.asyncio
-async def test_stream_chat_completion_empty_2xx_stream_fails_in_the_body_as_invalid_upstream_response(
+async def test_stream_chat_completion_empty_2xx_stream_ends_the_body_cleanly_without_a_first_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Decision 50: the client already holds the ``200`` at the source's headers, so a source that closes before its
+    first chunk ends the body as the clean empty stream ``main`` relayed (no exception out of a started body); the
+    stream owner reads the empty-stream verdict from ``first_frame_at`` staying ``None``."""
+
     response = _FakeResponse(status=200, content=_FakeContent(b""))
     _session, context, lease = _install_session(monkeypatch, response)
 
     stream = await forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"})
-    with pytest.raises(ModelSourceForwardingError) as excinfo:
-        await anext(stream.body)
+    delivered = [chunk async for chunk in stream.body]
 
-    assert excinfo.value.status_code == 502
-    assert excinfo.value.upstream_status_code == 200
-    assert cast(dict[str, object], excinfo.value.payload["error"])["code"] == "invalid_upstream_response"
+    assert delivered == []
+    assert stream.usage_holder.first_frame_at is None
+    assert stream.usage_holder.usage is None
     assert context.exited == 1
     assert lease.released == 1
 

@@ -546,20 +546,21 @@ async def _next_source_chunk(chunks: AsyncIterator[bytes]) -> bytes | None:
         raise _SourceBudgetExpired(exc) from exc
 
 
-async def _first_source_chunk(chunks: AsyncIterator[bytes], response_status: int) -> bytes:
+async def _first_source_chunk(chunks: AsyncIterator[bytes]) -> bytes | None:
     """The first chunk of a stream whose open returned at the headers, read under the source's total budget alone.
 
-    Same verdicts the open gives the first-frame phase when no deadline is
-    armed for it: a budget or transport failure is ``502
-    model_source_unreachable`` and a ``2xx`` stream that ends before its first
-    chunk is ``502 invalid_upstream_response``. No idle timer: the pre-first-
-    token silence of a chat-completions source is prompt processing.
+    A budget or transport failure is the ``502 model_source_unreachable``
+    verdict the open gives the first-frame phase; ``None`` when the ``2xx``
+    stream ends before its first chunk -- the client already holds the
+    ``200`` and headers, so the caller ends the body instead of raising into
+    it (decision 50). No idle timer: the pre-first-token silence of a
+    chat-completions source is prompt processing.
     """
 
     try:
         return await anext(chunks)
     except StopAsyncIteration:
-        raise _empty_stream_error(response_status) from None
+        return None
     except (aiohttp.ClientError, TimeoutError) as exc:
         raise _unreachable_error(exc) from exc
 
@@ -582,7 +583,12 @@ async def _source_stream_body(
     yielded before reading further) or ``None`` when the open returned at the
     headers (chat-completions streams): then the first chunk is read here,
     under the source's total budget alone and without the idle timer, and
-    ``usage_holder.first_frame_at`` is stamped when it arrives. Every chunk
+    ``usage_holder.first_frame_at`` is stamped when it arrives. A ``2xx``
+    source that closes before that first chunk ends the body cleanly -- the
+    client already holds the ``200`` and headers, so the empty stream ``main``
+    relayed is what it receives, never an exception out of a started body --
+    and ``first_frame_at`` stays ``None`` as the stream owner's evidence for
+    the ``invalid_upstream_response`` verdict (decision 50). Every chunk
     read after the first frame is bounded by ``idle_seconds``
     (``source_stream_idle_seconds()``) through the scheduler seam rather than
     aiohttp's ``sock_read``: the socket timer is armed from request send and a
@@ -626,7 +632,11 @@ async def _source_stream_body(
             # The open returned at the headers: a client that leaves during
             # prompt processing cancels this wait, and the ``finally`` below
             # releases the connection and the pooled lease at once.
-            chunk = await _first_source_chunk(chunks, response.status)
+            chunk = await _first_source_chunk(chunks)
+            if chunk is None:
+                # EOF before the first chunk: a clean empty stream to the
+                # client that already holds the ``200`` (``main`` parity).
+                return
             usage_holder.first_frame_at = clock.monotonic()
         while True:
             if chunk is None:
@@ -756,7 +766,7 @@ async def _open_source_stream(
         except aiohttp.ClientError as exc:
             raise _unreachable_error(exc) from exc
         if not first_chunk:
-            raise _empty_stream_error(response.status)
+            raise empty_stream_error(response.status)
         return stack, response, first_chunk
     except BaseException:
         await _await_cleanup_deferring_cancellation(stack.aclose(), scheduler=scheduler)
@@ -902,7 +912,9 @@ def _idle_timeout_error(idle_seconds: float) -> ModelSourceForwardingError:
     )
 
 
-def _empty_stream_error(response_status: int) -> ModelSourceForwardingError:
+def empty_stream_error(response_status: int) -> ModelSourceForwardingError:
+    """A ``2xx`` stream that ended before its first chunk: the open's verdict, and the stream owners' row verdict."""
+
     return ModelSourceForwardingError(
         status_code=502,
         payload={

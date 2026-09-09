@@ -562,6 +562,85 @@ async def test_chat_stream_client_leaving_during_prompt_processing_releases_the_
         assert log.error_code == "client_disconnected"
 
 
+async def _empty_2xx_chat_stream(request: web.Request) -> web.StreamResponse:
+    """A source that answers ``200 text/event-stream`` and closes without a single body chunk."""
+
+    response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+    await response.prepare(request)
+    await response.write_eof()
+    return response
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_empty_2xx_source_ends_the_started_body_cleanly_and_records_the_verdict(
+    async_client, source_upstream
+):
+    """The ``200`` and headers reached the client at the source's headers, so a source that closes before its first
+    chunk ends the body as the clean empty stream ``main`` relayed -- no exception escapes the started ASGI body --
+    while the request-log row keeps the ``error invalid_upstream_response`` verdict, not ``main``'s ``success``."""
+
+    base_url = await source_upstream(_empty_2xx_chat_stream)
+    model = "source-empty-chat-stream-model"
+    source_id = await _create_model_source(async_client, name="empty-chat-stream", model=model, base_url=base_url)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        body = b"".join([chunk async for chunk in response.aiter_bytes()])
+    assert body == b""
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.model_source_id == source_id
+        assert (log.status, log.error_code) == ("error", "invalid_upstream_response")
+        assert log.error_message == "OpenAI-compatible model source closed the stream before the first frame"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_empty_2xx_source_answers_502_to_a_limited_key_before_any_byte(async_client, source_upstream):
+    """The limited-key chat stream is buffered, so nothing reached the client yet: the empty-stream verdict is the
+    open's own ``502 invalid_upstream_response`` and the reservation is released."""
+
+    await _enable_api_key_auth(async_client)
+    base_url = await source_upstream(_empty_2xx_chat_stream)
+    model = "source-empty-chat-stream-limited-model"
+    source_id = await _create_model_source(
+        async_client, name="empty-chat-stream-limited", model=model, base_url=base_url
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "empty-chat-stream-limited-key",
+            "assignedSourceIds": [source_id],
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100_000}],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "invalid_upstream_response"
+    async with SessionLocal() as session:
+        reservation = (
+            await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id))
+        ).scalar_one()
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert (reservation.status, limits[0].current_value) == ("released", 0)
+        log = (await session.execute(select(RequestLog).where(RequestLog.model == model))).scalar_one()
+        assert (log.status, log.error_code, log.upstream_status_code) == ("error", "invalid_upstream_response", 200)
+
+
 @pytest.mark.asyncio
 async def test_source_unreachable_returns_error_envelope_and_releases_reservation(async_client):
     await _enable_api_key_auth(async_client)
@@ -1382,6 +1461,7 @@ async def test_cancelled_buffered_stream_releases_reservation(async_client, monk
             reservation=reservation,
             stream=cancelled_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             rate_limit_headers={},
         )
 
@@ -1446,6 +1526,7 @@ async def test_cancelled_buffered_stream_releases_reservation_when_close_fails(a
             reservation=reservation,
             stream=cancelled_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             rate_limit_headers={},
         )
 
@@ -1515,6 +1596,7 @@ async def test_cancelled_buffered_stream_finishes_usage_settlement(async_client,
             reservation=reservation,
             stream=complete_stream(),
             usage_holder=usage_holder,
+            upstream_status_code=200,
             rate_limit_headers={},
         )
     )
@@ -1589,6 +1671,7 @@ async def test_cancelled_buffered_stream_logs_disconnect(async_client, monkeypat
             reservation=reservation,
             stream=cancelled_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             rate_limit_headers={},
         )
 
@@ -1982,6 +2065,7 @@ async def test_buffered_stream_cancellation_logs_disconnect_even_if_release_fail
             reservation=reservation,
             stream=cancelled_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             rate_limit_headers={},
         )
 
@@ -2258,6 +2342,7 @@ async def test_downstream_disconnect_closes_source_stream(async_client, monkeypa
         proxy_api._source_chat_stream_with_settlement(
             source_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             request=request,
             source=source,
             api_key=None,
@@ -2321,6 +2406,7 @@ async def test_source_stream_disconnect_logs_cancelled_not_error(async_client, d
         proxy_api._source_chat_stream_with_settlement(
             source_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             request=request,
             source=source,
             api_key=None,
@@ -2411,6 +2497,7 @@ async def test_source_stream_settlement_cancellation_logs_cancelled_not_success(
         async for _chunk in proxy_api._source_chat_stream_with_settlement(
             source_stream(),
             usage_holder=usage_holder,
+            upstream_status_code=200,
             request=request,
             source=source,
             api_key=None,
@@ -3596,6 +3683,7 @@ async def test_buffer_limit_closes_abandoned_upstream_stream(async_client, monke
         reservation=None,
         stream=big_stream(),
         usage_holder=SourceUsageHolder(),
+        upstream_status_code=200,
         rate_limit_headers={},
     )
 

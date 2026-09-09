@@ -468,6 +468,25 @@ class SourceDispatch:
     def pin_failure_row_code(self) -> str:
         return self.pin_unverified_error_code if self.pin_outcome == "unknown" else self.pin_failure_error_code
 
+    def observe_first_output_item(self) -> None:
+        """The body released the source's first output item past the pin hook: a half-open breaker trial closes now.
+
+        Called once by ``settlement_stream`` (design §8.3, CL-2); the
+        concurrency slot stays held until ``finish()``. Failure-isolated: the
+        breaker never breaks a stream that is delivering.
+        """
+
+        self.first_output_item_seen = True
+        try:
+            self.claims.observe_first_output_item()
+        except Exception:
+            logger.warning(
+                "source_dispatch_first_output_item_failed request_id=%s source_id=%s",
+                self.request_id,
+                self.source.id,
+                exc_info=True,
+            )
+
     # -- hooks ----------------------------------------------------------------------
 
     async def on_first_content(self, holder: SourceUsageHolder) -> None:
@@ -1028,9 +1047,19 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     completed_normally = False
     timeout_phase: TimeoutPhase | None = None
     relayed_kind: str | None = None
+    holder = owner.usage_holder
+    # One attribute read per chunk until the parser reports the first output
+    # item: a half-open breaker trial closes at the item, not at the terminal
+    # (design §8.3). The parser runs ahead of this layer, so the flag is set by
+    # the time the frame carrying the item -- or the bookkeeping the body
+    # flushed ahead of it behind the pin hook -- reaches the transport.
+    awaiting_first_item = holder is not None and not owner.first_output_item_seen
     owner.body_started = True
     try:
         async for chunk in wrapped:
+            if awaiting_first_item and holder is not None and holder.first_output_item_seen:
+                awaiting_first_item = False
+                owner.observe_first_output_item()
             if _is_event_frame(chunk):
                 if relayed_kind not in _FAILURE_TERMINAL_KINDS:
                     frame_kind = relayed_terminal_kind(chunk)

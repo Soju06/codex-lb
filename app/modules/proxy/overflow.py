@@ -349,7 +349,11 @@ class BreakerToken(TrialClaim):
     """Lease handed to one overflow dispatch; ``settle`` is told the outcome exactly once.
 
     Issued in ``closed`` (records failures toward the threshold) and
-    ``half_open`` (the single leased trial); never in ``open``.
+    ``half_open`` (the single leased trial); never in ``open``. A trial token
+    concludes at the dispatch's first output item (``observe_first_output_item``
+    closes the breaker, design §8.3) and then counts like a closed-state token
+    at its terminal ``settle``, so a stream that stalls after its first item is
+    still a counted failure.
     """
 
     __slots__ = ("_breaker", "_issued_at", "_settled", "kind", "source_id")
@@ -368,6 +372,21 @@ class BreakerToken(TrialClaim):
     @property
     def settled(self) -> bool:
         return self._settled
+
+    def observe_first_output_item(self) -> None:
+        """The dispatch yielded its first output item: a half-open trial succeeded and the breaker closes now.
+
+        The token stays unsettled and becomes a ``closed``-state token, so the
+        terminal ``settle`` still counts a failure later in the same stream
+        toward the threshold. A ``closed``-issued token is unaffected -- its
+        terminal result decides, otherwise three item-then-stall streams could
+        never open the breaker -- and a superseded lease stays superseded.
+        """
+
+        if self._settled or self.kind != "trial":
+            return
+        if self._breaker._trial_succeeded(self):
+            self.kind = "closed"
 
     def settle(self, result: TrialResult) -> None:
         if self._settled:
@@ -390,10 +409,11 @@ class SourceBreaker:
     consecutive counted failures open the breaker for ``BREAKER_OPEN_SECONDS``.
     ``open``: no token (fresh declines ``breaker_open``, pinned/anchored answer
     503). ``half_open``: one leased trial token at a time
-    (``TRIAL_LEASE_TTL_SECONDS`` backstop for a lost claim); its ``success``
-    closes, ``failure`` re-opens, ``inconclusive`` (a decline, a client cancel
-    before the first item, a pin failure) releases the trial so the next
-    request becomes it (CL-2). A token that no longer describes the current
+    (``TRIAL_LEASE_TTL_SECONDS`` backstop for a lost claim); its first output
+    item closes the breaker at once (the slot stays with the dispatch owner),
+    a terminal ``success`` closes, ``failure`` re-opens, ``inconclusive`` (a
+    decline, a client cancel before the first item, a pin failure) releases
+    the trial so the next request becomes it (CL-2). A token that no longer describes the current
     state (a closed-issued token settled after the trip, a superseded lease)
     is ignored. Counts only overflow dispatches; direct routing keeps
     ``try_claim(source)`` without a token (documented deviation).
@@ -453,6 +473,15 @@ class SourceBreaker:
         token = BreakerToken(self, source_id, issued_at=now, kind="trial")
         entry.trial = token
         return token
+
+    def _trial_succeeded(self, token: BreakerToken) -> bool:
+        """The half-open trial yielded its first output item: close now (§8.3); ``False`` for a superseded lease."""
+
+        entry = self._entries.get(token.source_id)
+        if entry is None or entry.trial is not token:
+            return False
+        self._close(entry, token.source_id, cause="trial_first_output_item")
+        return True
 
     def _settle(self, token: BreakerToken, result: TrialResult) -> None:
         entry = self._entries.get(token.source_id)

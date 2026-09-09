@@ -242,6 +242,85 @@ def test_trial_lease_expiry_readmits_and_the_stale_lease_is_ignored(clock: Virtu
     assert breaker.state(SRC, clock.monotonic()) == "open"
 
 
+def test_trial_first_output_item_closes_the_breaker_while_the_stream_runs(clock: VirtualClock, caplog) -> None:
+    """Design §8.3: the first output item yielded closes the breaker. Mutant (the trial settles only at the
+    terminal): a recovered source streaming a long answer keeps the breaker half-open with the lease held, and every
+    other overflow request is ``breaker_open`` until that stream ends or the 120 s lease expires."""
+
+    breaker = SourceBreaker(clock=clock)
+    _open(breaker, clock)
+    clock.advance(BREAKER_OPEN_SECONDS)
+    trial = breaker.claim(SRC, clock.monotonic())
+    assert trial is not None and trial.kind == "trial"
+    assert breaker.claim(SRC, clock.monotonic()) is None
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.overflow")
+
+    trial.observe_first_output_item()
+
+    assert breaker.state(SRC, clock.monotonic()) == "closed"
+    assert "model_source_breaker state=closed" in caplog.text and "cause=trial_first_output_item" in caplog.text
+    # The trial's stream is still running: other requests flow with closed-state tokens.
+    concurrent = breaker.claim(SRC, clock.monotonic())
+    assert concurrent is not None and concurrent.kind == "closed"
+    assert trial.settled is False
+    trial.settle("success")
+    concurrent.settle("success")
+    assert breaker.state(SRC, clock.monotonic()) == "closed" and breaker.failures(SRC) == 0
+
+
+def test_trial_that_stalls_after_its_first_item_counts_one_closed_failure(clock: VirtualClock) -> None:
+    """A post-item idle timeout or transport drop is a counted failure (design §8.3): the trial closed the breaker
+    at its first item and its terminal ``failure`` counts toward the next trip like any closed-state token."""
+
+    breaker = SourceBreaker(clock=clock)
+    _open(breaker, clock)
+    clock.advance(BREAKER_OPEN_SECONDS)
+    trial = breaker.claim(SRC, clock.monotonic())
+    assert trial is not None
+    trial.observe_first_output_item()
+    trial.settle("failure")
+    assert breaker.state(SRC, clock.monotonic()) == "closed"
+    assert breaker.failures(SRC) == 1
+    _fail(breaker, clock, BREAKER_FAILURE_THRESHOLD - 1)
+    assert breaker.state(SRC, clock.monotonic()) == "open"
+
+
+def test_first_output_item_on_a_closed_token_leaves_the_terminal_result_to_decide(clock: VirtualClock) -> None:
+    """Mutant: an early ``success`` at the first item resets the consecutive count, so three item-then-stall
+    streams -- each a counted failure -- could never open the breaker."""
+
+    breaker = SourceBreaker(clock=clock)
+    for _ in range(BREAKER_FAILURE_THRESHOLD):
+        token = breaker.claim(SRC, clock.monotonic())
+        assert token is not None and token.kind == "closed"
+        token.observe_first_output_item()
+        assert breaker.state(SRC, clock.monotonic()) == "closed"
+        token.settle("failure")
+    assert breaker.state(SRC, clock.monotonic()) == "open"
+
+
+def test_first_output_item_is_idempotent_and_ignored_for_settled_or_superseded_tokens(clock: VirtualClock) -> None:
+    breaker = SourceBreaker(clock=clock)
+    _open(breaker, clock)
+    clock.advance(BREAKER_OPEN_SECONDS)
+    lost = breaker.claim(SRC, clock.monotonic())
+    assert lost is not None
+    clock.advance(TRIAL_LEASE_TTL_SECONDS + 1)
+    replacement = breaker.claim(SRC, clock.monotonic())
+    assert replacement is not None and replacement is not lost
+    # A superseded lease turning up with an item changes nothing and stays superseded for its terminal settle.
+    lost.observe_first_output_item()
+    assert breaker.state(SRC, clock.monotonic()) == "half_open" and lost.kind == "trial"
+    lost.settle("failure")
+    assert breaker.state(SRC, clock.monotonic()) == "half_open"
+    replacement.observe_first_output_item()
+    replacement.observe_first_output_item()
+    assert breaker.state(SRC, clock.monotonic()) == "closed"
+    replacement.settle("success")
+    replacement.observe_first_output_item()
+    assert breaker.state(SRC, clock.monotonic()) == "closed" and breaker.failures(SRC) == 0
+
+
 def test_gauge_follows_the_transitions(clock: VirtualClock, gauge: _Gauge) -> None:
     breaker = SourceBreaker(clock=clock)
     _open(breaker, clock)

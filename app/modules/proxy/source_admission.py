@@ -81,7 +81,9 @@ def get_source_bulkhead() -> SourceBulkhead:
 
 
 class TrialClaim(Protocol):
-    """Half-open breaker trial lease (WP-C2): told the dispatch outcome exactly once."""
+    """Half-open breaker trial lease (WP-C2): told the first output item once and the dispatch outcome exactly once."""
+
+    def observe_first_output_item(self) -> None: ...
 
     def settle(self, result: TrialResult) -> None: ...
 
@@ -106,6 +108,18 @@ class SourceAdmission:
 
         if self.owner is None:
             self._release("inconclusive")
+
+    def observe_first_output_item(self) -> None:
+        """Owner hook at the source's first output item: a half-open trial closes the breaker now (design §8.3).
+
+        The concurrency slot stays held -- only the owner's terminal latch
+        releases it -- and the trial is still settled with the slot, so a
+        counted failure later in the same stream reaches the breaker.
+        """
+
+        if self.released or self.trial is None:
+            return
+        self.trial.observe_first_output_item()
 
     def release(self, trial_result: TrialResult) -> None:
         """Owner latch: release the slot and hand the trial outcome to the breaker (when there is one)."""

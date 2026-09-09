@@ -1018,8 +1018,8 @@ class _HTTPBridgeStreamingMixin:
         # policy can resolve a sticky follow-up straight back to the
         # unavailable websocket upstream.
         if force_upstream_stream_transport is None and upstream_websocket_transport_recently_failed():
-            record_http_bridge_routing(stage="bypass", reason="recent_ws_failure")
             if runtime_config.enabled:
+                record_http_bridge_routing(stage="bypass", reason="recent_ws_failure")
                 logger.info(
                     "stream_responses bypassing http bridge for recent upstream websocket transport failure "
                     "request_id=%s",

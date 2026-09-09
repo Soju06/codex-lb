@@ -70,3 +70,13 @@ from surrounding imports.
 Tests used `python -m pytest ... -q --tb=short --timeout=60`. The previously
 reproduced idle-recovery timeout is documented above; that unrelated test was
 not rerun in this focused post-rebase validation.
+
+## Review follow-up
+
+The recent-WS-failure counter is now emitted only if that gate disables an
+admitted bridge. Configuration-disabled and image-generation bypasses no longer
+produce a second outage bypass count; forced upstream HTTP behavior is unchanged.
+
+`test_http_promotion_accounting.py`: **13 passed**, including three explicit
+configuration/image-generation/outage precedence cases. `make lint typecheck`
+and `git diff --check` passed after this fix.

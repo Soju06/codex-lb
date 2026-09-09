@@ -11,7 +11,7 @@ from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy import service as proxy_module
 from app.modules.proxy._service import observability, support
-from app.modules.proxy._service.http_bridge import helpers
+from app.modules.proxy._service.http_bridge import helpers, streaming
 from tests.integration.test_http_responses_bridge import (
     _cleanup_http_bridge_sessions as cleanup_http_bridge_sessions,  # noqa: F401
 )
@@ -126,6 +126,35 @@ async def test_promotion_counts_reuse_separately_from_admission(async_client, pr
     assert routing_counter.labels.call_count == 2
     connection_counter.labels.assert_any_call(event="create")
     connection_counter.labels.assert_any_call(event="reuse")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate", ["disabled", "image_generation", "recent_failure"])
+async def test_http_bridge_outage_counts_only_the_gate_that_disables_bridge(
+    async_client, promotion_transport, monkeypatch, gate
+):
+    upstreams, raw_calls, _ = promotion_transport
+    routing_counter = Mock()
+    monkeypatch.setattr(observability, "http_bridge_routing_total", routing_counter)
+    # Model an outage observed after API admission, at the service bypass gates.
+    monkeypatch.setattr(streaming, "upstream_websocket_transport_recently_failed", lambda: True)
+    body = {"model": "gpt-5.4", "input": _promotion_history()}
+    if gate == "disabled":
+        app_settings = _make_app_settings(enabled=False)
+        monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    elif gate == "image_generation":
+        body["tools"] = [{"type": "image_generation"}]
+
+    response = await async_client.post("/v1/responses", json=body)
+
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+    bypass_reasons = [
+        call.kwargs["reason"] for call in routing_counter.labels.call_args_list if call.kwargs["stage"] == "bypass"
+    ]
+    expected = {"disabled": [], "image_generation": ["image"], "recent_failure": ["recent_ws_failure"]}
+    assert bypass_reasons == expected[gate]
 
 
 @pytest.mark.asyncio

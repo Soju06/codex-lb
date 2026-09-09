@@ -977,13 +977,25 @@ The compact list SHALL sort subscription and purchased credits independently. A 
 - **AND** persists the migrated preference
 
 ### Requirement: Dashboard settings must expose upstream proxy routing controls
-The settings dashboard MUST allow operators to inspect upstream proxy routing state, enable or disable routing, choose the default proxy pool, create proxy endpoints, create proxy pools, and add endpoints to pools.
+The settings dashboard MUST allow operators to inspect upstream proxy routing state, enable or disable routing, choose the default proxy pool, create proxy endpoints, create proxy pools, and add endpoints to pools. For every endpoint the admin API reports as `plaintextCredentials: true`, the endpoint list MUST render a warning stating that its credentials are sent unencrypted over that scheme and recommending an `https://` proxy or a credential-free IP allowlist; endpoints reported as `false` MUST render no such warning.
 
 #### Scenario: Operator creates a pool from existing endpoints
 - **GIVEN** the upstream proxy admin API returns at least one endpoint
 - **WHEN** an operator creates a pool and selects endpoint members
 - **THEN** the dashboard MUST call the pool creation API with the selected endpoint ids
 - **AND** refresh the displayed upstream proxy admin state.
+
+#### Scenario: Plaintext-credential endpoint shows a warning
+
+- **GIVEN** the upstream proxy admin API returns an endpoint with `plaintextCredentials: true`
+- **WHEN** the upstream proxy settings section renders
+- **THEN** that endpoint's row shows the plaintext-credential warning naming its scheme
+
+#### Scenario: Encrypted or credential-free endpoint shows no warning
+
+- **GIVEN** the upstream proxy admin API returns an endpoint with `plaintextCredentials: false`
+- **WHEN** the upstream proxy settings section renders
+- **THEN** that endpoint's row shows no plaintext-credential warning
 
 ### Requirement: Dashboard accounts must expose account proxy bindings
 The accounts dashboard MUST allow operators to bind an account to a proxy pool and disable an existing account binding.
@@ -2266,7 +2278,7 @@ The dashboard request-log `View Details` dialog SHALL display `latency_ms` as an
 
 ### Requirement: Dashboard serving is compressed, cache-correct, and chart-lazy
 
-Dashboard API and static-asset responses MUST be served gzip-compressed when the client accepts it, while proxy paths MUST NOT pass through a compressing wrapper. Content-hashed assets under `/assets/` MUST be served with immutable year-long `Cache-Control`; `index.html` MUST remain `no-cache`. Chart vendor code MUST NOT load before first paint: it MUST live in an async-only chunk that is neither statically imported by the entry chunk nor modulepreloaded.
+Dashboard API and static-asset responses MUST be served gzip-compressed when the client accepts it, while proxy paths MUST NOT pass through a compressing wrapper. Content-hashed assets under `/assets/` MUST be served with immutable year-long `Cache-Control`; `index.html` MUST remain `no-cache`. Chart vendor code MUST NOT load before first paint: it MUST live in an async-only chunk that is neither statically imported by the entry chunk nor modulepreloaded. Static assets MUST be served with their correct web MIME types (`.js`/`.mjs` as `text/javascript`, `.css` as `text/css`, `.svg` as `image/svg+xml`, `.json` as `application/json`, `.woff`/`.woff2` as `font/woff`/`font/woff2`, `.html` as `text/html`) regardless of the host operating system's `mimetypes` registry state, so strict browser MIME checking never rejects dashboard module scripts.
 
 #### Scenario: Assets are compressed and immutable
 
@@ -2294,6 +2306,13 @@ Dashboard API and static-asset responses MUST be served gzip-compressed when the
 - **WHEN** the built dashboard entry page loads
 - **THEN** the recharts chunk is not statically imported by the entry chunk and not modulepreloaded
 - **AND** charts render correctly once their async chunk loads
+
+#### Scenario: Module scripts survive a poisoned OS MIME registry
+
+- **GIVEN** the host operating system maps `.js` to `text/plain` in its `mimetypes` sources (e.g. Windows `HKCR` registry entries)
+- **WHEN** a browser requests a hashed `.js` asset under `/assets/`
+- **THEN** the response `Content-Type` is `text/javascript`
+- **AND** the dashboard SPA boots instead of failing strict module MIME checking
 
 ### Requirement: Account quota displays hide expired windows
 
@@ -2546,6 +2565,16 @@ The Dashboard SHALL gate overview-backed statistics, quota, projections, and acc
 
 When the initial request-log listing reaches a terminal error, the Request Logs section MUST remain visible, MUST render the listing error inside that section, MUST announce that error through an alert semantic local to the section, and MUST expose a keyboard-operable, accessibly named Retry action. Activating Retry MUST refetch only the request-log listing query and MUST NOT refetch or hide healthy overview-backed content.
 
+While the initial overview request is pending with no data, the Dashboard SHALL
+render the existing page-wide skeleton. When that request reaches a terminal
+error with no data, it MUST NOT render the skeleton; it MUST preserve the shell,
+MUST announce the error, and MUST expose a keyboard-operable Retry.
+
+Retry SHALL refetch only the overview query. The terminal error SHALL remain
+rendered and Retry SHALL remain disabled with a busy state while that no-data
+refetch is in flight. Successful refetch SHALL replace the error with overview
+content. Cached overview data SHALL remain visible on later refetch errors.
+
 #### Scenario: Initial request-log failure preserves healthy overview
 
 - **GIVEN** dashboard overview, projections, and request-log filter options load successfully
@@ -2575,6 +2604,33 @@ When the initial request-log listing reaches a terminal error, the Request Logs 
 - **WHEN** the dashboard overview is not yet available
 - **THEN** the Dashboard renders its existing page-wide loading skeleton
 - **AND** it does not render overview-backed content prematurely
+
+#### Scenario: Terminal overview failure replaces the skeleton
+
+- **GIVEN** no overview data is available
+- **WHEN** the overview query reaches terminal error
+- **THEN** shell landmarks remain mounted
+- **AND** the loading skeleton is removed
+- **AND** an alert and keyboard-operable Retry are rendered
+
+#### Scenario: Retry remains visible while fetching
+
+- **GIVEN** the terminal no-data error is rendered
+- **WHEN** the operator activates Retry
+- **THEN** only the overview query refetches
+- **AND** the error remains visible
+- **AND** Retry is disabled and exposes a busy state
+
+#### Scenario: Retry recovers in place
+
+- **WHEN** the endpoint succeeds after Retry
+- **THEN** overview content replaces the error without a full page reload
+
+#### Scenario: Cached overview survives later failure
+
+- **GIVEN** overview content already exists
+- **WHEN** a later refetch fails
+- **THEN** the content remains visible without a page-wide skeleton
 
 ### Requirement: App header brand links to dashboard
 
@@ -3347,4 +3403,622 @@ The x-axis tick format of the Account Trend and API Trend charts SHALL be `MM-DD
 
 - **WHEN** the API Trend chart renders with timestamp data
 - **THEN** the x-axis tick labels SHALL be in `MM-DD` format (e.g., `"08-09"`)
+
+### Requirement: Dashboard refresh cadence is operator-selectable
+
+The dashboard MUST let the operator select a 5, 15, 30, or 60 second refresh
+cadence. The selection MUST persist locally, default to 15 seconds, and apply to
+both overview and projection queries without enabling background-tab polling.
+Failed refreshes MUST retain the last successful query data.
+
+#### Scenario: Refresh cadence updates live dashboard queries
+
+- **GIVEN** the operator selects a 5-second dashboard refresh cadence
+- **WHEN** the dashboard overview and projection queries are active
+- **THEN** both queries poll every 5 seconds
+- **AND** the preference survives a page reload
+- **AND** a failed poll does not clear the last successful data
+
+### Requirement: First-run empty lists describe setup, not filter mismatch
+
+Accounts, APIs, and dashboard request-log empty states SHALL distinguish a
+first-run empty source list from a filtered-empty result. When the source
+list has no items and no narrowing filter is applied, the empty copy SHALL
+describe setup (no accounts yet, no API keys yet, no requests yet) and SHALL
+NOT tell the operator to adjust filters. When the source list has items, or
+request-log filters differ from their defaults, and the visible result is
+empty, the empty copy SHALL describe a filter mismatch.
+
+#### Scenario: Accounts first-run empty copy
+
+- **GIVEN** the Accounts page has no accounts
+- **WHEN** the account list renders
+- **THEN** the empty title describes that there are no accounts yet
+- **AND** the empty description does not tell the operator to adjust filters
+
+#### Scenario: Accounts filtered empty copy
+
+- **GIVEN** the Accounts page has at least one account
+- **AND** the current search or status filter matches none of them
+- **WHEN** the account list renders
+- **THEN** the empty title describes that no accounts match
+- **AND** the empty description tells the operator to adjust filters
+
+#### Scenario: APIs first-run empty copy
+
+- **GIVEN** the APIs page has no API keys
+- **WHEN** the API key list renders
+- **THEN** the empty title describes that there are no API keys yet
+- **AND** the empty description does not tell the operator to adjust filters
+
+#### Scenario: Request logs first-run empty copy
+
+- **GIVEN** the request-log listing has no rows
+- **AND** request-log filters are at their defaults
+- **WHEN** the recent-requests table renders
+- **THEN** the empty title is `No requests yet`
+- **AND** the empty description does not say that request logs match the current filters
+
+#### Scenario: Request logs filtered empty copy
+
+- **GIVEN** the request-log listing has no rows
+- **AND** at least one request-log filter differs from its default
+- **WHEN** the recent-requests table renders
+- **THEN** the empty copy describes that no request logs match the current filters
+
+### Requirement: Dashboard empty accounts include a CTA to Accounts
+
+The dashboard empty-account cards and list SHALL include a control that
+navigates to `/accounts` when the overview has no accounts.
+
+#### Scenario: Empty account cards link to Accounts
+
+- **GIVEN** the dashboard overview has no accounts
+- **WHEN** the account cards empty state renders
+- **THEN** the empty state includes a link to `/accounts`
+
+#### Scenario: Empty account list links to Accounts
+
+- **GIVEN** the dashboard overview has no accounts
+- **WHEN** the account list empty state renders
+- **THEN** the empty state includes a link to `/accounts`
+
+### Requirement: Reports line charts show no-data when daily rows are absent
+
+When a Reports line chart receives an empty daily-row array, it SHALL render
+a no-data empty state and SHALL NOT render a continuous zero-filled series
+for the selected date range. When the daily-row array has at least one row,
+the chart MAY still fill missing days with zeros.
+
+#### Scenario: Empty daily payload hides the zero-line chart
+
+- **GIVEN** `GET /api/reports` returns no daily rows
+- **WHEN** a visible Reports line chart renders
+- **THEN** the chart card shows a no-data empty state
+- **AND** it does not render an area or line series of zero values
+
+#### Scenario: Partial daily payload still fills missing days
+
+- **GIVEN** a Reports line chart receives daily rows for some days in the selected range
+- **WHEN** the chart renders
+- **THEN** missing days in that range are still filled with zero values
+
+### Requirement: Legacy firewall route expands Advanced and targets the firewall section
+
+The `/firewall` route SHALL redirect to `/settings?advanced=1#firewall`.
+Opening Settings with `advanced=1` or hash `#firewall` SHALL expand the
+Advanced settings group on first render so the firewall section mounts.
+The firewall section SHALL expose `id="firewall"`. Opening `/settings`
+without that query or hash SHALL keep Advanced collapsed by default.
+
+#### Scenario: Legacy /firewall deeplink shows the firewall section
+
+- **WHEN** an operator opens `/firewall`
+- **THEN** the SPA navigates to `/settings?advanced=1#firewall`
+- **AND** the Advanced settings group is expanded
+- **AND** the firewall section heading is visible without a further expand click
+
+#### Scenario: Plain Settings stays collapsed
+
+- **WHEN** an operator opens `/settings` without `advanced=1` and without `#firewall`
+- **THEN** the Advanced settings group remains collapsed
+- **AND** the firewall section is not mounted
+
+### Requirement: Sticky-threads copy distinguishes soft routing from hard continuation affinity
+
+The routing settings SHALL describe `Sticky threads` as a soft preference and
+SHALL state that disabling it does not disable hard Codex continuation
+affinity for requests that carry continuation state.
+
+#### Scenario: Sticky threads help copy
+
+- **WHEN** the routing settings section renders
+- **THEN** the sticky-threads description identifies the toggle as a soft preference
+- **AND** an adjacent note states that hard Codex continuation affinity is not disabled by the toggle
+
+### Requirement: Sticky thresholds are presented in percent used with a remaining equivalent
+
+The sticky reallocation threshold controls SHALL name the quota window they
+apply to, SHALL state that the value is percent used, and SHALL show the
+quota-arithmetic remaining percent for a valid threshold value, qualified so
+it is not presented as the exact account-page remaining figure (routing adds
+temporary in-flight pressure on top of reported usage).
+
+#### Scenario: Threshold unit hint
+
+- **GIVEN** the sticky secondary threshold input holds the valid value `70`
+- **WHEN** the routing settings section renders
+- **THEN** a hint shows `70% used` alongside `30% remaining` in quota terms
+- **AND** the quota-window explainer states that in-flight work counts as temporary extra usage
+
+#### Scenario: Quota window explainer
+
+- **WHEN** the routing settings section renders
+- **THEN** an explainer identifies primary quota as the 5-hour window and secondary quota as the longer weekly window (monthly on plans without a weekly window)
+- **AND** it states that account pages show percent remaining while the thresholds are percent used
+
+### Requirement: Prefer-earlier-reset and limit warm-up copy describe actual behavior
+
+The routing settings SHALL describe `Prefer earlier reset` as preferring
+otherwise-eligible accounts whose selected quota window resets sooner, and
+SHALL describe limit warm-up as sending one small probe request that consumes
+a small amount of quota when an opted-in account's quota window is confirmed
+to have newly reset.
+
+#### Scenario: Prefer earlier reset help copy
+
+- **WHEN** the routing settings section renders
+- **THEN** the prefer-earlier-reset description says selection prefers accounts whose selected quota window resets sooner
+- **AND** it names the strategies the preference applies to (capacity weighted, usage weighted, and fill first)
+
+#### Scenario: Limit warm-up help copy
+
+- **WHEN** the routing settings section renders
+- **THEN** the limit warm-up description says a probe is sent when an opted-in account's quota window is confirmed to have newly reset
+- **AND** it states that probes are real requests and consume a small amount of quota
+
+### Requirement: Active status is presented as displayed status, not per-request eligibility
+
+The accounts list SHALL present a visible note that displayed status does not
+guarantee per-request eligibility, and SHALL annotate active rows and their
+status badges with the same hint for pointer and assistive-technology users.
+
+#### Scenario: Accounts list eligibility note
+
+- **GIVEN** the accounts list contains at least one account
+- **WHEN** the list renders
+- **THEN** a visible note states that individual requests can still skip an `Active` account
+
+#### Scenario: Active badge eligibility hint
+
+- **GIVEN** an account whose status is `active`
+- **WHEN** its accounts-list entry renders
+- **THEN** the focusable account row and the status badge carry the hint as a native tooltip and accessible description
+- **AND** non-active statuses do not carry that hint
+
+### Requirement: Configurable dashboard request-log columns
+
+The dashboard SHALL let operators show or hide request-log columns and MUST
+preserve at least one visible column. Column choices MUST be stored locally per
+browser and restored on later visits. Malformed or stale stored choices MUST
+fall back to supported defaults without preventing the dashboard from
+rendering. A restore-default action MUST clear customized visibility and width
+values.
+
+#### Scenario: Choose visible request-log columns
+
+- **WHEN** an operator selects or deselects columns in the dashboard request-log column chooser
+- **THEN** the corresponding request-log headers and cells are shown or hidden
+- **AND** the choice is restored when that browser revisits the dashboard
+
+#### Scenario: Preserve a usable table
+
+- **WHEN** only one request-log column remains visible
+- **THEN** the dashboard prevents that final column from being hidden
+
+#### Scenario: Recover from invalid stored preferences
+
+- **WHEN** stored request-log preferences are malformed or contain unsupported column identifiers
+- **THEN** the dashboard renders with supported default columns and widths
+
+### Requirement: Resizable dashboard request-log columns
+
+The dashboard SHALL render a vertical resize separator at the trailing edge of
+each visible request-log header. Dragging a separator MUST adjust that column
+within bounded minimum and maximum widths without changing other configured
+columns. Individual widths MUST be stored locally per browser and restored on
+later visits. Separators MUST support keyboard adjustment, and the table's
+minimum width MUST be derived from its visible column widths so overflow
+remains horizontally scrollable without a global table-width control.
+
+#### Scenario: Resize a request-log column by dragging
+
+- **WHEN** an operator drags a request-log header separator horizontally
+- **THEN** the corresponding header and body column change width
+- **AND** the selected width is restored on a later dashboard visit in the same browser
+
+#### Scenario: Resize a request-log column with the keyboard
+
+- **WHEN** a focused request-log header separator receives a Left or Right arrow key
+- **THEN** the corresponding column width decreases or increases by the documented step within its bounds
+
+#### Scenario: Wide columns remain reachable
+
+- **WHEN** the sum of visible request-log column widths exceeds the available viewport
+- **THEN** the table remains horizontally scrollable
+- **AND** no separate global table-width control is displayed
+
+### Requirement: Request logs surface reasoning-token usage
+
+The dashboard request-log API and UI MUST preserve and render the upstream-provided reasoning-token count separately from the inclusive output-token count. The UI MUST treat reasoning tokens as a subset of output tokens and MUST NOT add them to total-token or cost calculations.
+
+#### Scenario: Request row shows an available reasoning count
+
+- **GIVEN** a request-log row has `outputTokens=200` and `reasoningTokens=80`
+- **WHEN** the dashboard renders the recent-requests table
+- **THEN** the token cell shows 80 reasoning tokens as secondary metadata
+- **AND** the row's total-token value remains input tokens plus 200 output tokens
+
+#### Scenario: Request detail identifies the reasoning subset
+
+- **GIVEN** a request-log row has a persisted reasoning-token count
+- **WHEN** the operator opens `View Details`
+- **THEN** the dialog renders the exact reasoning-token count
+- **AND** its label identifies the count as included in output tokens
+
+#### Scenario: Missing reasoning usage is not estimated
+
+- **GIVEN** a request-log row has `reasoningTokens=null`
+- **WHEN** the dashboard renders the row and its details
+- **THEN** the dashboard does not derive a reasoning count from output text, reasoning summaries, or total output tokens
+
+### Requirement: Reports expose reasoning-token totals
+
+`GET /api/reports` MUST expose the sum of reported reasoning counts as `totalReasoningTokens` in its summary and nullable `reasoningTokens` in each daily row, using the same date, account, model, and user-agent filters as the existing token totals. The summary MUST expose `reasoningUsageKnownRequests`, counting rows whose upstream reasoning count is known, including known zeroes. The reports UI MUST label the aggregate as reported reasoning, show its known-request coverage, render it in the daily breakdown, and export it in the daily CSV. A daily row with requests but no reported reasoning counts MUST preserve `reasoningTokens=null`; known zero MUST remain zero. Existing total-token comparisons MUST remain input tokens plus inclusive output tokens, with a stored reasoning count serving as the output fallback when an older row has no output total.
+
+#### Scenario: Reports aggregate reasoning usage
+
+- **GIVEN** eligible request logs in a report window contain reasoning-token counts of 30 and 70 and one request with an unknown count
+- **WHEN** an operator requests that report window
+- **THEN** `summary.totalReasoningTokens` is 100
+- **AND** `summary.reasoningUsageKnownRequests` is 2
+- **AND** each daily row's `reasoningTokens` is the sum for that local-calendar day
+
+#### Scenario: Reports identify reasoning as an output subset
+
+- **GIVEN** a report summary has 1,000 input tokens, 400 output tokens, and 250 reasoning tokens
+- **WHEN** the dashboard renders the token summary
+- **THEN** the total remains 1,400 tokens
+- **AND** the summary identifies 250 reasoning tokens as included in the 400 output tokens
+
+#### Scenario: Daily CSV exports reasoning tokens
+
+- **WHEN** an operator exports the reports daily breakdown
+- **THEN** the CSV contains a Reported Reasoning Tokens column
+- **AND** every row contains that day's reasoning-token aggregate
+
+#### Scenario: A daily aggregate has no reported reasoning usage
+
+- **GIVEN** a report day contains requests whose reasoning-token counts are all unknown
+- **WHEN** the reports API and dashboard render that day
+- **THEN** the daily `reasoningTokens` value remains null
+- **AND** the table and CSV do not present it as a known zero
+
+#### Scenario: A legacy row has reasoning usage but no output total
+
+- **GIVEN** an eligible request log has `outputTokens=null` and `reasoningTokens=40`
+- **WHEN** the report aggregates inclusive output tokens
+- **THEN** the row contributes 40 output tokens and 40 reported reasoning tokens
+- **AND** reasoning is not added to that output total a second time
+
+### Requirement: Reports full-value USD displays use grouped currency formatting
+
+The dashboard SHALL render non-compact USD Cost values on `/reports` through the shared currency formatter so values at or above one thousand include locale-appropriate grouping separators and exactly two fractional digits. This requirement applies to the Total Cost summary value, its average-cost-per-day subtitle, Daily Breakdown Cost cells, and Cost by Day axis and tooltip values.
+
+#### Scenario: Summary and daily Cost values exceed one thousand USD
+
+- **WHEN** an authenticated operator views `/reports` data whose full-value Cost amount is `1400`
+- **THEN** the Total Cost summary value renders `$1,400.00`
+- **AND** the average-cost-per-day subtitle, when its amount is `1400`, renders `$1,400.00`
+- **AND** a Daily Breakdown Cost cell whose amount is `1400` renders `$1,400.00`
+- **AND** a Cost by Day axis tick whose amount is `1400` renders `$1,400.00`
+- **AND** a Cost by Day tooltip whose amount is `1400` renders `$1,400.00`
+
+#### Scenario: Intentionally compact Cost visualization remains compact
+
+- **WHEN** an authenticated operator views a constrained Reports distribution visualization whose Cost label uses compact notation
+- **THEN** that visualization may continue to render a compact label such as `$1.4K`
+- **AND** the full-value Cost displays remain grouped currency values
+
+### Requirement: Routing settings expose inherited capacity overrides
+
+The dashboard routing settings MUST display the effective value and the raw
+override state for each of the four account-capacity settings. A `NULL` raw
+override MUST render as an empty inheritable input with the effective value
+shown as a hint. Clearing that input MUST submit explicit `null`; entering a
+nonnegative integer, or an integer from 0 to 100 for the fair-share threshold,
+MUST submit an override value. The dashboard MUST prevent invalid values from
+being saved and MUST retain the existing stream-recovery-reserve validation.
+When validating a clear of a stored override, the dashboard MUST use the
+environment baseline value rather than the currently effective override value.
+
+#### Scenario: Inherited capacity is visible
+
+- **GIVEN** a capacity override is `NULL`
+- **WHEN** routing settings render
+- **THEN** the input is empty
+- **AND** the effective environment value is shown as the inherit hint
+
+#### Scenario: Clearing an override round-trips as null
+
+- **GIVEN** a routing setting currently has a numeric override
+- **WHEN** the operator empties the field and saves
+- **THEN** the update payload contains the field with explicit `null`
+- **AND** a subsequent GET shows the effective value and a `null` override
+
+#### Scenario: Unedited fields are preserved
+
+- **GIVEN** one capacity field is cleared and sibling fields have overrides
+- **WHEN** the operator saves
+- **THEN** the payload does not pin or clear the sibling fields
+
+#### Scenario: Capacity validation remains enforced
+
+- **WHEN** the operator enters a negative value, a non-integer, a fair-share
+  value outside 0-100, or a recovery reserve above the effective stream cap
+- **THEN** the dashboard prevents the save
+
+#### Scenario: Clearing a stream limit validates against environment capacity
+
+- **GIVEN** a stored stream-limit override of 24, a stored recovery reserve of
+  3, and an environment stream limit of 2
+- **WHEN** the operator clears only the stream-limit input
+- **THEN** the dashboard prevents the save
+
+### Requirement: Settings initial load failure is actionable
+
+The Settings page SHALL render its page-wide loading skeleton only while the
+initial settings request is still pending and no settings data is available.
+
+When the initial settings request reaches a terminal error and no settings data
+is available, the Settings page MUST NOT render the loading skeleton. It MUST
+render the settings error message, MUST announce that error through an alert
+semantic, and MUST expose a keyboard-operable, accessibly named Retry action.
+When the error carries no message of its own, the page SHALL render a settings
+load-failure fallback message. Activating Retry SHALL refetch the settings
+detail query without a full page reload, and Retry SHALL be disabled while that
+refetch is in flight.
+
+When settings data is available, a settings fetch error SHALL NOT hide the
+settings form; the page SHALL keep the form rendered and surface the error
+above it.
+
+#### Scenario: Failed initial settings load replaces the skeleton
+
+- **GIVEN** no settings data is available
+- **WHEN** the initial settings request reaches a terminal error
+- **THEN** the Settings page does not render its loading skeleton
+- **AND** the settings error message is rendered and announced through an alert semantic
+- **AND** an accessibly named Retry action is available
+
+#### Scenario: Retry refetches settings in place
+
+- **GIVEN** the initial settings request has failed and no settings data is available
+- **WHEN** the operator activates Retry
+- **THEN** the settings detail query is refetched
+- **AND** no full page reload occurs
+
+#### Scenario: Retry is disabled while the refetch is in flight
+
+- **GIVEN** the initial settings request has failed and no settings data is available
+- **WHEN** a settings refetch is in flight
+- **THEN** the Retry action is disabled
+
+#### Scenario: Pending initial settings load keeps the skeleton
+
+- **GIVEN** no settings data is available and no settings error has occurred
+- **WHEN** the initial settings request is still pending
+- **THEN** the Settings page renders its loading skeleton
+- **AND** no settings error message or Retry action is rendered
+
+#### Scenario: Settings error with cached data keeps the form visible
+
+- **GIVEN** settings data is available
+- **WHEN** a settings fetch error is present
+- **THEN** the settings form sections remain rendered
+- **AND** the settings error message is rendered above them
+- **AND** the loading skeleton is not rendered
+
+### Requirement: Dashboard route transitions preserve intentional scroll behavior
+
+The dashboard SPA MUST reset the window to the top when a client-side `PUSH` or `REPLACE` navigation changes the final destination pathname and the destination has no hash. A compatibility route that immediately replaces itself with a hashed destination MUST be treated as part of that hash-target navigation rather than as an independent destination. The same rule MUST apply to desktop and mobile top-level navigation. The SPA MUST NOT perform that reset for browser-history `POP` navigation, same-path query changes, or destinations with a hash.
+
+#### Scenario: Desktop top-level navigation opens the destination at the top
+
+- **GIVEN** a desktop user has scrolled a dashboard page below its heading
+- **WHEN** the user activates a top-level link to a different pathname without a hash
+- **THEN** the destination opens with `window.scrollY` equal to `0`
+- **AND** the destination heading is visible in the viewport
+
+#### Scenario: Mobile top-level navigation opens the destination at the top
+
+- **GIVEN** a mobile user has scrolled a dashboard page below its heading
+- **WHEN** the user opens the header menu and activates a top-level link to a different pathname without a hash
+- **THEN** the destination opens with `window.scrollY` equal to `0`
+- **AND** the destination heading is visible in the viewport
+
+#### Scenario: Browser history keeps its restoration position
+
+- **GIVEN** the browser has a stored scroll position for an earlier pathname
+- **WHEN** the user returns through back or forward history navigation
+- **THEN** the route shell does not reset the window scroll position
+
+#### Scenario: Query-only navigation keeps the current position
+
+- **GIVEN** the user is viewing a dashboard pathname at a nonzero scroll position
+- **WHEN** an in-app filter or view change updates only that pathname's query string
+- **THEN** the route shell does not reset the window scroll position
+
+#### Scenario: Settings and Firewall hashes retain target scrolling
+
+- **WHEN** navigation targets `/settings?advanced=1#firewall` directly or through the `/firewall` or `/firewall/` compatibility redirect
+- **THEN** the route shell does not reset the window to the top
+- **AND** the existing Settings hash behavior brings the Firewall target into view
+
+### Requirement: Affected Settings dialogs restore invoker focus
+
+The Settings `View collected data` telemetry preview and `Set password` setup dialogs SHALL retain the exact button that invoked them. When either dialog is dismissed with Escape or its explicit Close/Cancel action, the dialog SHALL restore focus to that connected invoking button without changing the Settings page scroll position. After restoration, `document.body` MUST NOT be the active element.
+
+Focus restoration MUST preserve the telemetry preview's on-demand fetch and conditional mounting behavior and the password setup flow's authentication request, session refresh, toast, form reset, and conditional mounting behavior. Password change, remove, verify, and TOTP dialogs are outside this requirement.
+
+#### Scenario: Telemetry preview closes with Escape
+
+- **GIVEN** an operator opened `View collected data` from its Settings button
+- **WHEN** the operator presses Escape
+- **THEN** the preview dialog closes
+- **AND** focus returns to that exact `View collected data` button without scrolling Settings
+- **AND** `document.body` is not active
+
+#### Scenario: Telemetry preview closes explicitly
+
+- **GIVEN** an operator opened `View collected data` from its Settings button
+- **WHEN** the operator activates the dialog's Close action
+- **THEN** the preview dialog closes
+- **AND** focus returns to that exact `View collected data` button without scrolling Settings
+- **AND** `document.body` is not active
+
+#### Scenario: Password setup closes with Escape
+
+- **GIVEN** an operator opened password setup from the `Set password` button
+- **WHEN** the operator presses Escape
+- **THEN** the setup dialog closes without submitting password setup
+- **AND** focus returns to that exact `Set password` button without scrolling Settings
+- **AND** `document.body` is not active
+
+#### Scenario: Password setup closes explicitly
+
+- **GIVEN** an operator opened password setup from the `Set password` button
+- **WHEN** the operator activates Cancel
+- **THEN** the setup dialog closes without submitting password setup
+- **AND** focus returns to that exact `Set password` button without scrolling Settings
+- **AND** `document.body` is not active
+
+### Requirement: API key create dialog remains usable in compact viewports
+
+The dashboard API key create dialog MUST constrain its outer shell to the visible viewport. Its title, Close control, and Create action MUST remain fully visible at a 320x568 viewport, and every form field MUST remain reachable through exactly one internal vertical scroll region. The header and footer MUST remain outside that scroll region. The dialog SHALL retain its stacked compact layout, two-column desktop layout, shared Dialog primitive, field behavior, and overlay and Escape dismissal behavior.
+
+#### Scenario: Compact viewport keeps primary controls visible
+
+- **WHEN** an operator opens Create API Key from `/apis` at a 320x568 viewport
+- **THEN** the dialog title, Close control, and Create action are fully inside the viewport
+- **AND** the dialog shell does not extend above or below the viewport
+
+#### Scenario: Compact form fields use one internal scroller
+
+- **WHEN** the create form fields exceed the height available between the dialog header and footer
+- **THEN** all General and Limits fields are reachable through one internal vertical scroll region
+- **AND** the dialog header and footer remain outside the scroll region
+
+#### Scenario: Larger compact and desktop layouts remain responsive
+
+- **WHEN** an operator opens Create API Key at 390x844 or a desktop viewport
+- **THEN** the dialog remains inside the viewport with its primary controls visible
+- **AND** the form is stacked below the desktop breakpoint and uses two columns at the desktop breakpoint
+
+#### Scenario: Existing dismissal behavior is preserved
+
+- **WHEN** an operator presses Escape or activates the dialog overlay while no nested menu surface is active
+- **THEN** the create dialog closes through the shared Dialog primitive
+
+### Requirement: Dashboard usage content remains contained on mobile
+
+The dashboard MUST keep the document width within the visible viewport at 320x568 and 390x844. Both usage donut cards, their horizontal content rows, fixed-size charts, and legends MUST remain within the dashboard content width. The request table MAY exceed the viewport width only inside its own horizontal scroller and MUST NOT widen the document. The dashboard SHALL preserve the two-column usage layout and page-level containment at a 1440x900 desktop viewport.
+
+#### Scenario: Usage donuts fit the smallest supported mobile viewport
+
+- **WHEN** an authenticated operator opens `/dashboard` at 320x568 with account usage in both quota windows
+- **THEN** the document does not scroll horizontally
+- **AND** both usage donut cards and their rendered content remain within the dashboard content width
+- **AND** the account-section heading and summary remain within the document width
+
+#### Scenario: Usage donuts fit the larger mobile viewport
+
+- **WHEN** the same dashboard data renders at 390x844
+- **THEN** the document does not scroll horizontally
+- **AND** both usage donut cards remain within the dashboard content width
+
+#### Scenario: Request table keeps local horizontal scrolling
+
+- **WHEN** the request table's columns require more width than the mobile content area
+- **THEN** the table remains wider than its local horizontal scroller
+- **AND** the scroller contains that width without widening the document
+
+#### Scenario: Desktop layout remains contained
+
+- **WHEN** the same dashboard data renders at 1440x900
+- **THEN** the usage donuts render in two columns
+- **AND** the document remains horizontally contained
+- **AND** the request table retains its local horizontal scrolling when its columns exceed the available section width
+
+### Requirement: Dashboard request-log filters use symbolic rolling timeframes
+
+For `1h`, `24h`, and `7d`, the dashboard MUST send symbolic `timeframe` to
+listing and options and MUST NOT send browser-generated `since`. Selecting
+`all` MUST omit both. Refetches MUST preserve all applicable manual filters.
+
+#### Scenario: Browser skew does not alter request-log filters
+
+- **WHEN** the dashboard fetches or refetches `timeframe=24h`
+- **THEN** both requests contain `timeframe=24h`
+- **AND** neither contains `since`
+
+### Requirement: Background request-log failure preserves retained rows
+
+When a page loaded successfully and a later refresh fails, Request Logs MUST
+keep the last successful filters, rows, total, and pagination visible. It MUST
+also announce the current failure with a section-local alert and expose Retry.
+Error-only rendering remains valid only before any page succeeds.
+
+#### Scenario: Failed refresh retains table
+
+- **GIVEN** a successful request-log page is visible
+- **WHEN** a later refresh reaches terminal failure
+- **THEN** the table and rows remain visible
+- **AND** the section exposes alert and Retry
+
+### Requirement: Dashboard route failures preserve a recoverable shell
+
+The authenticated dashboard SHALL retain its header, main landmark, status
+region, and React root when a route is unknown, pending, or fails to render.
+Unknown routes MUST render localized Not Found status and a keyboard Dashboard
+link. Pending lazy routes MUST render visible loading status. Rejected lazy
+imports MUST render an announced error with keyboard reload and Dashboard
+actions. Reload MUST fully navigate the current URL so the browser requests the
+current asset graph. Route-level code splitting MUST remain intact.
+
+#### Scenario: Unknown route retains shell
+
+- **WHEN** an authenticated operator opens an unknown path
+- **THEN** shell landmarks remain rendered
+- **AND** Not Found receives focus
+- **AND** a keyboard Dashboard link is available
+
+#### Scenario: Pending lazy route is visible
+
+- **WHEN** a matched lazy import remains pending
+- **THEN** shell landmarks remain
+- **AND** main renders a visible loading status
+
+#### Scenario: Rejected lazy route is contained
+
+- **WHEN** a lazy page import rejects
+- **THEN** the React root and shell remain rendered
+- **AND** an announced error receives focus
+- **AND** keyboard reload and Dashboard actions are available
+
+#### Scenario: Reload retries through current assets
+
+- **WHEN** the operator activates reload after a lazy import rejection
+- **THEN** the browser fully navigates the current URL
+- **AND** the route renders when its chunk becomes available
 

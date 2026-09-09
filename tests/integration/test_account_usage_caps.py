@@ -101,6 +101,22 @@ async def test_caps_gate_selection_and_preserve_pinned_ownership(db_setup, prima
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("observe_only", [False, True], ids=["live", "observe-only"])
+async def test_caps_gate_opportunistic_admission(db_setup, observe_only):
+    await _seed(primary=80)
+    selection = await LoadBalancer(_repos).check_opportunistic_admission(
+        model=None,
+        account_ids={"capped"},
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=100.0,
+        observe_only=observe_only,
+    )
+
+    assert selection.account is None
+
+
+@pytest.mark.asyncio
 async def test_all_fresh_candidates_capped_returns_typed_local_overload(db_setup):
     await _seed(primary=80)
     async with SessionLocal() as session:

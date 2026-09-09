@@ -161,6 +161,29 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_probe_account_refreshes_usage_cap_caches_after_usage_write(monkeypatch):
+    account = _make_account(status=AccountStatus.RATE_LIMITED)
+    service = _build_service(account=account, primary_pct=100.0, secondary_pct=80.0)
+    cache_refresh = AsyncMock()
+    selection_cache = SimpleNamespace(invalidate=Mock())
+    monkeypatch.setattr("app.modules.accounts.service.refresh_usage_cap_caches_after_write", cache_refresh)
+    monkeypatch.setattr("app.modules.accounts.service.get_account_selection_cache", lambda: selection_cache)
+
+    async def _fake_probe(**kwargs):
+        del kwargs
+        return 200
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    result = await service.probe_account(_ACCOUNT_ID)
+
+    assert result is not None
+    assert result.usage_refresh_ready_for_probe_settlement()
+    cache_refresh.assert_awaited_once_with()
+    selection_cache.invalidate.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_probe_account_reports_failed_usage_refresh(monkeypatch):
     account = _make_account(status=AccountStatus.RATE_LIMITED)
     service = _build_service(account=account, primary_pct=100.0, secondary_pct=80.0)

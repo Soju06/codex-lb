@@ -450,7 +450,13 @@ stable strings, and MUST emit a prewarm outcome counter labelled only by
 outcome. Prewarm eligibility is the prewarm enabled flag alone: no
 deterministic canary sampling or allow/deny cohort exists, so no canary
 bucket or eligibility cohort dimension is recorded and the
-`prewarm_status=canary_miss` value MUST NOT occur.
+`prewarm_status=canary_miss` value MUST NOT occur. The request-log ORM model
+MUST NOT map the legacy canary bucket or eligibility cohort columns. The
+physical columns MAY remain in the schema, allow-listed by the schema-drift
+gate, until the release after the last release whose ORM mapped them; they
+MUST NOT be dropped while a supported previous-release replica still maps
+them, because that replica renders explicit NULLs for them in every
+request-log INSERT while the migration Job runs ahead of the workload roll.
 
 #### Scenario: Prewarm outcome is visible without raw identifiers
 
@@ -468,8 +474,16 @@ bucket or eligibility cohort dimension is recorded and the
 - **THEN** no request is excluded by deterministic canary sampling
 - **AND** `prewarm_status=canary_miss` is never recorded
 - **AND** the prewarm counter and request log carry no canary bucket or
-  eligibility cohort dimension (the legacy request-log columns remain
-  unwritten for one release for rolling-upgrade safety, then are dropped)
+  eligibility cohort dimension
+
+#### Scenario: Legacy canary columns stay insertable during the rolling upgrade
+
+- **GIVEN** a database at the current Alembic head
+- **WHEN** a replica running the previous release inserts a request log with
+  explicit NULL `prewarm_canary_bucket` / `prewarm_eligible_reason` values
+- **THEN** the insert succeeds because both physical columns still exist
+- **AND** the current release's `RequestLog` model does not map either column
+- **AND** the schema-drift check reports no drift for the retained columns
 
 ### Requirement: 24-hour TTFT breakdown queries are available
 
@@ -860,4 +874,405 @@ operator action, and `0` MUST disable the watchdog.
 
 - **WHEN** `event_loop_lag_warn_threshold_seconds` is set to `0`
 - **THEN** the watchdog task is not started
+
+### Requirement: Unroutable upstream bridge events are logged
+
+An HTTP bridge session multiplexes one upstream connection across its pending requests.
+When an upstream event cannot be attributed to any pending request, the service MUST log
+it once with the event type, whether the event carried a response id, and the count of
+pending requests on that session. The log MUST NOT include raw prompt-cache keys,
+session ids, response ids, or payload content.
+
+Terminal bookkeeping events that are expected to arrive with no pending request — the
+drain and retirement paths that already run after a session's requests have been
+settled — MUST NOT be logged as unroutable, so the signal stays specific to events that
+were dropped while work was still waiting.
+
+#### Scenario: Event arrives with no pending request to receive it
+
+- **GIVEN** an HTTP bridge session with at least one pending request
+- **WHEN** an upstream event matches none of those pending requests
+- **THEN** the service logs the event type and the pending-request count
+- **AND** the log contains no response id, prompt-cache key, or payload content
+
+#### Scenario: Routed events stay silent
+
+- **WHEN** an upstream event is attributed to a pending request
+- **THEN** no unroutable-event log is emitted for it
+
+### Requirement: WebSocket scope cleanup timeout identifies its blocked phase
+
+When WebSocket scope finalization exceeds its cleanup budget, the proxy MUST
+include the current cleanup phase in the existing warning. The phase MUST be a
+fixed low-cardinality value that identifies the cleanup operation and MUST NOT
+contain request ids, account ids, request payloads, credentials, or exception
+content. This diagnostic MUST NOT change cleanup ordering, timeout budgets,
+retry behavior, or task ownership.
+
+The phase MUST be one of `not_started`, `upstream_close`, `upstream_reader`,
+`retired_create_lease`, `unsent_request`, `replay_request`, `pending_requests`,
+`connection_lease`, or `complete`. `not_started` is the fallback before the
+first cleanup operation begins. `complete` records finished cleanup and MUST NOT
+appear in a timeout warning. Missing or unrecognized phases MUST fall back to
+`not_started`; implementations MUST NOT derive a phase from request or exception
+data.
+
+#### Scenario: Pending request finalization exceeds the cleanup budget
+
+- **GIVEN** a cancelled WebSocket scope whose pending request finalization does
+  not finish within the cleanup budget
+- **WHEN** the proxy emits the cleanup-budget warning
+- **THEN** the warning includes `cleanup_phase=pending_requests`
+- **AND** the cleanup remains owned by the existing background drain
+
+#### Scenario: Diagnostic phase remains low-cardinality
+
+- **WHEN** any WebSocket scope cleanup phase exceeds the cleanup budget
+- **THEN** the warning identifies only a fixed cleanup phase
+- **AND** the phase contains no request id, account id, payload, credential, or
+  exception content
+
+### Requirement: Durable transcript cleanup exposes bounded aggregate telemetry
+
+Each durable operation transcript cleanup pass MUST expose low-cardinality
+telemetry for pass duration, deleted-operation count, completion outcome, and
+whether the pass stopped with likely eligible backlog remaining. Logs and
+metrics MUST NOT include prompt/output text, operation identifiers, session
+keys, account identifiers, or model names.
+
+If a later batch fails after earlier batches committed, failure telemetry MUST
+include the operations deleted and batches completed before that failure.
+
+#### Scenario: Budget exhaustion is observable
+
+- **GIVEN** eligible transcript operations remain after a cleanup pass reaches
+  its fixed budget
+- **WHEN** the pass stops
+- **THEN** aggregate telemetry reports the deleted count and a budget-exhausted
+  outcome
+- **AND** reports that backlog is likely to remain
+
+#### Scenario: A drained pass clears the backlog signal
+
+- **WHEN** a cleanup pass selects fewer operations than the repository batch
+  size, even if ownership rechecks deleted fewer rows from an earlier full
+  selection
+- **THEN** aggregate telemetry reports a completed outcome
+- **AND** clears the backlog-likely signal
+
+#### Scenario: Failed pass preserves partial progress telemetry
+
+- **GIVEN** one or more cleanup batches commit before a later batch fails
+- **WHEN** failure telemetry is recorded
+- **THEN** it includes the committed deletion and batch counts
+
+#### Scenario: Cleanup telemetry contains no sensitive labels
+
+- **WHEN** cleanup succeeds or fails
+- **THEN** its logs and metric labels contain no operation, session, account,
+  prompt, output, or model values
+
+### Requirement: Bundled Grafana latency quantiles aggregate selected buckets
+
+Every bundled Grafana request/upstream `histogram_quantile` MUST apply selected
+namespace/job filters and sum five-minute bucket rates by `le` before quantile.
+Residual method, path, instance, pod, replica, and scrape labels MUST NOT create
+additional quantile series.
+
+#### Scenario: Selected latency produces one series per quantile
+
+- **GIVEN** matching buckets span methods, paths, and scrape targets
+- **WHEN** bundled request p50/p95/p99 or upstream p99 evaluates
+- **THEN** matching rates are summed by `le` first
+- **AND** one selected-scope series remains per quantile
+
+### Requirement: High-latency alert aggregates by operational scope
+
+`CodexLBHighLatency` MUST calculate p99 from request buckets summed by
+namespace, job, and `le`. It MUST retain the ten-second threshold and
+five-minute duration.
+
+#### Scenario: Residual labels produce one alert value per scope
+
+- **GIVEN** one namespace/job has buckets across methods, paths, and replicas
+- **WHEN** the alert evaluates
+- **THEN** one aggregate p99 remains for that namespace/job
+
+### Requirement: Operation abandonment is observable
+
+When bridge maintenance moves an ambiguous operation to `abandoned`, the
+service MUST emit a structured low-cardinality diagnostic containing the
+source state, abandonment reason, bounded age, and owner-lease outcome, and
+MUST increment a Prometheus counter labeled only by source state. The
+diagnostic and metric MUST NOT contain request text, response IDs, API keys,
+account emails, or raw continuity keys.
+
+#### Scenario: stale operation abandonment is diagnosable
+
+- **WHEN** an eligible `unknown` or `acknowledged` operation is abandoned
+- **THEN** logs identify the source state and stale-owner reason
+- **AND** the abandonment counter increases for that source state
+- **AND** no sensitive request or continuity value is emitted
+
+### Requirement: Rendered log records redact URL userinfo and keyed secrets
+
+Every log record rendered by the application's text, access, and JSON
+formatters MUST have URL userinfo, in both the `scheme://user:password@` and
+the username-only `scheme://user@` forms, replaced with
+`scheme://[REDACTED]@` and `Basic <token>` authorization tokens (in the
+`Basic`, `basic` and `BASIC` scheme spellings)
+(a reversible encoding of `user:password`, as carried in aiohttp proxy-error
+reprs) replaced with `Basic [REDACTED]`, regardless of the originating logger
+(application, `asyncio`, aiohttp, uvicorn) and including exception and stack
+text. Structured extra keys MUST be redacted like values. Records at WARNING
+level or higher MUST additionally have keyed secrets (`password=`, `token=`,
+`api_key=`, bearer, basic and authorization values in any letter case, JSON
+secret fields embedded in strings, and structured extra fields whose key names
+a secret, whatever the value type) redacted. Redaction MUST never raise and
+MUST fail closed: if a redaction pass fails, the affected text is replaced with
+a `[REDACTED: log redaction failed]` placeholder and the record is still
+emitted with its timestamp, level and logger; structured extras that are cyclic,
+pathologically deep, or unprintable MUST still be emitted with redaction
+applied to every finite, printable part. Application startup MUST route
+`warnings.warn` output through the same log handlers. Log records that contain
+no secret patterns MUST render byte-identically to the unredacted rendering.
+
+#### Scenario: Unclosed aiohttp connection repr is credential-free
+
+- **GIVEN** an aiohttp connection is finalized without release and its connection key holds a credentialed proxy URL
+- **WHEN** the loop exception handler logs `Unclosed connection` through the `asyncio` logger
+- **THEN** the rendered record contains `proxy=URL('scheme://[REDACTED]@host:port')`
+- **AND** the password appears in neither the text nor the JSON rendering
+
+#### Scenario: Userinfo containing unencoded sub-delims is redacted
+
+- **GIVEN** a proxy password containing an RFC 3986 sub-delim such as `'`, which yarl leaves unencoded in the URL userinfo, or a raw environment proxy string that is not percent-encoded at all
+- **WHEN** the URL is rendered in any log record at any level
+- **THEN** the record contains `scheme://[REDACTED]@host:port` and neither the raw nor the percent-encoded password
+
+#### Scenario: Username-only URL userinfo is redacted
+
+- **GIVEN** a URL whose userinfo carries only a username (a token used as the username, `scheme://user@host:port`) with no `:password` part
+- **WHEN** the URL is rendered in any log record at any level, text or JSON
+- **THEN** the record contains `scheme://[REDACTED]@host:port` and the username does not appear
+
+#### Scenario: Proxy error repr with a Basic token is masked
+
+- **GIVEN** an aiohttp proxy error whose tunnel request headers carry `Proxy-Authorization: Basic <token>`
+- **WHEN** the error is logged with `%r` at any level, or its repr is logged by the loop's exception handler for an unretrieved task
+- **THEN** the rendered record contains `'Proxy-Authorization': 'Basic [REDACTED]'`
+- **AND** neither the token nor the password appears in the text or JSON rendering
+
+#### Scenario: Secret-keyed structured extras are masked
+
+- **GIVEN** a WARNING or higher record carries an extra field such as `{"password": "..."}` or `{"access_token": "..."}`
+- **WHEN** the JSON formatter renders the record
+- **THEN** the field value is replaced with `[REDACTED]` whatever its type (string, list, number, bytes, mapping); a null value stays null
+- **AND** fields such as `attempt` or `tokens` keep their values
+- **AND** an extra key carrying URL userinfo is rendered as `scheme://[REDACTED]@host`
+
+#### Scenario: Secret-free records are unchanged
+
+- **WHEN** a record such as the one-time bootstrap token banner contains no URL userinfo or keyed secret pattern
+- **THEN** the rendered output is byte-identical to the unredacted rendering
+
+#### Scenario: Redaction failure never breaks logging and fails closed
+
+- **WHEN** a redaction pass raises while rendering a record
+- **THEN** the record is still emitted, in text and JSON, with its timestamp, level and logger
+- **AND** the affected text is rendered as `[REDACTED: log redaction failed]` rather than the original text
+
+#### Scenario: Cyclic or unprintable structured extras never drop the record
+
+- **GIVEN** a record carries an extra whose container refers back to itself, or whose `repr()` raises
+- **WHEN** the JSON formatter renders the record
+- **THEN** the record is emitted, the back-reference collapses to a `{...}` / `[...]` placeholder and the unprintable value to an `<unprintable ...>` marker
+- **AND** secret-keyed fields and URL userinfo in the finite part of the extra are still redacted
+
+#### Scenario: Secret-keyed mappings rendered as Python repr are masked
+
+- **GIVEN** a WARNING or higher record renders a mapping with `%r`, or the JSON formatter falls back to text for a structured extra (nesting beyond the depth limit, a container whose iteration raises, an unserializable rebuild)
+- **WHEN** the rendered text contains `'password': 'x'`, `'access_token': [...]` or `'api_key': 123`
+- **THEN** each secret-keyed value is replaced with `[REDACTED]` (quotes kept for quoted strings)
+- **AND** `'Proxy-Authorization': 'Basic <token>'` keeps rendering as `'Basic [REDACTED]'`
+
+### Requirement: Loop exception handler output redacts context value reprs
+
+Application startup MUST install an asyncio loop exception handler that
+redacts the `repr()` of every context value the default handler would render
+(all keys except the textual `message`, `exception`, `source_traceback` and
+`handle_traceback` entries) before delegating to the previously installed or
+default handler. Secret-free context output MUST be byte-identical to the
+default handler output, the exception object and its traceback MUST be passed
+through unchanged, installation MUST be idempotent, and the handler MUST fail
+closed: a context value whose `repr()` raises MUST be replaced by an opaque
+stand-in, and any other failure inside the redacting handler MUST delegate a
+context that keeps the textual entries and replaces every other value with an
+opaque stand-in, so the report is still emitted and no unredacted value reaches
+the delegate.
+
+#### Scenario: Unclosed aiohttp connection repr is credential-free before logging
+
+- **GIVEN** an aiohttp connection is finalized without release and its connection key holds a credentialed proxy URL
+- **WHEN** the loop exception handler receives `Unclosed connection` with the connection object in its context
+- **THEN** the `asyncio` log record already contains `proxy=URL('scheme://[REDACTED]@host:port')`
+- **AND** the password appears nowhere in the record, independent of the formatter in use, including passwords carrying sub-delims such as `'` that yarl leaves unencoded
+
+#### Scenario: Unretrieved task exception repr is redacted
+
+- **WHEN** a task whose exception text or repr carries URL userinfo or a `Basic <token>` header is garbage-collected unretrieved
+- **THEN** the `Task exception was never retrieved` record renders the task repr with `[REDACTED]` in place of the credential
+
+#### Scenario: Secret-free contexts and failures are transparent
+
+- **WHEN** the context contains no secret pattern
+- **THEN** the emitted record message and exception info are byte-identical to the default handler output
+- **WHEN** a handler was already installed
+- **THEN** the previously installed handler still receives the (redacted) context
+- **WHEN** a context value's `repr()` raises
+- **THEN** the record is still emitted with its `message` line intact and that value rendered as an opaque stand-in naming the value type and the exception type
+- **WHEN** the redaction pass itself fails
+- **THEN** the record is still emitted with its `message`, exception and traceback entries intact and every other value rendered as an opaque redaction-failed stand-in
+
+### Requirement: Request metric labels have bounded cardinality
+
+The service MUST expose request counter and duration metrics with finite-vocabulary
+`method` and `path` labels. The `method` label MUST be one of `GET`, `POST`, `PUT`,
+`PATCH`, `DELETE`, `HEAD`, `OPTIONS`, or `OTHER`; any other HTTP method MUST map to
+`OTHER`. The `path` label MUST preserve the existing `/v1/...`, `/api/...`, and
+`/health/...` collapse values and the existing bare `/health` value. Paths under
+`/backend-api/` MUST map to `/backend-api/...`, and paths under `/internal/` MUST map
+to `/internal/...`; every other path MUST map to the single `/other` sentinel. Metric
+labels MUST NOT contain raw or truncated unmatched paths.
+
+#### Scenario: Unmatched paths share one metric label
+
+- **WHEN** requests use distinct paths outside the `/v1/`, `/api/`, `/health/`,
+  `/backend-api/`, and `/internal/` prefixes, including SPA-looking paths
+- **THEN** request counter and duration metrics use `path="/other"` for every
+  such request
+- **AND** no raw unmatched path or truncated unmatched path becomes a metric
+  label value
+
+#### Scenario: Primary proxy paths use bounded labels
+
+- **WHEN** requests use `/backend-api/codex/responses`, dynamic
+  `/backend-api/files/{file_id}/uploaded`, or `/internal/bridge/...` paths
+- **THEN** request counter and duration metrics use `/backend-api/...` for every
+  `/backend-api/` path and `/internal/...` for every `/internal/` path
+- **AND** no dynamic file ID or other raw suffix becomes a metric label value
+
+#### Scenario: Unsupported methods share the OTHER label
+
+- **WHEN** a request uses an HTTP method outside the supported method vocabulary
+- **THEN** request counter and duration metrics use `method="OTHER"`
+
+#### Scenario: Existing collapsed paths remain stable
+
+- **WHEN** a request uses a path under `/v1/`, `/api/`, or `/health/`, or uses bare `/health`
+- **THEN** the metric path label retains its existing value
+
+### Requirement: Secret-pattern redaction stays on the current line
+
+Keyed, bearer, basic, authorization, JSON, and Python-repr secret patterns
+MUST be applied independently to each CR/LF-delimited line of rendered log
+text. A match MUST NOT consume CR or LF or any text from a following line.
+Unterminated JSON secret values MUST be redacted through the end of the
+current line. A Bearer credential MUST treat a glued `:` tail on the same
+line as credential material. Same-line comma and ampersand separators MUST
+keep their existing truncation behavior. Records below WARNING MUST still
+skip these keyed patterns.
+
+#### Scenario: Authorization does not swallow the next traceback line
+
+- **GIVEN** a WARNING or higher record whose exception text contains
+  `authorization=Basic X` followed by a newline and `status=failed`
+- **WHEN** the text or JSON formatter renders the record
+- **THEN** the Basic credential is replaced with `[REDACTED]`
+- **AND** the following line still contains `status=failed`
+
+#### Scenario: Unterminated JSON secret is redacted through end of line
+
+- **GIVEN** a WARNING or higher record contains `{"token":"abc` with no
+  closing quote before the line ending, then a following `safe diagnostic line`
+- **WHEN** the text or JSON formatter renders the record
+- **THEN** the token value is replaced with `[REDACTED]`
+- **AND** `safe diagnostic line` remains
+
+#### Scenario: Bearer glued colon tail is redacted
+
+- **GIVEN** a WARNING or higher record contains
+  `Bearer abc.def:GLUEDTAIL, status=502`
+- **WHEN** the text or JSON formatter renders the record
+- **THEN** the rendered text contains `Bearer [REDACTED], status=502`
+- **AND** neither `abc.def` nor `GLUEDTAIL` appears
+
+#### Scenario: Same-line authorization truncation is unchanged
+
+- **GIVEN** a WARNING or higher record contains
+  `Authorization: Basic dXNlcjpwYXNz status=failed` on one line with no comma
+- **WHEN** the text formatter renders the record
+- **THEN** the credential is redacted
+- **AND** `status=failed` is not present on that line
+
+#### Scenario: Line terminators are preserved and redaction is idempotent
+
+- **GIVEN** rendered secret-bearing text that uses LF and CRLF separators
+- **WHEN** secret-pattern redaction is applied once and then again
+- **THEN** the terminator bytes and line count are unchanged
+- **AND** the second pass equals the first
+
+### Requirement: Upstream reasoning-replay rejections are counted
+
+When Prometheus support is available the proxy MUST expose a label-free counter
+named `codex_lb_upstream_reasoning_replay_400_total` and MUST increment it exactly
+once per upstream stream failure that is an HTTP 400 rejection, or a terminal
+`error` / `response.failed` frame carrying `invalid_request_error` without an HTTP
+status, whose error message references reasoning. Frames MUST be counted where
+the terminal frame is classified -- on the SSE streaming path, the websocket
+path, and the HTTP bridge (which finalizes through the websocket path) --
+independent of whether an account-health write follows, because
+`invalid_request_error` is never penalized and therefore never reaches the
+account-health handler. Counting MUST NOT alter failure classification, account
+health, or failover, MUST NOT log the rejection message body, and MUST degrade to
+a no-op when the Prometheus client is absent.
+
+#### Scenario: Reasoning replay rejection is counted
+
+- **WHEN** upstream rejects a stream with HTTP 400 and a message such as `Item with id 'rs_...' of type 'reasoning' was provided without its required following item.`
+- **THEN** `codex_lb_upstream_reasoning_replay_400_total` increments by one
+- **AND** the failure is classified and penalized exactly as before
+
+#### Scenario: Terminal frames are counted without an account-health write
+
+- **WHEN** an upstream SSE stream, websocket session, or HTTP-bridge session ends with a terminal `error` or `response.failed` frame whose code is `invalid_request_error` and whose message references reasoning
+- **THEN** `codex_lb_upstream_reasoning_replay_400_total` increments by exactly one
+- **AND** the frame is neither penalized nor otherwise classified differently than before
+
+#### Scenario: Other rejections are not counted
+
+- **WHEN** upstream rejects a stream with HTTP 400 without referencing reasoning, with a non-400 status whose message mentions reasoning, or with a terminal frame whose code is not `invalid_request_error`
+- **THEN** the counter does not change
+
+#### Scenario: Missing Prometheus client
+
+- **WHEN** the Prometheus client is not installed
+- **THEN** counting is a no-op and stream error handling is unchanged
+
+### Requirement: Timeout-invariant violations are diagnosable
+
+Timeout-invariant validation diagnostics SHALL include the rule id, left-hand
+setting or expression and value, relation, right-hand setting or expression and
+value, rationale, and code anchors. Diagnostics SHALL avoid request payloads,
+API keys, access tokens, raw affinity keys, account emails, and other
+high-cardinality runtime identifiers. Diagnostics SHALL describe startup
+validation of `Settings` and imported constants only, not per-request overrides,
+runtime clamps, or runtime-derived effective values.
+
+#### Scenario: Violation log names the invariant
+
+- **WHEN** startup timeout-invariant validation observes a violated rule
+- **THEN** the CRITICAL log includes that rule id and rationale
+- **AND** the log contains no request payload, API key, access token, raw
+  affinity key, or account email
 

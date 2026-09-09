@@ -41,6 +41,7 @@ from app.modules.settings.schemas import (
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
     RuntimeConnectAddressResponse,
+    SettingProvenance,
     SubscriptionOverflowPreflightResponse,
     UpstreamProxyAdminResponse,
     UpstreamProxyEndpointCreateRequest,
@@ -220,6 +221,10 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         request_log_retention_override_days=settings.request_log_retention_override_days,
         usage_history_retention_override_days=settings.usage_history_retention_override_days,
         version=settings.version,
+        provenance={
+            name: SettingProvenance(source=resolved.source, env_value=resolved.env_value, default=resolved.default)
+            for name, resolved in settings.provenance.items()
+        },
     )
 
 

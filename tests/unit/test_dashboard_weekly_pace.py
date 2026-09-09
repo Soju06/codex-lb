@@ -26,6 +26,7 @@ def _summary(
     used_percent: float,
     reset_in_hours: float,
     capacity: float = PRO_WEEKLY_CAPACITY_CREDITS,
+    weekly_cap: float | None = None,
 ) -> AccountSummary:
     return AccountSummary(
         account_id=account_id,
@@ -37,6 +38,7 @@ def _summary(
         window_minutes_secondary=10_080,
         capacity_credits_secondary=capacity,
         remaining_credits_secondary=capacity * (1.0 - used_percent / 100.0),
+        usage_cap_weekly_percent=weekly_cap,
     )
 
 
@@ -298,11 +300,23 @@ def test_weekly_pace_add_pro_accounts_uses_fleet_capacity_on_mixed_fleets() -> N
         trailing_demand_used_percent_by_account={pro_id: 110.0, plus_id: 300.0},
     )
 
-    # Demand is 78,120 credits (1.55 Pro-weeks) against 57,960 credits of fleet
-    # capacity (1.15 Pro-weeks). A seat-count basis would treat the Plus account
-    # as a full Pro seat (1.55 - 2 < 0) and suppress the recommendation; the
-    # capacity basis recommends one extra Pro account.
+    # Demand is normalized against each account's own effective capacity:
+    # 1.1 Pro account-weeks plus 3.0 Plus account-weeks, against 1.15 Pro-weeks
+    # of current fleet capacity, leaving a 2.95-account surplus.
     assert pace.saturated_account_count == 2
+    assert pace.add_pro_accounts == 3
+
+
+def test_weekly_pace_add_pro_accounts_normalizes_capped_account_demand() -> None:
+    account_id = "acc-capped-demand"
+    pace = _build(
+        [_summary(account_id, used_percent=99.5, reset_in_hours=2.0, weekly_cap=80.0)],
+        {account_id: [_row(account_id, 99.5, NOW - timedelta(minutes=1))]},
+        trailing_demand_used_percent_by_account={account_id: 100.0},
+    )
+
+    # One provider week of demand is 1.25 effective capped account-weeks,
+    # exceeding the account's 0.8 Pro-week fleet contribution.
     assert pace.add_pro_accounts == 1
 
 

@@ -9,7 +9,6 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
-from app.core.config.settings import get_settings
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import DashboardSettings
@@ -31,7 +30,6 @@ class SettingsRepository:
             sticky_threads_enabled=True,
             upstream_stream_transport="auto",
             prohibit_fast_mode=False,
-            http_downstream_transport_policy=get_settings().http_downstream_transport_policy,
             # Account-capacity overrides are tri-state: NULL inherits the
             # process environment value at read time. The first-boot seed must
             # stay NULL — copying the env value here would freeze it as a
@@ -54,9 +52,7 @@ class SettingsRepository:
             single_account_id=None,
             subscription_overflow_source_id=None,
             subscription_overflow_drain_until=None,
-            openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
-            warmup_model=get_settings().warmup_model,
             import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
@@ -282,7 +278,7 @@ class SettingsRepository:
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
         # Retention overrides are tri-state: a clear flag resets the column to
-        # NULL (inherit the deprecated env alias); a non-None value stores an
+        # NULL (not configured = retention disabled); a non-None value stores an
         # override; neither leaves the stored value untouched.
         if clear_request_log_retention:
             settings.request_log_retention_days = None

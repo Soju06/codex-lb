@@ -764,13 +764,34 @@ class _ParsedUpstreamWebSocketFrame:
     event: OpenAIEvent | None
 
 
-def _parse_upstream_websocket_text_frame(text: str) -> _ParsedUpstreamWebSocketFrame:
+def _parse_upstream_websocket_text_frame(
+    text: str,
+    *,
+    message: Any | None = None,
+) -> _ParsedUpstreamWebSocketFrame:
     """Decode an upstream websocket text frame exactly once.
 
     The payload is json-decoded a single time, the event type is classified
     from the parsed dict, and pydantic validation runs only for lifecycle
     frames (the only events whose validated model fields the proxy consumes).
+    Native Responses frames supply the already-decoded payload alongside their
+    trusted classification, so this path reuses that object and avoids a
+    second JSON decode. Public error conversion still runs in this policy layer.
     """
+    native_payload = getattr(message, "payload", None)
+    native_event_type = getattr(message, "event_type", None)
+    if (
+        getattr(message, "responses_interpreted", False)
+        and isinstance(native_payload, dict)
+        and (native_event_type is None or isinstance(native_event_type, str))
+    ):
+        event = parse_sse_event_payload(native_payload) if native_event_type in _LIFECYCLE_EVENT_TYPES else None
+        return _ParsedUpstreamWebSocketFrame(
+            payload=native_payload,
+            event_type=native_event_type,
+            event=event,
+        )
+
     try:
         raw_payload = json.loads(text)
     except json.JSONDecodeError:
@@ -796,7 +817,11 @@ async def _websocket_archive_request_id_for_message(
     # Archive attribution only needs the payload dict (response ids and error
     # fields are read from it directly), so reuse the caller's parsed frame
     # when provided and never re-validate non-lifecycle deltas.
-    frame = parsed_frame if parsed_frame is not None else _parse_upstream_websocket_text_frame(message.text)
+    frame = (
+        parsed_frame
+        if parsed_frame is not None
+        else _parse_upstream_websocket_text_frame(message.text, message=message)
+    )
     async with pending_lock:
         request_state = _websocket_archive_request_state_for_payload(
             pending_requests,
@@ -1020,7 +1045,7 @@ async def _process_and_forward_upstream_websocket_text(
     codex_session_affinity: bool,
     clock: Clock | None = None,
 ) -> bool:
-    parsed_frame = _parse_upstream_websocket_text_frame(text)
+    parsed_frame = _parse_upstream_websocket_text_frame(text, message=message)
     archive_request_id = await _websocket_archive_request_id_for_message(
         message,
         pending_requests=pending_requests,

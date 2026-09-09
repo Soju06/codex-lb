@@ -193,6 +193,14 @@ Foreground proxy account selection MUST NOT reject an otherwise active account s
 
 When upstream returns rate-limit or quota-exhaustion evidence for a selected account, the proxy MUST apply that penalty to the selected upstream account identity. The proxy MUST NOT invent model-scoped, transport-scoped, or request-kind-scoped upstream cooldown semantics unless upstream documentation or captured upstream response metadata proves that narrower upstream scope.
 
+Upstream `rate_limit_exceeded` and `usage_limit_reached` responses MUST retain the account's rate-limit classification and persisted reset deadline. Early recovery from usage evidence MUST require available quota, not freshness alone: the primary sample MUST report less than 100% usage, or its reset MUST have elapsed with a newer available long-window sample. An applicable exhausted long-window sample MUST NOT clear the rate-limit hold. Peer replicas without runtime evidence of the current block MUST continue to honor the persisted deadline. These recovery rules MUST NOT change pre-visible failover eligibility or the upstream error code surfaced to the client.
+
+After the quota debounce expires, a fresh applicable long-window sample at 100% MUST preserve an explicit quota-exhausted state when no usable credit override exists. When that exhausted sample supplies its reset time, routing MUST use that observed long-window reset instead of an earlier fallback deadline.
+
+The evidence gate MUST apply only to usage-based recovery of rate-limit and explicit quota-exhaustion states, not unrelated account-health penalties. Ordinary `rate_limit_exceeded` cooldown and persisted-deadline expiry during foreground selection MUST remain unchanged and MUST NOT require a new quota sample. Monthly usage unsupported by the account's plan MUST NOT block recovery based on an available post-block primary sample.
+
+When a fresh applicable exhausted sample omits reset metadata, an elapsed fallback deadline MUST NOT reactivate the account. An exhausted sample MUST be recent and, when a block marker exists, unambiguously post-block before replacing or removing that block's reset deadline. Credit overrides of an explicit quota block MUST use credit evidence recorded strictly after the block; cached pre-block credit availability MUST NOT clear the persisted quota status or block markers on any replica. Evidence recorded in the same integer Unix second as the persisted block MUST NOT count as post-block evidence. An expired long-window row MUST NOT veto recovery based on an available post-block primary sample or itself serve as fresh availability evidence.
+
 #### Scenario: Upstream 429 marks only the selected account
 
 - **GIVEN** account A is selected for a request
@@ -201,9 +209,81 @@ When upstream returns rate-limit or quota-exhaustion evidence for a selected acc
 - **THEN** it marks account A as rate-limited or cooling down
 - **AND** it does not create model-scoped or transport-scoped upstream cooldown buckets without upstream evidence
 
+#### Scenario: Usage exhaustion preserves rate-limit deadlines
+
+- **GIVEN** account A is selected while another account remains usable
+- **AND** upstream returns `usage_limit_reached` for account A
+- **WHEN** the proxy records the penalty
+- **THEN** it marks account A rate-limited and preserves pre-visible failover
+- **AND** fresh usage that still reports an exhausted primary or applicable long window does not clear the persisted deadline on either the marking replica or a peer
+- **AND** any surfaced failure preserves the upstream error code
+
+#### Scenario: Available usage permits early recovery on the marking replica
+
+- **GIVEN** an upstream rate-limit hold with a future reset deadline and elapsed local cooldown
+- **WHEN** a post-block primary sample reports less than 100% usage and no applicable long-window sample reports exhaustion
+- **THEN** the marking replica can recover the account through the existing persisted state transition
+- **AND** peer replicas observe the recovered state
+
+#### Scenario: Unsupported monthly usage does not veto background recovery
+
+- **GIVEN** an account whose plan has no monthly quota and whose persisted rate-limit deadline has elapsed
+- **AND** storage contains an exhausted monthly row and an available post-block primary row
+- **WHEN** background recovery evaluates the account
+- **THEN** it ignores the unsupported monthly row and permits recovery from the primary evidence
+
+#### Scenario: Ordinary rate-limit cooldown expires without usage refresh
+
+- **GIVEN** an account blocked by `rate_limit_exceeded` with a persisted reset deadline
+- **WHEN** foreground selection runs after that deadline without new usage data
+- **THEN** the existing cooldown-expiry path can recover the account without requiring quota evidence
+
+#### Scenario: Fresh exhausted long-window usage does not recover quota state
+
+- **GIVEN** account A was explicitly marked quota-exceeded by an upstream quota rejection
+- **AND** its quota debounce has expired
+- **WHEN** refreshed usage still reports 100% consumption in the applicable long window with no usable credit override
+- **THEN** account A remains quota-exceeded and unavailable for ordinary routing
+- **AND** the observed long-window reset replaces any shorter fallback reset deadline
+
+#### Scenario: Exhausted usage without reset metadata preserves the block
+
+- **GIVEN** an explicitly quota-exhausted account has an elapsed fallback deadline
+- **WHEN** its applicable long-window usage remains at 100% without reset metadata
+- **THEN** foreground selection keeps the account unavailable
+- **AND** later post-block usage proving available quota can recover the account
+
+#### Scenario: Cached credits cannot override a new quota failure
+
+- **GIVEN** cached usage reports usable credits before an upstream quota rejection
+- **WHEN** another replica selects accounts after the rejection is persisted
+- **THEN** the rejected account remains quota-exceeded and retains its block marker
+- **AND** only credit evidence recorded after that block can override quota exhaustion
+
+#### Scenario: Fractional pre-block credits cannot clear a persisted quota block
+
+- **GIVEN** a credit snapshot was recorded before a rejection within the same Unix second
+- **WHEN** the rejection is persisted with integer-second precision and either replica evaluates recovery
+- **THEN** the snapshot does not qualify as post-block evidence
+- **AND** a new credit snapshot in a later second can recover the account
+
+#### Scenario: Expired exhaustion does not veto available primary evidence
+
+- **GIVEN** a marking replica has an elapsed local cooldown and a future persisted rate-limit deadline
+- **AND** a fresh post-block primary sample reports available quota while a stored exhausted long-window row has expired
+- **WHEN** the replica evaluates early recovery
+- **THEN** it ignores the expired long-window row and recovers from the primary evidence
+
+#### Scenario: Historical exhaustion cannot rewrite a newer quota deadline
+
+- **GIVEN** an explicit quota rejection has a persisted fallback deadline
+- **AND** the latest exhausted long-window row is stale or not unambiguously post-block
+- **WHEN** routing evaluates the account
+- **THEN** that row does not replace or remove the persisted fallback deadline
+
 ### Requirement: Upstream rejections of the request payload are account neutral
 
-When upstream rejects a request because of the request payload itself, the proxy MUST NOT mutate the selected account's health: it MUST NOT record a transient account error, a rate-limit penalty, a quota penalty, or a permanent failure for that account. An upstream failure qualifies as a payload rejection only when it would reproduce identically on every account. The proxy MUST decide membership from the classified upstream message, never from the `invalid_request_error` code alone, and MUST require the upstream HTTP status to be 400 whenever a status is known. An upstream missing-tool-output rejection — the `invalid_request_error` whose message identifies a tool call with no matching tool output — MUST qualify. An account-scoped `invalid_request_error`, including the model-entitlement rejection `The '<model>' model is not supported when using Codex with a ChatGPT account.`, MUST NOT qualify and MUST keep its existing account-health handling. Skipping the penalty MUST be logged so the decision is observable, and MUST NOT change the failure classification, the failover decision, or the status and body returned to the client.
+When upstream rejects a request because of the request payload itself, the proxy MUST NOT mutate the selected account's health: it MUST NOT record a transient account error, a rate-limit penalty, a quota penalty, or a permanent failure for that account. An upstream failure qualifies as a payload rejection only when it would reproduce identically on every account. The proxy MUST decide membership from the classified upstream message, never from the `invalid_request_error` code alone, and MUST require the upstream HTTP status to be 400 whenever a status is known. An upstream missing-tool-output rejection — the `invalid_request_error` whose message identifies a tool call with no matching tool output — MUST qualify. The proxy MUST also leave account health untouched for the model-entitlement rejection `The '<model>' model is not supported when using Codex with a ChatGPT account.`: that rejection is scoped to the named model and is not evidence about the account's ability to serve the models it is entitled to. Because upstream delivers that rejection on the streaming path with neither an error `code` nor an error `type`, which normalizes to the `upstream_error` fallback, the proxy MUST decide it from the message and the 400 status alone and MUST NOT require a particular normalized error code. Skipping the penalty MUST be logged so the decision is observable, and MUST NOT change the failure classification, the failover decision, or the status and body returned to the client.
 
 #### Scenario: Missing-tool-output rejection leaves account health untouched
 
@@ -219,10 +299,37 @@ When upstream rejects a request because of the request payload itself, the proxy
 - **THEN** no serving account enters error backoff because of that payload
 - **AND** a session hard-pinned to one of those accounts is not failed with a saturated-hard-affinity selection error caused by that payload
 
+#### Scenario: Model-entitlement rejection leaves account health untouched
+
+- **GIVEN** account A is selected for a model it is not entitled to use
+- **WHEN** upstream returns HTTP 400 stating the model is not supported when using Codex with a ChatGPT account, with the error code normalized to `upstream_error` or to `invalid_request_error`
+- **THEN** the proxy does not increment account A's transient error count and does not mark it rate-limited, quota-exceeded, or permanently failed
+- **AND** the skip is logged
+
+#### Scenario: Model-entitlement rejection still fails over
+
+- **GIVEN** account A returned the model-entitlement rejection for the requested model
+- **WHEN** the proxy classifies that failure
+- **THEN** the classification and failover decision are unchanged, so an account with a different entitlement is still attempted
+- **AND** the status and body returned to the client when every attempt is exhausted are unchanged
+
+#### Scenario: A model no source can serve cannot poison subscription accounts
+
+- **GIVEN** a model that resolves to no enabled model source and therefore reaches subscription account selection
+- **WHEN** a client polls that model repeatedly and every subscription account returns the model-entitlement rejection
+- **THEN** no serving account enters error backoff because of those rejections
+- **AND** unrelated traffic hard-pinned to those accounts is not denied with a continuity-owner-unavailable or no-available-accounts selection error caused by them
+
 #### Scenario: Model-entitlement rejection still penalizes the account
 
-- **GIVEN** account A cannot use the requested model
-- **WHEN** upstream returns HTTP 400 `invalid_request_error` stating the model is not supported for a ChatGPT account
+- **GIVEN** account A is selected for a request
+- **WHEN** upstream fails with a non-400 status whose message matches the model-entitlement rejection
+- **THEN** the proxy records the account-health penalty for account A as before, because only a genuine HTTP 400 qualifies as the model-scoped rejection
+
+#### Scenario: A genuine upstream failure still penalizes the account
+
+- **GIVEN** account A is selected for a request
+- **WHEN** upstream fails with an `upstream_error` whose message is not the model-entitlement rejection
 - **THEN** the proxy records the account-health penalty for account A as before
 
 ### Requirement: Stale in-memory account sessions must not stay routable
@@ -422,31 +529,6 @@ derived quota window MUST report below `100%` usage before recovery.
 - **WHEN** selection reconstructs the account from recent available usage in every applicable window
 - **THEN** normal compare-and-set recovery may restore the account to `active`
 
-### Requirement: Re-authentication-required accounts are not selectable
-
-When an account credential/session is invalidated but the upstream account is not known to be disabled, the system MUST mark the account `reauth_required`. The selector MUST remove `reauth_required` accounts from every routing strategy and hard-affinity fallback until the account is re-authenticated. Operator pickers that configure single-account routing or account-scoped routing MUST only offer accounts that are not hard-blocked by paused, reauth-required, or deactivated status.
-
-#### Scenario: Token invalidated account leaves the pool
-
-- **GIVEN** account A is `reauth_required`
-- **AND** account B is active
-- **WHEN** a proxy request selects an account
-- **THEN** account B is selected
-- **AND** account A is not considered an eligible candidate
-
-#### Scenario: Hard-blocked account cannot be newly selected for scoped routing
-
-- **GIVEN** account A is paused, reauth-required, or deactivated
-- **WHEN** an operator opens a scoped account-routing picker
-- **THEN** account A is not offered as a new selectable account
-
-#### Scenario: Re-authentication-required account cannot be paused into resumable state
-
-- **GIVEN** account A is `reauth_required`
-- **WHEN** an operator attempts to pause account A
-- **THEN** the request is rejected
-- **AND** account A remains `reauth_required`
-
 ### Requirement: Selection state expires elapsed usage windows
 
 When building account selection state, the proxy SHALL treat any main-window usage sample (primary or secondary) whose `reset_at` timestamp has elapsed as a reset window: the derived used percentage becomes `0.0` and the derived reset timestamp is cleared, regardless of the sample's recorded used percentage. The rule SHALL apply after weekly-only primary remapping and SHALL mutate only derived selection inputs, not stored usage rows. Expired samples SHALL map to `0.0` rather than unknown so usage-derived status recovery still evaluates.
@@ -475,37 +557,35 @@ When building account selection state, the proxy SHALL treat any main-window usa
 
 ### Requirement: Rate-limit cooldowns are enforced across replicas
 
-A replica that did not observe the upstream 429 MUST NOT transition a
-`RATE_LIMITED` account to `ACTIVE` while the persisted `reset_at` deadline is
-in the future, regardless of the account's recorded usage. For `RATE_LIMITED`
-rows with `blocked_at` set but no persisted `reset_at` (legacy rows written
-before cooldown persistence), replicas MUST hold the account `RATE_LIMITED`
-until at least `blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS`. Recovery
-transitions MUST be written through the compare-and-set status update
-(`update_status_if_current`) so a stale snapshot cannot clobber a newer
-marking.
+A replica that did not observe the upstream 429 MUST NOT transition a `RATE_LIMITED` account to `ACTIVE` while the persisted `reset_at` deadline is in the future unless background usage refresh proves that the exact blocked Free monthly window reset under the strict exception below. For `RATE_LIMITED` rows with `blocked_at` set but no persisted `reset_at` (legacy rows written before cooldown persistence), replicas MUST hold the account `RATE_LIMITED` until at least `blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS`. Recovery transitions MUST be written through the compare-and-set status update (`update_status_if_current`) so a stale snapshot cannot clobber a newer marking.
 
-This constraint applies to every recovery path that writes account status,
-including the usage-refresh reconcile path: a usage refresh that observes
-available quota for a `RATE_LIMITED` account with `blocked_at` set MUST NOT
-rewrite the account to `ACTIVE` (or clear `reset_at`/`blocked_at`) while the
-persisted cooldown deadline — `reset_at`, or the
-`blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS` floor when `reset_at` is
-NULL — is still in the future. Only the replica that observed the 429 MAY
-recover the account earlier, through its runtime-cooldown-gated fresh-usage
-path; a replica's runtime cooldown state counts as observing the current 429
-only when its runtime block marker is at least as recent as the effective
-persisted `blocked_at` — leftover runtime state from an earlier 429 MUST NOT
-unlock early recovery of a newer block. `RATE_LIMITED` rows without
-`blocked_at` (stale window-derived markings) keep the existing fresh-usage
-recovery.
+The reset-confirmed exception SHALL apply only to a Free account with a still-future persisted deadline after the 30-second minimum floor has elapsed. Post-block monthly history MUST contain a baseline whose reset deadline matches the persisted account deadline within five seconds, and an adjacent monthly before/after pair at or after that baseline MUST prove a real temporal reset. Both the after sample and latest monthly sample MUST be post-block and below `100%`. The recovery compare-and-set MUST match the persisted status, deactivation reason, `reset_at`, and `blocked_at`, then clear both markers when it writes `ACTIVE`. The evidence MAY be loaded from persisted history after a process restart, but availability alone and comparisons between non-neighboring rows MUST NOT satisfy the exception.
+
+This constraint applies to every recovery path that writes account status, including the usage-refresh reconcile path. A usage refresh that observes available quota for a `RATE_LIMITED` account with `blocked_at` set MUST NOT rewrite the account to `ACTIVE` or clear its markers while the effective persisted cooldown is running unless the strict reset-confirmed exception succeeds. The replica that observed the current 429 MAY still recover earlier through its runtime-cooldown-gated fresh-usage path only when its runtime block marker is at least as recent as the effective persisted `blocked_at`; leftover runtime state from an earlier 429 MUST NOT unlock early recovery of a newer block. `RATE_LIMITED` rows without `blocked_at` keep the existing fresh-usage recovery. Generic 429 and Retry-After cooldowns without matching reset evidence, reset timestamp jitter, exhausted post-reset windows, and non-Free account exhaustion MUST remain protected until their ordinary recovery condition is met.
 
 #### Scenario: Usage refresh does not clear a running Retry-After cooldown
 
 - **GIVEN** an account marked `RATE_LIMITED` by a 429 whose Retry-After hint persisted `reset_at` 20 minutes in the future and `blocked_at` set
 - **WHEN** a periodic usage refresh fetches fresh usage showing available quota before that deadline
+- **AND** no qualifying Free monthly reset transition matches the persisted deadline
 - **THEN** the persisted row keeps status `RATE_LIMITED` with its `reset_at` and `blocked_at` intact
 - **AND** once the deadline elapses, a later refresh may recover the account to `ACTIVE` through the compare-and-set path
+
+#### Scenario: Confirmed blocked Free monthly reset permits peer recovery
+
+- **GIVEN** replica A marked a Free account `RATE_LIMITED` with `blocked_at` and a persisted deadline matching that account's monthly window
+- **AND** the 30-second minimum floor has elapsed
+- **WHEN** replica B observes a real post-block transition from the matching monthly baseline into a new available monthly window
+- **AND** the latest monthly sample remains below `100%`
+- **THEN** replica B may compare-and-set the account to `ACTIVE` before the old persisted deadline
+- **AND** a successful transition clears `reset_at` and `blocked_at`
+
+#### Scenario: Generic 429 without matching reset evidence remains protected
+
+- **GIVEN** an account has a future persisted cooldown from an upstream 429 or Retry-After hint
+- **AND** fresh usage reports availability but no temporal monthly reset whose baseline matches that deadline
+- **WHEN** any replica evaluates recovery
+- **THEN** the account remains `RATE_LIMITED` until an ordinary recovery condition is met
 
 #### Scenario: Peer replica does not flip a cooling account back
 
@@ -513,14 +593,30 @@ recovery.
 - **AND** account X's recorded usage is below 100%
 - **WHEN** a second balancer instance sharing the same database runs account selection
 - **THEN** account X is not selected
-- **AND** the persisted row remains `RATE_LIMITED` with its `reset_at` deadline intact until the deadline elapses
+- **AND** the persisted row remains `RATE_LIMITED` with its `reset_at` deadline intact until the deadline elapses or strict reset-confirmed recovery succeeds
 
 #### Scenario: Stale runtime cooldown does not unlock early recovery of a newer block
 
 - **GIVEN** a replica holds expired runtime cooldown state left over from an earlier 429 of account X
 - **AND** account X was since re-marked `RATE_LIMITED` by a peer replica with a newer `blocked_at` and a future persisted `reset_at`
 - **WHEN** the replica evaluates account X with usage recorded after the newer `blocked_at`
+- **AND** no strict reset-confirmed transition matches the newer block
 - **THEN** account X stays `RATE_LIMITED` and is not selected until the persisted deadline elapses
+
+#### Scenario: Concurrent newer block wins the recovery race
+
+- **GIVEN** reset evidence qualifies a blocked Free account for early recovery
+- **AND** another replica changes its status or either block marker before recovery commits
+- **WHEN** the recovery compare-and-set evaluates the older snapshot
+- **THEN** it does not overwrite the newer account row
+- **AND** the account is not made routable from the stale evidence
+
+#### Scenario: Exhausted Plus primary window remains protected
+
+- **GIVEN** a Plus account is `RATE_LIMITED` with primary usage at `100%`
+- **WHEN** a replica observes available long-window usage or a long-window reset
+- **THEN** the Free monthly reset exception does not apply
+- **AND** the account remains unavailable until its ordinary recovery condition is met
 
 #### Scenario: Legacy row without reset_at is floored
 
@@ -770,3 +866,235 @@ The proxy SHALL exclude an account from new request admission when observed usag
 - **WHEN** an account reports only a weekly window in its primary slot
 - **THEN** the weekly cap applies and the 5h cap does not
 - **AND** missing, elapsed, and monthly windows do not trigger these caps
+### Requirement: Invalid refresh tokens require account re-authentication
+
+The system MUST classify an upstream OAuth `invalid_refresh_token` refresh
+failure as permanent, persist the affected account as re-authentication required
+through the guarded refresh-account status path, and exclude that account from
+normal account selection until an operator reauthenticates or imports fresh
+credentials.
+
+#### Scenario: OAuth invalid-refresh-token response removes the account from routing
+
+- **GIVEN** an active account attempts a token refresh
+- **WHEN** upstream OAuth returns `invalid_refresh_token`
+- **THEN** the refresh path persists the account status as `reauth_required`
+- **AND** the account is not selected for subsequent routed requests until fresh
+  credentials are supplied
+
+### Requirement: Re-authentication-required accounts remain request-routable
+
+The system MUST distinguish request routability from refresh-token eligibility. `active` accounts MUST be request-routable. A `reauth_required` account MUST remain request-routable only while its stored access token is not known to be expired; paused and deactivated accounts MUST remain excluded.
+
+This status baseline is canonical for proxy selection, owner-bound affinity, warmup, automations, API-key account pools and scopes, probes, access-token-authenticated usage and reset-credit operations, and dashboard projections of routable capacity. Capability-specific references to active, eligible, or hard-unavailable accounts MUST apply this baseline unless a stricter credential-expiry, security, ownership, model, quota, cooldown, or operator-policy gate is explicitly required.
+
+Selecting a routable `reauth_required` account MUST use its stored access token without proactive refresh-token exchange. Its sticky, bridge, file, response, and realtime ownership MUST remain bound while that token is unexpired. Once a known access-token expiry is reached, new proxy selection and live bridge reuse MUST stop before upstream I/O. Movable soft affinity MAY fail over, while hard account-owned continuity MUST remain fail-closed rather than crossing accounts.
+
+A permanent forced-refresh failure while serving a movable request MUST release the account's lease and exclude it from that request's remaining attempts. The failure MUST NOT create a process-wide routing block before the stored access token's known expiry.
+
+#### Scenario: Token-invalidated account remains in the pool
+
+- **GIVEN** account A is `reauth_required` with a usable stored access token
+- **WHEN** an ordinary proxy or supporting access-token operation selects an account
+- **THEN** account A remains eligible after all other applicable gates
+- **AND** its refresh token is not proactively exchanged
+
+#### Scenario: Warning state preserves ownership
+
+- **GIVEN** account A owns sticky or hard continuity
+- **WHEN** account A becomes `reauth_required` with an unexpired stored access token
+- **THEN** the ownership remains bound to account A
+- **AND** the transition alone does not delete or rebind continuity
+
+#### Scenario: Expired warning account is quiesced locally
+
+- **GIVEN** account A is `reauth_required`
+- **AND** its stored access token has reached its known expiry
+- **WHEN** a new proxy request selects an account or considers bridge reuse
+- **THEN** account A is rejected before upstream I/O
+- **AND** hard account-owned continuity does not move to another account
+
+#### Scenario: All expired warning accounts report reauthentication
+
+- **GIVEN** every otherwise scoped account is `reauth_required` with a known-expired access token
+- **AND** an additional-quota evidence gate would otherwise reject those accounts first
+- **WHEN** account selection runs
+- **THEN** selection fails with an explicit message that all accounts require reauthentication
+
+#### Scenario: Current request excludes a rejected warning account
+
+- **GIVEN** a movable request selected account A
+- **AND** forced refresh fails permanently after upstream rejects A's access token
+- **WHEN** the request retries selection
+- **THEN** account A is excluded from that request's remaining attempts
+- **AND** account A may still be considered by a later independent request
+
+#### Scenario: Request-routable account can be selected for scoped routing
+
+- **GIVEN** account A is `reauth_required`
+- **WHEN** an operator opens a scoped account-routing picker
+- **THEN** account A is offered as selectable
+
+#### Scenario: Hard-blocked account cannot be newly selected for scoped routing
+
+- **GIVEN** account A is paused or deactivated
+- **WHEN** any routing strategy or account-scoped picker evaluates account A
+- **THEN** account A is not selectable
+
+#### Scenario: Re-authentication-required account cannot be paused into resumable state
+
+- **GIVEN** account A is `reauth_required`
+- **WHEN** an operator attempts to pause account A
+- **THEN** the request is rejected
+- **AND** account A remains `reauth_required`
+
+### Requirement: Overload rejections deprioritize the account for fresh selection
+
+When upstream rejects a fresh admission for an account as overloaded
+(`server_is_overloaded` or `overloaded_error`), the proxy MUST record the
+rejection, at the point where account health is written for it, in a
+replica-local per-account window that is independent of the transient error
+count and MUST NOT be reset by later successes on that account. When at least three rejections land inside a 120-second window, the
+proxy MUST deprioritize the account for fresh (unbound) selection for a
+bounded interval that grows exponentially with consecutive trips (60 seconds
+base, capped at 600 seconds, decaying to the base after 30 minutes without a
+trip); the level MUST saturate once the cap is reached so sustained overload
+cannot grow it without bound, and a trip while already deprioritized MUST NOT
+shorten the deadline.
+Deprioritization MUST be soft: selection first runs over the candidates not in
+overload backoff and, when the configured strategy and budget gates select
+none of them, runs again over the full candidate pool exactly as before. It
+MUST apply wherever a NEW account is chosen for a request — unbound selection
+and the sticky path's fresh binding, reallocation, or fallback pick — and MUST
+NOT apply to an established sticky owner, a continuity owner, or a
+hard-affinity owner. The
+proxy MUST log when the backoff engages. The failure classification, the
+failover decision, the existing transient error penalty, and the status and
+body returned to the client MUST remain unchanged.
+
+#### Scenario: Warm sessions keep masking the generic error counters
+
+- **GIVEN** account A is rejected as overloaded on fresh admissions while its
+  bridge-reuse and sticky sessions keep succeeding
+- **WHEN** three rejections arrive within 120 seconds
+- **THEN** account A enters overload backoff even though its transient error
+  count is zero
+- **AND** fresh selection skips account A while another candidate is available
+
+#### Scenario: Backoff never empties the pool
+
+- **GIVEN** every selectable account is in overload backoff
+- **WHEN** a fresh request selects an account
+- **THEN** selection proceeds over the full candidate pool as if no account
+  were backed off
+
+#### Scenario: Backoff yields to an ineligible remainder
+
+- **GIVEN** account A is in overload backoff and the configured strategy
+  selects none of the other accounts (rate-limited, cooling down, in generic
+  error backoff, or excluded by the strategy's budget gates)
+- **WHEN** a fresh request selects an account
+- **THEN** account A is selected rather than failing the request or reporting
+  an account-cap error
+
+#### Scenario: A previously unseen sticky key binds away from the backed-off account
+
+- **GIVEN** account A is in overload backoff and account B is selectable
+- **WHEN** a request carrying a session or prompt-cache key with no established
+  owner selects an account
+- **THEN** the new binding is made to account B
+- **AND** a request whose key already maps to account A keeps using account A
+
+#### Scenario: HTTP-status overload rejections keep their code
+
+- **GIVEN** upstream answers a fresh admission with an HTTP 5xx whose body
+  carries `server_is_overloaded`
+- **WHEN** the same-account transient retries are exhausted and health is
+  written after settlement
+- **THEN** the health write carries `server_is_overloaded` rather than a
+  collapsed `server_error`, so the rejection counts toward the account's
+  overload window
+
+#### Scenario: Recovery-probe reservation follows the selected pool
+
+- **GIVEN** a fresh request whose selection ran over the overload-free
+  candidates
+- **WHEN** the selected account is a due recovery probe that needs a
+  reservation
+- **THEN** the reservation is taken from that same overload-free pool, so an
+  older due probe skipped by the overload pass cannot invalidate the selection
+
+#### Scenario: Pinned sessions are not denied by overload backoff
+
+- **GIVEN** account A is in overload backoff
+- **WHEN** a request hard-pinned to account A (continuity owner, sticky
+  session, or file affinity) selects an account
+- **THEN** the pin is honored exactly as before
+
+#### Scenario: Consecutive trips back off longer, bounded
+
+- **GIVEN** account A trips the window repeatedly with each burst starting when
+  the previous backoff expires
+- **WHEN** the backoff deadline is computed for each trip
+- **THEN** the interval doubles from 60 seconds and never exceeds 600 seconds
+- **AND** after 30 minutes without a trip the next trip returns to 60 seconds
+
+#### Scenario: Non-overload transient errors do not feed the window
+
+- **GIVEN** account A returns a transient `server_error`
+- **WHEN** the proxy records account health
+- **THEN** the generic transient error is recorded as before
+- **AND** the overload window for account A is unchanged
+
+### Requirement: Upstream overload rejections back off and then isolate the account
+
+The balancer SHALL keep a replica-local sliding window of upstream overload admission rejections (`server_is_overloaded`, `overloaded_error`) per account that successes do not reset. When the window trips, the account SHALL enter a bounded, exponentially growing **soft backoff** during which fresh unbound selection and fresh sticky bindings prefer other candidates. When the backoff level reaches the isolation trip level, the account SHALL instead be **isolated** for `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` (default 1800; `0` disables isolation and keeps the soft backoff only). While isolated, established soft sticky owners MAY be released as specified by `sticky-session-operations`. In both stages the account MUST be dropped from a candidate pool only while at least one other candidate remains, and the configured strategy MUST judge eligibility of the remaining pool: when it rejects every overload-free candidate, selection MUST fall back to the full pool exactly as before. The backoff level MUST NOT decay while the account is backed off or isolated; it decays only after a quiet interval measured from the later of the last trip and the backoff deadline. Hard continuity owners MUST NOT be moved by either stage. The balancer MUST emit a warning when isolation engages, naming the account, level and isolation interval.
+
+#### Scenario: Sustained rejection escalates from soft backoff to isolation
+
+- **GIVEN** an account whose overload window has tripped twice (soft backoff)
+- **WHEN** it trips a third time
+- **THEN** the account is isolated for the configured isolation interval instead of the next soft interval
+- **AND** a warning `Account overload isolation engaged` is logged with the level and interval
+
+#### Scenario: Isolation is disabled by a zero interval
+
+- **GIVEN** `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS=0`
+- **WHEN** an account's overload window trips at or beyond the isolation level
+- **THEN** it receives the capped soft backoff interval and is never marked isolated
+
+#### Scenario: Leaving isolation while still rejected re-isolates
+
+- **GIVEN** an account whose isolation deadline just passed
+- **WHEN** its overload window trips again within the decay interval
+- **THEN** its level has not decayed and the account is isolated again
+
+#### Scenario: A lone candidate is never held out
+
+- **GIVEN** the only selectable account is isolated
+- **WHEN** a request selects an account
+- **THEN** the isolated account is selected rather than failing with `No available accounts`
+
+### Requirement: Weighted strategies discount recent upstream error rate
+
+The balancer SHALL keep a replica-local window (600 s) of upstream outcomes per account: successes recorded by `record_success` and the account-attributable transient failures recorded by `record_errors`. Rate-limit, quota, permanent and account-neutral failures MUST NOT be counted. When `CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED` is true (default) and the window holds at least 10 outcomes, the `capacity_weighted` and `relative_availability` strategies MUST multiply the candidate's draw weight by `max(0.05, 1 - error_rate)`; with fewer outcomes or the setting disabled the multiplier MUST be neutral. The multiplier MUST NOT change `relative_availability` top-k membership or any deterministic probe pick, and deterministic strategies (`round_robin`, `usage_weighted`, `fill_first`, `sequential_drain`, `reset_drain`, `single_account`) MUST be unaffected. The discount MUST lift as the window clears without requiring a success.
+
+#### Scenario: A flaky account receives proportionally less weighted traffic
+
+- **GIVEN** two accounts with equal remaining credits under `capacity_weighted`
+- **AND** one of them recorded 12 transient failures interleaved with 12 successes in the last ten minutes (so its `error_count` latch is zero)
+- **WHEN** fresh selections are drawn
+- **THEN** the flaky account is drawn about half as often as the clean one
+- **AND** it is still drawn (the weight floor keeps sampling it)
+
+#### Scenario: Thin evidence is neutral
+
+- **GIVEN** an account with nine failures and no successes in the window
+- **WHEN** its draw weight is computed
+- **THEN** the multiplier is `1.0`
+
+#### Scenario: Weighting can be disabled
+
+- **GIVEN** `CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED=false`
+- **WHEN** an account has failed every request in the window
+- **THEN** its draw weight multiplier is `1.0`

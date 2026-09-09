@@ -230,13 +230,13 @@ def build_weekly_credit_pace(
     saturated_account_count = sum(_used_percent(account) >= SATURATED_USED_PERCENT for account in pace_accounts)
     add_pro_accounts = None
     if trailing_demand_used_percent_by_account is not None:
-        trailing_demand_credits = sum(
-            account.full_credits
+        demand_quota_weeks = sum(
+            account.provider_full_credits
             * max(0.0, trailing_demand_used_percent_by_account.get(account.account_id, 0.0))
             / 100.0
+            / account.full_credits
             for account in pace_accounts
         )
-        demand_quota_weeks = trailing_demand_credits / PRO_WEEKLY_CAPACITY_CREDITS
         fleet_capacity_quota_weeks = total_full_credits / PRO_WEEKLY_CAPACITY_CREDITS
         demand_surplus_accounts = demand_quota_weeks - fleet_capacity_quota_weeks
         if demand_surplus_accounts > 0 and (runway_status == "runs_dry" or saturated_account_count > 0):

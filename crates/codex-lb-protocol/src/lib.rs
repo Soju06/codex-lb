@@ -15,6 +15,7 @@ pub const CAPABILITIES: &[&str] = &[
     "http_sse_v1",
     "http_responses_events_v1",
     "websocket",
+    "websocket_responses_events_v1",
     "websocket_send_ack",
 ];
 
@@ -84,6 +85,12 @@ pub struct NativeWebSocketRequest {
     pub ping_interval_ms: Option<u64>,
     pub ping_timeout_ms: Option<u64>,
     pub proxy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interpret_responses: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Deserialize, Serialize)]
@@ -136,6 +143,12 @@ pub enum NativeEvent {
     WebsocketText {
         request_id: String,
         text: String,
+    },
+    WebsocketResponsesText {
+        request_id: String,
+        text: String,
+        event_type: Option<String>,
+        payload: Box<serde_json::value::RawValue>,
     },
     WebsocketBinary {
         request_id: String,

@@ -23,6 +23,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from app.core.config.settings import _REMOVED_SETTINGS, Settings
+from app.core.config.tiers import SETTING_TIERS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = REPO_ROOT / "docs" / "reference" / "settings.md"
@@ -52,7 +53,6 @@ _PREFIX_SECTIONS: tuple[tuple[str, str], ...] = (
     ("upstream_", "Upstream transport"),
     ("http_responses_session_bridge_", "HTTP Responses session bridge"),
     ("http_responses_", "HTTP & streaming"),
-    ("http_downstream_", "HTTP & streaming"),
     ("http_connector_", "HTTP & streaming"),
     ("compact_", "HTTP & streaming"),
     ("stream_", "HTTP & streaming"),
@@ -63,10 +63,9 @@ _PREFIX_SECTIONS: tuple[tuple[str, str], ...] = (
     ("oauth_", "OAuth"),
     ("token_refresh_", "Token refresh"),
     ("auth_guardian_", "Token refresh"),
-    ("usage_", "Usage & retention"),
-    ("live_usage_", "Usage & retention"),
-    ("rate_limit_", "Usage & retention"),
-    ("request_log_", "Usage & retention"),
+    ("usage_", "Usage"),
+    ("live_usage_", "Usage"),
+    ("rate_limit_", "Usage"),
     ("openai_", "Prompt caching & affinity"),
     ("image_", "Images"),
     ("images_", "Images"),
@@ -94,9 +93,8 @@ _PREFIX_SECTIONS: tuple[tuple[str, str], ...] = (
 _EXACT_SECTIONS: dict[str, str] = {
     "data_dir": "Core",
     "trace": "Observability",
-    "workers_per_instance": "Multi-replica",
     "connect_address": "Dashboard",
-    "additional_quota_registry_file": "Usage & retention",
+    "additional_quota_registry_file": "Usage",
     "forwarded_allow_ips": "Firewall",
 }
 
@@ -143,10 +141,9 @@ _PROCESS_ENV_CONVENTIONS: tuple[tuple[str, str], ...] = (
         "Test-suite/CI only: overrides the database used by the test session factory.",
     ),
     (
-        "`CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE`, `CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS` "
-        "(inside `app/db/alembic/versions/**` only)",
+        "`CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE` (inside `app/db/alembic/versions/**` only)",
         "Frozen Alembic migrations read the process environment directly because migrations must not "
-        "depend on `Settings`; the live settings of the same name are documented in the tables below.",
+        "depend on `Settings`; the live setting of the same name is documented in the tables below.",
     ),
 )
 
@@ -160,7 +157,7 @@ _SECTION_ORDER: tuple[str, ...] = (
     "Proxy admission & account caps",
     "OAuth",
     "Token refresh",
-    "Usage & retention",
+    "Usage",
     "Prompt caching & affinity",
     "Images",
     "Model registry",
@@ -240,17 +237,18 @@ def _render_section_table(names: list[str], fields: dict[str, FieldInfo]) -> lis
     with_description = any(fields[name].description for name in names)
     lines: list[str] = []
     if with_description:
-        lines.append("| Environment variable | Type | Default | Description |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append("| Environment variable | Tier | Type | Default | Description |")
+        lines.append("| --- | --- | --- | --- | --- |")
     else:
-        lines.append("| Environment variable | Type | Default |")
-        lines.append("| --- | --- | --- |")
+        lines.append("| Environment variable | Tier | Type | Default |")
+        lines.append("| --- | --- | --- | --- |")
     for name in names:
         field = fields[name]
         env_var = _render_env_cell(name, field)
+        tier_cell = SETTING_TIERS.get(name, "unassigned")
         type_cell = _escape_cell(f"`{_render_type(field.annotation)}`")
         default_cell = _escape_cell(_render_default(name, field))
-        row = f"| {env_var} | {type_cell} | {default_cell} |"
+        row = f"| {env_var} | {tier_cell} | {type_cell} | {default_cell} |"
         if with_description:
             row += f" {_escape_cell(field.description or '')} |"
         lines.append(row)
@@ -265,10 +263,6 @@ def render_settings_reference() -> str:
     unknown = set(sections) - set(_SECTION_ORDER)
     if unknown:
         raise RuntimeError(f"sections missing from _SECTION_ORDER: {sorted(unknown)}")
-
-    deprecated_env_aliases = [
-        f"{ENV_PREFIX}{name.upper()}" for name in sorted(fields) if name.endswith("_retention_days")
-    ]
 
     lines: list[str] = [
         "<!-- GENERATED — edit scripts/generate_settings_reference.py, not this file. -->",
@@ -287,6 +281,18 @@ def render_settings_reference() -> str:
         "start from [Configuration](../configuration.md) for the handful that matter,",
         "and treat everything else as advanced operational tunables.",
         "",
+        "## Tiers",
+        "",
+        "The **Tier** column is the configuration policy for each setting",
+        "(`app/core/config/tiers.py`, enforced by `scripts/check_settings_tiers.py`):",
+        "",
+        "- **T0** bootstrap — needed before the database is reachable; env only.",
+        "- **T1** instance topology — legitimately differs per replica or deployment; env only.",
+        "- **T2** secret — encrypted in the database; env is at most a seed.",
+        "- **T3** behaviour tunable / feature flag — the dashboard is the management",
+        "  surface; a T3 setting that is still env-only is migration backlog.",
+        "- **T4** incident debug — env allowed, dashboard toggle recommended.",
+        "",
         "## `PORT` (special case, no prefix)",
         "",
         "The listen port (default `2455`) is read from the bare `PORT` process",
@@ -303,6 +309,15 @@ def render_settings_reference() -> str:
         "contain env files (the Nix package wrapper points it at the launch",
         "directory). It must be set in the process environment, not in an env file:",
         "the env-file locations have to be known before env files are read.",
+        "",
+        f"## `{ENV_PREFIX}WORKERS_PER_INSTANCE` (special case, startup guard)",
+        "",
+        "Not a setting: the only supported value is `1` (one worker process per",
+        "instance), so there is nothing to configure. If it is set to anything else,",
+        "startup fails with a settings validation error — per-account concurrency caps",
+        "are partitioned per replica via the bridge ring, and multiple worker processes",
+        "inside one instance would silently multiply them. Scale horizontally via",
+        "replicas instead.",
         "",
         "## Process-level environment variables (not settings)",
         "",
@@ -329,18 +344,10 @@ def render_settings_reference() -> str:
     lines.extend(
         [
             "",
-            "## Removed / deprecated",
+            "## Removed",
             "",
-            "Deprecated env aliases (still functional for one release; the dashboard",
-            "runtime value wins when set):",
-            "",
-        ]
-    )
-    lines.extend(f"- `{alias}`" for alias in deprecated_env_aliases)
-    lines.extend(
-        [
-            "",
-            "Removed settings (ignored; values are now fixed — see PRINCIPLES.md P2 /",
+            "Removed settings (ignored with a one-release startup warning; each is now a",
+            "fixed default or a dashboard runtime setting — see PRINCIPLES.md P2 /",
             "issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):",
             "",
         ]

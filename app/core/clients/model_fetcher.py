@@ -21,7 +21,7 @@ from app.core.clients.native_egress import (
     NativeEgressUnavailable,
     discover_native_egress_client,
 )
-from app.core.clients.proxy import build_codex_user_agent
+from app.core.clients.proxy import _codex_response_status, build_codex_user_agent
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.types import JsonValue
@@ -252,13 +252,6 @@ async def _fetch_models_direct_python(url: str, headers: dict[str, str]) -> obje
                 text = await resp.text()
                 raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
             return await resp.json(content_type=None)
-
-
-def _codex_response_status(response: object) -> int:
-    value = getattr(response, "status_code", getattr(response, "status", None))
-    if value is None:
-        return 0
-    return int(value)
 
 
 async def _codex_response_text(response: object) -> str:

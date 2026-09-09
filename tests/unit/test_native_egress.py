@@ -47,6 +47,7 @@ print(json.dumps({
         "http_sse_v1",
         "http_responses_events_v1",
         "websocket",
+        "websocket_responses_events_v1",
         "websocket_send_ack",
     ],
 }), flush=True)
@@ -69,7 +70,6 @@ def _echo_helper_source() -> str:
 import base64
 import json
 import sys
-
 for line in sys.stdin:
     command = json.loads(line)
     request_id = command["request_id"]
@@ -562,11 +562,14 @@ import base64
 import json
 import sys
 
+interpreted = set()
 for line in sys.stdin:
     command = json.loads(line)
     request_id = command["request_id"]
     kind = command["type"]
     if kind == "websocket_connect":
+        if command.get("interpret_responses"):
+            interpreted.add(request_id)
         assert command["headers"] == [["user-agent", "codex-cli"], ["sec-websocket-protocol", "openai"]]
         assert command["ping_interval_ms"] == 20000
         assert command["ping_timeout_ms"] is None
@@ -576,8 +579,12 @@ for line in sys.stdin:
         }), flush=True)
     elif kind == "websocket_send_text":
         print(json.dumps({
-            "type": "websocket_text", "request_id": request_id,
-            "text": "echo:" + command["text"],
+            "type": "websocket_responses_text" if request_id in interpreted else "websocket_text",
+            "request_id": request_id,
+            "text": command["text"] if request_id in interpreted else "echo:" + command["text"],
+            **({"event_type": "response.text.delta",
+                "payload": json.loads(command["text"])}
+               if request_id in interpreted else {}),
         }), flush=True)
         print(json.dumps({
             "type": "websocket_sent", "request_id": request_id,
@@ -637,6 +644,44 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
         await asyncio.wait_for(websocket.receive(), timeout=0.1)
     assert client._process is process
     assert process is not None and process.returncode is None
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_metadata", [False, True], ids=["valid", "missing-payload"])
+async def test_native_responses_websocket_preserves_interpretation_metadata(
+    tmp_path: Path, invalid_metadata: bool
+) -> None:
+    helper = tmp_path / "native-helper"
+    source = _websocket_helper_source()
+    if invalid_metadata:
+        source = source.replace('"payload": json.loads(command["text"])', '"invalid_payload": None')
+    _write_helper(helper, source)
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={"user-agent": "codex-cli", "sec-websocket-protocol": "openai"},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+            interpret_responses=True,
+        )
+    )
+
+    if invalid_metadata:
+        with pytest.raises(NativeEgressProtocolError, match="Responses websocket event is invalid"):
+            await websocket.send_text('{"type":"response.text.delta","delta":"hi"}')
+            await websocket.receive()
+    else:
+        await websocket.send_text('{"type":"response.text.delta","delta":"hi"}')
+        assert await websocket.receive() == NativeWebSocketMessage(
+            kind="text",
+            text='{"type":"response.text.delta","delta":"hi"}',
+            responses_interpreted=True,
+            event_type="response.text.delta",
+            payload={"type": "response.text.delta", "delta": "hi"},
+        )
+        await websocket.close()
     await client.aclose()
 
 
@@ -1101,6 +1146,16 @@ def test_bounded_event_queue_trips_on_bytes_or_events_and_releases_bytes_on_get(
         queue.put_nowait(interpreted)
     queue.get_nowait()
     assert queue.get_nowait() == interpreted
+    assert queue.queued_bytes == 0
+    # WebSocket IPC also embeds the original JSON object. Both copies count.
+    websocket_event = {"type": "websocket_responses_text", "text": "{}", "payload": {}, "event_type": None}
+    queue.put_nowait(websocket_event)
+    queue.put_nowait(websocket_event)
+    assert queue.queued_bytes == 8
+    with pytest.raises(asyncio.QueueFull):
+        queue.put_nowait(websocket_event)
+    queue.get_nowait()
+    queue.get_nowait()
     assert queue.queued_bytes == 0
     # A lone event larger than the whole budget is accepted at an empty queue
     # (the SSE event size cap bounds it), so a single big chunk never fails;

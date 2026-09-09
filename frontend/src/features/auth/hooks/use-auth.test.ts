@@ -1,20 +1,31 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import {
+  acceptInvite as acceptInviteRequest,
   getAuthSession,
   loginGuest,
   loginPassword,
   logout as logoutRequest,
+  logoutAll as logoutAllRequest,
   verifyTotp as verifyTotpRequest,
 } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { createDashboardAuthSession } from "@/test/mocks/factories";
+import { LAST_USERNAME_STORAGE_KEY } from "@/features/auth/last-username";
+import { LoginHintSchema } from "@/features/auth/schemas";
+import {
+  ADMIN_PERMISSIONS,
+  createAccessSummary,
+  createDashboardAuthSession,
+  createSessionUser,
+} from "@/test/mocks/factories";
 
 vi.mock("@/features/auth/api", () => ({
+  acceptInvite: vi.fn(),
   getAuthSession: vi.fn(),
   loginPassword: vi.fn(),
   loginGuest: vi.fn(),
   logout: vi.fn(),
+  logoutAll: vi.fn(),
   verifyTotp: vi.fn(),
 }));
 
@@ -36,11 +47,18 @@ function resetAuthStore(): void {
     guestAccessEnabled: false,
     guestPasswordRequired: false,
     canWrite: false,
+    user: null,
+    accessSummary: null,
+    tier: "individual",
+    totpEnrollmentRequired: false,
+    mustChangePassword: false,
+    loginHint: LoginHintSchema.parse({}),
     adminLoginRequested: false,
     loading: false,
     initialized: false,
     error: null,
   });
+  window.localStorage.removeItem(LAST_USERNAME_STORAGE_KEY);
 }
 
 describe("useAuthStore initial state", () => {
@@ -52,6 +70,9 @@ describe("useAuthStore initial state", () => {
     expect(initial.role).toBe("guest");
     expect(initial.permissions).toEqual([]);
     expect(initial.canWrite).toBe(false);
+    expect(initial.user).toBeNull();
+    expect(initial.tier).toBe("individual");
+    expect(initial.loginHint.usernameField).toBe("hidden");
   });
 });
 
@@ -182,5 +203,113 @@ describe("useAuthStore actions", () => {
     expect(next.authenticated).toBe(true);
     expect(next.totpRequiredOnLogin).toBe(false);
     expect(next.loading).toBe(false);
+  });
+
+  it("sends the username when given and remembers the account that signed in", async () => {
+    (loginPassword as Mock).mockResolvedValue({ ...sessionBase, user: createSessionUser({ username: "alice" }) });
+
+    await useAuthStore.getState().login("secret-pass", "alice");
+
+    expect(loginPassword).toHaveBeenCalledWith({ username: "alice", password: "secret-pass" });
+    expect(window.localStorage.getItem(LAST_USERNAME_STORAGE_KEY)).toBe("alice");
+    expect(useAuthStore.getState().user?.username).toBe("alice");
+  });
+
+  it("forgets the remembered username after a username-less sign-in on a single-account install", async () => {
+    window.localStorage.setItem(LAST_USERNAME_STORAGE_KEY, "alice");
+    (loginPassword as Mock).mockResolvedValue({ ...sessionBase, user: null });
+
+    await useAuthStore.getState().login("secret-pass");
+
+    expect(window.localStorage.getItem(LAST_USERNAME_STORAGE_KEY)).toBeNull();
+  });
+
+  it("puts a signed-in account without team facts (no users:manage) on the team tier", async () => {
+    (getAuthSession as Mock).mockResolvedValue({
+      ...sessionBase,
+      permissions: ["read", "dashboard:read:all", "accounts:read:all"],
+      user: createSessionUser({ username: "viewer" }),
+      accessSummary: null,
+    });
+
+    await useAuthStore.getState().refreshSession();
+
+    expect(useAuthStore.getState().tier).toBe("team");
+  });
+
+  it("acceptInvite applies the returned session like login does", async () => {
+    (acceptInviteRequest as Mock).mockResolvedValue({
+      ...sessionBase,
+      user: createSessionUser({ username: "sarah" }),
+      accessSummary: null,
+    });
+
+    await useAuthStore.getState().acceptInvite({ token: "tok", username: "sarah", password: "strong-password" });
+
+    expect(acceptInviteRequest).toHaveBeenCalledWith({ token: "tok", username: "sarah", password: "strong-password" });
+    const next = useAuthStore.getState();
+    expect(next.authenticated).toBe(true);
+    expect(next.user?.username).toBe("sarah");
+    expect(next.tier).toBe("team");
+    expect(next.loading).toBe(false);
+  });
+
+  it("derives the disclosure tier and the account block from the session", async () => {
+    (getAuthSession as Mock).mockResolvedValue({
+      ...sessionBase,
+      permissions: ADMIN_PERMISSIONS,
+      user: createSessionUser(),
+      accessSummary: createAccessSummary({ usersTotal: 2, nonAdminUsers: 1 }),
+      login: { usernameField: "shown", providers: [], localLogin: "enabled" },
+    });
+
+    await useAuthStore.getState().refreshSession();
+
+    const next = useAuthStore.getState();
+    expect(next.tier).toBe("team");
+    expect(next.user?.username).toBe("admin");
+    expect(next.loginHint.usernameField).toBe("shown");
+  });
+
+  it("answers can() and scope() from the scoped permission strings only", async () => {
+    (getAuthSession as Mock).mockResolvedValue({
+      ...sessionBase,
+      permissions: ["read", "dashboard:read:own", "api_keys:read:own", "accounts:read:all"],
+    });
+
+    await useAuthStore.getState().refreshSession();
+
+    const { can, scope } = useAuthStore.getState();
+    expect(can("dashboard:read")).toBe(true);
+    expect(scope("dashboard:read")).toBe("own");
+    expect(scope("accounts:read")).toBe("all");
+    expect(can("users:manage")).toBe(false);
+    expect(scope("users:manage")).toBeNull();
+  });
+
+  it("logoutEverywhere revokes every session and resets to least privilege before refreshing", async () => {
+    useAuthStore.setState({
+      authenticated: true,
+      initialized: true,
+      role: "admin",
+      permissions: ADMIN_PERMISSIONS,
+      canWrite: true,
+      user: createSessionUser(),
+      tier: "team",
+    });
+    (logoutAllRequest as Mock).mockResolvedValue({ status: "ok" });
+    let stateDuringRefresh: ReturnType<typeof useAuthStore.getState> | null = null;
+    (getAuthSession as Mock).mockImplementation(async () => {
+      stateDuringRefresh = useAuthStore.getState();
+      return { ...sessionBase, authenticated: false };
+    });
+
+    await useAuthStore.getState().logoutEverywhere();
+
+    expect(logoutAllRequest).toHaveBeenCalledTimes(1);
+    expect(logoutRequest).not.toHaveBeenCalled();
+    expect(stateDuringRefresh!.user).toBeNull();
+    expect(stateDuringRefresh!.tier).toBe("individual");
+    expect(stateDuringRefresh!.permissions).toEqual([]);
   });
 });

@@ -66,6 +66,9 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/dashboard-auth/totp/verify",
 	"POST /api/dashboard-auth/totp/disable",
 	"POST /api/dashboard-auth/logout",
+	"POST /api/dashboard-auth/logout-all",
+	"GET /api/dashboard-auth/invite/:token",
+	"POST /api/dashboard-auth/invite/accept",
 	// settings
 	"GET /api/settings",
 	"PUT /api/settings",

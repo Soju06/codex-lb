@@ -1,5 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Eye, Lock } from "lucide-react";
+import { Eye, Lock, User } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 
@@ -8,8 +9,10 @@ import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { readLastUsername } from "@/features/auth/last-username";
 import { LoginRequestSchema } from "@/features/auth/schemas";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { ApiError } from "@/lib/api-client";
 
 export function LoginForm() {
   const { t } = useTranslation();
@@ -19,20 +22,46 @@ export function LoginForm() {
   const error = useAuthStore((state) => state.error);
   const clearError = useAuthStore((state) => state.clearError);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
+  const usernameField = useAuthStore((state) => state.loginHint.usernameField);
   const guestAccessEnabled = useAuthStore((state) => state.guestAccessEnabled);
   const guestPasswordRequired = useAuthStore((state) => state.guestPasswordRequired);
 
+  // A remembered non-default username keeps the field visible even when the
+  // server says `hidden` (anti-flapping after the second account is removed
+  // again, PLAN §4.4); the "different account" link and a `username_required`
+  // answer reveal it too.
+  const [lastUsername] = useState(readLastUsername);
+  const [usernameRevealed, setUsernameRevealed] = useState(false);
+  const showUsername =
+    usernameField === "shown" || (lastUsername !== "" && lastUsername !== "admin") || usernameRevealed;
+
   const form = useForm({
     resolver: zodResolver(LoginRequestSchema),
-    defaultValues: { password: "" },
+    defaultValues: { username: lastUsername, password: "" },
   });
   const guestForm = useForm({
     defaultValues: { password: "" },
   });
 
-  const handleSubmit = async (values: { password: string }) => {
+  // Move focus into the field the moment it is revealed (link or server answer).
+  useEffect(() => {
+    if (usernameRevealed) {
+      form.setFocus("username");
+    }
+  }, [usernameRevealed, form]);
+
+  const handleSubmit = async (values: { username?: string; password: string }) => {
     clearError();
-    await login(values.password);
+    const username = showUsername ? values.username?.trim() : undefined;
+    try {
+      await (username ? login(values.password, username) : login(values.password));
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.code === "username_required") {
+        clearError();
+        setUsernameRevealed(true);
+        form.setError("username", { message: t("auth.login.usernameRequired") });
+      }
+    }
   };
 
   const handleGuestSubmit = async (values: { password: string }) => {
@@ -47,10 +76,42 @@ export function LoginForm() {
           <form onSubmit={form.handleSubmit(handleSubmit)}>
             <div className="space-y-1.5">
               <h2 className="text-base font-semibold tracking-tight">{t("auth.login.heading")}</h2>
-              <p className="text-sm text-muted-foreground">{t("auth.login.subheading")}</p>
+              <p className="text-sm text-muted-foreground">
+                {showUsername ? t("auth.login.subheadingWithUsername") : t("auth.login.subheading")}
+              </p>
             </div>
 
-            <div className="mt-5">
+            {showUsername ? (
+              <div className="mt-5">
+                <FormField
+                  control={form.control}
+                  name="username"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel className="text-xs font-medium">{t("auth.login.usernameLabel")}</FormLabel>
+                      <div className="relative">
+                        <User className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground/60" aria-hidden="true" />
+                        <FormControl>
+                          <Input
+                            {...field}
+                            type="text"
+                            autoComplete="username"
+                            autoCapitalize="none"
+                            spellCheck={false}
+                            placeholder={t("auth.login.usernamePlaceholder")}
+                            disabled={loading}
+                            className="pl-9"
+                          />
+                        </FormControl>
+                      </div>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
+            ) : null}
+
+            <div className={showUsername ? "mt-4" : "mt-5"}>
               <FormField
                 control={form.control}
                 name="password"
@@ -80,6 +141,17 @@ export function LoginForm() {
               {loading ? <Spinner size="sm" className="mr-2" /> : null}
               {t("auth.login.submit")}
             </Button>
+
+            {showUsername ? null : (
+              <button
+                type="button"
+                className="mt-3 w-full text-center text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                onClick={() => setUsernameRevealed(true)}
+                disabled={loading}
+              >
+                {t("auth.login.differentAccount")}
+              </button>
+            )}
           </form>
         </Form>
       ) : null}

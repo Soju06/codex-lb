@@ -1,6 +1,8 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
+import type { InviteDescription } from "@/features/auth/schemas";
+
 import {
   LIMIT_TYPES,
   LIMIT_WINDOWS,
@@ -20,6 +22,8 @@ import {
   createConversationDetails,
   createConversationsResponse,
   createDashboardAuthSession,
+  createSessionUser,
+  OPERATOR_PERMISSIONS,
   createDashboardOverview,
   createDashboardProjections,
   createDashboardSettings,
@@ -59,6 +63,15 @@ const MODEL_OPTION_DELIMITER = ":::";
 const STATUS_ORDER = ["ok", "cancelled", "rate_limit", "quota", "error"] as const;
 
 // ── Zod schemas for mock request bodies ──
+
+export const MOCK_INVITE_TOKEN = "invite-token-valid";
+
+const InviteAcceptPayloadSchema = z.looseObject({
+  token: z.string(),
+  username: z.string().optional(),
+  password: z.string(),
+  displayName: z.string().optional(),
+});
 
 const OauthStartPayloadSchema = z.looseObject({
   forceMethod: z.string().optional(),
@@ -260,6 +273,7 @@ type MockState = {
   conversations: ConversationEntry[];
   conversationDetails: ConversationDetails[];
   authSession: DashboardAuthSession;
+  inviteDescription: InviteDescription;
   settings: DashboardSettings;
   telemetryConsent: TelemetryConsent;
   quotaPlannerSettings: QuotaPlannerSettings;
@@ -354,6 +368,13 @@ function createInitialState(): MockState {
       }),
     ],
     authSession: createDashboardAuthSession(),
+    inviteDescription: {
+      roleName: "Operator",
+      inviterDisplayName: "admin",
+      suggestedUsername: "sarah",
+      usernameLocked: false,
+      expiresAt: "2026-02-01T18:00:00Z",
+    },
     settings: createDashboardSettings(),
     telemetryConsent: createTelemetryConsent(),
     quotaPlannerSettings: createQuotaPlannerSettings(),
@@ -2147,6 +2168,58 @@ export const handlers = [
       authenticated: false,
     });
     return HttpResponse.json({ status: "ok" });
+  }),
+
+  http.post("/api/dashboard-auth/logout-all", () => {
+    state.authSession = createDashboardAuthSession({
+      ...state.authSession,
+      authenticated: false,
+      user: null,
+    });
+    return HttpResponse.json({ status: "ok" });
+  }),
+
+  // Invite acceptance (public). Only the fixed token is valid; every other
+  // token gets the single 404 the backend returns for unknown/expired/consumed.
+  http.get("/api/dashboard-auth/invite/:token", ({ params }) => {
+    if (params.token !== MOCK_INVITE_TOKEN) {
+      return HttpResponse.json(
+        { error: { code: "invite_not_found", message: "Invite not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json(state.inviteDescription);
+  }),
+
+  http.post("/api/dashboard-auth/invite/accept", async ({ request }) => {
+    const payload = await parseJsonBody(request, InviteAcceptPayloadSchema);
+    if (!payload || payload.token !== MOCK_INVITE_TOKEN) {
+      return HttpResponse.json(
+        { error: { code: "invite_not_found", message: "Invite not found" } },
+        { status: 404 },
+      );
+    }
+    if (state.authSession.user) {
+      return HttpResponse.json(
+        { error: { code: "already_signed_in", message: "Sign out before accepting an invite" } },
+        { status: 409 },
+      );
+    }
+    state.authSession = createDashboardAuthSession({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      permissions: OPERATOR_PERMISSIONS,
+      user: createSessionUser({
+        id: "user_invited",
+        username: payload.username ?? state.inviteDescription.suggestedUsername,
+        displayName: payload.displayName ?? null,
+        role: { id: "role_operator", slug: "operator", name: "Operator", kind: "preset" },
+      }),
+      login: { usernameField: "shown", providers: [{ kind: "password", label: "Password", loginUrl: null }], localLogin: "enabled" },
+    });
+    return HttpResponse.json(state.authSession);
   }),
 
   http.get("/api/models", () => {

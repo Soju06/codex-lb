@@ -5,7 +5,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import App from "@/App";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { createAccountSummary, createDashboardAuthSession, createUpstreamProxyAdmin } from "@/test/mocks/factories";
+import {
+  ADMIN_PERMISSIONS,
+  GUEST_PERMISSIONS,
+  createAccountSummary,
+  createDashboardAuthSession,
+  createUpstreamProxyAdmin,
+} from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
@@ -26,7 +32,7 @@ const guestSession = createDashboardAuthSession({
   passwordRequired: false,
   totpConfigured: false,
   role: "guest",
-  permissions: ["read"],
+  permissions: GUEST_PERMISSIONS,
   guestAccessEnabled: true,
   guestPasswordRequired: false,
 });
@@ -75,7 +81,7 @@ function useGuestSession() {
     authenticated: true,
     passwordRequired: false,
     role: "guest",
-    permissions: ["read"],
+    permissions: GUEST_PERMISSIONS,
     canWrite: false,
     guestAccessEnabled: true,
     guestPasswordRequired: false,
@@ -85,12 +91,12 @@ function useGuestSession() {
 
 describe("guest restricted surfaces integration", () => {
   beforeEach(() => {
-    useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true, initialized: false });
+    useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true, initialized: false });
   });
 
   afterEach(() => {
     server.events.removeAllListeners();
-    useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true, initialized: false });
+    useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true, initialized: false });
   });
 
   it("shows the administrator-only notice on /apis without requesting API keys", async () => {

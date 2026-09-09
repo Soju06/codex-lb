@@ -4,6 +4,7 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
 import App from "@/App";
+import { ADMIN_PERMISSIONS } from "@/test/mocks/factories";
 import { renderWithProviders } from "@/test/utils";
 import { server } from "@/test/mocks/server";
 
@@ -41,7 +42,7 @@ describe("auth flow integration", () => {
           authMode: "standard",
           passwordManagementEnabled: true,
           role: "admin",
-          permissions: ["read", "write"],
+          permissions: ADMIN_PERMISSIONS,
         }),
       ),
     );

@@ -34,7 +34,83 @@ describe("AuthSessionSchema", () => {
       permissions: [],
       guestAccessEnabled: false,
       guestPasswordRequired: false,
+      user: null,
+      authMethod: null,
+      mustChangePassword: false,
+      totpEnrollmentRequired: false,
+      login: {
+        usernameField: "hidden",
+        providers: [{ kind: "password", label: "Password", loginUrl: null }],
+        localLogin: "enabled",
+      },
+      accessSummary: null,
+      assignableRoleIds: [],
     });
+  });
+
+  it("defaults the account fields for payloads that predate them", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      role: "admin",
+      permissions: ["read", "write"],
+    });
+
+    expect(parsed.user).toBeNull();
+    expect(parsed.login.usernameField).toBe("hidden");
+    expect(parsed.accessSummary).toBeNull();
+    expect(parsed.assignableRoleIds).toEqual([]);
+    expect(parsed.totpEnrollmentRequired).toBe(false);
+    expect(parsed.mustChangePassword).toBe(false);
+  });
+
+  it("parses the account block, login hint and access summary", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      role: "admin",
+      permissions: ["read", "write", "users:manage:all"],
+      user: { id: "u1", username: "admin", displayName: null, role: { id: "r1", slug: "admin", name: "Admin", kind: "preset" } },
+      authMethod: "password",
+      login: { usernameField: "shown", providers: [{ kind: "password", label: "Password" }], localLogin: "enabled" },
+      accessSummary: {
+        usersTotal: 2,
+        usersActive: 2,
+        usersInvited: 0,
+        usersDisabled: 0,
+        pendingInvites: 0,
+        nonAdminUsers: 1,
+        customRoles: 0,
+        providersEnabled: ["password"],
+        roleMappings: 0,
+        scimTokens: 0,
+        auditSinks: 0,
+        localLoginPolicy: "enabled",
+      },
+      assignableRoleIds: ["r1"],
+    });
+
+    expect(parsed.user?.username).toBe("admin");
+    expect(parsed.login.usernameField).toBe("shown");
+    expect(parsed.login.providers[0]?.loginUrl).toBeNull();
+    expect(parsed.accessSummary?.usersTotal).toBe(2);
+    expect(parsed.assignableRoleIds).toEqual(["r1"]);
+  });
+
+  it("treats an explicit null login hint as the hidden default", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: false,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      login: null,
+    });
+
+    expect(parsed.login.usernameField).toBe("hidden");
   });
 
   it("defaults role and permissions to least privilege when omitted", () => {
@@ -106,6 +182,11 @@ describe("LoginRequestSchema", () => {
         password: "strong-password",
       }).success,
     ).toBe(true);
+  });
+
+  it("accepts an optional username", () => {
+    const parsed = LoginRequestSchema.parse({ username: " alice ", password: "strong-password" });
+    expect(parsed.username).toBe("alice");
   });
 
   it("rejects empty password", () => {

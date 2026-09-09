@@ -3,6 +3,8 @@ import {
   AuthSessionSchema,
   GuestPasswordSetRequestSchema,
   type GuestLoginRequest,
+  type InviteAcceptRequest,
+  InviteDescriptionSchema,
   type GuestPasswordSetRequest,
   type LoginRequest,
   type PasswordChangeRequest,
@@ -90,4 +92,24 @@ export function disableTotp(payload: unknown) {
 
 export function logout() {
   return post(`${AUTH_BASE_PATH}/logout`, StatusResponseSchema);
+}
+
+/** Revokes every session of the signed-in account, including this one. */
+export function logoutAll() {
+  return post(`${AUTH_BASE_PATH}/logout-all`, StatusResponseSchema);
+}
+
+/** Public: what the acceptance screen may show for an invite token (404 for every invalid token). */
+export function describeInvite(token: string) {
+  return get(`${AUTH_BASE_PATH}/invite/${encodeURIComponent(token)}`, InviteDescriptionSchema, {
+    suppressUnauthorizedHandler: true,
+  });
+}
+
+/** Public: sets the invited account's password and signs it in (session cookie). */
+export function acceptInvite(payload: InviteAcceptRequest) {
+  return post(`${AUTH_BASE_PATH}/invite/accept`, AuthSessionSchema, {
+    body: payload,
+    suppressUnauthorizedHandler: true,
+  });
 }

@@ -23,7 +23,7 @@ max_lines = 60
 # Single source of truth for dashboard nav width. If the nav refactor moves or
 # renames this array, the checker exits 2 until path/array here are repointed —
 # that coupling is intentional.
-path = "frontend/src/components/layout/app-header.tsx"
+path = "frontend/src/components/layout/nav-items.ts"
 array = "CORE_NAV_ITEMS"
 max_items = 5
 

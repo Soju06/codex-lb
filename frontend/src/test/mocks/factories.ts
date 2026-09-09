@@ -27,7 +27,7 @@ import {
 } from "@/features/apis/schemas";
 import type { ModelSource } from "@/features/model-sources/schemas";
 import { ModelSourceSchema } from "@/features/model-sources/schemas";
-import type { AuthSession } from "@/features/auth/schemas";
+import type { AccessSummary, AuthSession, AuthSessionUser } from "@/features/auth/schemas";
 import { AuthSessionSchema } from "@/features/auth/schemas";
 import type {
 	DashboardOverview,
@@ -493,11 +493,73 @@ export function createDashboardAuthSession(
 		passwordManagementEnabled: true,
 		passwordSessionActive: false,
 		role: "admin",
-		permissions: ["read", "write"],
+		permissions: ADMIN_PERMISSIONS,
 		guestAccessEnabled: false,
 		guestPasswordRequired: false,
 		...overrides,
 	});
+}
+
+// Wire form of the preset grants (`permission_strings` in the backend): the
+// coarse aliases first, then every `<permission>:<scope>` entry.
+export const ADMIN_PERMISSIONS: string[] = [
+	"read",
+	"write",
+	"accounts:export:all",
+	"accounts:read:all",
+	"accounts:write:all",
+	"api_keys:assign:all",
+	"api_keys:read:all",
+	"api_keys:write:all",
+	"audit:read:all",
+	"conversations:read:all",
+	"dashboard:read:all",
+	"ops:write:all",
+	"roles:manage:all",
+	"security:write:all",
+	"users:manage:all",
+];
+
+export const OPERATOR_PERMISSIONS: string[] = [
+	"read",
+	"write",
+	"accounts:read:all",
+	"accounts:write:all",
+	"api_keys:assign:all",
+	"api_keys:read:all",
+	"api_keys:write:all",
+	"dashboard:read:all",
+	"ops:write:all",
+];
+
+export const GUEST_PERMISSIONS: string[] = ["read", "accounts:read:all", "dashboard:read:all"];
+
+export function createSessionUser(overrides: Partial<AuthSessionUser> = {}): AuthSessionUser {
+	return {
+		id: "user_admin",
+		username: "admin",
+		displayName: null,
+		role: { id: "role_admin", slug: "admin", name: "Admin", kind: "preset" },
+		...overrides,
+	};
+}
+
+export function createAccessSummary(overrides: Partial<AccessSummary> = {}): AccessSummary {
+	return {
+		usersTotal: 1,
+		usersActive: 1,
+		usersInvited: 0,
+		usersDisabled: 0,
+		pendingInvites: 0,
+		nonAdminUsers: 0,
+		customRoles: 0,
+		providersEnabled: ["password"],
+		roleMappings: 0,
+		scimTokens: 0,
+		auditSinks: 0,
+		localLoginPolicy: "enabled",
+		...overrides,
+	};
 }
 
 export function createDashboardSettings(

@@ -92,6 +92,83 @@ describe("RoutingSettings", () => {
     expect(screen.getAllByText(/Inherited effective value:/)).toHaveLength(4);
   });
 
+  it("shows the legacy inherited hint only under empty inputs", () => {
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          proxyAccountResponseCreateLimitOverride: null,
+          proxyAccountStreamLimitOverride: 24,
+          proxyAccountStreamRecoveryReserveOverride: null,
+          proxyApiKeyFairShareCongestionThresholdPctOverride: null,
+        }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("spinbutton", { name: "Stream limit" })).toHaveValue(24);
+    expect(screen.getAllByText(/Inherited effective value:/)).toHaveLength(3);
+  });
+
+  it("blocks resetting a stream limit whose inherited value the saved reserve would exceed", () => {
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          proxyAccountStreamLimit: 24,
+          proxyAccountStreamLimitEnvironmentValue: 8,
+          proxyAccountStreamLimitOverride: 24,
+          proxyAccountStreamRecoveryReserve: 9,
+          proxyAccountStreamRecoveryReserveEnvironmentValue: 1,
+          proxyAccountStreamRecoveryReserveOverride: 9,
+          provenance: {
+            proxy_account_stream_limit: { source: "dashboard", envValue: 8, default: 8 },
+            proxy_account_stream_recovery_reserve: { source: "dashboard", envValue: 1, default: 1 },
+          },
+        }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const resets = screen.getAllByRole("button", { name: "Reset to inherited" });
+    expect(resets).toHaveLength(2);
+    // Stream limit: clearing to 8 would leave the saved reserve of 9 above it.
+    expect(resets[0]).toBeDisabled();
+    expect(screen.getByText(/Reset is blocked: the stream recovery reserve would exceed/)).toBeInTheDocument();
+    // Reserve: clearing to 1 stays below the saved stream limit of 24.
+    expect(resets[1]).toBeEnabled();
+  });
+
+  it("shows provenance badges and resets a dashboard-owned cap to inherited", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const settings: DashboardSettings = {
+      ...BASE_SETTINGS,
+      proxyAccountResponseCreateLimitOverride: null,
+      proxyAccountStreamLimitOverride: 24,
+      proxyAccountStreamRecoveryReserveOverride: null,
+      proxyApiKeyFairShareCongestionThresholdPctOverride: null,
+      provenance: {
+        proxy_account_response_create_limit: { source: "env", envValue: 6, default: 4 },
+        proxy_account_stream_limit: { source: "dashboard", envValue: 8, default: 8 },
+        proxy_account_stream_recovery_reserve: { source: "default", envValue: 1, default: 1 },
+        proxy_api_key_fair_share_congestion_threshold_pct: { source: "default", envValue: 0, default: 0 },
+      },
+    };
+    render(<RoutingSettings settings={settings} busy={false} onSave={onSave} />);
+
+    expect(screen.getByText("Inherited from environment (6)")).toBeInTheDocument();
+    expect(screen.getByText("Default (1)")).toBeInTheDocument();
+    expect(screen.getByText("Default (0)")).toBeInTheDocument();
+    expect(screen.queryByText(/Inherited effective value:/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Reset to inherited" }));
+
+    expect(onSave).toHaveBeenCalledWith(buildSettingsUpdateRequest(settings, { proxyAccountStreamLimit: null }));
+  });
+
   it.each([
     ["Response-create limit", "proxyAccountResponseCreateLimit"],
     ["Stream limit", "proxyAccountStreamLimit"],

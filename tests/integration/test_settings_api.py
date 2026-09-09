@@ -302,6 +302,64 @@ async def test_settings_api_capacity_overrides_support_absent_null_and_explicit_
 
 
 @pytest.mark.asyncio
+async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_client, monkeypatch):
+    from app.modules.settings import service as settings_service
+
+    # Fresh row: the column is NULL and the test environment leaves the cap at
+    # its code default, so the value is reported as the default.
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    assert initial.json()["provenance"]["proxy_account_stream_limit"] == {
+        "source": "default",
+        "envValue": 8,
+        "default": 8,
+    }
+
+    # PUT a value: dashboard-owned, environment and default still reported.
+    configured = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": 24})
+    assert configured.status_code == 200
+    configured_payload = configured.json()
+    assert configured_payload["proxyAccountStreamLimit"] == 24
+    assert configured_payload["provenance"]["proxy_account_stream_limit"] == {
+        "source": "dashboard",
+        "envValue": 8,
+        "default": 8,
+    }
+
+    # PUT null clears the column; with the environment differing from the
+    # default the value is inherited from the environment.
+    inherited = settings_service.get_settings().model_copy(update={"proxy_account_stream_limit": 12})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": None})
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["proxyAccountStreamLimit"] == 12
+    assert cleared_payload["proxyAccountStreamLimitOverride"] is None
+    assert cleared_payload["provenance"]["proxy_account_stream_limit"] == {
+        "source": "env",
+        "envValue": 12,
+        "default": 8,
+    }
+
+    # Omitting the field leaves the inherited state untouched, and every
+    # inheritable setting has a provenance entry.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    provenance = unchanged.json()["provenance"]
+    assert provenance["proxy_account_stream_limit"]["source"] == "env"
+    assert set(provenance) == {
+        "proxy_account_response_create_limit",
+        "proxy_account_stream_limit",
+        "proxy_account_stream_recovery_reserve",
+        "proxy_api_key_fair_share_congestion_threshold_pct",
+        "request_log_retention_days",
+        "usage_history_retention_days",
+    }
+    # Retention is database-only: no environment value, NULL reads as default.
+    assert provenance["request_log_retention_days"] == {"source": "default", "envValue": None, "default": 0}
+
+
+@pytest.mark.asyncio
 async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(async_client, monkeypatch):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200

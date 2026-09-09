@@ -10,12 +10,74 @@ import app.modules.settings.service as settings_service_module
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import (
+    InheritableValue,
     SettingsService,
     _dump_additional_quota_routing_policies,
     _parse_additional_quota_routing_policies,
+    resolve_inheritable,
 )
 
 pytestmark = pytest.mark.unit
+
+
+def test_resolve_inheritable_null_column_uses_environment_when_it_differs_from_default() -> None:
+    assert resolve_inheritable(None, 12, 8) == InheritableValue(12, "env", 12, 8)
+
+
+def test_resolve_inheritable_null_column_reports_default_when_environment_matches_default() -> None:
+    assert resolve_inheritable(None, 8, 8) == InheritableValue(8, "default", 8, 8)
+    # Database-only settings have no environment layer at all.
+    assert resolve_inheritable(None, None, 0) == InheritableValue(0, "default", None, 0)
+
+
+def test_resolve_inheritable_dashboard_value_wins_including_zero() -> None:
+    assert resolve_inheritable(24, 12, 8) == InheritableValue(24, "dashboard", 12, 8)
+    assert resolve_inheritable(0, 12, 8) == InheritableValue(0, "dashboard", 12, 8)
+    assert resolve_inheritable(0, None, 0) == InheritableValue(0, "dashboard", None, 0)
+
+
+@pytest.mark.asyncio
+async def test_settings_data_reports_provenance_for_every_inheritable_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = DashboardSettings()
+    row.proxy_account_response_create_limit = None
+    row.proxy_account_stream_limit = None
+    row.proxy_account_stream_recovery_reserve = 3
+    row.proxy_api_key_fair_share_congestion_threshold_pct = None
+    row.request_log_retention_days = 30
+    row.usage_history_retention_days = None
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    # Environment differs from the code default for the stream limit (8) only.
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            proxy_account_response_create_limit=4,
+            proxy_account_stream_limit=12,
+            proxy_account_stream_recovery_reserve=1,
+            proxy_api_key_fair_share_congestion_threshold_pct=0,
+        ),
+    )
+
+    settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+
+    assert settings.provenance == {
+        "proxy_account_response_create_limit": InheritableValue(4, "default", 4, 4),
+        "proxy_account_stream_limit": InheritableValue(12, "env", 12, 8),
+        "proxy_account_stream_recovery_reserve": InheritableValue(3, "dashboard", 1, 1),
+        "proxy_api_key_fair_share_congestion_threshold_pct": InheritableValue(0, "default", 0, 0),
+        "request_log_retention_days": InheritableValue(30, "dashboard", None, 0),
+        "usage_history_retention_days": InheritableValue(0, "default", None, 0),
+    }
+    # The flat effective fields come from the same resolution.
+    assert settings.proxy_account_stream_limit == 12
+    assert settings.proxy_account_stream_recovery_reserve == 3
+    assert settings.request_log_retention_days == 30
 
 
 @pytest.mark.asyncio

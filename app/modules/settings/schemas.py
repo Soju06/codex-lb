@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field, field_validator
 
@@ -31,6 +32,21 @@ class AdditionalQuotaPolicy(DashboardModel):
     display_label: str
     routing_policy: str = Field(pattern=r"^(inherit|burn_first|normal|preserve)$")
     model_ids: list[str] = Field(default_factory=list)
+
+
+class SettingProvenance(DashboardModel):
+    """Where an inheritable setting's effective value comes from.
+
+    ``source`` is ``"dashboard"`` (the dashboard column is set), ``"env"`` (the
+    column is NULL and the environment value differs from the code default) or
+    ``"default"``. ``env_value`` is the environment value that applies while
+    the column is NULL (``None`` for database-only settings); ``default`` is
+    the code default. Both carry the setting's own scalar type.
+    """
+
+    source: Literal["dashboard", "env", "default"]
+    env_value: int | float | str | bool | None = None
+    default: int | float | str | bool | None = None
 
 
 class DashboardSettingsResponse(DashboardModel):
@@ -102,9 +118,24 @@ class DashboardSettingsResponse(DashboardModel):
     guest_access_enabled: bool
     guest_password_configured: bool
     version: int = Field(ge=1)
+    # Provenance of every inheritable setting keyed by its setting name (the
+    # ``dashboard_settings`` column / ``Settings`` field name). Additive: the
+    # flat ``<name>``, ``<name>_environment_value`` and ``<name>_override``
+    # fields above stay as they are.
+    provenance: dict[str, SettingProvenance] = Field(default_factory=dict)
 
 
 class DashboardSettingsUpdateRequest(DashboardModel):
+    """Partial update of the dashboard settings.
+
+    Inheritable settings (the four account-capacity caps and the two retention
+    overrides) are tri-state, decided by ``model_fields_set``: a field that is
+    omitted is left unchanged, an explicit ``null`` clears the dashboard value
+    so the setting returns to inheriting the environment value or code default
+    (``provenance[<name>].source`` becomes ``"env"`` or ``"default"``), and a
+    concrete value is stored and wins over both.
+    """
+
     expected_version: int | None = Field(default=None, ge=1)
     sticky_threads_enabled: bool | None = None
     upstream_stream_transport: str | None = Field(

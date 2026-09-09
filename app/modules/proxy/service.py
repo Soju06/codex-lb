@@ -1853,6 +1853,7 @@ class ProxyService(
                         legacy_sticky_key,
                     )
                     preferred_selection = await self._load_balancer.select_account(
+                        dashboard_settings=settings,  # C2-3 resilience toggles
                         sticky_key=preferred_sticky_inputs[0],
                         sticky_kind=preferred_sticky_inputs[1],
                         reallocate_sticky=preferred_sticky_inputs[2],
@@ -1917,6 +1918,7 @@ class ProxyService(
                         )
                         return preferred_selection
                 selection = await self._load_balancer.select_account(
+                    dashboard_settings=settings,  # C2-3 resilience toggles
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,

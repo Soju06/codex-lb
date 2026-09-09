@@ -77,6 +77,10 @@ vi.mock("@/features/settings/components/session-settings", () => ({
   SessionSettings: () => <div>Session Settings</div>,
 }));
 
+vi.mock("@/features/settings/components/resilience-settings", () => ({
+  ResilienceSettings: () => <div>Resilience Settings</div>,
+}));
+
 vi.mock("@/features/settings/components/data-retention-settings", () => ({
   DataRetentionSettings: (props: unknown) => {
     dataRetentionSettingsMock(props);

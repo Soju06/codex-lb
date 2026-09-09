@@ -28,6 +28,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
@@ -216,6 +217,7 @@ class _CodexControlMixin:
             else None
         )
         settings = await _service_get_settings_cache().get()
+        bind_resilience_toggles(settings)  # C2-3 resilience toggles
         if _routing_strategy(settings) == "single_account":
             selected_account_id = (settings.single_account_id or "").strip()
             if not selected_account_id:
@@ -224,6 +226,7 @@ class _CodexControlMixin:
                 return None
             scoped_account_ids = {selected_account_id}
         selection = await proxy._load_balancer.select_account(
+            dashboard_settings=settings,  # C2-3 resilience toggles
             sticky_key=affinity.selection_key,
             sticky_kind=affinity.kind,
             reallocate_sticky=affinity.reallocate_sticky,
@@ -272,6 +275,7 @@ class _CodexControlMixin:
         base_settings = _service_get_settings()
         deadline = start + base_settings.proxy_request_budget_seconds
         settings = await _service_get_settings_cache().get()
+        bind_resilience_toggles(settings, startup_settings=base_settings)  # C2-3 resilience toggles
         affinity = _sticky_key_for_codex_control_request(
             headers,
             codex_session_affinity=codex_session_affinity,

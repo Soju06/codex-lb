@@ -10671,7 +10671,7 @@ async def test_stream_responses_via_websocket_preserves_raw_error_when_sdk_contr
         return websocket, websocket
 
     monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: _CircuitBreakerStub())
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: _CircuitBreakerStub())
 
     events = [
         event
@@ -10966,7 +10966,7 @@ async def test_open_upstream_websocket_records_circuit_breaker_failure_on_5xx_ha
 
     cb = _CircuitBreakerStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
 
     with pytest.raises(proxy_module.aiohttp.WSServerHandshakeError):
         await proxy_module._open_upstream_websocket(
@@ -11043,7 +11043,7 @@ async def test_open_upstream_websocket_scopes_dns_failure_for_account_breaker(
 
     cb = _CircuitBreakerStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
 
     with pytest.raises(aiohttp.ClientConnectorError):
         await proxy_module._open_upstream_websocket(
@@ -11149,7 +11149,7 @@ async def test_open_upstream_websocket_records_circuit_breaker_success_after_val
         return object()
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
     monkeypatch.setattr(proxy_module.aiohttp.client_ws, "WebSocketDataQueue", lambda *args, **kwargs: object())
     monkeypatch.setattr(proxy_module, "WebSocketReader", _build_reader)
     monkeypatch.setattr(proxy_module, "WebSocketWriter", lambda *args, **kwargs: object())
@@ -11246,7 +11246,7 @@ async def test_open_upstream_websocket_holds_half_open_probe_until_lifecycle_fin
 
     cb = _CircuitBreakerStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
     monkeypatch.setattr(proxy_module.aiohttp.client_ws, "WebSocketDataQueue", lambda *args, **kwargs: object())
     monkeypatch.setattr(proxy_module, "WebSocketReader", lambda *args, **kwargs: object())
     monkeypatch.setattr(proxy_module, "WebSocketWriter", lambda *args, **kwargs: object())
@@ -11306,7 +11306,7 @@ async def test_stream_responses_websocket_records_circuit_breaker_success_after_
         return websocket, websocket
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: breaker)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: breaker)
     monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
@@ -11363,7 +11363,7 @@ async def test_stream_responses_websocket_records_circuit_breaker_failure_when_s
         return websocket, websocket
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: breaker)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: breaker)
     monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
@@ -11422,7 +11422,7 @@ async def test_open_upstream_websocket_raises_when_circuit_breaker_is_open(monke
 
     cb = _CircuitBreakerStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
 
     with pytest.raises(proxy_module.CircuitBreakerOpenError):
         await proxy_module._open_upstream_websocket(
@@ -11484,7 +11484,7 @@ async def test_open_upstream_websocket_malformed_101_records_failure(monkeypatch
 
     cb = _CircuitBreakerStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
 
     with pytest.raises(proxy_module.aiohttp.WSServerHandshakeError):
         await proxy_module._open_upstream_websocket(
@@ -45224,7 +45224,7 @@ class _CBStub:
 async def test_cb_context_normal_200_records_success(monkeypatch):
     cb = _CBStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
 
     resp = SimpleNamespace(status=200)
 
@@ -45245,7 +45245,7 @@ async def test_cb_context_normal_200_records_success(monkeypatch):
 async def test_cb_context_4xx_caller_raises_records_success(monkeypatch):
     cb = _CBStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
 
     resp = SimpleNamespace(status=429)
 
@@ -45270,7 +45270,7 @@ async def test_cb_context_4xx_caller_raises_records_success(monkeypatch):
 async def test_cb_context_200_body_timeout_records_failure(monkeypatch):
     cb = _CBStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
 
     resp = SimpleNamespace(status=200)
 
@@ -45292,7 +45292,7 @@ async def test_cb_context_200_body_timeout_records_failure(monkeypatch):
 async def test_cb_context_connection_failure_records_failure(monkeypatch):
     cb = _CBStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
 
     from contextlib import asynccontextmanager
 
@@ -45313,7 +45313,7 @@ async def test_cb_context_connection_failure_records_failure(monkeypatch):
 async def test_cb_context_process_dns_failure_does_not_poison_account_breaker(monkeypatch):
     cb = _CBStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
     connection_key = ConnectionKey("chatgpt.com", 443, True, True, None, None, None)
     dns_error = aiohttp.ClientConnectorError(
         connection_key,
@@ -45364,7 +45364,7 @@ async def test_cb_context_open_circuit_closes_request_context_manager(monkeypatc
     cb = _OpenCircuitCB()
     cm = _RequestCM()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
-    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: cb)
 
     with pytest.raises(proxy_module.CircuitBreakerOpenError):
         async with proxy_module._service_circuit_breaker_context(cm, account_id="acc_test"):

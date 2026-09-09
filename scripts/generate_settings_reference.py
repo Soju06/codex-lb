@@ -24,6 +24,7 @@ from pydantic_core import PydanticUndefined
 
 from app.core.config.settings import _REMOVED_SETTINGS, Settings
 from app.core.config.tiers import SETTING_TIERS
+from app.db.models import DashboardSettings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = REPO_ROOT / "docs" / "reference" / "settings.md"
@@ -233,6 +234,18 @@ def _render_default(name: str, field: FieldInfo) -> str:
     return f"`{default!r}`"
 
 
+_DASHBOARD_COLUMNS = frozenset(column.name for column in DashboardSettings.__table__.columns)
+
+
+def _render_tier_cell(name: str) -> str:
+    tier = SETTING_TIERS.get(name, "unassigned")
+    # A T3 setting with a same-name dashboard_settings column is managed from
+    # the dashboard; the env var is only the fallback while the column is NULL.
+    if tier == "T3" and name in _DASHBOARD_COLUMNS:
+        return "T3 (dashboard)"
+    return tier
+
+
 def _render_section_table(names: list[str], fields: dict[str, FieldInfo]) -> list[str]:
     with_description = any(fields[name].description for name in names)
     lines: list[str] = []
@@ -245,7 +258,7 @@ def _render_section_table(names: list[str], fields: dict[str, FieldInfo]) -> lis
     for name in names:
         field = fields[name]
         env_var = _render_env_cell(name, field)
-        tier_cell = SETTING_TIERS.get(name, "unassigned")
+        tier_cell = _render_tier_cell(name)
         type_cell = _escape_cell(f"`{_render_type(field.annotation)}`")
         default_cell = _escape_cell(_render_default(name, field))
         row = f"| {env_var} | {tier_cell} | {type_cell} | {default_cell} |"

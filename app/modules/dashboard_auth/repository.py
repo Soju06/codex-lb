@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DashboardSettingsConflictError
 from app.db.models import DashboardSettings
+from app.modules.dashboard_users.compat import CompatAdminProjection
 from app.modules.settings.repository import SettingsRepository
 
 _SETTINGS_ID = 1
@@ -16,6 +17,9 @@ class DashboardAuthRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._settings_repository = SettingsRepository(session)
+        # Release N: legacy credential columns are a projection of the compat
+        # `admin` user row; every credential write is mirrored before commit.
+        self._compat = CompatAdminProjection(session)
 
     async def get_settings(self) -> DashboardSettings:
         return await self._settings_repository.get_or_create()
@@ -46,6 +50,7 @@ class DashboardAuthRepository:
             if secret_encrypted is None:
                 row.totp_required_on_login = False
 
+        await self._compat.set_totp_secret(secret_encrypted)
         return await self._mutate_settings_with_retry(_mutate)
 
     async def set_password_hash(self, password_hash: str) -> DashboardSettings:
@@ -54,6 +59,7 @@ class DashboardAuthRepository:
             row.bootstrap_token_encrypted = None
             row.bootstrap_token_hash = None
 
+        await self._compat.set_password_hash(password_hash)
         return await self._mutate_settings_with_retry(_mutate)
 
     async def set_guest_password_hash(self, password_hash: str) -> DashboardSettings:
@@ -86,8 +92,12 @@ class DashboardAuthRepository:
             .values(password_hash=password_hash, bootstrap_token_encrypted=None, bootstrap_token_hash=None)
             .returning(DashboardSettings.id)
         )
+        configured = result.scalar_one_or_none() is not None
+        if configured:
+            # First-run setup creates the `admin` account the credential belongs to.
+            await self._compat.ensure_exists(password_hash=password_hash)
         await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        return configured
 
     async def get_password_hash(self) -> str | None:
         row = await self._settings_repository.get_or_create()
@@ -102,6 +112,8 @@ class DashboardAuthRepository:
             row.totp_secret_encrypted = None
             row.totp_last_verified_step = None
 
+        await self._compat.set_password_hash(None)
+        await self._compat.set_totp_secret(None)
         return await self._mutate_settings_with_retry(_mutate)
 
     async def store_bootstrap_token_if_absent(self, token_encrypted: bytes, token_hash: bytes) -> bool:
@@ -143,5 +155,13 @@ class DashboardAuthRepository:
             .values(totp_last_verified_step=step)
             .returning(DashboardSettings.id)
         )
+        advanced = result.scalar_one_or_none() is not None
+        # The replay counter must advance in both places or in neither: a code
+        # accepted by the legacy column but already used on the user row (or
+        # vice versa) is a replay.
+        mirrored = await self._compat.try_advance_totp_step(step)
+        if not advanced or mirrored is False:
+            await self._session.rollback()
+            return False
         await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        return True

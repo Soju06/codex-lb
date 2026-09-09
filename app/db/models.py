@@ -883,6 +883,118 @@ class CapabilityLineageMarker(Base):
     )
 
 
+class DashboardUserStatus(str, Enum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    INVITED = "invited"
+
+
+class DashboardUserRoleSource(str, Enum):
+    MANUAL = "manual"
+    MAPPING = "mapping"
+    SCIM = "scim"
+
+
+class ApiKeyDeactivatedReason(str, Enum):
+    MANUAL = "manual"
+    OWNER_DISABLED = "owner_disabled"
+    EXPIRED = "expired"
+
+
+#: Username of the account the legacy shared dashboard password is migrated
+#: into. During the expand/contract release its credentials are mirrored to the
+#: legacy ``dashboard_settings`` columns so older replicas keep working.
+COMPAT_ADMIN_USERNAME = "admin"
+
+
+class DashboardUser(Base):
+    """A person (or service) who signs in to the dashboard.
+
+    ``status``/``role_source`` are plain strings validated by the enums above
+    (no database enum type, so adding values needs no type migration). The
+    ``role_id`` foreign key is RESTRICT: a role in use cannot be deleted.
+    """
+
+    __tablename__ = "dashboard_users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(320), unique=True, nullable=True)
+    role_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("dashboard_roles.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    role_source: Mapped[str] = mapped_column(
+        String(16),
+        default=DashboardUserRoleSource.MANUAL.value,
+        server_default=text("'manual'"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        default=DashboardUserStatus.ACTIVE.value,
+        server_default=text("'active'"),
+        nullable=False,
+    )
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    session_generation: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    is_break_glass: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    role: Mapped["DashboardRoleRecord"] = relationship("DashboardRoleRecord")
+    identities: Mapped[list["DashboardIdentity"]] = relationship(
+        "DashboardIdentity",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class DashboardIdentity(Base):
+    """An external identity (reverse-proxy header, OIDC, SCIM) linked to a user.
+
+    One user may hold several identities from several providers; the
+    ``(provider, provider_key, subject)`` triple is unique.
+    """
+
+    __tablename__ = "dashboard_identities"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_key", "subject", name="uq_dashboard_identities_subject"),
+        Index("idx_dashboard_identities_user_id", "user_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    groups_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    user: Mapped["DashboardUser"] = relationship("DashboardUser", back_populates="identities")
+
+
 class DashboardRoleRecord(Base):
     """A dashboard role: one of the five presets or an operator-defined custom role.
 
@@ -1397,6 +1509,21 @@ class ApiKey(Base):
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Ownership (per-user accounts). NULL owner = shared/service key. Populated
+    # once principals carry a user id; declared here so the schema lands once.
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Why an inactive key is inactive, so re-enabling a user restores only the
+    # keys that were disabled because of that user (never manual blocks).
+    deactivated_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

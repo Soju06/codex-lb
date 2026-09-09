@@ -2316,6 +2316,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     await self._process_http_bridge_upstream_text(
                         session,
                         message.text,
+                        message=message,
                         scheduler=scheduler,
                         clock=clock,
                     )
@@ -2491,6 +2492,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
         text: str,
         *,
+        message: UpstreamWebSocketMessage | None = None,
         scheduler: Scheduler | None = None,
         clock: Clock | None = None,
     ) -> None:
@@ -2504,8 +2506,21 @@ class _HTTPBridgeUpstreamEventsMixin:
         # of framing it as SSE and running the line parser over it. The
         # data-only block is what unmatched events relay.
         event_block = f"data: {text}\n\n"
-        payload = parse_sse_data_json_text(text)
-        event_type = classify_event_type(payload)
+        if (
+            message is not None
+            and message.responses_interpreted
+            and message.payload is not None
+            and text.startswith("{")
+            and "\n" not in text
+            and "\r" not in text
+        ):
+            # Only this shape uses the direct JSON path in the legacy bridge.
+            # Preserve its SSE-field semantics for whitespace/multiline text.
+            payload = message.payload
+            event_type = message.event_type
+        else:
+            payload = parse_sse_data_json_text(text)
+            event_type = classify_event_type(payload)
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []

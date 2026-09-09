@@ -134,6 +134,7 @@ config:
   # @param config.upstreamBaseUrl Override OpenAI upstream base URL (empty = default)
   upstreamBaseUrl: ""
   # @param config.upstreamConnectTimeout Upstream connection timeout seconds
+  # (deprecated env alias since 1.25: a value saved in Settings -> Advanced -> Upstream timeouts wins)
   upstreamConnectTimeout: 10
   # @param config.logFormat Log output format (json|text)
   logFormat: json
@@ -142,7 +143,8 @@ config:
   # @param config.leaderElectionTtlSeconds Leader election TTL in seconds
   leaderElectionTtlSeconds: 30
   # @param config.circuitBreakerEnabled Enable circuit breaker for upstream requests
-  # (failure threshold and recovery timeout are fixed application constants)
+  # (failure threshold and recovery timeout are fixed application constants;
+  # deprecated env alias since 1.25: a value saved in Settings -> Advanced -> Resilience wins)
   circuitBreakerEnabled: true
   # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
   backpressureMaxConcurrentRequests: 0
@@ -490,6 +492,9 @@ migration:
   # @param migration.enabled Run database migration Job on install/upgrade
   enabled: true
   # @param migration.serviceSelectorMode Public Service selector mode during controller migration (auto keeps legacy during first upgrade/cutover and workload after cutover)
+  # DEPRECATED: part of the pre-1.13 Deployment -> StatefulSet migration shim (with the
+  # legacy-deployment-*-hook.yaml Jobs). Planned removal in the first minor release after
+  # 1.26; the Service will then always select the StatefulSet pods. See README "Upgrading".
   serviceSelectorMode: auto
   # @param migration.backoffLimit Maximum retries before marking Job failed
   backoffLimit: 3

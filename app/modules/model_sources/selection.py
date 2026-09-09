@@ -164,3 +164,46 @@ async def responses_model_is_source_owned(
             exc_info=True,
         )
         return False
+
+
+async def select_overflow_model_source(
+    source_id: str,
+    model: str,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+    require_streaming: bool = False,
+) -> tuple[ModelSource, str] | None:
+    """Resolve ``model`` on the designated overflow source only (#2123 WP-C1, design v3 §4.5).
+
+    Same candidate order and ``allowed_models`` filter as
+    ``select_responses_model_source`` but *without* the registry-precedence
+    skip (a registry slug is exactly what overflows), looked up with
+    ``allowed_source_ids={source_id}``; rows are detached from the session.
+    The API key's source-assignment scope is deliberately not consulted here:
+    the caller decides whether the presenting key may reach the source.
+    """
+
+    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    candidates = [candidate for candidate in (raw_model, model) if candidate]
+    if not candidates:
+        return None
+    deduped_candidates = list(dict.fromkeys(candidates))
+    async with get_background_session() as session:
+        repository = ModelSourcesRepository(session)
+        for candidate in deduped_candidates:
+            if exact_allowed_models is not None and candidate not in exact_allowed_models:
+                continue
+            source = await repository.find_responses_source_for_model(
+                candidate,
+                allowed_source_ids={source_id},
+                require_streaming=require_streaming,
+            )
+            if source is not None:
+                break
+        else:
+            source = None
+        # Same session boundary as ``select_responses_model_source``: detach so
+        # the dispatch path can read the row after the read transaction ends.
+        detach_session_objects(session)
+        return (source, candidate) if source is not None else None

@@ -68,6 +68,18 @@ if PROMETHEUS_AVAILABLE:
         ["downstream_transport", "upstream_transport", "policy", "sticky", "status"],
         registry=REGISTRY,
     )
+    http_bridge_routing_total = Counter(
+        "codex_lb_http_bridge_routing_total",
+        "HTTP bridge routing evaluations by stage and reason (not connection successes)",
+        ["stage", "reason"],
+        registry=REGISTRY,
+    )
+    http_bridge_connections_total = Counter(
+        "codex_lb_http_bridge_connections_total",
+        "HTTP bridge connection lifecycle events",
+        ["event"],
+        registry=REGISTRY,
+    )
     upstream_request_duration_seconds = Histogram(
         "codex_lb_upstream_request_duration_seconds",
         "Upstream request duration",
@@ -369,6 +381,61 @@ if PROMETHEUS_AVAILABLE:
         "Total cache invalidation poll cycles that failed",
         registry=REGISTRY,
     )
+    # Model-source dispatch (#2123 WP-C1). ``kind`` is an opaque dispatch kind
+    # supplied by the caller (``direct`` for direct source routing); every label
+    # set is closed or bounded by the number of configured sources.
+    model_source_dispatch_total = Counter(
+        "codex_lb_model_source_dispatch_total",
+        "Total owned model-source dispatch attempts by dispatch kind and terminal status",
+        ["kind", "status"],
+        registry=REGISTRY,
+    )
+    model_source_dispatch_abandoned_total = Counter(
+        "codex_lb_model_source_dispatch_abandoned_total",
+        "Total model-source dispatches abandoned by a departing client, by stage",
+        ["stage"],
+        registry=REGISTRY,
+    )
+    model_source_timeout_total = Counter(
+        "codex_lb_model_source_timeout_total",
+        "Total model-source transport deadlines that expired, by phase",
+        ["phase"],
+        registry=REGISTRY,
+    )
+    model_source_bulkhead_rejections_total = Counter(
+        "codex_lb_model_source_bulkhead_rejections_total",
+        "Total model-source dispatches rejected by the per-source concurrency bulkhead",
+        ["source_id"],
+        registry=REGISTRY,
+    )
+    model_source_bulkhead_in_flight = Gauge(
+        "codex_lb_model_source_bulkhead_in_flight",
+        "In-flight model-source dispatches held by the per-source concurrency bulkhead",
+        ["source_id"],
+        registry=REGISTRY,
+        **_gauge_kwargs,
+    )
+    model_source_usage_estimated_total = Counter(
+        "codex_lb_model_source_usage_estimated_total",
+        "Total limited-key model-source reservations settled at an estimate, by cause",
+        ["source_id", "cause"],
+        registry=REGISTRY,
+    )
+    model_source_live_pins = Gauge(
+        "codex_lb_model_source_live_pins",
+        "Live model-source pins by kind (sampled)",
+        ["kind"],
+        registry=REGISTRY,
+        **({"multiprocess_mode": "liveall"} if MULTIPROCESS_MODE else {}),
+    )
+    # Read-only pool-exhaustion probe (#2123 WP-C1, design decision 28): declines
+    # by reason; the label set is closed (``drain_strategy``).
+    pool_exhaustion_probe_declined_total = Counter(
+        "codex_lb_pool_exhaustion_probe_declined_total",
+        "Total read-only pool-exhaustion probes that declined to evaluate the pool, by reason",
+        ["reason"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -392,6 +459,8 @@ else:
     request_duration_seconds: HistogramLike | None = None
     upstream_requests_total: CounterLike | None = None
     upstream_transport_decisions_total: CounterLike | None = None
+    http_bridge_routing_total: CounterLike | None = None
+    http_bridge_connections_total: CounterLike | None = None
     upstream_request_duration_seconds: HistogramLike | None = None
     upstream_reasoning_replay_400_total: CounterLike | None = None
     image_requests_total: CounterLike | None = None
@@ -441,6 +510,14 @@ else:
     stream_idle_timeout_total: CounterLike | None = None
     cache_invalidation_bump_failures_total: CounterLike | None = None
     cache_invalidation_poll_failures_total: CounterLike | None = None
+    model_source_dispatch_total: CounterLike | None = None
+    model_source_dispatch_abandoned_total: CounterLike | None = None
+    model_source_timeout_total: CounterLike | None = None
+    model_source_bulkhead_rejections_total: CounterLike | None = None
+    model_source_bulkhead_in_flight: GaugeLike | None = None
+    model_source_usage_estimated_total: CounterLike | None = None
+    model_source_live_pins: GaugeLike | None = None
+    pool_exhaustion_probe_declined_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -498,6 +575,14 @@ __all__ = [
     "image_requests_total",
     "make_scrape_registry",
     "mark_process_dead",
+    "model_source_bulkhead_in_flight",
+    "model_source_bulkhead_rejections_total",
+    "model_source_dispatch_abandoned_total",
+    "model_source_dispatch_total",
+    "model_source_live_pins",
+    "model_source_timeout_total",
+    "model_source_usage_estimated_total",
+    "pool_exhaustion_probe_declined_total",
     "prometheus_client",
     "proxy_phase_latency_seconds",
     "rate_limit_hits_total",
@@ -509,4 +594,6 @@ __all__ = [
     "upstream_request_duration_seconds",
     "upstream_requests_total",
     "upstream_transport_decisions_total",
+    "http_bridge_routing_total",
+    "http_bridge_connections_total",
 ]

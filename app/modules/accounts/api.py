@@ -29,11 +29,9 @@ from app.modules.accounts.schemas import (
     AccountAliasResponse,
     AccountAuthExportResponse,
     AccountDeleteResponse,
-    AccountExportResponse,
     AccountImportResponse,
     AccountLimitWarmupUpdateRequest,
     AccountLimitWarmupUpdateResponse,
-    AccountOpenCodeAuthExportResponse,
     AccountPauseResponse,
     AccountProbeRequest,
     AccountProbeResponse,
@@ -180,28 +178,6 @@ async def consume_account_usage_reset_credit(
     return result
 
 
-@router.post("/{account_id}/export", response_model=AccountExportResponse, deprecated=True)
-async def export_account(
-    request: Request,
-    response: Response,
-    account_id: str,
-    _write_access=Depends(require_dashboard_write_access),
-    context: AccountsContext = Depends(get_accounts_context),
-) -> AccountExportResponse:
-    result = await context.service.export_account(account_id)
-    if not result:
-        raise DashboardNotFoundError("Account not found", code="account_not_found")
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    AuditService.log_async(
-        "account_exported",
-        actor_ip=request.client.host if request.client else None,
-        details={"account_id": result.account_id},
-    )
-    return result
-
-
 @router.post("/{account_id}/export/auth", response_model=AccountAuthExportResponse)
 async def export_account_auth(
     request: Request,
@@ -211,28 +187,6 @@ async def export_account_auth(
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountAuthExportResponse:
     result = await context.service.export_auth(account_id)
-    if not result:
-        raise DashboardNotFoundError("Account not found", code="account_not_found")
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    AuditService.log_async(
-        "account_auth_exported",
-        actor_ip=request.client.host if request.client else None,
-        details={"account_id": account_id},
-    )
-    return result
-
-
-@router.post("/{account_id}/export/opencode-auth", response_model=AccountOpenCodeAuthExportResponse, deprecated=True)
-async def export_account_opencode_auth(
-    request: Request,
-    response: Response,
-    account_id: str,
-    _write_access=Depends(require_dashboard_write_access),
-    context: AccountsContext = Depends(get_accounts_context),
-) -> AccountOpenCodeAuthExportResponse:
-    result = await context.service.export_opencode_auth(account_id)
     if not result:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"

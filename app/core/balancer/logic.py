@@ -1310,7 +1310,33 @@ def account_status_for_permanent_failure(error_code: str) -> AccountStatus:
     return AccountStatus.DEACTIVATED
 
 
-FailoverAction = Literal["failover_next", "surface"]
+FailoverAction = Literal["failover_next", "retry_same_account", "surface"]
+
+# Owner-bound burst 429 (a code-less upstream HTTP 429 burst/concurrency
+# rejection on a request that cannot move to another account): bounded
+# same-account backoff before the original rejection is surfaced. Module
+# constants on purpose -- the Settings ratchet is full and this is a transport
+# invariant, not an operator knob. Waits are 1 s, 2 s, 4 s (upstream
+# ``Retry-After`` is a floor), never above ``BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS``.
+BURST_SAME_ACCOUNT_MAX_RETRIES = 3
+BURST_SAME_ACCOUNT_BASE_SECONDS = 1.0
+BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS = 10.0
+# ``Retry-After`` stamped on a surfaced burst 429 that carried none upstream;
+# matches ``app.core.resilience.overload.LOCAL_OVERLOAD_RETRY_AFTER_SECONDS``.
+BURST_SURFACE_RETRY_AFTER_SECONDS = 5
+
+
+def burst_same_account_backoff_seconds(retry_index: int, *, retry_after_seconds: float | None) -> float:
+    """Deterministic wait before same-account burst retry ``retry_index`` (1-based).
+
+    ``min(MAX_WAIT, max(retry_after_seconds or 0, BASE * 2 ** (retry_index - 1)))``:
+    exponential from ``BURST_SAME_ACCOUNT_BASE_SECONDS`` with the upstream
+    ``Retry-After`` (when present and positive) acting as a floor. No jitter, so
+    the caller's timing seam (``scheduler.sleep``) fully owns the wait.
+    """
+    exponential = BURST_SAME_ACCOUNT_BASE_SECONDS * (2 ** (max(retry_index, 1) - 1))
+    floor = float(retry_after_seconds) if retry_after_seconds is not None and retry_after_seconds > 0 else 0.0
+    return min(BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS, max(floor, exponential))
 
 
 def failover_decision(
@@ -1318,9 +1344,21 @@ def failover_decision(
     failure_class: FailureClass,
     downstream_visible: bool,
     candidates_remaining: int,
+    owner_bound: bool = False,
+    same_account_retry_available: bool = False,
 ) -> FailoverAction:
+    """Decide how a pre-visible upstream failure is handled.
+
+    ``owner_bound`` means the request cannot move to another account (dispatched
+    account-bound payload, required previous-response / turn-state / file
+    owner). Such a request never fails over -- ``failover_next`` would be a
+    lie -- so it either retries the same account (when the caller reports a
+    bounded same-account retry is still available) or surfaces the failure.
+    """
     if downstream_visible:
         return "surface"
+    if owner_bound:
+        return "retry_same_account" if same_account_retry_available else "surface"
     if candidates_remaining <= 0:
         return "surface"
     if failure_class in ("rate_limit", "quota", "retryable_transient"):

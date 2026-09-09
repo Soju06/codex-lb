@@ -213,8 +213,11 @@ Before a PR is squash-merged into `main`:
    fine" is not a green CI; rerun, fix, or wait. The Helm / migration /
    PostgreSQL test jobs are part of the gate, not optional. The
    `CI Required` check is the branch-protection check to require: it
-   depends on every CI job and also runs for merge queue synthetic merge
-   groups, so a stale PR head cannot bypass a broken merge result.
+   depends on every `ci.yml` job and also runs for merge queue synthetic merge
+   groups, so a stale PR head cannot bypass a broken merge result. The release
+   guards (`Beta release guard`, `Stable release guard`) run from
+   `release-guards.yml` so an edited release PR body re-checks them without
+   restarting the matrix; they are separate contexts, not part of `CI Required`.
 2. **Actionable CodeRabbit findings must be fixed or explicitly addressed
    or dismissed in-thread on the merge-target head.** Review the current-head
    CodeRabbit findings before merging; no finding may be silently skipped.

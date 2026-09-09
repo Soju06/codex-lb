@@ -1,11 +1,13 @@
 # rate-limit-reset-credits Specification
 
 ## Purpose
-TBD - created by archiving change add-rate-limit-reset-credits. Update Purpose after archive.
+Governs visibility and redemption of upstream banked rate-limit reset credits per account. Upstream exposes the redeem affordance only in selected editors, so operators managing many accounts had no way to see how many credits an account holds, when they expire, or to redeem one from the dashboard. This capability defines the per-account polling cadence and in-memory cache, operator redemption of the soonest-expiring credit, isolation of polling failures from account status, and cross-replica serialization of redemption and cache invalidation.
 ## Requirements
 ### Requirement: Reset credits are polled per account on a fixed cadence
 
 The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eligible account on a configurable cadence that defaults to 60 seconds, using that account's stored OAuth bearer token and `chatgpt-account-id`. The scheduler SHALL start with the application lifespan when reset-credit polling is enabled. Because snapshots are kept in process-local memory, every running replica SHALL refresh its own snapshot cache instead of relying on leader election, and the scheduler SHALL NOT be leader-gated while snapshots remain process-local. Each replica SHALL apply a randomized startup delay of up to one full interval and randomized per-tick jitter of +/-10% so replica ticks are desynchronized. The aggregate upstream fetch rate scales with the number of running replicas; `rate_limit_reset_credits_refresh_interval_seconds` is the operator control for total upstream load. The poll SHALL skip any account that is paused, requires reauthentication, deactivated, or lacks a usable `chatgpt-account-id`.
+
+When dashboard setting `auto_redeem_reset_credits_before_expiry` is enabled, the refresh loop SHALL evaluate refreshed snapshots and attempt to redeem the soonest-expiring available reset credit when it expires within five minutes by reusing the existing reset-credit redemption function, serialization, idempotency ledger, cache invalidation, and usage-refresh path. Before invoking the redemption function, automatic redemption SHALL re-read the target account in the redemption session and abort without consuming upstream when the account is missing, paused, requires reauthentication, deactivated, or no longer has a usable `chatgpt-account-id`. Automatic redemption SHALL constrain the redemption helper to the credit id and expiry that triggered the five-minute window, and SHALL abort without consuming upstream if the helper's fresh pre-consume fetch no longer reports that same credit with the same expiry as available. Automatic redemption SHALL use a stable automatic redeem request id for the account and UTC expiry date, and SHALL NOT issue another upstream consume when that automatic request is already durably pinned.
 
 #### Scenario: Default cadence polls every 60 seconds
 - **WHEN** the application starts with default settings
@@ -25,6 +27,31 @@ The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eli
 - **WHEN** an account is persisted as `paused`, `reauth_required`, or `deactivated`
 - **THEN** the scheduler performs no upstream reset-credits fetch for that account
 - **AND** the cached snapshot for that account (if any) is left untouched by the skip
+
+#### Scenario: Automatic redemption is disabled by default
+- **WHEN** the dashboard settings row is created for the first time
+- **THEN** `auto_redeem_reset_credits_before_expiry` is `false`
+- **AND** the reset-credit refresh scheduler only refreshes snapshots and does not redeem credits automatically
+
+#### Scenario: Automatic redemption reuses the existing redeem path
+- **GIVEN** `auto_redeem_reset_credits_before_expiry` is enabled
+- **AND** a refreshed eligible account snapshot includes an available credit whose expiry is within the automatic redemption window
+- **WHEN** the reset-credit refresh loop processes that account
+- **THEN** the system redeems the soonest-expiring available credit through the same redemption function used by the dashboard consume endpoint
+- **AND** the redemption uses the existing per-account serializer, durable idempotency ledger, cache invalidation, and usage refresh behavior
+- **AND** duplicate automatic attempts for an already pinned automatic request do not issue another upstream consume
+
+#### Scenario: Automatic redemption ignores non-expiring snapshots
+- **GIVEN** `auto_redeem_reset_credits_before_expiry` is enabled
+- **AND** a refreshed eligible account snapshot has no available credit with `expires_at`
+- **WHEN** the reset-credit refresh loop processes that account
+- **THEN** the system does not attempt automatic redemption for that snapshot
+
+#### Scenario: Automatic redemption waits until the five-minute expiry window
+- **GIVEN** `auto_redeem_reset_credits_before_expiry` is enabled
+- **AND** a refreshed eligible account snapshot's soonest available credit expires more than five minutes in the future
+- **WHEN** the reset-credit refresh loop processes that account
+- **THEN** the system refreshes the snapshot but does not attempt automatic redemption
 
 ### Requirement: Reset credit snapshots are cached in memory keyed by account
 
@@ -242,4 +269,43 @@ After a successful consume (dashboard or `POST /v1/reset-credit`) and after a co
 - **WHEN** a consume for account X succeeds on replica A and bumps the `reset_credits` namespace
 - **THEN** replica A evicts only account X's snapshot
 - **AND** account Y's cached snapshot on replica A survives (replica A does not clear its whole store in response to its own bump)
+
+### Requirement: Daybreak capability intent cannot downgrade through reset-credit routing
+
+`POST /v1/reset-credit` and `POST /api/codex/rate-limit-reset-credits/consume` (with or without its trailing slash) MUST require a valid proxy API key whenever `X-Codex-LB-Required-Capability` is present. After authentication they MUST return HTTP 400 with `error.code = "required_capability_transport_unsupported"` before account lookup, ChatGPT usage-identity validation, credential decryption, upstream route resolution, reset-credit fetch, or reset-credit consume. Headerless requests MUST retain their existing authentication and redemption behavior. Capability-bearing reads of `/api/codex/usage`, `/v1/usage`, and `/v1/reset-credit` MAY remain available after proxy API-key authentication because their API-key paths are local and do not select an upstream account or dispatch an upstream request. They MUST NOT enter ChatGPT usage-identity validation while the carrier is present.
+
+#### Scenario: Authenticated reset-credit carrier fails before account routing
+
+- **WHEN** a valid proxy API key sends either reset-credit consume surface with the Daybreak carrier
+- **THEN** ingress returns HTTP 400 `required_capability_transport_unsupported`
+- **AND** no account, ChatGPT identity, credential, route, fetch, or consume operation is reached
+
+#### Scenario: Local usage initialization authenticates without upstream identity lookup
+
+- **WHEN** a valid proxy API key reads a local usage or reset-credit listing with the Daybreak carrier
+- **THEN** the existing local API-key response remains available
+- **AND** no ChatGPT usage-identity request or upstream account routing occurs
+
+#### Scenario: Headerless reset-credit behavior remains unchanged
+
+- **WHEN** a reset-credit request omits the required-capability carrier
+- **THEN** the existing API-key or ChatGPT identity authentication and redemption behavior remains in effect
+
+### Requirement: SQLite redeem-claim cleanup survives repeated cancellation
+
+After a process acquires the SQLite reset-credit redeem claim, the system MUST
+treat heartbeat cancellation and drain followed by holder-fenced claim release
+as one owned cleanup operation. Repeated caller cancellation while cleanup is
+suspended MUST NOT interrupt that operation. Deferred cancellation MUST surface
+only after heartbeat shutdown and release finish. Lease expiry MUST remain the
+crash or release-error backstop, not routine live-process cancellation cleanup.
+
+#### Scenario: Repeated cancellation cannot strand a live SQLite claim
+
+- **GIVEN** a SQLite redemption holds a durable claim with a heartbeat
+- **WHEN** the body is cancelled and cancellation is delivered again after
+  claim release starts
+- **THEN** the heartbeat is cancelled and drained
+- **AND** holder-fenced release finishes before cancellation surfaces
+- **AND** a successor can acquire immediately without waiting for lease expiry
 

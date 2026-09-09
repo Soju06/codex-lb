@@ -541,6 +541,7 @@ mod tests {
             ping_interval_ms: Some(20_000),
             ping_timeout_ms: Some(120_000),
             proxy_url: None,
+            interpret_responses: false,
         };
         let (mut websocket, response) = connect_native_websocket(&request)
             .await

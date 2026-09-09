@@ -1,11 +1,23 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import i18n, { normalizeSupportedLanguage, SUPPORTED_LANGUAGES } from "@/i18n";
+import i18n, { normalizeSupportedLanguage } from "@/i18n";
 import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
+import ko from "@/i18n/locales/ko.json";
+import zhCN from "@/i18n/locales/zh-CN.json";
 
 afterEach(async () => {
   await i18n.changeLanguage("en");
+});
+
+describe("locale key parity", () => {
+  it.each([
+    ["ko", ko],
+    ["zh-CN", zhCN],
+    ["ja", ja],
+  ])("%s defines exactly the keys that en defines", (_locale, resource) => {
+    expect(Object.keys(resource).sort()).toEqual(Object.keys(en).sort());
+  });
 });
 
 describe("normalizeSupportedLanguage", () => {
@@ -41,10 +53,6 @@ describe("normalizeSupportedLanguage", () => {
 });
 
 describe("locale resources", () => {
-  it.each(SUPPORTED_LANGUAGES)("keeps %s translation coverage in sync with English", (language) => {
-    expect(Object.keys(i18n.getResourceBundle(language, "translation")).sort()).toEqual(Object.keys(en).sort());
-  });
-
   it("preserves Japanese interpolation variables and inline markup", () => {
     const placeholders = (value: string) => (value.match(/\{\{[^}]+\}\}|<\/?\d+>/g) ?? []).sort();
 

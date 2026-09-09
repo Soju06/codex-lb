@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 import aiohttp
-from aiohttp_retry import ExponentialRetry, RetryClient
+from aiohttp_retry import RetryClient
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.clients.codex import (
@@ -16,19 +16,18 @@ from app.core.clients.codex import (
     require_route_or_direct_egress_opt_in,
 )
 from app.core.clients.headers import build_chatgpt_auth_headers
-from app.core.clients.http import lease_retry_client
+from app.core.clients.http import _safe_json, lease_retry_client
+from app.core.clients.proxy import _codex_response_status
 from app.core.clients.usage import (
+    RETRYABLE_STATUS,
     _retry_delay_seconds,
+    _retry_options,
     _safe_codex_json,
 )
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
-
-RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
-RETRY_START_TIMEOUT = 0.5
-RETRY_MAX_TIMEOUT = 2.0
 
 logger = logging.getLogger(__name__)
 
@@ -273,15 +272,6 @@ def _consume_url(base_url: str) -> str:
     return f"{_reset_credits_url(base_url)}/consume"
 
 
-async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
-    try:
-        data = await resp.json(content_type=None)
-    except Exception:
-        text = await resp.text()
-        return {"error": {"message": text.strip()}}
-    return data if isinstance(data, dict) else {"error": {"message": str(data)}}
-
-
 def _success_payload(payload: JsonObject) -> JsonObject:
     if "error" in payload:
         raise ValueError("success response carried error payload")
@@ -320,18 +310,6 @@ def _extract_error_code(payload: JsonObject) -> str | None:
             normalized = code.strip().lower()
             return normalized or None
     return None
-
-
-def _retry_options(attempts: int) -> ExponentialRetry:
-    return ExponentialRetry(
-        attempts=attempts,
-        start_timeout=RETRY_START_TIMEOUT,
-        max_timeout=RETRY_MAX_TIMEOUT,
-        factor=2.0,
-        statuses=RETRYABLE_STATUS,
-        exceptions={aiohttp.ClientError, asyncio.TimeoutError},
-        retry_all_server_errors=False,
-    )
 
 
 async def _fetch_reset_credits_via_codex(
@@ -430,10 +408,3 @@ async def _consume_reset_credit_via_codex(
             if callable(close):
                 await close()
     raise RuntimeError("unreachable reset credits consume retry state")
-
-
-def _codex_response_status(response: object) -> int:
-    value = getattr(response, "status_code", getattr(response, "status", None))
-    if value is None:
-        return 0
-    return int(value)

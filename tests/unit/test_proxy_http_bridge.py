@@ -52,6 +52,7 @@ from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._service import support as proxy_support_module
 from app.modules.proxy._service.http_bridge import accepted_replay as http_bridge_accepted_replay_module
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
@@ -1936,6 +1937,7 @@ async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_time
     process_text.assert_awaited_once_with(
         session,
         '{"type":"response.completed"}',
+        message=UpstreamWebSocketMessage(kind="text", text='{"type":"response.completed"}'),
         scheduler=service._scheduler,
         clock=service._clock,
     )
@@ -11721,6 +11723,7 @@ async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
             "instructions": "hi",
             "input": "hello",
             "prompt_cache_key": "soft-queue-full",
+            "service_tier": "priority",
         }
     )
     saturated_session = _make_bridge_session(key_value="soft-queue-full", queued_request_count=8)
@@ -11809,6 +11812,8 @@ async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
     assert get_or_create.await_args_list[1].kwargs["previous_response_id"] is None
     assert get_or_create.await_args_list[2].kwargs["previous_response_id"] is None
     assert "internal_soft_affinity_reroute" in caplog.text
+    assert get_or_create.await_args_list[1].kwargs["request_service_tier"] == "priority"
+    assert get_or_create.await_args_list[2].kwargs["request_service_tier"] == "priority"
 
 
 @pytest.mark.asyncio
@@ -23231,6 +23236,11 @@ async def test_get_or_create_http_bridge_session_waiter_propagates_terminal_infl
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    # The registration gate consults ring membership through the real database;
+    # this test only exercises the in-memory inflight waiter, so pin the gate
+    # closed like the sibling inflight tests instead of depending on schema
+    # some earlier module happened to provision.
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
     monkeypatch.setattr(
         proxy_service,
@@ -25737,6 +25747,7 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
         account_id: str | None = None,
         surface: str = "websocket",
         apply_gate_timeout: bool = True,
+        routing_tunables: RoutingTunables | None = None,
     ) -> None:
         del bridge_session
         del compact
@@ -28485,7 +28496,12 @@ async def test_create_http_bridge_session_does_not_classify_post_selection_failu
 @pytest.mark.asyncio
 async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_previous_response_owner_misses(
     monkeypatch: pytest.MonkeyPatch,
+    db_setup: bool,
 ) -> None:
+    # ``_pin_file_account`` writes through the real ``SessionLocal`` into
+    # ``file_account_pins``; ``db_setup`` provisions that schema instead of
+    # relying on an earlier module having reset the shared test database.
+    del db_setup
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     await service._pin_file_account("file_from_other_account", "acc-file")
     payload = proxy_service.ResponsesRequest.model_validate(
@@ -30047,6 +30063,7 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
     process_text.assert_awaited_once_with(
         session,
         "late response",
+        message=UpstreamWebSocketMessage(kind="text", text="late response"),
         scheduler=service._scheduler,
         clock=service._clock,
     )
@@ -33743,7 +33760,7 @@ async def test_http_bridge_submit_cooldown_suppression_spares_session_owned_by_c
         return allowed
 
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", gate)
-    monkeypatch.setattr(service, "_http_bridge_fair_share_threshold_pct", AsyncMock(return_value=0))
+    monkeypatch.setattr(service, "_http_bridge_reacquire_snapshot", AsyncMock(return_value=(0, RoutingTunables())))
     monkeypatch.setattr(
         service,
         "_ensure_http_bridge_session_stream_lease_locked",

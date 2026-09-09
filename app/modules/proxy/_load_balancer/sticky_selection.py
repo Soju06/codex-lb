@@ -33,6 +33,7 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     overload_isolation_active,
     sticky_owner_isolation_reroute_pool,
 )
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
     AccountConcurrencyCaps,
@@ -106,6 +107,7 @@ class StickySelectionOwner(Protocol):
         *,
         required_account_id: str | None,
         redact_sensitive_details: bool,
+        routing_tunables: RoutingTunables,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
     def _sync_runtime_state(
@@ -243,6 +245,8 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     traffic_class: TrafficClass
     concurrency_caps: AccountConcurrencyCaps
     redact_sensitive_details: bool
+    # C2-2 routing/overload: dashboard snapshot resolved once by the caller.
+    routing_tunables: RoutingTunables
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
@@ -324,6 +328,7 @@ async def run_sticky_selection_path(
     traffic_class = request.traffic_class
     caps = request.concurrency_caps
     redact_sensitive_details = request.redact_sensitive_details
+    routing_tunables = request.routing_tunables
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
     allow_usage_exhaustion_error = request.allow_usage_exhaustion_error
@@ -434,6 +439,7 @@ async def run_sticky_selection_path(
                 selection_inputs,
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
+                routing_tunables=routing_tunables,
             )
             if retired_legacy_owner_account_ids:
                 # Retirement is authoritative even when this selector loaded a

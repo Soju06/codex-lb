@@ -69,8 +69,32 @@ context and stays in Python. An alias payload containing a float, oversized
 integer, or escaped surrogate uses Python serialization to preserve its exact
 legacy representation. Neither handoff starts a second HTTP request. Unchanged
 mixed-line-ending events preserve their text; JSON arrays never become objects.
-The Python transport remains the missing-helper implementation, and WebSocket
-event interpretation is deferred to the next transport slice.
+The Python transport remains the missing-helper implementation.
+
+## Native Responses WebSocket ownership
+
+`websocket_responses_events_v1` classifies Responses WebSocket JSON objects in
+Rust and embeds their JSON payload in IPC. The Python WebSocket relay and HTTP
+bridge reuse that decoded object for request matching, sequence tracking,
+tool-call handling and lifecycle validation. Original text, numeric tokens,
+duplicate-key precedence and WebSocket aliases stay unchanged. A string `type`
+wins; otherwise an object `error` classifies as `error`. Public errors and
+HTTP-specific normalization retain their Python policy owners.
+
+For example, an integer larger than 64 bits crosses IPC without Rust numeric
+conversion and remains a Python integer. Whitespace outside strings is removed
+only in the embedded IPC object to preserve JSON-line framing; original frame
+text is untouched. Invalid/non-object/unsupported JSON and frames over 1 MiB
+remain opaque. Live calls do not opt in. The HTTP bridge preserves its legacy
+SSE-field parsing for multiline or whitespace-prefixed frames.
+
+The Python fallback is still supported, so its parser is active code. Retired
+native-path branches must be removed in the migration that replaces them. Before
+removal, audit intervening Python commits and extend shared Rust/Python fixtures
+for applicable fixes. The ownership table and audit through `d3f63331d` are in
+[the archived change](../../changes/archive/2026-09-08-native-websocket-event-interpretation/context.md).
+That change includes a tracked benchmark script/result; the final synthetic
+measurement shows no speedup (640 ms raw versus 674 ms interpreted).
 
 ## Native SSE output writes
 

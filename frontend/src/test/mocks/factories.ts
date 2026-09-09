@@ -530,6 +530,11 @@ export function createDashboardSettings(
 		proxyApiKeyFairShareCongestionThresholdPct: 0,
 		proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue: 0,
 		proxyApiKeyFairShareCongestionThresholdPctOverride: 0,
+		proxyOverloadIsolationSeconds: 1800,
+		proxyAccountErrorRateWeightingEnabled: true,
+		proxyAccountInflightPenaltyPct: 2.5,
+		proxyAccountLeaseTokenWeight: 1,
+		proxyAccountLeaseTtlSeconds: 900,
 		weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
 		weeklyPaceSmoothingMinutes: 30,
 		openaiCacheAffinityMaxAgeSeconds: 300,
@@ -554,6 +559,9 @@ export function createDashboardSettings(
 		guestAccessEnabled: false,
 		guestPasswordConfigured: false,
 		limitWarmupStaggeredIdleEnabled: false,
+		softDrainEnabled: true,
+		deterministicFailoverEnabled: true,
+		circuitBreakerEnabled: false,
 		...overrides,
 	});
 }

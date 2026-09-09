@@ -123,7 +123,7 @@ image response and transfer ownership to the tracked retrying release fallback.
 
 ### Requirement: Image routes expose bounded operational observability
 
-The system SHALL emit structured route-completion logs and Prometheus metrics for `/v1/images/generations` and `/v1/images/edits`. Observability labels MUST be bounded to route, effective public model, stream flag, HTTP status, and outcome, and MUST NOT include prompts, image bytes, file names, access tokens, or raw upstream payloads.
+The system SHALL emit structured route-completion logs and Prometheus metrics for `/v1/images/generations` and `/v1/images/edits`. Observability labels MUST be bounded to route, effective public model, stream flag, HTTP status, and outcome, and MUST NOT include prompts, image bytes, file names, access tokens, or raw upstream payloads. The duration start time MUST be captured at HTTP ingress, before authentication, body admission, or handler execution, by a pure ASGI middleware that stores it in the request scope state; pre-handler rejections MUST measure duration from that ingress start time.
 
 #### Scenario: Successful image request records completion telemetry
 
@@ -136,6 +136,12 @@ The system SHALL emit structured route-completion logs and Prometheus metrics fo
 - **WHEN** an image request is rejected by validation or mapped from an upstream/image-generation error
 - **THEN** the service emits the same bounded `images_route_complete` fields with a non-success outcome
 - **AND** increments the image request counter and duration histogram without logging prompt or binary image content
+
+#### Scenario: Pre-handler rejection measures duration from ingress
+
+- **WHEN** an image route request is rejected before its handler runs (for example an oversized multipart upload or a missing API key)
+- **THEN** the recorded duration uses the start time stamped into the request scope state at HTTP ingress
+- **AND** non-image HTTP paths and WebSocket scopes receive no such stamp
 
 ### Requirement: Codex-base Images API aliases
 
@@ -241,4 +247,26 @@ Byte-limit failures MUST return HTTP 413 with OpenAI error `code = payload_too_l
 - **WHEN** parsing succeeds, fails a limit, encounters malformed multipart, receives a client disconnect, or is cancelled
 - **THEN** every created multipart spool is closed
 - **AND** disconnect and cancellation are not converted to HTTP 413
+
+### Requirement: Daybreak capability intent fails closed on Images HTTP routes
+
+The Codex-base and `/v1` image generation and edit routes MUST require a valid proxy API key whenever `X-Codex-LB-Required-Capability` is present, even when deployment-wide API-key authentication is disabled. After authentication they MUST return HTTP 400 with `error.code = "required_capability_transport_unsupported"` before request-body parsing that is not already required by framework validation, model-source lookup, usage reservation, account selection, internal Responses construction, or upstream dispatch. The rejection MUST emit exactly one bounded `images_route_complete` observation. Headerless Images requests MUST preserve their existing behavior.
+
+#### Scenario: Authenticated Daybreak image request fails closed
+
+- **WHEN** the Daybreak provider sends a generation or edit request with its valid proxy API key and capability carrier
+- **THEN** the Images route returns HTTP 400 `required_capability_transport_unsupported`
+- **AND** no model source, reservation, account, internal Responses request, or upstream attempt is selected
+- **AND** exactly one bounded invalid-request route observation is emitted
+
+#### Scenario: Daybreak image request authenticates before transport denial
+
+- **WHEN** a capability-bearing generation or edit request omits the proxy API key or supplies an invalid key
+- **THEN** the Images route returns the existing HTTP 401 `invalid_api_key` response
+- **AND** no image body is decoded and no account or upstream request is selected
+
+#### Scenario: Ordinary Images behavior remains unchanged
+
+- **WHEN** an Images request omits the required-capability carrier
+- **THEN** the route retains its existing authentication, validation, account-routing, observability, and response behavior
 

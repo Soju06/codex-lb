@@ -2540,3 +2540,40 @@ async def test_retired_prewarm_canary_columns_stay_insertable_for_legacy_replica
 
     # The retained physical columns are an allow-listed drift, not a schema defect.
     assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+
+
+@pytest.mark.asyncio
+async def test_automation_run_claim_budget_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the nullable ``automation_runs.claim_budget_seconds`` column,
+    downgrade drops it, and a final walk to head proves the revision sits on a
+    single-head graph."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'automation-run-claim-budget.sqlite'}"
+    parent_revision = "20260909_060000_add_report_rollup"
+    claim_budget_revision = "20260909_070000_automation_run_claim_budget"
+
+    async def _automation_run_columns(engine) -> set[str]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('automation_runs')"))
+            return {row[1] for row in rows}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert "claim_budget_seconds" not in await _automation_run_columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, claim_budget_revision, bootstrap_legacy=False))
+        assert "claim_budget_seconds" in await _automation_run_columns(engine)
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert "claim_budget_seconds" not in await _automation_run_columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert "claim_budget_seconds" in await _automation_run_columns(engine)
+    finally:
+        await engine.dispose()

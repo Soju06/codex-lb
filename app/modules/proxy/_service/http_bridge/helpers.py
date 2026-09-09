@@ -60,6 +60,7 @@ from app.core.metrics.prometheus import (
     bridge_instance_mismatch_total,
     bridge_reattach_total,
     bridge_unanchored_handoff_recovery_total,
+    http_bridge_connections_total,
     http_bridge_prewarm_total,
     http_bridge_stuck_retire_total,
 )
@@ -197,6 +198,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
+from app.modules.proxy.http_continuation import inferred_http_bridge_key
 from app.modules.proxy.ring_membership import (
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
@@ -764,6 +766,33 @@ def _service_get_settings() -> Any:
 
 def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
+
+
+def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether the one permitted server-side anchored replay is unused."""
+    settings = _service_get_settings()
+    return (
+        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
+        in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and (
+            request_state.replay_count == 0
+            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+            == "server_indefinite_recovery"
+        )
+    )
+
+
+def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    payload = openai_error(
+        "previous_response_not_found",
+        "Previous response was not found; retry without previous_response_id.",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+    return payload
 
 
 def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
@@ -2410,8 +2439,13 @@ def _make_http_bridge_session_key(
             affinity_kind = "session_header"
             strength = "hard"
         else:
-            affinity_key = affinity.key or request_id
-            affinity_kind = affinity.kind.value if affinity.kind is not None else "request"
+            inferred_key = (
+                inferred_http_bridge_key(payload) if payload.conversation or explicit_prompt_cache_key is None else None
+            )
+            affinity_key = inferred_key or affinity.key or request_id
+            affinity_kind = (
+                "prompt_cache" if inferred_key else affinity.kind.value if affinity.kind is not None else "request"
+            )
             strength = "soft"
     return _HTTPBridgeSessionKey(
         affinity_kind=affinity_kind,
@@ -3782,6 +3816,8 @@ def _log_http_bridge_event(
     response_events_seen: int | None = None,
     transport_classification: str | None = None,
 ) -> None:
+    if event in {"create", "reuse", "reconnect", "close", "evict_idle"} and http_bridge_connections_total is not None:
+        http_bridge_connections_total.labels(event=event).inc()
     level = logging.INFO
     if event in {
         "queue_full",

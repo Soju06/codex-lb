@@ -17,6 +17,7 @@ The server keeps at most 64 successful report entries and 64 options entries for
 - SQLite lifecycle/retention suite: 26 tests passed. Additional report retention/migration tests: 2 passed.
 - Existing hourly/conversation rollup parity and fold suites: 39 tests passed. The retention parity scenario now also folds report history and verifies that daily row membership and filtered reports survive pruning.
 - Frontend: 137 reports tests passed, TypeScript check and production build passed. ESLint on changed report files passed.
+- The first PR CI run exposed three App-route integration tests that still mocked options through the full reports endpoint. Updated them to handle the dedicated options endpoint and verify both queries reject inverted dates, recover with one request each, and stay idle on account-only retry. All three tests, TypeScript and changed-file ESLint passed locally after the correction.
 - Ruff, ty, architecture/cancellation/timing/settings checks and strict OpenSpec validation passed.
 - Playwright with mocked dashboard data: changing to 90d issued exactly one report request and one options request; long-window speed notice rendered. Screenshots are UI fixtures, not production measurements: [original error state](error-state.png), [90-day report](90-day-report.png).
 

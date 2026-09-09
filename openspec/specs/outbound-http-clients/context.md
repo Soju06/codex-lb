@@ -2,7 +2,7 @@
 
 ## Purpose and Scope
 
-This note records implementation decisions behind the outbound client layer that do not change the normative contracts in `spec.md`. It currently covers how the TLS verification context is shared across connectors.
+This note records implementation decisions behind the outbound client layer that do not change the normative contracts in `spec.md`. It covers shared TLS verification and Responses payload preparation.
 
 ## Shared TLS verification context
 
@@ -114,3 +114,12 @@ Compact, raw HTTP and WebSocket messages keep immediate writes through this same
 cancellation-safe owner. Python queue fairness, bounds and replay policy are
 unchanged. Benchmark methodology and limitations are recorded in the archived
 `batch-ready-native-sse-output` change.
+## Responses HTTP preparation
+
+The [active-consumer requirement](spec.md#requirement-responses-http-preparation-serializes-only-for-active-consumers) avoids full-body preparation strings that have no consumer. `_stream_responses_with_session` determines whether HTTP is certain before calculating a WebSocket size estimate. Explicit HTTP and non-streaming requests skip that estimate; eligible WebSocket selection retains its exact-byte budget.
+
+The selected payload string is needed for native request bytes or enabled raw payload tracing. Python HTTP and routed clients continue to serialize their payload dictionaries through the existing request owner, and the archive continues to receive the dictionary. The change introduces no serializer, cache, configuration or transport policy.
+
+For example, an explicit Python HTTP request with a large tool result and tracing disabled reaches the real upstream with the same body while avoiding two full preparation encodes. The local-origin regression checks the exact body hash and observes the owning encodes. A separate enabled-trace case retains the required string, and an auto-mode case retains the size decision. If a WebSocket handshake falls back to HTTP, active tracing regenerates its string from the rewritten HTTP payload so WebSocket-only metadata cannot remain in the trace.
+
+The controlled 1 MB and 8 MB workload confirms preparation CPU savings and exact body identity. Those savings apply to this local preparation work; they do not establish native latency parity or explain historical minute-scale waits. Retained clients with small incremental tool results have much less serialization work to remove.

@@ -136,6 +136,7 @@ describe("RoutingSettings", () => {
     expect(resets).toHaveLength(2);
     // Stream limit: clearing to 8 would leave the saved reserve of 9 above it.
     expect(resets[0]).toBeDisabled();
+    expect(screen.getByText(/Reset is blocked: the stream recovery reserve would exceed/)).toBeInTheDocument();
     // Reserve: clearing to 1 stays below the saved stream limit of 24.
     expect(resets[1]).toBeEnabled();
   });

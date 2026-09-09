@@ -59,9 +59,8 @@ describe("InheritBadge", () => {
         resetBlockedReason="reserve would exceed the limit"
       />,
     );
-    const reset = screen.getByRole("button", { name: "Reset to inherited" });
-    expect(reset).toBeDisabled();
-    expect(reset).toHaveAttribute("title", "reserve would exceed the limit");
+    expect(screen.getByRole("button", { name: "Reset to inherited" })).toBeDisabled();
+    expect(screen.getByText("reserve would exceed the limit")).toBeInTheDocument();
   });
 
   it("renders nothing without provenance when no fallback value is given", () => {

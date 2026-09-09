@@ -30,9 +30,10 @@ type InheritBadgeProps = {
    */
   fallbackValue?: number;
   /**
-   * When set, the reset action is disabled and explains why: clearing this
-   * value would make the settings API reject the request (for example a
-   * recovery reserve that would exceed the inherited stream limit).
+   * When set, the reset action is disabled and the reason is shown next to it
+   * (a disabled button cannot show a tooltip): clearing this value would make
+   * the settings API reject the request, for example a recovery reserve that
+   * would exceed the inherited stream limit.
    */
   resetBlockedReason?: string;
 };
@@ -61,17 +62,21 @@ export function InheritBadge({
   }
   if (provenance.source === "dashboard") {
     return (
-      <Button
-        type="button"
-        variant="ghost"
-        size="xs"
-        className="h-6 px-1.5 text-[11px] text-muted-foreground"
-        disabled={busy || resetBlockedReason !== undefined}
-        title={resetBlockedReason}
-        onClick={() => void resetToInherited()}
-      >
-        {t("settings.inherit.reset")}
-      </Button>
+      <span className="block space-y-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          className="h-6 px-1.5 text-[11px] text-muted-foreground"
+          disabled={busy || resetBlockedReason !== undefined}
+          onClick={() => void resetToInherited()}
+        >
+          {t("settings.inherit.reset")}
+        </Button>
+        {resetBlockedReason !== undefined ? (
+          <span className="block text-[11px] text-muted-foreground">{resetBlockedReason}</span>
+        ) : null}
+      </span>
     );
   }
   return (

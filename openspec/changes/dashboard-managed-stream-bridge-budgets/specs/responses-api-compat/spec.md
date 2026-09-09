@@ -5,7 +5,7 @@ The default compact request budget MUST be at least 180 seconds, and the default
 
 `compact_request_budget_seconds`, `stream_idle_timeout_seconds`, `proxy_request_budget_seconds` and `http_responses_stream_request_budget_seconds` are dashboard-managed (`configuration-tiers`): each has a nullable `dashboard_settings` column of the same name whose non-NULL value MUST override the process environment value, which in turn overrides the code default. Consumers MUST read the effective value from the `SettingsCache` snapshot bound at the request or WebSocket entry point and MUST NOT query the database per request or per event. The environment variables remain as deprecated fallbacks and MUST NOT be copied into the column by the server; a client that echoes the effective values of a `GET /api/settings` response back through `PUT` stores them as explicit dashboard values (clients MUST send only the fields they intend to change). `GET /api/settings` MUST report any environment value the `Settings` model accepts, including one outside the bounds `PUT` enforces.
 
-Background consumers derived from the stream budget (the quota warm-up claim lease, which floors at the stream budget) MUST resolve the effective value from a dashboard snapshot the scheduler tick already holds, not from the environment alone. `upstream_connect_timeout_seconds` MUST NOT exceed the effective `http_responses_stream_request_budget_seconds` (`upstream-connect-within-stream-budget`); `PUT /api/settings` MUST reject a change that introduces that violation with `400 timeout_invariant_violation`, alongside the existing `admission-wait-within-stream-budget` rule.
+Background consumers derived from the stream budget (the quota warm-up claim lease, which floors at the stream budget) MUST resolve the effective value from a dashboard snapshot the scheduler tick already holds, not from the environment alone. The background warm-up probe itself MUST stream under that same snapshot, so a healthy probe still provably outlives its claim lease when the dashboard budget is below the environment value. `upstream_connect_timeout_seconds` MUST NOT exceed the effective `http_responses_stream_request_budget_seconds` (`upstream-connect-within-stream-budget`); `PUT /api/settings` MUST reject a change that introduces that violation with `400 timeout_invariant_violation`, alongside the existing `admission-wait-within-stream-budget` rule.
 
 #### Scenario: compact and stream watchdog defaults leave room for long turns
 - **WHEN** the service starts with default configuration
@@ -50,6 +50,7 @@ Background consumers derived from the stream budget (the quota warm-up claim lea
 - **THEN** the stream budget is 3600 seconds
 - **AND** `GET /api/settings` reports `httpResponsesStreamRequestBudgetSeconds: 3600` with `provenance.http_responses_stream_request_budget_seconds.source = "dashboard"`
 - **AND** the next quota warm-up claim lease is 3600 seconds long rather than 7200
+- **AND** the background warm-up probe streams under the same 3600 second budget
 
 #### Scenario: Connect timeout is bounded by the effective stream budget
 - **GIVEN** default configuration

@@ -16,6 +16,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import func, select, update
 
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -385,6 +386,9 @@ async def test_warm_now_claim_ttl_honours_dashboard_stream_budget_over_environme
             ttl_seconds = (claimed.lease_expires_at - claimed.executed_at).total_seconds()
             # The dashboard value, not the 7200 s environment value and not the 300 s floor.
             assert 2999.0 <= ttl_seconds <= 3001.0
+        # The probe itself runs under the same effective budget the lease floors
+        # at, so a healthy probe provably outlives its claim.
+        assert with_dashboard_overrides(get_settings()).http_responses_stream_request_budget_seconds == 3000.0
         return WarmupUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
 
     async def noop_record_effect(self, account, model, *, source, confidence):

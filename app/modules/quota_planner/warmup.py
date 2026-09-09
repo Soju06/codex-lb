@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import usage as usage_core
 from app.core.clients.proxy import stream_responses
-from app.core.config.dashboard_overrides import effective_settings
+from app.core.config.dashboard_overrides import dashboard_overrides_bound, effective_settings
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -261,11 +261,18 @@ class QuotaWarmupService:
         started = time.monotonic()
         reservation_finalized = False
         try:
-            usage = await self._send_warmup_probe(
-                account=account,
-                model=resolved_model,
-                request_id=request_id,
-            )
+            # The probe must run under the same effective stream budget the
+            # claim lease floors at (``_warmup_claim_ttl_seconds``); otherwise a
+            # dashboard budget below the environment value would expire the
+            # lease while the probe is still streaming and let another replica
+            # reclaim the decision. Same binding as the proxy warm-up path
+            # (``proxy/_service/warmup.py``).
+            with dashboard_overrides_bound(dashboard_settings):
+                usage = await self._send_warmup_probe(
+                    account=account,
+                    model=resolved_model,
+                    request_id=request_id,
+                )
             if reservation_id is not None:
                 settlement_cancellation = await _await_cleanup_deferring_cancellation(
                     self._api_keys.finalize_usage_reservation(

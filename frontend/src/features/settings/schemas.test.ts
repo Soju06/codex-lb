@@ -5,10 +5,16 @@ import {
   SettingsUpdateRequestSchema,
   SubscriptionOverflowPreflightSchema,
   TelemetryConsentSchema,
+  TelemetryDaySchema,
   TelemetrySnapshotEnvelopeSchema,
   UpstreamProxyAdminSchema,
 } from "@/features/settings/schemas";
-import { createDashboardSettings, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
+import {
+  createDashboardSettings,
+  createTelemetryDay,
+  createTelemetryPreview,
+  createTelemetrySnapshotEnvelope,
+} from "@/test/mocks/factories";
 
 describe("DashboardSettingsSchema", () => {
   it("parses settings payload", () => {
@@ -494,16 +500,65 @@ describe("UpstreamProxyAdminSchema", () => {
 });
 
 describe("TelemetrySnapshotEnvelopeSchema", () => {
-  it("parses the exact transmitted envelope", () => {
+  it("parses the exact transmitted heartbeat envelope", () => {
     const parsed = TelemetrySnapshotEnvelopeSchema.parse(createTelemetrySnapshotEnvelope());
 
     expect(parsed.instance_id).toBe("00000000-0000-4000-8000-000000000000");
     expect(parsed.timestamp).toBe("2026-08-06T00:00:00Z");
     expect(parsed.metrics.schema_version).toBe(2);
     expect(parsed.metrics.deploy.method).toBe("docker");
-    expect(parsed.metrics.usage_7d.request_kinds.unknown).toBe(0);
+    // Exact account-row counts replaced the v1 pool/plan buckets.
+    expect(parsed.metrics.accounts.total).toBe(2);
+    expect(parsed.metrics.accounts.per_plan).toEqual({ plus: 2, pro: 0, team: 0, free: 0 });
+    expect(parsed.metrics.accounts.per_status).toEqual({ active: 2 });
+    expect(parsed.metrics.usage_7d.request_kinds.unknown).toBe(1);
     expect(parsed.metrics.usage_7d.models[0]?.reasoning).toEqual({ high: 0.5, medium: 0.5 });
     expect(parsed.metrics.features.dashboard_auth).toBe(true);
+  });
+
+  it("rejects the legacy v1 heartbeat shape", () => {
+    // v1 carried bucketed accounts under schema_version 1; each marker alone
+    // must fail parsing so a stale backend cannot pass as v2.
+    const legacy = structuredClone(createTelemetrySnapshotEnvelope()) as unknown as {
+      metrics: Record<string, unknown>;
+    };
+    legacy.metrics.schema_version = 1;
+    legacy.metrics.accounts = {
+      pool_bucket: "2-5",
+      plan_mix: { plus: "2-5", pro: "0", team: "0", free: "0" },
+      workspace_accounts: false,
+      routing_policy: "usage_weighted",
+      limit_warmup_enabled: false,
+      egress_proxy_used: false,
+    };
+    expect(TelemetrySnapshotEnvelopeSchema.safeParse(legacy).success).toBe(false);
+
+    const versionOnly = structuredClone(createTelemetrySnapshotEnvelope()) as unknown as {
+      metrics: Record<string, unknown>;
+    };
+    versionOnly.metrics.schema_version = 1;
+    expect(TelemetrySnapshotEnvelopeSchema.safeParse(versionOnly).success).toBe(false);
+
+    const poolBucketOnly = structuredClone(createTelemetrySnapshotEnvelope());
+    (poolBucketOnly.metrics.accounts as Record<string, unknown>).pool_bucket = "2-5";
+    expect(TelemetrySnapshotEnvelopeSchema.safeParse(poolBucketOnly).success).toBe(false);
+  });
+
+  it.each([
+    ["db_size_bucket", ["metrics", "deploy"], "100GB+"],
+    ["cost_usd_bucket", ["metrics", "usage_7d"], "1k+"],
+    ["avg_output_tokens_bucket", ["metrics", "usage_7d", "models", "0"], "1k+"],
+    ["api_keys_bucket", ["metrics", "features"], "many"],
+  ] as const)("rejects an undocumented %s value", (field, path, value) => {
+    // Buckets are closed sets (openspec/specs/telemetry/context.md); a value
+    // outside the documented set is backend drift, not a new bucket.
+    const envelope = structuredClone(createTelemetrySnapshotEnvelope());
+    let target = envelope as unknown as Record<string, unknown>;
+    for (const key of path) {
+      target = target[key] as Record<string, unknown>;
+    }
+    target[field] = value;
+    expect(TelemetrySnapshotEnvelopeSchema.safeParse(envelope).success).toBe(false);
   });
 
   it("rejects unknown extra fields at every object layer so backend drift fails parsing", () => {
@@ -514,7 +569,6 @@ describe("TelemetrySnapshotEnvelopeSchema", () => {
       ["metrics"],
       ["metrics", "deploy"],
       ["metrics", "accounts"],
-      ["metrics", "accounts", "per_plan"],
       ["metrics", "usage_7d"],
       ["metrics", "usage_7d", "request_kinds"],
       ["metrics", "usage_7d", "transport_mix"],
@@ -545,36 +599,113 @@ describe("TelemetrySnapshotEnvelopeSchema", () => {
     expect(TelemetrySnapshotEnvelopeSchema.safeParse(missingTimestamp).success).toBe(false);
 
     const missingNested = structuredClone(createTelemetrySnapshotEnvelope());
-    delete (missingNested!.metrics.usage_7d.request_kinds as Record<string, unknown>).unknown;
+    delete (missingNested.metrics.usage_7d.request_kinds as Record<string, unknown>).unknown;
     expect(TelemetrySnapshotEnvelopeSchema.safeParse(missingNested).success).toBe(false);
   });
 });
 
+describe("TelemetryDaySchema", () => {
+  it("parses the completed-day body", () => {
+    const parsed = TelemetryDaySchema.parse(createTelemetryDay());
+
+    expect(parsed.schema_version).toBe(2);
+    expect(parsed.instance_id).toBe("00000000-0000-4000-8000-000000000000");
+    expect(parsed.utc_date).toBe("2026-08-05");
+    expect(parsed.dimensions.global.requests).toBe(3);
+    expect(parsed.dimensions.global.latency_ms).toEqual({ sample_count: 3, buckets: { "6": 3 } });
+    expect(parsed.dimensions.transport.map((entry) => entry.name)).toEqual(["ws", "http_bridge"]);
+    expect(parsed.dimensions.request_kinds).toEqual({ responses: 0, chat: 0, images: 0, unknown: 3 });
+    expect(parsed.errors.http_status_class).toEqual({ "2xx": 2, "5xx": 1 });
+    expect(parsed.errors.outcomes).toEqual({ success: 2, error: 1, cancelled: 0 });
+  });
+
+  it("rejects unknown extra fields at every object layer so backend drift fails parsing", () => {
+    const layers: string[][] = [
+      [],
+      ["dimensions"],
+      ["dimensions", "request_kinds"],
+      ["dimensions", "global"],
+      ["dimensions", "global", "latency_ms"],
+      ["dimensions", "models", "0"],
+      ["errors"],
+      ["errors", "outcomes"],
+    ];
+    for (const path of layers) {
+      const day = structuredClone(createTelemetryDay());
+      let target = day as unknown as Record<string, unknown>;
+      for (const key of path) {
+        target = target[key] as Record<string, unknown>;
+      }
+      target.drifted_field = true;
+      expect(
+        TelemetryDaySchema.safeParse(day).success,
+        `extra field at ${path.join(".") || "day root"} must fail parsing`,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects a cross-dimension cell nested under a dimension entry", () => {
+    // The day body carries independent marginals only; a model entry with a
+    // per-client breakdown is the re-identification vector the spec forbids.
+    const day = structuredClone(createTelemetryDay());
+    (day.dimensions.models[0] as unknown as Record<string, unknown>).clients = [
+      { name: "codex-cli", requests: 3 },
+    ];
+    expect(TelemetryDaySchema.safeParse(day).success).toBe(false);
+  });
+
+  it("rejects an in-progress day timestamp in place of the completed UTC date", () => {
+    const day = structuredClone(createTelemetryDay()) as unknown as Record<string, unknown>;
+    day.utc_date = "2026-08-05T12:00:00Z";
+    expect(TelemetryDaySchema.safeParse(day).success).toBe(false);
+  });
+});
+
 describe("TelemetryConsentSchema", () => {
-  it("parses consent with and without a preview envelope", () => {
+  const decided = { state: "enabled", source: "persisted", active: true, notice_version: 2 };
+
+  it("parses consent with and without the preview bodies", () => {
     const withPreview = TelemetryConsentSchema.parse({
       state: "undecided",
       source: "default",
       active: true,
-      preview: createTelemetrySnapshotEnvelope(),
+      notice_version: 2,
+      preview: createTelemetryPreview(),
     });
-    expect(withPreview.preview?.metrics!.schema_version).toBe(2);
+    expect(withPreview.notice_version).toBe(2);
+    expect(withPreview.preview?.heartbeat.metrics.schema_version).toBe(2);
+    expect(withPreview.preview?.day.utc_date).toBe("2026-08-05");
 
-    const withoutPreview = TelemetryConsentSchema.parse({
-      state: "enabled",
-      source: "persisted",
-      active: true,
-      preview: null,
-    });
+    const withoutPreview = TelemetryConsentSchema.parse({ ...decided, preview: null });
     expect(withoutPreview.preview).toBeNull();
   });
 
-  it("rejects consent responses that omit the preview field", () => {
+  it("rejects a preview carrying only one of the two bodies", () => {
+    const { heartbeat, day } = createTelemetryPreview();
+    for (const preview of [{ heartbeat }, { day }]) {
+      expect(
+        TelemetryConsentSchema.safeParse({ ...decided, preview }).success,
+        `preview with keys ${Object.keys(preview).join(",")} must fail parsing`,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects a bare heartbeat envelope in place of the preview object", () => {
+    // v1 attached the envelope directly as `preview`; v2 wraps both bodies.
+    expect(
+      TelemetryConsentSchema.safeParse({ ...decided, preview: createTelemetrySnapshotEnvelope() })
+        .success,
+    ).toBe(false);
+  });
+
+  it("rejects consent responses that omit the preview field or the notice version", () => {
+    expect(TelemetryConsentSchema.safeParse(decided).success).toBe(false);
     expect(
       TelemetryConsentSchema.safeParse({
         state: "enabled",
         source: "persisted",
         active: true,
+        preview: null,
       }).success,
     ).toBe(false);
   });

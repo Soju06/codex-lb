@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import i18n from "@/i18n";
-import { createTelemetryConsent, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
+import { createTelemetryConsent, createTelemetryPreview } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
@@ -29,6 +29,8 @@ describe("TelemetrySettings", () => {
     await waitFor(() => expect(toggle).toBeChecked());
     expect(toggle).toBeEnabled();
     expect(screen.getByText(i18n.t("settings.telemetry.optOutNotice"))).toBeInTheDocument();
+    // The collector retention duration is disclosed on the settings surface too.
+    expect(screen.getByText(i18n.t("settings.telemetry.retentionNotice"))).toBeInTheDocument();
 
     await user.click(toggle);
 
@@ -82,9 +84,7 @@ describe("TelemetrySettings", () => {
         const url = new URL(request.url);
         telemetryRequests.push(url);
         if (url.searchParams.get("include_preview") === "true") {
-          return HttpResponse.json(
-            createTelemetryConsent({ preview: createTelemetrySnapshotEnvelope() }),
-          );
+          return HttpResponse.json(createTelemetryConsent({ preview: createTelemetryPreview() }));
         }
         return HttpResponse.json(createTelemetryConsent());
       }),
@@ -101,9 +101,14 @@ describe("TelemetrySettings", () => {
     await user.click(viewButton);
 
     const dialog = await screen.findByRole("dialog", { name: "Collected telemetry data" });
-    expect(within(dialog).getByText(/"schema_version": 2/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/"consent": "undecided"/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/"timestamp": "2026-08-06T00:00:00Z"/)).toBeInTheDocument();
+    // Both transmitted bodies are rendered under their own labels.
+    const heartbeat = within(dialog).getByRole("region", { name: "Heartbeat" });
+    expect(heartbeat).toHaveTextContent('"schema_version": 2');
+    expect(heartbeat).toHaveTextContent('"consent": "undecided"');
+    expect(heartbeat).toHaveTextContent('"timestamp": "2026-08-06T00:00:00Z"');
+    expect(within(dialog).getByRole("region", { name: "Completed day" })).toHaveTextContent(
+      '"utc_date": "2026-08-05"',
+    );
     expect(
       telemetryRequests.filter((url) => url.searchParams.get("include_preview") === "true"),
     ).toHaveLength(1);

@@ -100,9 +100,10 @@ describe("useTelemetryPreview", () => {
 
     await waitFor(() => expect(result.current.telemetryPreviewQuery.isSuccess).toBe(true));
     const preview = result.current.telemetryPreviewQuery.data?.preview;
-    expect(preview?.metrics!.schema_version).toBe(2);
-    expect(preview?.instance_id).toBe("00000000-0000-4000-8000-000000000000");
-    expect(preview?.timestamp).toBe("2026-08-06T00:00:00Z");
+    expect(preview?.heartbeat.metrics.schema_version).toBe(2);
+    expect(preview?.heartbeat.instance_id).toBe("00000000-0000-4000-8000-000000000000");
+    expect(preview?.heartbeat.timestamp).toBe("2026-08-06T00:00:00Z");
+    expect(preview?.day.utc_date).toBe("2026-08-05");
   });
 });
 

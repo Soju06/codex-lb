@@ -6087,3 +6087,79 @@ async def test_list_due_manual_runs_honours_budget_pinned_at_claim(db_setup):
                 now_utc=scheduled_for + timedelta(seconds=200)
             )
         assert [due_run.id for due_run in legacy_due] == [run.id]
+
+        # A pin below the current budget (left behind by a pre-pin writer that
+        # advanced ``started_at`` during a rolling deploy) does not shorten the
+        # window: the raised current budget covers the live attempt.
+        await session.execute(update(AutomationRun).where(AutomationRun.id == run.id).values(claim_budget_seconds=60.0))
+        await session.commit()
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=600.0)):
+            stale_pin_in_flight = await automations_repository.list_due_manual_runs(
+                now_utc=scheduled_for + timedelta(seconds=200)
+            )
+            stale_pin_past_window = await automations_repository.list_due_manual_runs(
+                now_utc=scheduled_for + timedelta(seconds=700)
+            )
+        assert stale_pin_in_flight == []
+        assert [due_run.id for due_run in stale_pin_past_window] == [run.id]
+
+
+@pytest.mark.asyncio
+async def test_list_due_manual_runs_limit_counts_only_eligible_rows(db_setup):
+    """An in-flight claim ordered ahead of a due placeholder must not consume the
+    batch slot owed to the placeholder (the SQL bound is looser than the per-row
+    pinned window, so candidates are paged until ``limit`` eligible rows are found)."""
+    del db_setup
+    account = (await _create_accounts("auto-manual-limit-eligible"))[0]
+    scheduled_for = datetime(2026, 9, 9, 2, 0, 0)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Manual limit eligible",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=600.0)):
+            in_flight = await automations_repository.claim_run(
+                job_id=job.id,
+                trigger="manual",
+                slot_key=_manual_slot_key(job.id, "in-flight", account.id),
+                cycle_key=f"manual:{job.id}:in-flight",
+                cycle_expected_accounts=1,
+                cycle_window_end=scheduled_for,
+                scheduled_for=scheduled_for,
+                started_at=scheduled_for + timedelta(seconds=1),
+                account_id=account.id,
+            )
+            # Sorted after the in-flight claim (later scheduled_for) but still due.
+            placeholder = await automations_repository.claim_run(
+                job_id=job.id,
+                trigger="manual",
+                slot_key=_manual_slot_key(job.id, "placeholder", account.id),
+                cycle_key=f"manual:{job.id}:placeholder",
+                cycle_expected_accounts=1,
+                cycle_window_end=scheduled_for + timedelta(seconds=10),
+                scheduled_for=scheduled_for + timedelta(seconds=10),
+                started_at=scheduled_for + timedelta(seconds=10),
+                account_id=account.id,
+            )
+        assert in_flight is not None
+        assert placeholder is not None
+
+        due = await automations_repository.list_due_manual_runs(now_utc=scheduled_for + timedelta(seconds=200), limit=1)
+        assert [due_run.id for due_run in due] == [placeholder.id]
+
+        past_window = await automations_repository.list_due_manual_runs(
+            now_utc=scheduled_for + timedelta(seconds=700), limit=1
+        )
+        assert [due_run.id for due_run in past_window] == [in_flight.id]

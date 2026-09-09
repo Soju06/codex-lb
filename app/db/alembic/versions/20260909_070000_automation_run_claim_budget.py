@@ -1,7 +1,7 @@
 """pin the automation stale-claim reclaim window to the budget captured at claim time
 
-Revision ID: 20260909_060000_automation_run_claim_budget
-Revises: 20260909_050000_dashboard_routing_overload_settings
+Revision ID: 20260909_070000_automation_run_claim_budget
+Revises: 20260909_060000_add_report_rollup
 Create Date: 2026-09-09
 
 Adds the nullable ``automation_runs.claim_budget_seconds`` column. Every
@@ -18,8 +18,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260909_060000_automation_run_claim_budget"
-down_revision = "20260909_050000_dashboard_routing_overload_settings"
+revision = "20260909_070000_automation_run_claim_budget"
+down_revision = "20260909_060000_add_report_rollup"
 branch_labels = None
 depends_on = None
 

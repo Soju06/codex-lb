@@ -298,9 +298,14 @@ def _running_run(
 
 
 def test_run_claim_timeout_seconds_uses_pinned_budget_and_falls_back_for_legacy_rows() -> None:
+    # Lowered dashboard budget: the pinned window stands.
     assert run_claim_timeout_seconds(600.0, fallback_budget_seconds=60.0) == 630.0
+    # No pin: the current budget alone.
     assert run_claim_timeout_seconds(None, fallback_budget_seconds=60.0) == 90.0
-    assert run_claim_timeout_seconds(0.5, fallback_budget_seconds=600.0) == 30.5
+    # Raised dashboard budget: the window widens to cover an attempt started by
+    # a pre-pin writer under the current budget (rolling deploy).
+    assert run_claim_timeout_seconds(0.5, fallback_budget_seconds=600.0) == 630.0
+    assert run_claim_timeout_seconds(0.5, fallback_budget_seconds=0.0) == 30.5
 
 
 def test_compact_request_timeout_uses_budget_pinned_at_claim(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -332,4 +337,14 @@ def test_is_reclaimable_running_claim_judges_each_run_by_its_own_pinned_window()
         pinned,
         now_utc=started_at + timedelta(seconds=631),
         fallback_budget_seconds=60.0,
+    )
+    # The dashboard budget was raised to 600 s after a 60 s pin: a legacy
+    # writer may be executing this row under 600 s, so it is not reclaimable
+    # at +200 s and the pin alone does not shorten the window.
+    stale_pin = _running_run(started_at=started_at, scheduled_for=scheduled_for, claim_budget_seconds=60.0)
+    assert not _is_reclaimable_running_claim(stale_pin, now_utc=now_utc, fallback_budget_seconds=600.0)
+    assert _is_reclaimable_running_claim(
+        stale_pin,
+        now_utc=started_at + timedelta(seconds=631),
+        fallback_budget_seconds=600.0,
     )

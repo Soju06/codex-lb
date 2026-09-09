@@ -2552,8 +2552,8 @@ async def test_automation_run_claim_budget_migration_upgrade_and_downgrade(tmp_p
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'automation-run-claim-budget.sqlite'}"
-    parent_revision = "20260909_050000_dashboard_routing_overload_settings"
-    claim_budget_revision = "20260909_060000_automation_run_claim_budget"
+    parent_revision = "20260909_060000_add_report_rollup"
+    claim_budget_revision = "20260909_070000_automation_run_claim_budget"
 
     async def _automation_run_columns(engine) -> set[str]:
         async with engine.connect() as conn:

@@ -8,6 +8,6 @@
 
 ## 2. Verification
 
-- [x] 2.1 Integration: claims and reclaims store the budget in effect; a claim pinned at 600 s is not reclaimed after the dashboard lowers the budget to 60 s and is reclaimed past its own window; a legacy NULL row follows the current budget; `list_due_manual_runs` honours the pinned window.
+- [x] 2.1 Integration: claims and reclaims store the budget in effect; a claim pinned at 600 s is not reclaimed after the dashboard lowers the budget to 60 s and is reclaimed past its own window; a legacy NULL row follows the current budget; `list_due_manual_runs` honours the pinned window and its `limit` counts only eligible rows.
 - [x] 2.2 Unit: window helper, per-run staleness predicate and the pinned compact timeout.
 - [x] 2.3 Migration upgrade/downgrade test; `make lint`, `uv run ty check`, `make migration-check`, `openspec validate automation-run-pinned-budget --strict`.

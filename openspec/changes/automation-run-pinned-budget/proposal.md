@@ -7,9 +7,9 @@ An automation run claim is reclaimable once it has been held longer than the com
 ## What Changes
 
 - `automation_runs` gains a nullable `claim_budget_seconds` column. Every claim — a fresh slot claim, the runs created by run-now, and a stale reclaim — stores the compact request budget in effect at that moment.
-- The stale-claim window of a run is derived from its stored budget (`max(30, stored + 30)` seconds), on every path that judges staleness: due-cycle discovery, the scheduled-cycle reclaim, due manual-run discovery and the manual reclaim. Rows claimed before the column existed (NULL) keep using the current effective budget.
-- The compact request timeout the run executes with is the same stored budget, so the execution timeout and the reclaim window can never disagree for one run.
-- Lowering the dashboard budget therefore applies to claims made after the change only; an in-flight run keeps the window it was claimed under. Raising the budget also leaves in-flight runs on their original window.
+- The stale-claim window of a run covers the larger of its stored budget and the current effective budget (`max(30, max(stored, current) + 30)` seconds), on every path that judges staleness: due-cycle discovery, the scheduled-cycle reclaim, due manual-run discovery and the manual reclaim. Rows claimed before the column existed (NULL) use the current effective budget alone.
+- The compact request timeout the run executes with is bounded by the same stored budget, so the execution timeout can never exceed the reclaim window for one run.
+- Lowering the dashboard budget therefore applies to claims made after the change only; an in-flight run keeps the window it was claimed under. Raising the budget widens in-flight windows as before, which also keeps a replica that advances `started_at` without refreshing the pin (pre-upgrade code during a rolling deploy) covered by the window while it executes under the current budget.
 
 ## Capabilities
 
@@ -19,11 +19,11 @@ None.
 
 ### Modified Capabilities
 
-- `automations`: the multi-replica safety requirement fixes the stale-claim reclaim window to the budget captured at claim time and gains scenarios for a lowered dashboard budget and for legacy rows.
+- `automations`: the multi-replica safety requirement derives the stale-claim reclaim window from the larger of the budget captured at claim time and the current budget, and gains scenarios for a lowered dashboard budget, a raised budget over a lower pin, and legacy rows.
 
 ## Impact
 
-- Migration `20260909_060000_automation_run_claim_budget` (one nullable column, sqlite and PostgreSQL; downgrade drops it).
+- Migration `20260909_070000_automation_run_claim_budget` (one nullable column, sqlite and PostgreSQL; downgrade drops it).
 - Code: `app/db/models.py`, `app/modules/automations/repository.py`, `app/modules/automations/service.py`.
 - API: none (the column is not exposed).
 - Operators: no action; existing running rows fall back to the current budget until they complete or are reclaimed.

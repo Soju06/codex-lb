@@ -27,8 +27,10 @@ from app.db.models import (
 
 DEFAULT_AUTOMATION_SCHEDULE_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
-# A running claim is reclaimable once it has been held for the compact request
-# budget it was claimed under plus this grace, never sooner than the floor.
+# A running claim is reclaimable once it has been held for the larger of the
+# compact request budget it was claimed under and the current budget, plus this
+# grace, never sooner than the floor. A dashboard change can therefore only
+# widen a live claim's window, never narrow it.
 RUN_CLAIM_GRACE_SECONDS = 30.0
 RUN_CLAIM_MIN_TIMEOUT_SECONDS = 30.0
 
@@ -41,10 +43,17 @@ def effective_compact_request_budget_seconds() -> float:
 def run_claim_timeout_seconds(claim_budget_seconds: float | None, *, fallback_budget_seconds: float) -> float:
     """Reclaim window for a claim made under ``claim_budget_seconds``.
 
-    ``None`` marks a row claimed before the budget was stored on it; such rows
-    use ``fallback_budget_seconds`` (the current effective budget).
+    The window covers the larger of the pinned budget and
+    ``fallback_budget_seconds`` (the current effective budget): lowering the
+    dashboard budget cannot shrink the window under an in-flight run, and a
+    raised budget still covers an attempt started by a writer that advanced
+    ``started_at`` without refreshing the pin (pre-pin replica during a rolling
+    deploy). ``None`` marks a row that never had a pin; it uses the current
+    budget alone.
     """
-    budget = fallback_budget_seconds if claim_budget_seconds is None else claim_budget_seconds
+    budget = (
+        fallback_budget_seconds if claim_budget_seconds is None else max(claim_budget_seconds, fallback_budget_seconds)
+    )
     return max(RUN_CLAIM_MIN_TIMEOUT_SECONDS, budget + RUN_CLAIM_GRACE_SECONDS)
 
 
@@ -863,7 +872,7 @@ class AutomationsRepository:
     ) -> list[AutomationRunRecord]:
         # The SQL bound is the shortest reclaim window any row can have; the
         # exact per-row window (pinned at claim time, current budget for
-        # legacy NULL rows) is applied below.
+        # legacy NULL rows) is applied to the fetched candidates below.
         earliest_stale_started_before = now_utc - timedelta(seconds=RUN_CLAIM_MIN_TIMEOUT_SECONDS)
         fallback_budget_seconds = effective_compact_request_budget_seconds()
         stmt = (
@@ -892,26 +901,34 @@ class AutomationsRepository:
                 AutomationRun.started_at.asc(),
                 AutomationRun.id.asc(),
             )
-            .limit(limit)
         )
         if cycle_key is not None:
             stmt = stmt.where(AutomationRun.cycle_key == cycle_key)
-        result = await self._session.execute(stmt)
-        due_runs = [
-            self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
-            for run, job_name, model, reasoning_effort in result.all()
-        ]
-        return [
-            run
-            for run in due_runs
-            if run.started_at <= run.scheduled_for
-            or run.started_at
-            < run_stale_started_before(
-                now_utc=now_utc,
-                claim_budget_seconds=run.claim_budget_seconds,
-                fallback_budget_seconds=fallback_budget_seconds,
+        # Page through the candidates so claims still inside their own window
+        # never consume ``limit`` slots owed to eligible rows behind them.
+        due_runs: list[AutomationRunRecord] = []
+        offset = 0
+        while len(due_runs) < limit:
+            result = await self._session.execute(stmt.offset(offset).limit(limit))
+            rows = result.all()
+            due_runs.extend(
+                run
+                for run in (
+                    self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
+                    for run, job_name, model, reasoning_effort in rows
+                )
+                if run.started_at <= run.scheduled_for
+                or run.started_at
+                < run_stale_started_before(
+                    now_utc=now_utc,
+                    claim_budget_seconds=run.claim_budget_seconds,
+                    fallback_budget_seconds=fallback_budget_seconds,
+                )
             )
-        ]
+            if len(rows) < limit:
+                break
+            offset += limit
+        return due_runs[:limit]
 
     async def claim_manual_run_execution(
         self,

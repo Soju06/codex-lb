@@ -367,6 +367,7 @@ class _Env:
         route: str = ROUTE_CODEX_RESPONSES,
         raw_model: str | None = None,
         require_streaming: bool = True,
+        direct_source: ModelSource | None = None,
     ) -> OverflowDispatch | JSONResponse | None:
         result = await resolve_subscription_overflow(
             request or _request(headers),
@@ -377,6 +378,7 @@ class _Env:
             require_streaming=require_streaming,
             source_route_excluded=source_route_excluded,
             route=route,
+            direct_source=direct_source,
         )
         return cast("OverflowDispatch | JSONResponse | None", result)
 
@@ -932,6 +934,123 @@ def _message(content: Mapping[str, JsonValue]) -> str:
     message = error["message"]
     assert isinstance(message, str)
     return message
+
+
+# --- direct source routing meets a pin or anchor (I7, design §7.2) -------------------------------
+
+DIRECT_MODEL = "direct-model"
+
+
+def _direct_source(model: str = DIRECT_MODEL) -> ModelSource:
+    """The source direct routing selected for ``model``; never the designated one."""
+
+    return _source("src_direct", model=model)
+
+
+@pytest.mark.asyncio
+async def test_direct_source_without_evidence_returns_none_after_the_pin_lookup_alone(env: _Env) -> None:
+    """A model a source serves directly is that source's request: one bounded pin read, then nothing."""
+
+    result = await env.resolve(payload=_payload(model=DIRECT_MODEL), direct_source=_direct_source())
+    assert result is None
+    assert env.pins.calls == [(thread_pin_key(_thread_key()), True)]
+    assert env.probe_calls == 0 and env.select_calls == [] and env.view_calls == 0 and env.dump_calls == 0
+    assert env.outcomes == [], "direct routing is not an exhaustion event: no decline is counted"
+    _assert_nothing_claimed(env)
+
+
+@pytest.mark.asyncio
+async def test_direct_source_with_an_unanchored_previous_response_id_counts_nothing(env: _Env) -> None:
+    request = _request(SDK)
+    result = await env.resolve(
+        SDK,
+        _payload(model=DIRECT_MODEL, store=None, previous_response_id="resp_direct_9"),
+        request=request,
+        route=ROUTE_V1_RESPONSES,
+        direct_source=_direct_source(),
+    )
+    assert result is None
+    assert env.pins.calls == [(anchor_pin_key(None, "resp_direct_9"), True)]
+    assert env.outcomes == [] and env.probe_calls == 0 and env.select_calls == []
+    assert getattr(request.state, HINT_STATE_ATTRIBUTE, None) is None
+
+
+@pytest.mark.asyncio
+async def test_live_pin_beats_a_direct_source_when_the_pinned_source_serves_the_model(env: _Env) -> None:
+    """Mutant: the direct source dispatches first. The pinned source lists the model, so the turn stays pinned."""
+
+    shared = "shared-model"
+    env.sources[SRC] = _source(model=shared)
+    env.pins.live(_pin_record(thread_pin_key(_thread_key()), now=env.clock.now()))
+    result = await env.resolve(payload=_payload(model=shared), direct_source=_direct_source(shared))
+    assert isinstance(result, OverflowDispatch)
+    assert result.kind == DISPATCH_KIND_PINNED and result.source is env.sources[SRC] and result.model == shared
+    assert result.request_log_source == REQUEST_LOG_SOURCE_PINNED
+    assert env.outcomes == ["dispatched_pinned"]
+    assert env.probe_calls == 0
+    result.claims.release_if_unowned()
+
+
+@pytest.mark.asyncio
+async def test_live_pin_with_a_directly_owned_unlisted_model_follows_the_unservable_rules(env: _Env) -> None:
+    """The pinned source does not serve the model another source owns: ciphertext -> 400 and the pin is kept;
+    a source-free transcript -> neutral release, after which the route's direct dispatch serves the id-stripped body."""
+
+    record = _pin_record(thread_pin_key(_thread_key()), now=env.clock.now())
+    env.pins.live(record)
+    env.unservable_cause = "model_unlisted"
+    ciphertext = _payload(
+        model=DIRECT_MODEL,
+        input=[{**_user("hi"), "id": "msg_src_1"}, {"type": "reasoning", "id": "rs_1", "encrypted_content": "x"}],
+    )
+    refused = await env.resolve(payload=ciphertext, direct_source=_direct_source())
+    assert isinstance(refused, JSONResponse) and refused.status_code == 400
+    assert _body(refused)["error"]["code"] == SOURCE_UNAVAILABLE_CODE
+    assert env.executor.deleted == []
+    assert _first_item(ciphertext)["id"] == "msg_src_1", "a refused body is untouched"
+    assert env.outcomes == ["pinned_unservable_model_unlisted"]
+
+    source_free = _payload(model=DIRECT_MODEL, input=[{**_user("hi"), "id": "msg_src_1"}])
+    released = await env.resolve(payload=source_free, direct_source=_direct_source())
+    assert released is None
+    assert env.executor.deleted == [(record.pin_key, True)], "deleted durably before the direct source serves it"
+    assert "id" not in _first_item(source_free)
+    assert env.outcomes == ["pinned_unservable_model_unlisted", "pinned_released_neutral"]
+    assert env.probe_calls == 0
+    _assert_nothing_claimed(env)
+
+
+@pytest.mark.asyncio
+async def test_live_anchor_beats_a_direct_source(env: _Env) -> None:
+    api_key = _api_key()
+    env.pins.live(
+        _pin_record(
+            anchor_pin_key("key_1", "resp_src_1"), now=env.clock.now(), kind=PIN_KIND_ANCHOR, api_key_id="key_1"
+        )
+    )
+    listed = await env.resolve(
+        SDK,
+        _payload(store=None, previous_response_id="resp_src_1"),
+        api_key,
+        route=ROUTE_V1_RESPONSES,
+        direct_source=_direct_source(MODEL),
+    )
+    assert isinstance(listed, OverflowDispatch)
+    assert listed.kind == DISPATCH_KIND_ANCHOR and listed.source is env.sources[SRC]
+    listed.claims.release_if_unowned()
+
+    env.unservable_cause = "model_unlisted"
+    unlisted = await env.resolve(
+        SDK,
+        _payload(model=DIRECT_MODEL, store=None, previous_response_id="resp_src_1"),
+        api_key,
+        route=ROUTE_V1_RESPONSES,
+        direct_source=_direct_source(),
+    )
+    assert isinstance(unlisted, JSONResponse) and unlisted.status_code == 400
+    assert _body(unlisted)["error"]["code"] == SOURCE_UNAVAILABLE_CODE
+    assert env.outcomes == ["dispatched_anchor", "pinned_unservable_model_unlisted"]
+    _assert_nothing_claimed(env)
 
 
 @pytest.mark.asyncio

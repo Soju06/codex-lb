@@ -799,6 +799,57 @@ async def test_overflow_route_helper_releases_the_decisions_claims_when_admissio
     assert payload.stream is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "route"),
+    [(CODEX_ROUTE, ROUTE_CODEX_RESPONSES), (V1_ROUTE, ROUTE_V1_RESPONSES)],
+    ids=["codex", "v1"],
+)
+async def test_decision_precedes_a_direct_source_dispatch_and_names_the_selected_source(
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch, path: str, route: str
+) -> None:
+    """A directly owned model still consults the decision first (I7): its answer wins over the direct dispatch,
+    it is handed the selected source, and ``None`` hands the request back to direct routing untouched."""
+
+    attempts = _forbid_subscription_stream(monkeypatch)
+    state = _StubState()
+    direct_model = "direct-owned-model"
+    source_id = await _create_overflow_source(
+        async_client,
+        source_upstream,
+        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _completed(_USAGE)]),
+        name=f"direct-first-{route}",
+        model=direct_model,
+        designate=False,
+    )
+    answers: list[Any] = [
+        JSONResponse(
+            status_code=400,
+            content=openai_error(SOURCE_UNAVAILABLE_CODE, "pinned elsewhere", error_type="invalid_request_error"),
+        ),
+        None,
+    ]
+    spy = _install_decision(monkeypatch, lambda: answers.pop(0))
+    headers = _native_headers("thr_direct_first")
+
+    refused = await async_client.post(path, json=_codex_body(model=direct_model), headers=headers)
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"]["code"] == SOURCE_UNAVAILABLE_CODE
+    assert state.requests == [], "the decision's answer precedes the direct dispatch"
+
+    served = await async_client.post(path, json=_codex_body(model=direct_model), headers=headers)
+    await _drain(async_client)
+    assert served.status_code == 200, served.text
+    assert [sent["model"] for sent in state.requests] == [direct_model]
+    assert attempts == []
+    assert len(spy.calls) == 2
+    for call in spy.calls:
+        assert call["route"] == route
+        assert call["direct_source"] is not None and call["direct_source"].id == source_id
+        assert call["payload"].model == direct_model
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
 @pytest.mark.parametrize("path", WS_ROUTES, ids=["codex-ws", "v1-ws"])
 def test_websocket_handshake_is_denied_with_the_decisions_426_before_accept(
     app_instance, monkeypatch: pytest.MonkeyPatch, path: str
@@ -1432,6 +1483,78 @@ async def test_pinned_thread_model_switch_listed_serves_unlisted_refuses(
     assert unlisted.json()["error"]["code"] == SOURCE_UNAVAILABLE_CODE
     assert len(scene.state.requests) == 1
     assert attempts == []
+
+
+@pytest.mark.asyncio
+async def test_pinned_thread_switching_to_a_directly_owned_model_is_decided_by_the_pin(
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§7.2 / I7: another source serving the requested model directly never sees the pinned transcript.
+
+    The pinned source does not list the model, so the unservable rules apply:
+    source reasoning -> 400 and neither source is contacted; a source-free
+    transcript -> the pin is deleted durably first, then the direct source
+    serves the id-stripped body.
+    """
+
+    attempts = _forbid_subscription_stream(monkeypatch)
+    scene = await _exhausted_scene(async_client, source_upstream, tag="direct_switch")
+    direct_state = _StubState()
+    direct_model = "direct-only-model"
+    direct_source_id = await _create_overflow_source(
+        async_client,
+        source_upstream,
+        _sse_handler(
+            direct_state,
+            before_hold=[_created("resp_direct_1"), _ITEM_ADDED, _DELTA, _completed(_USAGE, "resp_direct_1")],
+        ),
+        name="direct-switch",
+        model=direct_model,
+        designate=False,
+    )
+    thread_id = "thr_direct_switch"
+    await _write_pin(thread_pin_key(_thread_key(thread_id)), kind=PIN_KIND_THREAD, source_id=scene.source_id)
+    await _pool_is_healthy(async_client, tag="direct_switch")
+
+    ciphertext = [
+        {"type": "message", "id": "msg_src_1", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        {"type": "reasoning", "id": "rs_src_1", "summary": [], "encrypted_content": "c2VjcmV0"},
+    ]
+    refused = await async_client.post(
+        CODEX_ROUTE, json={**_codex_body(model=direct_model), "input": ciphertext}, headers=_native_headers(thread_id)
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"]["code"] == SOURCE_UNAVAILABLE_CODE
+    assert direct_state.requests == [], "the other source never receives the pinned transcript"
+    assert scene.state.requests == []
+    assert len(await _pin_rows()) == 1, "a refused turn keeps its pin"
+
+    source_free = [
+        {"type": "message", "id": "msg_src_1", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        {"type": "message", "id": "msg_src_2", "role": "assistant", "content": [{"type": "output_text", "text": "yo"}]},
+    ]
+    async with async_client.stream(
+        "POST",
+        CODEX_ROUTE,
+        json={**_codex_body(model=direct_model), "input": source_free},
+        headers=_native_headers(thread_id),
+    ) as response:
+        assert response.status_code == 200, await response.aread()
+        text = (await response.aread()).decode()
+    await _drain(async_client)
+
+    created, terminals = _lifecycle(_events(text))
+    assert created == ["resp_direct_1"]
+    assert terminals == ["response.completed"]
+    assert await _pin_rows() == [], "the pin is deleted durably before the direct source serves the thread"
+    assert len(direct_state.requests) == 1
+    sent_input = direct_state.requests[0]["input"]
+    assert [item.get("role") for item in sent_input] == ["user", "assistant"]
+    assert all("id" not in item for item in sent_input), sent_input
+    assert scene.state.requests == []
+    assert attempts == []
+    rows = await _all_rows()
+    assert [(row.model_source_id, row.account_id) for row in rows] == [(direct_source_id, None)]
 
 
 @pytest.mark.asyncio

@@ -955,14 +955,15 @@ async def resolve_subscription_overflow(
     require_streaming: bool,
     source_route_excluded: bool,
     route: str,
+    direct_source: ModelSource | None = None,
 ) -> OverflowDispatch | Response | None:
     """Decide once at route admission (design §4.2 order).
 
-    ``None``: fall through to the subscription path unchanged (both settings
-    columns off, or a decline). ``Response``: a fail-closed answer for a
-    pinned/anchored context. ``OverflowDispatch``: dispatch to the source with
-    claims already held (released by the route helper latch when no owner
-    takes them).
+    ``None``: fall through to the unchanged path (both settings columns off,
+    a decline, or a directly owned model without pin evidence). ``Response``:
+    a fail-closed answer for a pinned/anchored context. ``OverflowDispatch``:
+    dispatch to the source with claims already held (released by the route
+    helper latch when no owner takes them).
 
     Order: thread pin (durable knowledge beats a turn-state claim) -> anchor
     (also in drain mode) -> drain check -> O(1) declines -> probe with the
@@ -970,6 +971,18 @@ async def resolve_subscription_overflow(
     (last; nothing fallible after them). ``except Exception`` (never
     ``CancelledError``) falls through except on a pinned/anchored context or a
     failed mandated lookup, which answer 503 (§8.1).
+
+    ``direct_source`` is the source direct routing selected for the model
+    (``None`` on the subscription path). The route calls the decision before
+    the direct dispatch because a pin or anchor owns the conversation
+    regardless of which source serves the model directly (I7, design §7.2):
+    a live pin or anchor is dispatched by the pinned rules -- to the pinned
+    source when it serves the model, otherwise the unservable rules (neutral
+    release, after which the caller's direct route serves the id-stripped
+    body, or 400) -- and without evidence the decision returns ``None`` right
+    after the lookups: a model a source serves directly is that source's
+    request, never a subscription exhaustion, so nothing is probed, selected
+    or counted.
     """
 
     settings = await get_settings_cache().get()
@@ -1025,10 +1038,15 @@ async def resolve_subscription_overflow(
                 pinned_context = True
                 stage = "dispatch_anchor"
                 return await dispatch_anchor(decision, anchor.record, anchor.state)
-            # Unknown id: the continuation lives elsewhere -- today's owner
-            # fail-closed path answers unchanged (design §4.2 (3)); never the
-            # fresh pipeline, so no probe, no select and no history hint.
-            _decline(route, "not_portable_history", detail="previous_response_id:unanchored")
+            if direct_source is None:
+                # Unknown id: the continuation lives elsewhere -- today's owner
+                # fail-closed path answers unchanged (design §4.2 (3)); never the
+                # fresh pipeline, so no probe, no select and no history hint.
+                _decline(route, "not_portable_history", detail="previous_response_id:unanchored")
+                return None
+        if direct_source is not None:
+            # No pin or anchor evidence: the model's own source serves it. Not
+            # an exhaustion event, so no drain decline, no probe, no outcome.
             return None
         if designated is None:
             _decline(route, "drain_mode")

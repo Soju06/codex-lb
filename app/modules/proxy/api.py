@@ -1216,6 +1216,43 @@ async def responses(
         )
         if disabled_denial is not None:
             return disabled_denial
+    if source is None:
+        apply_enforced_service_tier_model_fallback(
+            responses_payload,
+            service_tier_was_enforced=service_tier_was_enforced,
+        )
+    # Subscription-exhaustion overflow is decided once here (design v3 §4.1):
+    # probe inputs equal selection inputs, and nothing is reserved, leased or
+    # written yet. The decision precedes a direct source dispatch as well: a
+    # conversation pinned or anchored to an overflow source stays there even
+    # when another source serves the requested model directly (I7), while a
+    # directly owned model without pin evidence never overflows fresh.
+    # ``None`` is the unchanged direct-routing or subscription path.
+    overflow = await resolve_subscription_overflow(
+        request,
+        responses_payload,
+        context,
+        api_key,
+        raw_model=raw_source_model,
+        require_streaming=not backend_non_streaming_requested,
+        source_route_excluded=source_route_excluded,
+        route=ROUTE_CODEX_RESPONSES,
+        direct_source=source,
+    )
+    if isinstance(overflow, Response):
+        return overflow
+    if overflow is not None:
+        return await _overflow_source_response(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            overflow,
+            pre_normalization_effort=pre_normalization_effort,
+            enforce_openai_sdk_contract=openai_sdk_request,
+            native_codex_heartbeat=native_codex_heartbeat,
+            non_streaming=backend_non_streaming_requested,
+        )
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -1233,38 +1270,6 @@ async def responses(
             enforce_openai_sdk_contract=openai_sdk_request,
             native_codex_heartbeat=native_codex_heartbeat,
             context=context,
-        )
-
-    apply_enforced_service_tier_model_fallback(
-        responses_payload,
-        service_tier_was_enforced=service_tier_was_enforced,
-    )
-    # Subscription-exhaustion overflow is decided once here (design v3 §4.1):
-    # probe inputs equal selection inputs, and nothing is reserved, leased or
-    # written yet. ``None`` is the unchanged subscription path.
-    overflow = await resolve_subscription_overflow(
-        request,
-        responses_payload,
-        context,
-        api_key,
-        raw_model=raw_source_model,
-        require_streaming=not backend_non_streaming_requested,
-        source_route_excluded=source_route_excluded,
-        route=ROUTE_CODEX_RESPONSES,
-    )
-    if isinstance(overflow, Response):
-        return overflow
-    if overflow is not None:
-        return await _overflow_source_response(
-            request,
-            responses_payload,
-            context,
-            api_key,
-            overflow,
-            pre_normalization_effort=pre_normalization_effort,
-            enforce_openai_sdk_contract=openai_sdk_request,
-            native_codex_heartbeat=native_codex_heartbeat,
-            non_streaming=backend_non_streaming_requested,
         )
 
     if not backend_non_streaming_requested:
@@ -1456,6 +1461,37 @@ async def v1_responses(
         )
         if disabled_denial is not None:
             return disabled_denial
+    if source is None:
+        apply_enforced_service_tier_model_fallback(
+            responses_payload,
+            service_tier_was_enforced=service_tier_was_enforced,
+        )
+    # Decided before a direct source dispatch for the same reason as on the
+    # Codex route: a pin or anchor owns the conversation whichever source
+    # serves the model directly (I7).
+    overflow = await resolve_subscription_overflow(
+        request,
+        responses_payload,
+        context,
+        api_key,
+        raw_model=raw_source_model,
+        require_streaming=responses_payload.stream is True,
+        source_route_excluded=source_route_excluded,
+        route=ROUTE_V1_RESPONSES,
+        direct_source=source,
+    )
+    if isinstance(overflow, Response):
+        return overflow
+    if overflow is not None:
+        return await _overflow_source_response(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            overflow,
+            pre_normalization_effort=pre_normalization_effort,
+            non_streaming=not responses_payload.stream,
+        )
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -1469,32 +1505,6 @@ async def v1_responses(
             rate_limit_headers=rate_limit_headers,
             pre_normalization_effort=pre_normalization_effort,
             context=context,
-        )
-    apply_enforced_service_tier_model_fallback(
-        responses_payload,
-        service_tier_was_enforced=service_tier_was_enforced,
-    )
-    overflow = await resolve_subscription_overflow(
-        request,
-        responses_payload,
-        context,
-        api_key,
-        raw_model=raw_source_model,
-        require_streaming=responses_payload.stream is True,
-        source_route_excluded=source_route_excluded,
-        route=ROUTE_V1_RESPONSES,
-    )
-    if isinstance(overflow, Response):
-        return overflow
-    if overflow is not None:
-        return await _overflow_source_response(
-            request,
-            responses_payload,
-            context,
-            api_key,
-            overflow,
-            pre_normalization_effort=pre_normalization_effort,
-            non_streaming=not responses_payload.stream,
         )
     if responses_payload.stream:
         response = await _stream_responses(

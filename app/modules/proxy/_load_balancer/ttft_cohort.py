@@ -15,10 +15,11 @@ queue, and any WebSocket/bridge row whose first-token latency spans a retried
 send or an account-capacity wait are excluded) -- and derives a
 draw-weight multiplier relative to the fleet: an account whose estimate sits
 above the fleet median by more than the deadband is discounted to
-``max(floor, fleet / account)``. Weighted strategies multiply the candidate's
-weight by it alongside the error-rate multiplier; sticky owners, deterministic
-probes and deterministic strategies never consult it. The signal is
-replica-local and never persisted.
+``max(floor, fleet / account)``. ``latency_cohort.apply_latency_cohort_weights``
+combines it with the per-model output-throughput multiplier
+(``throughput_cohort.py``) as the minimum of the two and applies it to fresh
+weighted draws; sticky owners, deterministic probes and deterministic
+strategies never consult it. The signal is replica-local and never persisted.
 
 Estimator: the per-account estimate is the mean of the samples below the top
 decile (an upper-trimmed mean). The slow cohort observed in production is
@@ -32,16 +33,12 @@ stays neutral. Estimator changes are one-function edits here, not settings.
 
 from __future__ import annotations
 
-import logging
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from statistics import median
 from typing import Any
 
-from app.core.balancer import AccountState
 from app.modules.proxy._load_balancer.types import RuntimeState
-
-logger = logging.getLogger(__name__)
 
 # One hour of eligible turns: long enough for a quiet account to keep evidence,
 # short enough that an account changing cohort is re-weighted within the hour.
@@ -66,8 +63,6 @@ TTFT_WEIGHT_DEADBAND = 0.15
 # A 10x outlier still keeps half of its weight: the window keeps sampling it
 # and the discount lifts as soon as its samples recover.
 TTFT_WEIGHT_FLOOR = 0.5
-# Transition log gate: a multiplier move smaller than this is not logged.
-_LOG_DELTA = 0.1
 
 
 def _prune(samples: list[tuple[float, int]], now: float) -> None:
@@ -187,23 +182,16 @@ def ttft_weight_multiplier(account_ms: float, fleet_ms: float) -> float:
     return max(TTFT_WEIGHT_FLOOR, fleet_ms / account_ms)
 
 
-def apply_ttft_cohort_weights(
-    states: Iterable[AccountState],
+def fleet_ttft_estimates(
     runtime_by_account_id: Mapping[str, RuntimeState],
-    *,
     now: float,
-    log_transitions: bool = True,
-) -> None:
-    """Multiply each state's ``selection_weight_multiplier`` by its TTFT cohort weight.
+) -> tuple[dict[str, float], float | None]:
+    """Per-account estimates and the fleet reference (their median).
 
-    The fleet reference is computed over the whole runtime map, not only the
-    states being built, so a selection narrowed to a subset (API-key scoping,
-    model catalog, continuity owner) is still weighed against the full pool.
-    Neutral for every state while fewer than ``TTFT_MIN_ACCOUNTS`` accounts
-    hold enough samples. ``log_transitions=False`` is for builds on a detached
-    runtime snapshot (observe-only admission): the multiplier is identical but
-    the ``ttft_weight`` written there is discarded, so logging from it would
-    repeat the transition on the next live build.
+    Computed over the whole runtime map so a selection narrowed to a subset is
+    still weighed against the full pool; the reference is ``None`` -- every
+    multiplier neutral -- while fewer than ``TTFT_MIN_ACCOUNTS`` accounts hold
+    enough samples.
     """
     estimates = {
         account_id: estimate
@@ -211,25 +199,4 @@ def apply_ttft_cohort_weights(
         if (estimate := account_ttft_estimate_ms(runtime, now)) is not None
     }
     fleet_ms = median(estimates.values()) if len(estimates) >= TTFT_MIN_ACCOUNTS else None
-    for state in states:
-        runtime = runtime_by_account_id.get(state.account_id)
-        if runtime is None:
-            continue
-        account_ms = estimates.get(state.account_id)
-        multiplier = 1.0 if fleet_ms is None or account_ms is None else ttft_weight_multiplier(account_ms, fleet_ms)
-        if multiplier != 1.0:
-            state.selection_weight_multiplier *= multiplier
-        previous = runtime.ttft_weight
-        if log_transitions and ((previous < 1.0) != (multiplier < 1.0) or abs(multiplier - previous) > _LOG_DELTA):
-            # Account identifiers are deliberately omitted: ``_build_states``
-            # carries no redaction flag, so this line must stay identifier-free.
-            logger.info(
-                "ttft_cohort_weight_change multiplier=%.2f ttft_ms=%s fleet_ttft_ms=%s samples=%d "
-                "accounts_with_evidence=%d",
-                multiplier,
-                None if account_ms is None else round(account_ms),
-                None if fleet_ms is None else round(fleet_ms),
-                len(runtime.ttft_samples or ()),
-                len(estimates),
-            )
-        runtime.ttft_weight = multiplier
+    return estimates, fleet_ms

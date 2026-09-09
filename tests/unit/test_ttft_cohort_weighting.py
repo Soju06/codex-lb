@@ -14,6 +14,7 @@ import pytest
 from app.core.balancer.logic import AccountState, _select_capacity_weighted, select_account
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind
+from app.modules.proxy._load_balancer.latency_cohort import apply_latency_cohort_weights, last_cohort_weight
 from app.modules.proxy._load_balancer.opportunistic_admission import (
     _observe_selection_states,
     detached_runtime_snapshot,
@@ -27,7 +28,6 @@ from app.modules.proxy._load_balancer.ttft_cohort import (
     TTFT_WEIGHT_DEADBAND,
     TTFT_WEIGHT_FLOOR,
     account_ttft_estimate_ms,
-    apply_ttft_cohort_weights,
     record_ttft_sample,
     ttft_weight_multiplier,
 )
@@ -187,14 +187,14 @@ def test_weights_neutral_on_thin_fleet_evidence() -> None:
     }
     assert TTFT_MIN_ACCOUNTS == 3
     states = [_state("slow"), _state("fast"), _state("quiet")]
-    apply_ttft_cohort_weights(states, runtime, now=_NOW)
+    apply_latency_cohort_weights(states, runtime, now=_NOW)
     assert [state.selection_weight_multiplier for state in states] == [1.0, 1.0, 1.0]
 
 
 def test_uniformly_slow_fleet_is_neutral() -> None:
     runtime = {f"acc-{index}": _runtime_with_samples([2_600 + index] * 20) for index in range(20)}
     states = [_state(account_id) for account_id in runtime]
-    apply_ttft_cohort_weights(states, runtime, now=_NOW)
+    apply_latency_cohort_weights(states, runtime, now=_NOW)
     assert all(state.selection_weight_multiplier == 1.0 for state in states)
 
 
@@ -212,13 +212,13 @@ def test_prod_shaped_bimodal_cohorts() -> None:
         "nearby": _runtime_with_samples([1_800] * 20),  # inside the 15% deadband
     }
     states = [_state(account_id) for account_id in runtime]
-    apply_ttft_cohort_weights(states, runtime, now=_NOW)
+    apply_latency_cohort_weights(states, runtime, now=_NOW)
     by_id = {state.account_id: state.selection_weight_multiplier for state in states}
     assert all(by_id[f"fast-{index}"] == 1.0 for index in range(11))
     assert all(TTFT_WEIGHT_FLOOR <= by_id[f"slow-{index}"] < 1.0 for index in range(9))
     assert by_id["outlier"] == TTFT_WEIGHT_FLOOR
     assert by_id["nearby"] == 1.0
-    assert runtime["slow-0"].ttft_weight == by_id["slow-0"]
+    assert last_cohort_weight(runtime["slow-0"], None) == by_id["slow-0"]
 
 
 def test_multiplier_compounds_with_error_rate_and_is_clamped() -> None:
@@ -228,7 +228,7 @@ def test_multiplier_compounds_with_error_rate_and_is_clamped() -> None:
         "fast-b": _runtime_with_samples([1_000] * 20),
     }
     state = _state("flaky-slow", multiplier=0.75)  # error-rate discount already applied
-    apply_ttft_cohort_weights([state, _state("fast-a"), _state("fast-b")], runtime, now=_NOW)
+    apply_latency_cohort_weights([state, _state("fast-a"), _state("fast-b")], runtime, now=_NOW)
     assert state.selection_weight_multiplier == pytest.approx(0.75 * TTFT_WEIGHT_FLOOR)
     random.seed(20260909)
     picks = Counter(_select_capacity_weighted([state, _state("fast-a")]).account_id for _ in range(400))
@@ -257,13 +257,13 @@ async def test_balancer_steers_fresh_selection_away_from_slow_cohort() -> None:
     # 0.5 vs 1.0 weight with equal credits: about a fifth of the draws, never zero.
     assert picks[slow.id] > 0
     assert picks[slow.id] < min(picks[fast_a.id], picks[fast_b.id])
-    assert balancer._runtime[slow.id].ttft_weight == TTFT_WEIGHT_FLOOR
+    assert last_cohort_weight(balancer._runtime[slow.id], None) == TTFT_WEIGHT_FLOOR
 
     # The window clears with time and the discount lifts without any new sample.
     clock.advance(TTFT_SAMPLE_WINDOW_SECONDS + 1.0)
     result = await balancer.select_account()
     assert result.account is not None
-    assert balancer._runtime[slow.id].ttft_weight == 1.0
+    assert last_cohort_weight(balancer._runtime[slow.id], None) == 1.0
 
 
 @asynccontextmanager
@@ -405,25 +405,25 @@ def test_transition_log_is_gated_and_carries_no_account_identifiers(caplog: pyte
         "slow-account-secret": _runtime_with_samples([6_000] * 20),
     }
     states = [_state(account_id) for account_id in runtime]
-    with caplog.at_level(logging.INFO, logger="app.modules.proxy._load_balancer.ttft_cohort"):
-        apply_ttft_cohort_weights(states, runtime, now=_NOW)
-        apply_ttft_cohort_weights([_state(account_id) for account_id in runtime], runtime, now=_NOW)
-    transitions = [record for record in caplog.records if "ttft_cohort_weight_change" in record.getMessage()]
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy._load_balancer.latency_cohort"):
+        apply_latency_cohort_weights(states, runtime, now=_NOW)
+        apply_latency_cohort_weights([_state(account_id) for account_id in runtime], runtime, now=_NOW)
+    transitions = [record for record in caplog.records if "latency_cohort_weight_change" in record.getMessage()]
     assert len(transitions) == 1
     message = transitions[0].getMessage()
     assert "slow-account-secret" not in message and "fast-a" not in message
-    assert "multiplier=0.50" in message and "accounts_with_evidence=3" in message
+    assert "multiplier=0.50 signal=ttft model=None" in message and "accounts_with_ttft_evidence=3" in message
 
     # Lifting back to neutral is a transition too and is logged once.
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger="app.modules.proxy._load_balancer.ttft_cohort"):
-        apply_ttft_cohort_weights(
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy._load_balancer.latency_cohort"):
+        apply_latency_cohort_weights(
             [_state(account_id) for account_id in runtime], runtime, now=_NOW + TTFT_SAMPLE_WINDOW_SECONDS + 1.0
         )
-        apply_ttft_cohort_weights(
+        apply_latency_cohort_weights(
             [_state(account_id) for account_id in runtime], runtime, now=_NOW + TTFT_SAMPLE_WINDOW_SECONDS + 1.0
         )
-    lifted = [record for record in caplog.records if "ttft_cohort_weight_change" in record.getMessage()]
+    lifted = [record for record in caplog.records if "latency_cohort_weight_change" in record.getMessage()]
     assert len(lifted) == 1 and "multiplier=1.00" in lifted[0].getMessage()
 
 
@@ -435,16 +435,16 @@ def test_snapshot_build_does_not_repeat_the_transition_log(caplog: pytest.LogCap
     }
     accounts = [_make_account(account_id) for account_id in live]
     common: dict[str, Any] = {"latest_primary": {}, "latest_secondary": {}, "latest_monthly": {}, "now": _NOW}
-    with caplog.at_level(logging.INFO, logger="app.modules.proxy._load_balancer.ttft_cohort"):
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy._load_balancer.latency_cohort"):
         snapshot = detached_runtime_snapshot(live, now=_NOW, stale_lease_ttl_seconds=lambda _kind: 60.0)
         observed, _ = _build_states(accounts=accounts, runtime=snapshot, log_weight_transitions=False, **common)
-        assert live["slow"].ttft_weight == 1.0  # the snapshot absorbed the write
+        assert last_cohort_weight(live["slow"], None) == 1.0  # the snapshot absorbed the write
         selected, _ = _build_states(accounts=accounts, runtime=live, **common)
     assert [state.selection_weight_multiplier for state in observed] == [
         state.selection_weight_multiplier for state in selected
     ]
-    assert live["slow"].ttft_weight == TTFT_WEIGHT_FLOOR
-    transitions = [record for record in caplog.records if "ttft_cohort_weight_change" in record.getMessage()]
+    assert last_cohort_weight(live["slow"], None) == TTFT_WEIGHT_FLOOR
+    transitions = [record for record in caplog.records if "latency_cohort_weight_change" in record.getMessage()]
     assert len(transitions) == 1
 
 

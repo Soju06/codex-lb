@@ -43,9 +43,14 @@ Account pages display each window as **percent remaining**; the sticky reallocat
 
 When enabled and several accounts are otherwise eligible, selection is restricted to the accounts whose selected quota window (5h or weekly) resets soonest. Weekly resets are compared in whole-day buckets; when the selected window has no known reset time, the other window is used as a fallback. The preference applies to the `Capacity weighted`, `Usage weighted`, and `Fill first` strategies; the fixed-order and draw-based strategies (`Round robin`, `Relative availability`, `Sequential drain`, `Reset drain`, `Single account`) ignore it.
 
-### Relative first-token latency weighting
+### Relative latency weighting
 
-The `Capacity weighted` and `Relative availability` strategies also discount accounts whose recent first-token latency on small, low-effort, single-attempt turns sits more than 15% above the fleet median, down to half of their normal weight. The signal is measured per replica from the last hour of successful turns, needs at least eight samples on at least three accounts before it acts, and is neutral when the whole fleet is equally slow. It never excludes an account and never moves an established sticky session; there is nothing to configure.
+The `Capacity weighted` and `Relative availability` strategies also discount accounts that are slower than their siblings, down to half of their normal weight, using two replica-local signals measured from the last hour of successful, unqueued, single-attempt turns:
+
+- **First-token latency** per account, on small, low-effort turns: an account more than 15% above the fleet median is discounted.
+- **Output throughput** (tokens per second after the first token) per account **and per model**, on turns with at least 200 output tokens: an account more than 15% below the fleet median *for the model being requested* is discounted for that model only, so an account that streams slowly on one model keeps its full weight on the others.
+
+Each signal needs at least eight samples on at least three accounts (per model, for throughput) before it acts and is neutral when the whole fleet is equally slow. When both apply, the smaller multiplier is used, never their product. The weight never excludes an account and never moves an established sticky session; there is nothing to configure.
 
 ### Limit warm-up
 

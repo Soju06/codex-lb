@@ -9,6 +9,7 @@ import anyio
 from app.core.clock import clock_for, scheduler_for
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, proxy_phase_latency_seconds
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy._load_balancer.throughput_cohort import record_tps_sample
 from app.modules.proxy._load_balancer.ttft_cohort import record_ttft_sample
 from app.modules.proxy.affinity import _extract_model_class
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
@@ -198,9 +199,9 @@ class _RequestLogMixin:
         conversation_id: str | None = None,
         client_ip: str | None = None,
         archive_request_id: str | None = None,
-        # True when the row's first-token latency spans more than one upstream
-        # send (bridge retry or direct WebSocket replay) or an account-capacity
-        # wait. Not persisted; it only keeps the row out of the TTFT cohort sample.
+        # True when the row's latencies span more than one upstream send
+        # (bridge retry or direct WebSocket replay) or an account-capacity
+        # wait. Not persisted; it only keeps the row out of the latency cohort samples.
         upstream_retried: bool = False,
     ) -> None:
         task = scheduler_for(self).create_task(
@@ -303,10 +304,13 @@ class _RequestLogMixin:
             useragent_group=useragent_group,
             model=model,
         )
-        # Fleet-relative TTFT cohort weight: the funnel already carries every
-        # field the eligibility filter needs; ineligible rows are dropped there.
+        # Fleet-relative latency cohort weights (first-token latency per account,
+        # output throughput per account and model): the funnel already carries
+        # every field the eligibility filters need; ineligible rows are dropped there.
+        queued_wait_ms = (latency_response_create_gate_wait_ms or 0) + (latency_bridge_queue_wait_ms or 0)
+        balancer = getattr(self, "_load_balancer", None)
         record_ttft_sample(
-            getattr(self, "_load_balancer", None),
+            balancer,
             account_id=account_id,
             status=status,
             request_kind=request_kind,
@@ -314,7 +318,19 @@ class _RequestLogMixin:
             input_tokens=input_tokens,
             cached_input_tokens=cached_input_tokens,
             reasoning_effort=reasoning_effort,
-            queued_wait_ms=(latency_response_create_gate_wait_ms or 0) + (latency_bridge_queue_wait_ms or 0),
+            queued_wait_ms=queued_wait_ms,
+            retried=upstream_retried,
+        )
+        record_tps_sample(
+            balancer,
+            account_id=account_id,
+            status=status,
+            request_kind=request_kind,
+            model=model,
+            latency_ms=latency_ms,
+            latency_first_token_ms=latency_first_token_ms,
+            output_tokens=output_tokens,
+            queued_wait_ms=queued_wait_ms,
             retried=upstream_retried,
         )
 

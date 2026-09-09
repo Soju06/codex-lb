@@ -108,6 +108,7 @@ class StickySelectionOwner(Protocol):
         required_account_id: str | None,
         redact_sensitive_details: bool,
         routing_tunables: RoutingTunables,
+        model: str | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
     def _sync_runtime_state(
@@ -258,6 +259,8 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     # from the pre-exclusion continuity pool, which also differs from the
     # routable pool by catalog-evidence model filtering.
     exclude_account_ids: frozenset[str] = frozenset()
+    # Requested model; scopes the per-model latency cohort weight of fresh draws.
+    model: str | None = None
     # First-iteration owner read performed by the caller inside its shared
     # owner-lookup session (see load_balancer.select_account). Consumed exactly
     # once; retries re-read fresh ownership evidence through a repo bundle.
@@ -445,6 +448,7 @@ async def run_sticky_selection_path(
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
                 routing_tunables=routing_tunables,
+                model=request.model,
             )
             if retired_legacy_owner_account_ids:
                 # Retirement is authoritative even when this selector loaded a

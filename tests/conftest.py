@@ -467,6 +467,11 @@ def _reset_global_state() -> None:
         settings_cache = get_settings_cache()
         settings_cache._cached_settings = None
         settings_cache._cached_at = 0.0
+        # ``cached_row()`` deliberately survives an invalidation (a dashboard
+        # value must not revert to the environment between a mutation and the
+        # next load), so the fallback slot needs an explicit reset here or a
+        # dashboard row leaks from one test into the next.
+        settings_cache._last_loaded_settings = None
     except Exception:
         pass
     try:

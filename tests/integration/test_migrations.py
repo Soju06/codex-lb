@@ -2762,12 +2762,18 @@ async def test_dashboard_conversation_archive_migration_upgrade_and_downgrade(tm
     """Upgrade adds the nullable ``conversation_archive_enabled`` column; downgrade drops it;
     a final walk to head proves the revision sits on a single-head graph."""
     from alembic import command
+    from alembic.script import ScriptDirectory
 
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'conversation-archive.sqlite'}"
-    parent_revision = "20260909_090000_dashboard_background_job_toggles"
     archive_revision = "20260909_120000_dashboard_conversation_archive"
+    # Read the parent from the graph, not from a literal: this revision is the
+    # tail of a stack whose merge order re-chains ``down_revision``.
+    parent_revision = (
+        ScriptDirectory.from_config(_build_alembic_config(db_url)).get_revision(archive_revision).down_revision
+    )
+    assert isinstance(parent_revision, str)
 
     async def _columns(engine) -> dict[str, dict[str, object]]:
         async with engine.connect() as conn:

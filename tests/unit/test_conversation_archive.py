@@ -23,14 +23,6 @@ from app.core.utils.request_id import reset_request_id, set_request_id
 from app.modules.conversation_archive import service as conversation_archive_service
 
 
-@pytest.fixture(autouse=True)
-def _no_cached_dashboard_row(monkeypatch):
-    # M5 conversation archive: unit tests drive the toggle through the env
-    # fake; a dashboard row cached by an earlier (integration) test must not
-    # leak into them.
-    monkeypatch.setattr(conversation_archive, "get_settings_cache", lambda: _CachedRow(None))
-
-
 def _reset_archive_disk_pressure() -> None:
     with conversation_archive._DISK_PRESSURE_LOCK:
         conversation_archive._DISK_PRESSURE_PAUSED_UNTIL = 0.0

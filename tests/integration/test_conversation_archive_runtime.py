@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from app.core import conversation_archive
-from app.core.config.settings_cache import get_settings_cache
+from app.core.cache.invalidation import NAMESPACE_SETTINGS, CacheInvalidationPoller
+from app.core.config.settings_cache import SettingsCache, get_settings_cache
+from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
 
@@ -100,3 +102,42 @@ async def test_dashboard_off_survives_a_cache_invalidation_with_the_env_alias_on
         assert _records(tmp_path) == []
     finally:
         await cache.invalidate(propagate=False)
+
+
+@pytest.mark.asyncio
+async def test_open_stream_replica_stops_recording_after_a_peer_disables_it(
+    async_client, db_setup, monkeypatch, tmp_path
+):
+    """A replica carrying only an already-open stream must follow a peer's disable.
+
+    The gate cannot await, so a replica that receives no new request would keep
+    the snapshot it loaded when the stream opened. The settings cache is
+    refreshed off the cache-invalidation bus for exactly this reason: one poll
+    cycle after the peer's ``PUT``, frames of the open stream stop being
+    archived — no new request, no restart.
+    """
+    replica_b = SettingsCache()
+    poller_b = CacheInvalidationPoller(SessionLocal)
+    poller_b.on_invalidation(NAMESPACE_SETTINGS, lambda: replica_b.invalidate(propagate=False))
+    poller_b.on_invalidation(NAMESPACE_SETTINGS, replica_b.refresh)
+    await poller_b._poll_once()
+
+    # The env alias is on, so a gate that fell back to it would keep recording.
+    monkeypatch.setattr(conversation_archive, "get_settings", lambda: _ArchiveEnvironment(tmp_path, enabled=True))
+    monkeypatch.setattr(conversation_archive, "get_settings_cache", lambda: replica_b)
+
+    enabled = await async_client.put("/api/settings", json={"conversationArchiveEnabled": True})
+    assert enabled.status_code == 200
+    await poller_b._poll_once()
+    assert conversation_archive.archive_enabled() is True
+    _archive_one("open-stream-frame")
+    assert [record["extra"] for record in _records(tmp_path)] == [{"marker": "open-stream-frame"}]
+
+    # The peer turns it off. Replica B serves no request in between.
+    disabled = await async_client.put("/api/settings", json={"conversationArchiveEnabled": False})
+    assert disabled.status_code == 200
+    await poller_b._poll_once()
+
+    assert conversation_archive.archive_enabled() is False
+    _archive_one("frame-after-disable")
+    assert [record["extra"] for record in _records(tmp_path)] == [{"marker": "open-stream-frame"}]

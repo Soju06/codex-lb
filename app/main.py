@@ -572,6 +572,12 @@ async def lifespan(app: FastAPI):
         NAMESPACE_SETTINGS,
         lambda: get_settings_cache().invalidate(propagate=False),
     )
+    # Then pull the new row in. Readers that cannot await the cache (the
+    # conversation archive gate runs per archived frame) would otherwise keep
+    # the pre-change snapshot on a replica that is only carrying already-open
+    # streams; the invalidate above already expired it, so a failed refresh
+    # degrades to the ordinary TTL reload instead of serving a stale value.
+    cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_settings_cache().refresh)
     cache_poller.on_invalidation(NAMESPACE_UPSTREAM_ROUTE, get_upstream_route_cache().clear)
     # The route resolver also reads the dashboard settings row (routing enabled
     # + default pool id), so settings bumps clear resolved routes as well.

@@ -295,3 +295,50 @@ async def test_conversation_archive_toggle_writes_a_dedicated_audit_event_with_a
 
 
 # end M5 conversation archive
+
+
+@pytest.mark.asyncio
+async def test_conversation_archive_toggle_audit_names_the_actor_under_trusted_header_auth(
+    async_client, monkeypatch
+) -> None:
+    """When the auth mode carries an identity, the dedicated event records it.
+
+    Password auth has no per-user identity yet, so `actor` is null there; the
+    field exists so an identity-carrying mode (and the RBAC work) fills it in.
+    """
+    from app.core.auth.dashboard_mode import DashboardAuthMode
+    from app.core.config.settings import get_settings
+    from app.core.conversation_archive import CONVERSATION_ARCHIVE_TOGGLED_ACTION
+
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_MODE", DashboardAuthMode.TRUSTED_HEADER)
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS", "true")
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER", "Remote-User")
+    get_settings.cache_clear()
+
+    enabled = await async_client.put(
+        "/api/settings",
+        json={"conversationArchiveEnabled": True},
+        headers={"Remote-User": "alice@example.com"},
+    )
+    assert enabled.status_code == 200
+
+    event = await _wait_for_audit_log(CONVERSATION_ARCHIVE_TOGGLED_ACTION)
+    assert event is not None
+    assert event.details is not None
+    details = json.loads(event.details)
+    assert details["actor"] == "alice@example.com"
+    assert details["actor_role"] == "admin"
+    assert details["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_unrelated_settings_change_writes_no_conversation_archive_event(async_client) -> None:
+    """The dedicated event is reserved for effective archive flips."""
+    from app.core.conversation_archive import CONVERSATION_ARCHIVE_TOGGLED_ACTION
+
+    response = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert response.status_code == 200
+    await _wait_for_settings_changed_audit_log()
+
+    assert await _wait_for_audit_log(CONVERSATION_ARCHIVE_TOGGLED_ACTION, attempts=3) is None

@@ -39,6 +39,24 @@ class SettingsCache:
                 self._cached_at = now
                 return settings
 
+    async def refresh(self) -> DashboardSettings:
+        """Load the row now and make it the current snapshot.
+
+        Registered as a cache-invalidation callback for the ``settings``
+        namespace so that a dashboard change reaches every replica on the bus
+        instead of waiting for the next request to pull it in. That bound
+        matters for readers that cannot await — the conversation archive gate
+        runs per archived frame, and a replica carrying only already-open
+        streams would otherwise keep the previous value indefinitely.
+        """
+        async with self._lock:
+            async with SessionLocal() as session:
+                settings = await SettingsRepository(session).get_or_create()
+            self._cached_settings = settings
+            self._last_loaded_settings = settings
+            self._cached_at = time.monotonic()
+            return settings
+
     def cached_row(self) -> DashboardSettings | None:
         """The last row this cache loaded, even if past its TTL or invalidated.
 

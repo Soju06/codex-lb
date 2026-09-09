@@ -14,7 +14,7 @@ import zlib
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from app.core.config.inheritable import resolve_inheritable
 from app.core.config.settings import Settings, get_settings
@@ -66,6 +66,9 @@ CONVERSATION_ARCHIVE_SETTING = "conversation_archive_enabled"
 # enabling turns the proxy into a full prompt/response recorder readable by the
 # same dashboard admin, so the on/off event carries the actor explicitly.
 CONVERSATION_ARCHIVE_TOGGLED_ACTION = "conversation_archive_toggled"
+# Hoisted out of the resolver: ``archive_enabled()`` runs once per archived
+# frame, and a ``model_fields`` lookup per call showed up in the gate's cost.
+_CONVERSATION_ARCHIVE_DEFAULT: Final[bool] = bool(Settings.model_fields[CONVERSATION_ARCHIVE_SETTING].default)
 
 
 def resolve_archive_enabled(dashboard_settings: object | None, startup_settings: object | None = None) -> bool:
@@ -76,13 +79,12 @@ def resolve_archive_enabled(dashboard_settings: object | None, startup_settings:
     defaults to the process ``Settings``. Missing attributes resolve to the
     code default so partial fakes keep working.
     """
-    default = bool(Settings.model_fields[CONVERSATION_ARCHIVE_SETTING].default)
     environment = startup_settings if startup_settings is not None else get_settings()
     return bool(
         resolve_inheritable(
             getattr(dashboard_settings, CONVERSATION_ARCHIVE_SETTING, None),
-            bool(getattr(environment, CONVERSATION_ARCHIVE_SETTING, default)),
-            default,
+            bool(getattr(environment, CONVERSATION_ARCHIVE_SETTING, _CONVERSATION_ARCHIVE_DEFAULT)),
+            _CONVERSATION_ARCHIVE_DEFAULT,
         ).value
     )
 
@@ -92,9 +94,11 @@ def archive_enabled() -> bool:
 
     Reads ``SettingsCache.cached_row()`` — never the database — so the twenty
     ``archive_*`` call sites in the upstream clients stay synchronous and
-    lock-free; before the first cache load the environment alias applies. A
-    dashboard toggle therefore takes effect within the cache TTL on every
-    replica without a restart.
+    lock-free; before the first cache load the environment alias applies, and
+    an invalidation never takes the gate back to that layer. Every replica
+    refreshes the snapshot off the cache-invalidation bus, so a dashboard
+    toggle reaches frames of already-open streams without a restart and
+    without a request having to arrive first.
     """
     return resolve_archive_enabled(get_settings_cache().cached_row())
 

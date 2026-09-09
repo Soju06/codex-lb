@@ -88,3 +88,30 @@ async def test_cached_row_survives_invalidate(monkeypatch) -> None:
     reloaded = await cache.get()
     assert reloaded is not loaded
     assert cache.cached_row() is reloaded
+
+
+@pytest.mark.asyncio
+async def test_refresh_loads_and_replaces_the_snapshot(monkeypatch) -> None:
+    """``refresh`` is the bus callback: it pulls the new row in without a caller."""
+    state = {"now": 100.0, "calls": 0}
+
+    class _FakeRepository:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def get_or_create(self):
+            state["calls"] += 1
+            return SimpleNamespace(version=state["calls"])
+
+    monkeypatch.setattr(settings_cache_module, "SessionLocal", lambda: _FakeSessionContext())
+    monkeypatch.setattr(settings_cache_module, "SettingsRepository", _FakeRepository)
+    monkeypatch.setattr(settings_cache_module.time, "monotonic", lambda: state["now"])
+
+    cache = SettingsCache(ttl_seconds=5.0)
+    first = await cache.get()
+
+    refreshed = await cache.refresh()
+    assert refreshed is not first
+    assert cache.cached_row() is refreshed
+    assert await cache.get() is refreshed  # refreshed rows are current, not stale
+    assert state["calls"] == 2

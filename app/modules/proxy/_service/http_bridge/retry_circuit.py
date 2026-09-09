@@ -1613,16 +1613,6 @@ class _HTTPBridgeRetryCircuitMixin:
                             backoff,
                             detail,
                         )
-                    if poison_class_failure and not quarantine_poisoned_anchor:
-                        # A configured abandonment threshold below the circuit
-                        # threshold clears the anchor before the circuit ever
-                        # opens, and the terminal frame is published before that
-                        # clear. The quarantine has to cover this window too, or
-                        # an immediate client retry is planned with the dead
-                        # anchor while the clear is still awaiting I/O.
-                        if state.consecutive_failures >= threshold:
-                            quarantine_poisoned_anchor = True
-                            quarantine_cooldown_remaining = max(0.0, state.cooldown_until - now)
             if duplicate_attempt is None:
                 assert state is not None
                 armed_quarantine_generation: int | None = None
@@ -1741,12 +1731,11 @@ class _HTTPBridgeRetryCircuitMixin:
                     # leave its speculative quarantine suppressing a valid
                     # anchor.
                     adopted_poison_class = _http_bridge_anchor_poison_detail(state.last_detail) is not None
-                    # The effective anchor-poison threshold, which sits at
-                    # or below the circuit threshold: with a configured
-                    # threshold of one, a non-poison local strike adopting a
-                    # one-failure poison row must still arm the quarantine,
-                    # or the loaded-key cache hands the next request the
-                    # dead anchor.
+                    # The anchor-poison threshold is the circuit threshold:
+                    # a non-poison local strike adopting a poison row that
+                    # reaches it must still arm the quarantine, or the
+                    # loaded-key cache hands the next request the dead
+                    # anchor.
                     poison_arm_threshold = threshold
                     merged_poison_opened = (
                         adopted_poison_class

@@ -13,9 +13,8 @@ pre-response failure classes (`stream_incomplete`, `clean_close`, and
 the stream classes while keeping its own durable detail). Every funnel
 that abandons on repeated eventless failures — the idle-recovery
 exhaustion and the retry-transport failure path alike — MUST route
-through the capped poison consult and the captured continuity fence;
-none may compare against the raw configured threshold or clear
-continuity unfenced. The failed-registration poison restore MUST
+through the shared poison consult and the captured continuity fence;
+none may apply a threshold of its own or clear continuity unfenced. The failed-registration poison restore MUST
 transition its own settle's tombstone through the fenced detail-only
 supersede before re-seeding — the strike merge's sticky tombstone would
 otherwise silently refuse the poison class and leave a threshold
@@ -119,13 +118,12 @@ also clear the stored durable continuity anchor for that key. The quarantine
 armed with the strike only suppresses injection in this process and expires,
 so without the durable clear the same dead anchor is restored on the next
 reattach and re-poisons the key after every cooldown. On every settlement path — terminal,
-grouped, retirement, and close alike — the configured anchor-poison threshold
-MUST be capped at the circuit's own failure threshold. Above that threshold
-the key is refused for 60-600s per strike, so a higher value cannot be reached
-at any useful rate. A configured value below the circuit threshold MUST still
-be honoured, and the poison quarantine MUST be armed no later than the strike
-that satisfies that effective threshold, so a clear that fires before the
-circuit opens is never published without quarantine cover.
+grouped, retirement, and close alike — the anchor-poison threshold IS the
+circuit's own failure threshold, a fixed application constant rather than a
+runtime setting. Above that threshold the key is refused for 60-600s per
+strike, so a higher value could never be reached at any useful rate, and the
+poison quarantine MUST be armed with the strike that opens the circuit, so a
+clear is never published without quarantine cover.
 
 A grouped settlement whose strikes carry the circuit through that threshold
 MUST clear the anchor as well, after its grouped terminal frames are published.
@@ -324,7 +322,7 @@ time while its snapshot predates the write — and a settlement MUST sweep
 any state that a pre-delete snapshot re-created while its delete was in
 flight. Adopting a replacement episode MUST invalidate the local half-open
 lease even when the adopted cooldown has already elapsed, and a poison row at
-the effective configured abandonment threshold adopted from a durable load
+the circuit threshold adopted from a durable load
 MUST arm this worker's process-local poison quarantine, since the replica
 that recorded the strikes cannot arm it here — unless the local episode's
 one-clear marker records that its anchor was already abandoned, in which
@@ -489,9 +487,9 @@ reconcile on the row's own values — strike merges keep the tombstone
 sticky, so a miss means the count moved, not that the tombstone was
 replaced: a zeroed row erases plain, a positive count promotes to the
 superseded sentinel, and a second miss defers to the next completion.
-The merged-opening quarantine arm MUST use the effective anchor-poison
-threshold, so a configured threshold of one arms from an adopted
-one-failure poison row even when the local strike was clean. The poison
+The merged-opening quarantine arm MUST use the circuit threshold, so an
+adopted poison row that reaches it arms the quarantine even when the local
+strike was clean. The poison
 classification carries its OWN deadline: only a poison arm may extend
 it, a weaker arm extends only the shared session fence, and the
 anchor-is-dead answer expires on the poison deadline even while weaker
@@ -579,10 +577,9 @@ exits without advancing a send attempt past the captured baseline — the
 internal precreated-retry path included, whose requests already carry
 prior attempts and therefore key the release on advancement, not on a
 zero count. The owed-debt arm and the sticky-detail
-fence MUST both
-use the effective configured anchor-poison threshold, so a configured
-threshold of one arms and preserves the debt from the one-failure row
-whose first poison strike already authorized the abandonment.
+fence MUST both use the circuit threshold, so the strike that opens the
+circuit arms and preserves the debt whose poison evidence already authorized
+the abandonment.
 The claimed-probe token MUST be handed out by the admission's claim under
 its own lock, never inferred from before/after reads. Every fence captured
 for a later clear MUST be captured under the same provenance rule the clear

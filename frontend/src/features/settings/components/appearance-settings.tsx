@@ -5,6 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { useAccountQuotaDisplayStore, type AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
 import {
   useDashboardPreferencesStore,
+  type DashboardDisplayMode,
   type DashboardRefreshSeconds,
 } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore, type ThemePreference } from "@/hooks/use-theme";
@@ -29,6 +30,17 @@ const DATE_FORMAT_OPTIONS: { value: DateDisplayFormat; labelKey: string }[] = [
 ];
 
 const REFRESH_OPTIONS: DashboardRefreshSeconds[] = [5, 15, 30, 60];
+
+const DASHBOARD_DISPLAY_MODE_OPTIONS: { value: DashboardDisplayMode; labelKey: string }[] = [
+  {
+    value: "weeklyPace",
+    labelKey: "settings.appearance.dashboardDisplay.weeklyPace",
+  },
+  {
+    value: "requestHeatmap",
+    labelKey: "settings.appearance.dashboardDisplay.requestHeatmap",
+  },
+];
 
 const QUOTA_DISPLAY_OPTIONS: {
   value: AccountQuotaDisplayPreference;
@@ -66,6 +78,8 @@ export function AppearanceSettings() {
   const setDateDisplayFormat = useDateDisplayFormatStore((s) => s.setDateDisplayFormat);
   const refreshSeconds = useDashboardPreferencesStore((s) => s.refreshSeconds);
   const setRefreshSeconds = useDashboardPreferencesStore((s) => s.setRefreshSeconds);
+  const dashboardDisplayMode = useDashboardPreferencesStore((s) => s.dashboardDisplayMode);
+  const setDashboardDisplayMode = useDashboardPreferencesStore((s) => s.setDashboardDisplayMode);
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -175,6 +189,33 @@ export function AppearanceSettings() {
                   className={cn(
                     "rounded-md px-3 py-1.5 text-left text-xs font-medium transition-colors duration-200",
                     quotaDisplay === value
+                      ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <span className="block">{t(labelKey)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">{t("settings.appearance.dashboardDisplay.label")}</p>
+              <p className="text-xs text-muted-foreground">
+                {t("settings.appearance.dashboardDisplay.description")}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-1 rounded-lg border border-border/50 bg-muted/40 p-0.5">
+              {DASHBOARD_DISPLAY_MODE_OPTIONS.map(({ value, labelKey }) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={dashboardDisplayMode === value}
+                  onClick={() => setDashboardDisplayMode(value)}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-left text-xs font-medium transition-colors duration-200",
+                    dashboardDisplayMode === value
                       ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
                       : "text-muted-foreground hover:text-foreground",
                   )}

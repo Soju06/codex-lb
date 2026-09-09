@@ -1,11 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getDashboardOverview, getDashboardProjections } from "@/features/dashboard/api";
+import {
+  getDashboardOverview,
+  getDashboardProjections,
+  getDashboardRequestActivity,
+} from "@/features/dashboard/api";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
+import { getBrowserReportsTimeZone } from "@/features/reports/date";
 
 export function useDashboard(timeframe: OverviewTimeframe = DEFAULT_OVERVIEW_TIMEFRAME) {
   const refreshSeconds = useDashboardPreferencesStore((state) => state.refreshSeconds);
@@ -25,6 +30,20 @@ export function useDashboardProjections(enabled = true) {
     queryFn: getDashboardProjections,
     enabled,
     refetchInterval: refreshSeconds * 1_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useDashboardRequestActivity(
+  enabled = false,
+  timeZone = getBrowserReportsTimeZone() ?? "UTC",
+) {
+  return useQuery({
+    queryKey: ["dashboard", "request-activity", timeZone],
+    queryFn: () => getDashboardRequestActivity({ timezone: timeZone }),
+    enabled,
+    refetchInterval: 60_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });

@@ -3,11 +3,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from itertools import batched
 from typing import Any
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, case, cast, func, insert, or_, select
+from sqlalchemy import Integer, String, and_, case, cast, func, insert, literal, or_, select, union_all
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,6 +51,7 @@ from app.modules.accounts.usage_time_rollup import (
     to_dimension,
 )
 from app.modules.accounts.usage_time_rollup_read import (
+    LabeledWindow,
     RawWindow,
     conversation_presence_union,
     earliest_hourly_bucket_at,
@@ -57,6 +59,7 @@ from app.modules.accounts.usage_time_rollup_read import (
     read_errors_window,
     read_hourly_window,
     sum_demand_window,
+    sum_labeled_hourly_window,
 )
 
 
@@ -68,6 +71,11 @@ class _RequestLogFilters:
 
 # Earliest representable listing lower bound for the rollup-count window.
 _ROLLUP_EPOCH = datetime(1970, 1, 1)
+
+# Each raw-window row contributes three bound values to the labeled CTE. Keep
+# batches well below SQLite's legacy 999-variable limit while staying small
+# enough for PostgreSQL statement parameter limits and planning.
+_REQUEST_ACTIVITY_SQL_BATCH_SIZE = 100
 
 # Column keys for the Core request-log insert in ``add_log``. Every non-PK
 # column is read off the fully built transient instance; columns ``add_log``
@@ -218,6 +226,12 @@ class ConversationDetailsResult:
     total_elapsed_ms: int
     useragent_group: str | None
     model_stats: list[ConversationModelStatRow]
+
+
+@dataclass(frozen=True, slots=True)
+class RequestActivityDay:
+    date: str
+    requests: int
 
 
 class RequestLogsRepository:
@@ -731,6 +745,54 @@ class RequestLogsRepository:
 
     async def aggregate_activity_between(self, since: datetime, until: datetime) -> RequestActivityAggregate:
         return await self._aggregate_activity(since, until)
+
+    async def aggregate_request_activity(self, windows: list[LabeledWindow]) -> list[RequestActivityDay]:
+        """Count non-warmup requests by labeled local calendar day.
+
+        Folded hourly counts are reduced to one row per day in SQL.  The
+        separate raw query is restricted to the exact complements returned by
+        the watermark-aware folded read, so the six-month dashboard request
+        never materializes full-grain rollup or request-log rows.
+        """
+        folded_counts, raw_windows = await sum_labeled_hourly_window(
+            self._session,
+            windows,
+            filters=(RequestUsageHourlyRollup.request_kind.not_in(WARMUP_REQUEST_KINDS),),
+        )
+        counts = dict(folded_counts)
+
+        if raw_windows:
+            for raw_window_batch in batched(raw_windows, _REQUEST_ACTIVITY_SQL_BATCH_SIZE):
+                raw_window_rows = [
+                    select(
+                        literal(label).label("label"),
+                        literal(start).label("window_start"),
+                        literal(end).label("window_end"),
+                    )
+                    for label, (start, end) in raw_window_batch
+                ]
+                raw_windows_cte = (
+                    raw_window_rows[0] if len(raw_window_rows) == 1 else union_all(*raw_window_rows)
+                ).cte("activity_raw_windows")
+                statement = (
+                    select(raw_windows_cte.c.label, func.count(RequestLog.id).label("request_count"))
+                    .select_from(
+                        raw_windows_cte.join(
+                            RequestLog,
+                            and_(
+                                RequestLog.requested_at >= raw_windows_cte.c.window_start,
+                                RequestLog.requested_at < raw_windows_cte.c.window_end,
+                            ),
+                        )
+                    )
+                    .where(self._exclude_warmup_clause())
+                    .group_by(raw_windows_cte.c.label)
+                )
+                for row in (await self._session.execute(statement)).all():
+                    label = str(row.label)
+                    counts[label] = counts.get(label, 0) + int(row.request_count)
+
+        return [RequestActivityDay(date=label, requests=count) for label, count in sorted(counts.items()) if count > 0]
 
     async def _aggregate_activity(self, since: datetime, until: datetime | None) -> RequestActivityAggregate:
         rollup_rows, raw_windows = await read_hourly_window(

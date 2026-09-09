@@ -194,6 +194,35 @@ async def test_aggregate_activity_counts_only_nonblank_conversation_requests(db_
 
 
 @pytest.mark.asyncio
+async def test_aggregate_request_activity_bounds_raw_tail_by_requested_at(monkeypatch) -> None:
+    session = AsyncMock()
+    session.get_bind = MagicMock(return_value=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")))
+    since = datetime(2026, 7, 1)
+    until = datetime(2026, 7, 2)
+    session.execute.return_value = SimpleNamespace(all=lambda: [SimpleNamespace(label="2026-07-01", request_count=2)])
+    monkeypatch.setattr(
+        repository_module,
+        "sum_labeled_hourly_window",
+        AsyncMock(
+            return_value=(
+                {"2026-07-01": 3},
+                [("2026-07-01", (since, until))],
+            )
+        ),
+    )
+    hourly_reader = AsyncMock(side_effect=AssertionError("activity must not materialize hourly rows"))
+    monkeypatch.setattr(repository_module, "read_hourly_window", hourly_reader)
+
+    result = await RequestLogsRepository(session).aggregate_request_activity([("2026-07-01", since, until)])
+
+    assert [(day.date, day.requests) for day in result] == [("2026-07-01", 5)]
+    hourly_reader.assert_not_awaited()
+    statement = str(session.execute.await_args.args[0])
+    assert "request_logs.requested_at >=" in statement
+    assert "request_logs.requested_at <" in statement
+
+
+@pytest.mark.asyncio
 async def test_add_log_does_not_recalculate_unpriced_model_source_cost(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

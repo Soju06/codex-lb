@@ -17,8 +17,9 @@ from app.db.models import (
     UsageHistory,
 )
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.usage_time_rollup_read import LabeledWindow
 from app.modules.limit_warmup.repository import LimitWarmupRepository
-from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.request_logs.repository import RequestActivityDay, RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.repository import (
     AdditionalUsageRepository,
@@ -112,6 +113,9 @@ class DashboardRepository:
         until: datetime,
     ) -> RequestActivityAggregate:
         return await self._logs_repo.aggregate_activity_between(since, until)
+
+    async def aggregate_request_activity(self, windows: list[LabeledWindow]) -> list[RequestActivityDay]:
+        return await self._logs_repo.aggregate_request_activity(windows)
 
     async def top_error_since(self, since: datetime) -> str | None:
         return await self._logs_repo.top_error_since(since)

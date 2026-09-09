@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core import usage as usage_core
 from app.core.crypto import TokenEncryptor
 from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.usage.types import UsageWindowRow
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import UsageHistory
 from app.modules.accounts.mappers import build_account_summaries
+from app.modules.accounts.usage_time_rollup_read import LabeledWindow
 from app.modules.dashboard.builders import (
     build_dashboard_overview_summary,
     build_overview_timeframe,
@@ -21,6 +23,8 @@ from app.modules.dashboard.schemas import (
     DashboardOverviewResponse,
     DashboardOverviewTimeframeKey,
     DashboardProjectionsResponse,
+    DashboardRequestActivityDay,
+    DashboardRequestActivityResponse,
     DashboardUsageWindows,
     DepletionResponse,
     WeeklyCreditApiKeyAttribution,
@@ -41,6 +45,8 @@ from app.modules.usage.depletion_service import (
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import NormalizedUsageWindow
+
+_REQUEST_ACTIVITY_MONTHS = 6
 
 # Newest-first per-account row bound for the projections history fetch
 # (PostgreSQL; the SQLite snapshot cache keeps the shared floor). Live
@@ -266,6 +272,29 @@ class DashboardService:
             depletion_primary=pri_depletion,
             depletion_secondary=sec_depletion,
             weekly_credit_pace=weekly_credit_pace,
+        )
+
+    async def get_request_activity(self, timezone_name: str | None = None) -> DashboardRequestActivityResponse:
+        captured_now = utcnow()
+        captured_now_utc = (
+            captured_now.replace(tzinfo=timezone.utc)
+            if captured_now.tzinfo is None
+            else captured_now.astimezone(timezone.utc)
+        )
+        timezone_info = _resolve_timezone(timezone_name)
+        local_now = captured_now_utc.astimezone(timezone_info)
+        current_month_index = local_now.year * 12 + local_now.month - 1
+        start_year, start_month_index = divmod(current_month_index - (_REQUEST_ACTIVITY_MONTHS - 1), 12)
+        start_date = date(start_year, start_month_index + 1, 1)
+        windows = _request_activity_windows(
+            start_date,
+            local_now.date(),
+            timezone_info,
+            captured_now_utc.replace(tzinfo=None),
+        )
+        rows = await self._repo.aggregate_request_activity(windows)
+        return DashboardRequestActivityResponse(
+            days=[DashboardRequestActivityDay(date=row.date, requests=row.requests) for row in rows]
         )
 
 
@@ -529,3 +558,33 @@ def _latest_recorded_at(
     if additional_ts is not None:
         timestamps.append(additional_ts)
     return max(timestamps) if timestamps else None
+
+
+def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:
+    if not timezone_name:
+        return timezone.utc
+    try:
+        return ZoneInfo(timezone_name)
+    except (ValueError, ZoneInfoNotFoundError):
+        return timezone.utc
+
+
+def _local_midnight_to_utc_naive(value: date, timezone_info: ZoneInfo | timezone) -> datetime:
+    return to_utc_naive(datetime.combine(value, datetime.min.time(), tzinfo=timezone_info))
+
+
+def _request_activity_windows(
+    start_date: date,
+    end_date: date,
+    timezone_info: ZoneInfo | timezone,
+    captured_now_utc: datetime,
+) -> list[LabeledWindow]:
+    windows: list[LabeledWindow] = []
+    current_date = start_date
+    while current_date <= end_date:
+        day_start = _local_midnight_to_utc_naive(current_date, timezone_info)
+        next_day_start = _local_midnight_to_utc_naive(current_date + timedelta(days=1), timezone_info)
+        day_end = min(next_day_start, captured_now_utc) if current_date == end_date else next_day_start
+        windows.append((current_date.isoformat(), day_start, day_end))
+        current_date += timedelta(days=1)
+    return windows

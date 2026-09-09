@@ -132,13 +132,18 @@ class _AsgiStream:
 
     ``disconnect()`` queues the ``http.disconnect`` message a departing client
     produces, so a route's reaction to a real client departure can be asserted
-    without an HTTP client in between.
+    without an HTTP client in between. With ``stall_response_start`` the
+    ``http.response.start`` send records the status and headers and then never
+    completes -- the client's socket is gone before the first write lands -- so
+    the only way out is the cancellation a queued ``http.disconnect`` triggers
+    and the response body is never iterated (the pre-body window).
     """
 
     app: Any
     path: str
     headers: dict[str, str]
     body: bytes
+    stall_response_start: bool = False
     status: int | None = None
     response_headers: dict[str, str] = field(default_factory=dict)
     chunks: list[bytes] = field(default_factory=list)
@@ -186,6 +191,8 @@ class _AsgiStream:
             self.status = message["status"]
             self.response_headers = {key.decode().lower(): value.decode() for key, value in message.get("headers", [])}
             self._started.set()
+            if self.stall_response_start:
+                await asyncio.Event().wait()
         elif message["type"] == "http.response.body":
             body = message.get("body", b"")
             if body:

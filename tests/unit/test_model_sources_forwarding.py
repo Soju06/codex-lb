@@ -22,6 +22,7 @@ from app.modules.model_sources.forwarding import (
     SOURCE_HEADER_DEADLINE_SECONDS,
     SOURCE_STREAM_IDLE_CAP_SECONDS,
     ModelSourceForwardingError,
+    SourceChatStream,
     SourceResponsesStream,
     SourceStreamUsageParser,
     SourceUsage,
@@ -1419,6 +1420,41 @@ def test_synthetic_source_responses_stream_aclose_is_a_no_op() -> None:
         yield b""
 
     stream = SourceResponsesStream(body=body(), usage_holder=SourceUsageHolder(), upstream_status_code=200)
+    assert stream.transport is None
+    asyncio.run(stream.aclose())
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_completion_aclose_before_iteration_releases_lease_and_response_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chat stream owns its transport like the Responses stream: a body that never starts (the client left
+    between the route returning and the response start) is released by ``aclose()`` instead of garbage collection."""
+
+    response = _FakeResponse(content=_FakeContent(b"data: x\n\n", first_gate=_forever))
+    _session, context, lease = _install_session(monkeypatch, response)
+
+    stream = await forwarding_module.stream_chat_completion(_responses_source(), {"model": "m"})
+    assert isinstance(stream, SourceChatStream)
+    assert stream.transport is not None
+    assert context.exited == 0 and lease.released == 0
+
+    await stream.aclose()
+    await stream.aclose()
+
+    assert context.exited == 1
+    assert lease.released == 1
+    # Closing the never-started body afterwards is a no-op for the transport.
+    await cast(AsyncGenerator[bytes, None], stream.body).aclose()
+    assert context.exited == 1
+    assert lease.released == 1
+
+
+def test_synthetic_source_chat_stream_aclose_is_a_no_op() -> None:
+    async def body() -> AsyncIterator[bytes]:
+        yield b""
+
+    stream = SourceChatStream(body=body(), usage_holder=SourceUsageHolder(), upstream_status_code=200)
     assert stream.transport is None
     asyncio.run(stream.aclose())
 

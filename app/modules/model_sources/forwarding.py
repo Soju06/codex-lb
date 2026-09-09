@@ -135,33 +135,39 @@ class SourceEmbeddings:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceChatStream:
+class _TransportOwnedStream:
+    """A source stream whose ``body`` and direct ``aclose()`` converge on one transport release.
+
+    ``transport`` owns the session lease and the upstream response (``None``
+    for the synthetic streams tests build) and is shared with ``body`` so both
+    close paths meet at its single latch. ``aclose()`` on a never-started
+    async generator skips its ``finally`` block, so a stream that is torn down
+    before iteration begins -- a client that leaves between the route
+    returning and Starlette's first body write -- would otherwise keep the
+    pooled lease and the upstream connection until garbage collection.
+    """
+
+    transport: "SourceStreamTransport | None" = field(default=None, kw_only=True, repr=False, compare=False)
+
+    async def aclose(self) -> None:
+        """Release the source connection directly (idempotent), even if ``body`` was never started."""
+
+        if self.transport is not None:
+            await self.transport.aclose()
+
+
+@dataclass(frozen=True, slots=True)
+class SourceChatStream(_TransportOwnedStream):
     body: AsyncIterator[bytes]
     usage_holder: "SourceUsageHolder"
     upstream_status_code: int
 
 
 @dataclass(frozen=True, slots=True)
-class SourceResponsesStream:
+class SourceResponsesStream(_TransportOwnedStream):
     body: AsyncIterator[bytes]
     usage_holder: "SourceUsageHolder"
     upstream_status_code: int
-    # Owner of the session lease and the upstream response (``None`` for the
-    # synthetic streams tests build); shared with ``body`` so both close paths
-    # converge on one release.
-    transport: "SourceStreamTransport | None" = field(default=None, repr=False, compare=False)
-
-    async def aclose(self) -> None:
-        """Release the source connection directly (idempotent), even if ``body`` was never started.
-
-        ``aclose()`` on a never-started async generator skips its ``finally``
-        block, so a stream that is torn down before iteration begins would
-        otherwise keep the pooled lease and the upstream connection until
-        garbage collection.
-        """
-
-        if self.transport is not None:
-            await self.transport.aclose()
 
 
 @dataclass(slots=True)
@@ -363,7 +369,12 @@ async def stream_chat_completion(
         scheduler=scheduler,
         clock=clock,
     )
-    return SourceChatStream(body=body, usage_holder=usage_holder, upstream_status_code=response.status)
+    return SourceChatStream(
+        body=body,
+        usage_holder=usage_holder,
+        upstream_status_code=response.status,
+        transport=transport,
+    )
 
 
 async def forward_responses(
@@ -719,7 +730,7 @@ async def _open_source_stream(
     reservation instead of holding them until the first token. The mid-stream
     idle cap is the body's (``_source_stream_body``). The returned exit stack
     owns the session lease and response and must be closed by the stream body
-    (or ``SourceResponsesStream.aclose``); the returned bytes are the first
+    (or the stream's ``aclose()``); the returned bytes are the first
     chunk, which the body yields before reading further, or ``None`` when the
     body reads it.
     """

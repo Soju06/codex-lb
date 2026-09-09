@@ -12,6 +12,7 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Coroutine
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -29,6 +30,8 @@ from app.modules.api_keys.service import (
 )
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
+    SourceChatStream,
+    SourceStreamTransport,
     SourceUsage,
     SourceUsageHolder,
 )
@@ -42,6 +45,7 @@ from app.modules.proxy.source_dispatch import (
     OPEN_DISCONNECT_POLL_SECONDS,
     STALL_EVIDENCE_SECONDS,
     ClientDisconnectedDuringOpen,
+    SourceChatStreamOwner,
     SourceDispatch,
     SourcePinCommitError,
     SourceStreamingResponse,
@@ -1756,6 +1760,146 @@ async def test_streaming_response_disconnect_before_the_body_starts_finishes_can
     assert recorder.rows[0]["status"] == "cancelled"
     assert recorder.rows[0]["error_code"] == ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY
     assert owner.claims.released is True
+
+
+# -- chat-completions transport owner (WP-C1 follow-up F1) -------------------------------------------
+
+
+def _chat_stream(record: list[str]) -> SourceChatStream:
+    """A ``SourceChatStream`` whose transport is a real ``SourceStreamTransport`` over a recording exit stack."""
+
+    stack = AsyncExitStack()
+
+    async def release_transport() -> None:
+        record.append("transport_closed")
+
+    stack.push_async_callback(release_transport)
+
+    async def body() -> AsyncIterator[bytes]:
+        yield b"data: chunk\n\n"
+
+    return SourceChatStream(
+        body=body(),
+        usage_holder=SourceUsageHolder(),
+        upstream_status_code=200,
+        transport=SourceStreamTransport(stack, scheduler=dispatch_module.REAL_SCHEDULER),
+    )
+
+
+def _chat_owner(record: list[str]) -> SourceChatStreamOwner:
+    async def abandoned_before_body() -> None:
+        record.append("abandoned_before_body")
+
+    return SourceChatStreamOwner(stream=_chat_stream(record), on_abandoned_before_body=abandoned_before_body)
+
+
+@pytest.mark.asyncio
+async def test_chat_owner_disconnect_before_the_body_starts_closes_the_transport_and_records_once() -> None:
+    """Chat parity with CL-6: an ASGI disconnect before Starlette iterates the body closes the source transport
+    directly and runs the route's abandoned-before-body step exactly once, even when finalized again."""
+
+    record: list[str] = []
+    owner = _chat_owner(record)
+    started = asyncio.Event()
+
+    async def outer() -> AsyncIterator[bytes]:
+        owner.body_started = True  # what the route's settlement generator does on entry
+        started.set()
+        yield b"data: a\n\n"
+
+    response = SourceStreamingResponse(outer(), owner=owner)
+    await _run_response(response, disconnect_immediately=True)
+
+    assert not started.is_set()
+    assert record == ["transport_closed", "abandoned_before_body"]
+    assert owner.finished is True and owner.body_started is False
+
+    await owner.finalize_transport()
+    assert record == ["transport_closed", "abandoned_before_body"]
+
+
+@pytest.mark.asyncio
+async def test_chat_owner_leaves_a_started_body_to_its_own_settlement() -> None:
+    """Once the settlement generator ran it owns the outcome: the finalizer neither closes the transport (the body's
+    ``finally`` does) nor records a second outcome."""
+
+    record: list[str] = []
+    owner = _chat_owner(record)
+
+    async def outer() -> AsyncIterator[bytes]:
+        owner.body_started = True
+        try:
+            yield b"data: a\n\n"
+            yield b"data: b\n\n"
+        finally:
+            record.append("body_finally")
+
+    response = SourceStreamingResponse(outer(), owner=owner)
+    sent = await _run_response(response, disconnect_immediately=False)
+
+    bodies = [message["body"] for message in sent if message["type"] == "http.response.body"]
+    assert b"".join(cast(list[bytes], bodies)) == b"data: a\n\ndata: b\n\n"
+    assert record == ["body_finally"]
+    assert owner.finished is False
+
+
+@pytest.mark.asyncio
+async def test_chat_owner_finalizer_closes_a_body_suspended_at_a_yield_before_deciding() -> None:
+    """A body abandoned mid-yield (the first write failed after the generator started) is closed first, so its own
+    cleanup runs and the abandoned-before-body step does not."""
+
+    record: list[str] = []
+    owner = _chat_owner(record)
+
+    async def outer() -> AsyncIterator[bytes]:
+        owner.body_started = True
+        try:
+            yield b"data: a\n\n"
+        finally:
+            record.append("body_finally")
+
+    body = outer()
+    SourceStreamingResponse(body, owner=owner)
+    assert await anext(body) == b"data: a\n\n"
+
+    await owner.finalize_transport()
+
+    assert record == ["body_finally"]
+    assert owner.finished is False
+
+
+@pytest.mark.asyncio
+async def test_chat_owner_records_the_abandonment_even_when_the_transport_close_raises() -> None:
+    record: list[str] = []
+    stack = AsyncExitStack()
+
+    async def broken_release() -> None:
+        record.append("transport_close_attempted")
+        raise RuntimeError("connector gone")
+
+    stack.push_async_callback(broken_release)
+
+    async def body() -> AsyncIterator[bytes]:
+        yield b""
+
+    async def abandoned_before_body() -> None:
+        record.append("abandoned_before_body")
+
+    owner = SourceChatStreamOwner(
+        stream=SourceChatStream(
+            body=body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+            transport=SourceStreamTransport(stack, scheduler=dispatch_module.REAL_SCHEDULER),
+        ),
+        on_abandoned_before_body=abandoned_before_body,
+    )
+    SourceStreamingResponse(body(), owner=owner)
+
+    await owner.finalize_transport()
+
+    assert record == ["transport_close_attempted", "abandoned_before_body"]
+    assert owner.finished is True
 
 
 # -- metric increments (spec scenario -> counter assertions) --------------------------------------

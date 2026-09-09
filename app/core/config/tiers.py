@@ -158,7 +158,6 @@ MIGRATING: Final[dict[str, str]] = {
     # K2 bridge: http_responses_session_bridge_enabled is a T4 kill switch, not
     # a tunable, so it has no MIGRATING row.
     "http_responses_session_bridge_request_budget_seconds": "backlog",
-    "http_responses_session_bridge_codex_prewarm_enabled": "backlog",
     "http_responses_session_bridge_operation_spool_retention_seconds": "backlog",
     "http_responses_session_bridge_ambiguous_continuation_recovery_mode": "backlog",
     "automations_scheduler_enabled": "backlog",

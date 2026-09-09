@@ -330,6 +330,8 @@ class Settings(BaseSettings):
     rate_limit_reset_credits_refresh_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor): the same-name
+    # ``dashboard_settings`` column wins when set (M3 codex prewarm).
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)

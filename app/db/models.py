@@ -1059,6 +1059,11 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
+    # M3 codex prewarm: dashboard-managed Codex HTTP-bridge session prewarm.
+    # NULL inherits the deprecated ``CODEX_LB_*`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    http_responses_session_bridge_codex_prewarm_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M3 codex prewarm
     upstream_proxy_routing_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

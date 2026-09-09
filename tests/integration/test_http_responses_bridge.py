@@ -218,6 +218,7 @@ def _make_dashboard_settings(
     prefer_earlier_reset_accounts: bool = False,
     gateway_safe_mode: bool = False,
     prompt_cache_idle_ttl_seconds: int | float = 3600,
+    codex_prewarm_enabled: bool | None = None,
 ) -> DashboardSettings:
     return DashboardSettings(
         id=1,
@@ -234,6 +235,8 @@ def _make_dashboard_settings(
         api_key_auth_enabled=False,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=int(prompt_cache_idle_ttl_seconds),
         http_responses_session_bridge_gateway_safe_mode=gateway_safe_mode,
+        # M3 codex prewarm: NULL inherits the env alias passed to _make_app_settings.
+        http_responses_session_bridge_codex_prewarm_enabled=codex_prewarm_enabled,
         sticky_reallocation_budget_threshold_pct=95.0,
     )
 
@@ -266,6 +269,7 @@ def _install_bridge_settings_with_limits(
     codex_idle_ttl_seconds: float = 900.0,
     prompt_cache_idle_ttl_seconds: float = 3600.0,
     codex_prewarm_enabled: bool = False,
+    codex_prewarm_dashboard: bool | None = None,
     gateway_safe_mode: bool = False,
     prefer_earlier_reset_accounts: bool = False,
     instance_id: str = "instance-a",
@@ -288,6 +292,7 @@ def _install_bridge_settings_with_limits(
             prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
             gateway_safe_mode=gateway_safe_mode,
             prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+            codex_prewarm_enabled=codex_prewarm_dashboard,
         ),
     )
 
@@ -2074,6 +2079,141 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
 
     assert select_calls == [(True, "priority")]
     await service._close_http_bridge_session(session)
+
+
+def _install_codex_prewarm_bridge_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    account: Account,
+    fake_upstream: _FakeBridgeUpstreamWebSocket,
+) -> None:
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+            preferred_account_id,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_codex_prewarm_dashboard_on_beats_env_off(async_client, monkeypatch):
+    """M3 codex prewarm: the dashboard switch (on) wins over the deprecated env
+    alias (off): the first turn of a new Codex session is preceded by exactly one
+    ``generate=false`` warm-up."""
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        codex_idle_ttl_seconds=600.0,
+        codex_prewarm_enabled=False,
+        codex_prewarm_dashboard=True,
+    )
+    account_id = await _import_account(
+        async_client, "acc_http_bridge_prewarm_dash_on", "http-bridge-prewarm-dash-on@example.com"
+    )
+    fake_upstream = _PrewarmingBridgeUpstreamWebSocket()
+    account = await _get_account(account_id)
+    _install_codex_prewarm_bridge_fakes(monkeypatch, account=account, fake_upstream=fake_upstream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"x-codex-turn-state": "turn_state_prewarm_dash_on"},
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_actual_2"
+    assert len(fake_upstream.sent_text) == 2
+    assert json.loads(fake_upstream.sent_text[0])["generate"] is False
+    assert "generate" not in json.loads(fake_upstream.sent_text[1])
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_codex_prewarm_dashboard_off_beats_env_on(async_client, monkeypatch):
+    """M3 codex prewarm: the dashboard switch (off) wins over the deprecated env
+    alias (on): no warm-up is sent, the visible turn is the only upstream request."""
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        codex_idle_ttl_seconds=600.0,
+        codex_prewarm_enabled=True,
+        codex_prewarm_dashboard=False,
+    )
+    account_id = await _import_account(
+        async_client, "acc_http_bridge_prewarm_dash_off", "http-bridge-prewarm-dash-off@example.com"
+    )
+    fake_upstream = _PrewarmingBridgeUpstreamWebSocket()
+    account = await _get_account(account_id)
+    _install_codex_prewarm_bridge_fakes(monkeypatch, account=account, fake_upstream=fake_upstream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"x-codex-turn-state": "turn_state_prewarm_dash_off"},
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_actual_1"
+    assert len(fake_upstream.sent_text) == 1
+    assert "generate" not in json.loads(fake_upstream.sent_text[0])
 
 
 @pytest.mark.asyncio

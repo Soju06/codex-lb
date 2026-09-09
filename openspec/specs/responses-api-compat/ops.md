@@ -206,7 +206,7 @@ Dashboard shortcut:
 - If native Codex websocket reconnects are flaky, verify the client is replaying that same `x-codex-turn-state` header.
 - `403` / `404` websocket handshake failures should now stay visible as websocket errors; they should no longer disappear behind automatic HTTP fallback.
 - In HTTP bridge logs, idle eviction should prefer prompt-cache sessions before Codex-session bridges when both are idle.
-- On Codex-affinity HTTP bridges, an internal `generate=false` prewarm only appears when the dedicated Codex bridge prewarm flag is enabled.
+- On Codex-affinity HTTP bridges, an internal `generate=false` prewarm only appears when the dedicated Codex bridge prewarm switch is on — the dashboard setting `http_responses_session_bridge_codex_prewarm_enabled` (`GET /api/settings` reports its `provenance`), or its deprecated `CODEX_LB_*` alias while the dashboard value is unset. Flipping it in the dashboard applies to the next new Codex session on every replica without a restart.
 - For HTTP `/v1/responses` and `/backend-api/codex/responses`, capture response headers and verify clients that need stronger continuity replay the returned `x-codex-turn-state` on later calls.
 - Compare backend Codex HTTP vs websocket cache ratios after bridge rollout; if backend HTTP still lags materially while websocket remains healthy, investigate prompt-prefix instability or missing client continuity signals before revisiting transport continuity.
 

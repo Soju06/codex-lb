@@ -201,6 +201,9 @@ export const DashboardSettingsSchema = z
     softDrainEnabled: z.boolean().optional().default(true),
     deterministicFailoverEnabled: z.boolean().optional().default(true),
     circuitBreakerEnabled: z.boolean().optional().default(false),
+    // M3 codex prewarm: effective value; `provenance[<snake_name>]` says
+    // whether the dashboard, the environment or the default owns it.
+    httpResponsesSessionBridgeCodexPrewarmEnabled: z.boolean().optional().default(false),
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -292,6 +295,9 @@ export const SettingsUpdateRequestSchema = z
     softDrainEnabled: z.boolean().nullable().optional(),
     deterministicFailoverEnabled: z.boolean().nullable().optional(),
     circuitBreakerEnabled: z.boolean().nullable().optional(),
+    // M3 codex prewarm: tri-state (omitted = unchanged, null = reset to
+    // inherited, boolean = dashboard value).
+    httpResponsesSessionBridgeCodexPrewarmEnabled: z.boolean().nullable().optional(),
     // C2-1 timeouts, tri-state like the caps: absent = unchanged, null = clear
     // (inherit environment / default), value = store. Cross-field invariants
     // are enforced by the backend against the effective values.

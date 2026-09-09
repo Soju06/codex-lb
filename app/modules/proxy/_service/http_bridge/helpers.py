@@ -39,6 +39,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clock import REAL_SCHEDULER, Scheduler, clock_for, scheduler_for
+from app.core.config.inheritable import resolve_inheritable
 from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import (
@@ -3359,13 +3360,28 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
     return json.dumps(warmup_payload, ensure_ascii=True, separators=(",", ":"))
 
 
-def _http_bridge_prewarm_enabled(settings: Any) -> bool:
-    """Prewarm eligibility is the ``prewarm_enabled`` flag alone.
+def _http_bridge_prewarm_enabled(settings: Any, dashboard_settings: Any | None = None) -> bool:
+    """Prewarm eligibility is the ``prewarm_enabled`` switch alone.
+
+    M3 codex prewarm: the switch is dashboard-managed. ``dashboard_settings`` is
+    the cached ``dashboard_settings`` row (or any object exposing the same
+    attribute; a missing attribute reads as NULL); a non-NULL column wins, NULL
+    inherits ``settings`` (the deprecated ``CODEX_LB_*`` env alias) and then the
+    code default (off), through the shared ``resolve_inheritable`` resolver.
 
     The canary percent and allow/deny cohort scaffolding was one-time
     rollout tooling retired by ``reduce-settings-surface-phase-4``.
     """
-    return bool(getattr(settings, "http_responses_session_bridge_codex_prewarm_enabled", False))
+    name = "http_responses_session_bridge_codex_prewarm_enabled"
+    default = bool(Settings.model_fields[name].default)
+    column_value = getattr(dashboard_settings, name, None)
+    return bool(
+        resolve_inheritable(
+            None if column_value is None else bool(column_value),
+            bool(getattr(settings, name, default)),
+            default,
+        ).value
+    )
 
 
 def _record_http_bridge_prewarm_outcome(*, outcome: str) -> None:

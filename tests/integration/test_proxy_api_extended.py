@@ -2841,16 +2841,23 @@ async def test_stream_responses_keepalive_interval_honours_dashboard_value_over_
     )
     context = ProxyContext(service=cast(proxy_module.ProxyService, _FakeService()))
 
-    with dashboard_overrides_bound(snapshot):
-        bound = await proxy_api_module._stream_responses(_request(), payload, context, api_key=None)
-        assert isinstance(bound, StreamingResponse)
-        first_chunk = await asyncio.wait_for(bound.body_iterator.__aiter__().__anext__(), timeout=0.2)
-    assert first_chunk == SSE_KEEPALIVE_FRAME
+    try:
+        with dashboard_overrides_bound(snapshot):
+            bound = await proxy_api_module._stream_responses(_request(), payload, context, api_key=None)
+            assert isinstance(bound, StreamingResponse)
+            first_chunk = await asyncio.wait_for(bound.body_iterator.__aiter__().__anext__(), timeout=0.2)
+        assert first_chunk == SSE_KEEPALIVE_FRAME
 
-    unbound = await proxy_api_module._stream_responses(_request(), payload, context, api_key=None)
-    assert isinstance(unbound, StreamingResponse)
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(unbound.body_iterator.__aiter__().__anext__(), timeout=0.15)
+        unbound = await proxy_api_module._stream_responses(_request(), payload, context, api_key=None)
+        assert isinstance(unbound, StreamingResponse)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(unbound.body_iterator.__aiter__().__anext__(), timeout=0.15)
+    finally:
+        # The database is reset per test, but the process-wide SettingsCache is
+        # not: clear the dashboard value and drop the cached row so a following
+        # test cannot observe the 0.01 s keepalive within the cache TTL.
+        await async_client.put("/api/settings", json={"sseKeepaliveIntervalSeconds": None})
+        await get_settings_cache().invalidate(propagate=False)
 
 
 @pytest.mark.asyncio

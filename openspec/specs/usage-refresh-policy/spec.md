@@ -23,7 +23,10 @@ usage refresh only when the upstream error contains an explicit,
 account-specific terminal signal. A recognized permanent-failure error code
 MUST be mapped through the existing permanent-failure account-status policy,
 and an error message that explicitly says the account is deactivated MUST mark
-the account `deactivated`. A bare HTTP status, including `402` or `404`, MUST
+the account `deactivated`. For example, the re-authentication codes
+`token_invalidated`, `token_expired`, and `app_session_terminated` map to
+`reauth_required` through that policy (non-normative; the code list lives in
+`app/core/balancer/logic.py`). A bare HTTP status, including `402` or `404`, MUST
 NOT change account status or routing availability and MUST remain a refresh
 failure for existing logging, error accounting, and later refresh retries.
 

@@ -13,6 +13,7 @@ from starlette.types import Message, Receive, Scope, Send
 
 import app.core.middleware.api_firewall as api_firewall_module
 import app.modules.proxy.api as proxy_api_module
+from app.core.config.settings import get_settings
 from app.core.middleware.api_firewall import ApiFirewallMiddleware
 from app.core.middleware.firewall_cache import FirewallIPCache
 from app.core.middleware.trusted_proxy_headers import TrustedProxyHeadersMiddleware
@@ -132,6 +133,7 @@ async def test_http_firewall_uses_raw_peer_when_projection_differs(
     # Given: an allowlist and capture-then-project transport with opposing peer identities.
     _configure_firewall_backend(monkeypatch, case.allowlist)
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    get_settings.cache_clear()
     projected_scope: list[tuple[str | None, str]] = []
 
     async def downstream(scope: Scope, receive: Receive, send: Send) -> None:
@@ -174,6 +176,7 @@ async def test_websocket_firewall_uses_raw_peer_when_projection_differs(
     # Given: the same allowlist and capture-then-project identities on a protected WebSocket scope.
     _configure_firewall_backend(monkeypatch, case.allowlist)
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    get_settings.cache_clear()
     monkeypatch.setattr(
         proxy_api_module,
         "get_settings",

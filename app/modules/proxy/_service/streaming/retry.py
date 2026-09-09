@@ -175,7 +175,6 @@ def _verified_cross_transport_fresh_replay(
 def _effective_http_downstream_transport_policy(
     api_key: ApiKeyData | None,
     dashboard_settings: Any,
-    base_settings: Any,
 ) -> tuple[str, bool]:
     override = getattr(api_key, "transport_policy_override", None) if api_key is not None else None
     if override is not None:
@@ -183,8 +182,7 @@ def _effective_http_downstream_transport_policy(
     dashboard_policy = getattr(dashboard_settings, "http_downstream_transport_policy", None)
     if isinstance(dashboard_policy, str) and dashboard_policy:
         return dashboard_policy, False
-    base_policy = getattr(base_settings, "http_downstream_transport_policy", _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT)
-    return base_policy, False
+    return _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT, False
 
 
 def _resolved_configured_stream_transport(dashboard_settings: Any) -> tuple[str, bool]:
@@ -209,11 +207,7 @@ def _http_bridge_allowed_by_transport_policy(
         # A first-party Codex client owns its WebSocket -> HTTP fallback. Once
         # it submits HTTP, sticky metadata must not promote it back to WS.
         return False
-    policy, _override_applied = _effective_http_downstream_transport_policy(
-        api_key,
-        dashboard_settings,
-        base_settings,
-    )
+    policy, _override_applied = _effective_http_downstream_transport_policy(api_key, dashboard_settings)
     return _resolve_http_downstream_transport(policy, payload=payload, headers=headers) == "websocket"
 
 
@@ -378,9 +372,7 @@ class _StreamingRetryMixin:
                     upstream_transport_policy_label = policy
                     upstream_stream_transport = "http"
                 else:
-                    policy, override_applied = _effective_http_downstream_transport_policy(
-                        api_key, settings, base_settings
-                    )
+                    policy, override_applied = _effective_http_downstream_transport_policy(api_key, settings)
                     upstream_transport_policy_label = policy
                     policy_transport = _resolve_http_downstream_transport(policy, payload=payload, headers=headers)
                     upstream_stream_transport = "http" if policy_transport == "http" else configured_transport

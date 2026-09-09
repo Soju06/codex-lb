@@ -20,13 +20,13 @@ const INTEGER_DAYS_PATTERN = /^\d+$/;
 const REQUEST_LOG_PRESET_DAYS = [30, 90] as const;
 
 type ParsedOverride =
-  | { valid: true; value: number | null } // null = inherit (cleared input)
+  | { valid: true; value: number | null } // null = not configured (cleared input)
   | { valid: false };
 
 function parseOverride(raw: string, floor: number): ParsedOverride {
   const trimmed = raw.trim();
   if (trimmed === "") {
-    // Empty input = no dashboard override (inherit the env alias / default).
+    // Empty input = no dashboard override (not configured = retention disabled).
     return { valid: true, value: null };
   }
   if (!INTEGER_DAYS_PATTERN.test(trimmed)) {
@@ -65,7 +65,7 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
 
   const save = () => {
     // Only submit this card's edited fields: a value stores an override, null
-    // clears it (back to inheriting the deprecated env alias), and untouched
+    // clears it (back to not configured = disabled), and untouched
     // fields stay out of the payload entirely.
     const patch: Partial<SettingsUpdateRequest> = {};
     if (requestLogChanged && parsedRequestLog.valid) {

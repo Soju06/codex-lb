@@ -37,8 +37,7 @@ data:
   # HTTP connector
   CODEX_LB_HTTP_CONNECTOR_LIMIT: {{ .Values.config.httpConnectorLimit | toString | quote }}
   CODEX_LB_HTTP_CONNECTOR_LIMIT_PER_HOST: {{ .Values.config.httpConnectorLimitPerHost | toString | quote }}
-  # Cache affinity
-  CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS: {{ .Values.config.cacheAffinityMaxAgeSeconds | toString | quote }}
+  # Prompt caching (the cache-affinity TTL is a dashboard runtime setting)
   CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED: {{ .Values.config.promptCacheKeyDerivationEnabled | toString | quote }}
   # Session bridge
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED: {{ .Values.config.sessionBridgeEnabled | toString | quote }}

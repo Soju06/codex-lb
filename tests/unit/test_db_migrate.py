@@ -18,6 +18,7 @@ from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import Connection
 
 import app.db.migrate as migrate_module
+from app.core.config.settings import get_settings
 from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
 from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_migration_backups
 from app.db.migrate import (
@@ -1749,6 +1750,7 @@ def test_run_upgrade_backfills_additional_usage_quota_key_from_configured_regist
     )
 
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry_path))
+    get_settings.cache_clear()
     clear_additional_quota_registry_cache()
 
     run_upgrade(url, "20260309_000000_add_additional_usage_history", bootstrap_legacy=False)
@@ -1871,6 +1873,7 @@ def test_run_upgrade_rejects_duplicate_additional_quota_aliases_in_registry(
     )
 
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry_path))
+    get_settings.cache_clear()
     clear_additional_quota_registry_cache()
 
     run_upgrade(url, "20260309_000000_add_additional_usage_history", bootstrap_legacy=False)

@@ -1493,7 +1493,7 @@ async def test_native_http_terminal_releases_upstream_without_python_cancel(
             await reader.read()
         closed.set()
 
-    monkeypatch.setattr(proxy_module.get_settings(), "max_sse_event_bytes", 256 * 1024)
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", 256 * 1024)
     async with _serve_http(handler) as base_url:
         session = _UnexpectedPythonSession()
         route = (

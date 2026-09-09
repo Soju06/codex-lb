@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import select
 
+import app.core.clients.proxy as core_proxy_module
 from app.core.clients.proxy import ProxyResponseError
 from app.db.models import ApiKeyUsageReservation
 from app.db.session import SessionLocal
@@ -96,8 +97,10 @@ async def test_promoted_http_bypass_reasons_are_counted(async_client, promotion_
     routing_counter = Mock()
     monkeypatch.setattr(observability, "http_bridge_routing_total", routing_counter)
     if bypass == "payload_size":
-        app_settings = _make_app_settings(enabled=True).model_copy(update={"max_sse_event_bytes": 3 * 1024 * 1024})
-        monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+        # The payload bypass compares against the fixed upstream frame budget
+        # (MAX_SSE_EVENT_BYTES - 2 MiB headroom, floored at 1 MiB): shrink it so
+        # a 1 MiB + 1 history trips the bypass.
+        monkeypatch.setattr(core_proxy_module, "MAX_SSE_EVENT_BYTES", 3 * 1024 * 1024)
         history = _promotion_history("x" * (1024 * 1024 + 1))
     else:
         history = _promotion_history()

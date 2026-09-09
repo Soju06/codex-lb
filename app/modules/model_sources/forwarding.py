@@ -1375,11 +1375,13 @@ class SourceStreamUsageParser:
         if timings is not None:
             self._usage_holder.timings = timings
 
-    def _observe_responses_event(self, event: Mapping[str, JsonValue]) -> None:
+    def _observe_responses_event(self, event: dict[str, JsonValue]) -> None:
         """Record the frame observations the dispatch owner needs (design v3 §6).
 
         One set membership on the event ``type`` plus a ``len()`` for delta
-        frames on top of the ``json.loads`` the usage capture already paid.
+        frames on top of the ``json.loads`` the usage capture already paid;
+        ``event`` is that ``json.loads`` result, owned by this parser and read
+        only, so it is handed to the classifier without a copy.
         """
 
         holder = self._usage_holder
@@ -1387,7 +1389,7 @@ class SourceStreamUsageParser:
         # carrying an ``error`` object is the ``error`` terminal (the wrapper
         # relays or rewrites it as a failure; the parser must not read it as
         # bookkeeping that is withheld ahead of the hook or settled as a cancel).
-        event_type = classify_event_type(dict(event))
+        event_type = classify_event_type(event)
         kind = classify_responses_frame(event_type)
         response = event.get("response")
         if is_json_mapping(response):

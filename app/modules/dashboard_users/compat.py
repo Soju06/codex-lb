@@ -45,6 +45,11 @@ class CompatAdminProjection:
     ) -> DashboardUser:
         user = await self.get()
         if user is not None:
+            # Re-arming after a password removal: the row survives with NULL
+            # credentials and must pick up the new ones.
+            user.password_hash = password_hash
+            user.totp_secret_encrypted = totp_secret_encrypted
+            user.totp_last_verified_step = totp_last_verified_step
             return user
         user = DashboardUser(
             id=COMPAT_ADMIN_USER_ID,
@@ -65,12 +70,18 @@ class CompatAdminProjection:
         user = await self.get()
         if user is not None:
             user.password_hash = password_hash
+        elif password_hash is not None:
+            # A replica of the previous release set the legacy password without
+            # a user row; the first mirrored write self-heals the projection.
+            await self.ensure_exists(password_hash=password_hash)
 
-    async def set_totp_secret(self, secret_encrypted: bytes | None) -> None:
+    async def set_totp_secret(self, secret_encrypted: bytes | None, *, legacy_password_hash: str | None) -> None:
         user = await self.get()
         if user is not None:
             user.totp_secret_encrypted = secret_encrypted
             user.totp_last_verified_step = None
+        elif secret_encrypted is not None and legacy_password_hash is not None:
+            await self.ensure_exists(password_hash=legacy_password_hash, totp_secret_encrypted=secret_encrypted)
 
     async def try_advance_totp_step(self, step: int) -> bool | None:
         """Advance the replay counter; ``None`` when there is no compat user to mirror."""

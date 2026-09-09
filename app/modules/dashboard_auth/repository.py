@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from sqlalchemy import or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,22 +24,36 @@ class DashboardAuthRepository:
     async def get_settings(self) -> DashboardSettings:
         return await self._settings_repository.get_or_create()
 
-    async def _mutate_settings_with_retry(self, mutate: Callable[[DashboardSettings], None]) -> DashboardSettings:
+    async def _mutate_settings_with_retry(
+        self,
+        mutate: Callable[[DashboardSettings], None],
+        *,
+        mirror: Callable[[DashboardSettings], Awaitable[None]] | None = None,
+    ) -> DashboardSettings:
         """Apply a single-purpose settings mutation, retrying once on a version conflict.
 
         These mutations are idempotent absolute writes (set/clear a credential
         field), so losing the optimistic version race to a concurrent settings
         update is benign: re-read the fresh row, re-apply the same mutation,
         and commit again instead of surfacing a 500.
+
+        ``mirror`` re-applies the compat-admin projection of the same write
+        (it receives the mutated legacy row). It runs before every commit
+        attempt because the conflict rollback discards the flushed user-row
+        update together with the legacy one.
         """
         row = await self._settings_repository.get_or_create()
         mutate(row)
+        if mirror is not None:
+            await mirror(row)
         try:
             await self._settings_repository.commit_refresh(row)
         except DashboardSettingsConflictError:
             row = await self._settings_repository.get_or_create()
             await self._session.refresh(row)
             mutate(row)
+            if mirror is not None:
+                await mirror(row)
             await self._settings_repository.commit_refresh(row)
         return row
 
@@ -50,8 +64,10 @@ class DashboardAuthRepository:
             if secret_encrypted is None:
                 row.totp_required_on_login = False
 
-        await self._compat.set_totp_secret(secret_encrypted)
-        return await self._mutate_settings_with_retry(_mutate)
+        return await self._mutate_settings_with_retry(
+            _mutate,
+            mirror=lambda row: self._compat.set_totp_secret(secret_encrypted, legacy_password_hash=row.password_hash),
+        )
 
     async def set_password_hash(self, password_hash: str) -> DashboardSettings:
         def _mutate(row: DashboardSettings) -> None:
@@ -59,8 +75,9 @@ class DashboardAuthRepository:
             row.bootstrap_token_encrypted = None
             row.bootstrap_token_hash = None
 
-        await self._compat.set_password_hash(password_hash)
-        return await self._mutate_settings_with_retry(_mutate)
+        return await self._mutate_settings_with_retry(
+            _mutate, mirror=lambda _row: self._compat.set_password_hash(password_hash)
+        )
 
     async def set_guest_password_hash(self, password_hash: str) -> DashboardSettings:
         def _mutate(row: DashboardSettings) -> None:
@@ -112,9 +129,11 @@ class DashboardAuthRepository:
             row.totp_secret_encrypted = None
             row.totp_last_verified_step = None
 
-        await self._compat.set_password_hash(None)
-        await self._compat.set_totp_secret(None)
-        return await self._mutate_settings_with_retry(_mutate)
+        async def _mirror(_row: DashboardSettings) -> None:
+            await self._compat.set_password_hash(None)
+            await self._compat.set_totp_secret(None, legacy_password_hash=None)
+
+        return await self._mutate_settings_with_retry(_mutate, mirror=_mirror)
 
     async def store_bootstrap_token_if_absent(self, token_encrypted: bytes, token_hash: bytes) -> bool:
         await self._settings_repository.get_or_create()

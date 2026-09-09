@@ -19,11 +19,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug
 from app.core.config.settings import get_settings
+from app.core.exceptions import DashboardSettingsConflictError
 from app.db.migrate import _build_alembic_config, inspect_migration_state, run_upgrade
 from app.db.models import ApiKey, DashboardIdentity, DashboardSettings, DashboardUser
 from app.db.session import SessionLocal
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
 from app.modules.dashboard_users.compat import COMPAT_ADMIN_USER_ID, COMPAT_ADMIN_USERNAME
+from app.modules.settings.repository import SettingsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -91,6 +93,76 @@ async def test_password_change_and_removal_are_mirrored(async_client) -> None:
     assert user.password_hash is None
     assert user.totp_secret_encrypted is None
     assert (await _legacy_settings()).password_hash is None
+
+    # Setting a password again re-arms the surviving admin row instead of
+    # leaving it credential-less next to a populated legacy column.
+    again = await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password789"})
+    assert again.status_code == 200, again.text
+    user = await _compat_user()
+    legacy = await _legacy_settings()
+    assert user is not None and user.id == COMPAT_ADMIN_USER_ID
+    assert user.password_hash is not None and user.password_hash == legacy.password_hash
+    async with SessionLocal() as session:
+        count = (await session.execute(text("SELECT COUNT(*) FROM dashboard_users"))).scalar_one()
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_mirrored_writes_create_the_admin_row_when_an_old_replica_left_only_the_legacy_column(db_setup) -> None:
+    # A replica of the previous release configured the password: legacy column
+    # set, no user row. The next mirrored write must self-heal the projection.
+    async with SessionLocal() as session:
+        repository = DashboardAuthRepository(session)
+        await repository.get_settings()
+        await session.execute(text("UPDATE dashboard_settings SET password_hash = '$2b$old-replica' WHERE id = 1"))
+        await session.commit()
+    assert await _compat_user() is None
+
+    async with SessionLocal() as session:
+        await DashboardAuthRepository(session).set_totp_secret(b"secret-from-new-replica")
+    user = await _compat_user()
+    assert user is not None and user.id == COMPAT_ADMIN_USER_ID
+    assert user.password_hash == "$2b$old-replica"
+    assert user.totp_secret_encrypted == b"secret-from-new-replica"
+
+    async with SessionLocal() as session:
+        user_row = (await session.execute(select(DashboardUser))).scalar_one()
+        await session.delete(user_row)
+        await session.commit()
+    async with SessionLocal() as session:
+        await DashboardAuthRepository(session).set_password_hash("$2b$new-replica")
+    user = await _compat_user()
+    assert user is not None and user.password_hash == "$2b$new-replica"
+
+
+@pytest.mark.asyncio
+async def test_mirror_is_reapplied_when_the_settings_commit_conflicts(async_client, monkeypatch) -> None:
+    assert (
+        await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
+    ).status_code == 200
+
+    original_commit_refresh = SettingsRepository.commit_refresh
+    attempts = {"count": 0}
+
+    async def _conflict_once(self, settings, *, on_committed=None):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            # A concurrent settings writer won the optimistic version race:
+            # commit_refresh rolls the whole transaction back, including the
+            # flushed compat-admin mirror.
+            await self._session.rollback()
+            raise DashboardSettingsConflictError()
+        await original_commit_refresh(self, settings, on_committed=on_committed)
+
+    monkeypatch.setattr(SettingsRepository, "commit_refresh", _conflict_once)
+    async with SessionLocal() as session:
+        await DashboardAuthRepository(session).set_password_hash("$2b$retried")
+    assert attempts["count"] == 2
+
+    user = await _compat_user()
+    legacy = await _legacy_settings()
+    assert legacy.password_hash == "$2b$retried"
+    assert user is not None and user.password_hash == "$2b$retried"
 
 
 @pytest.mark.asyncio
@@ -209,12 +281,18 @@ async def test_dashboard_users_migration_backfills_the_compat_admin(tmp_path, le
                 )
 
         await to_thread.run_sync(lambda: run_upgrade(db_url, TARGET_REVISION, bootstrap_legacy=False))
-        # Re-run the same revision's upgrade body by walking down and up: rows stay unique.
+        # Idempotency on pre-existing state: stamp back (no downgrade) and
+        # re-run the same upgrade body over the already-created tables/rows.
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.stamp(config, PARENT_REVISION))
+        await to_thread.run_sync(lambda: run_upgrade(db_url, TARGET_REVISION, bootstrap_legacy=False))
         async with engine.connect() as conn:
             tables = {row[0] for row in await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
             assert {"dashboard_users", "dashboard_identities"} <= tables
-            api_key_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info('api_keys')"))}
+            api_key_column_names = [row[1] for row in await conn.execute(text("PRAGMA table_info('api_keys')"))]
+            api_key_columns = set(api_key_column_names)
             assert {"owner_user_id", "created_by_user_id", "deactivated_reason"} <= api_key_columns
+            assert len(api_key_column_names) == len(api_key_columns)
             users = (
                 await conn.execute(
                     text(
@@ -237,7 +315,7 @@ async def test_dashboard_users_migration_backfills_the_compat_admin(tmp_path, le
         else:
             assert users == []
 
-        config = _build_alembic_config(db_url)
+        # The down/up walk validates the downgrade and a fresh re-apply.
         await to_thread.run_sync(lambda: command.downgrade(config, PARENT_REVISION))
         async with engine.connect() as conn:
             tables = {row[0] for row in await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}

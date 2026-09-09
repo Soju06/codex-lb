@@ -18,11 +18,11 @@ The RBAC plan turns the shared password into an `admin` user without a visible m
 
 ### Backfill in the migration, create at runtime for fresh installs
 
-The revision inserts the `admin` row only when a legacy password exists; a passwordless install creates it at first `POST /password/setup` through `CompatAdminProjection.ensure_exists`. Both use the same deterministic id and the unique username, so re-running the migration or racing the bootstrap cannot produce two admins.
+The revision inserts the `admin` row only when a legacy password exists (its identifiers are frozen literals in the revision, checked against the runtime constants by a unit test, so deleting the compat module later cannot break `alembic upgrade`); a passwordless install creates it at first `POST /password/setup` through `CompatAdminProjection.ensure_exists`, which also re-arms a row left credential-less by a password removal. Mirrored writes that find a legacy password but no row create it, covering a password configured by an old replica during the rolling window. Both use the same deterministic id and the unique username, so re-running the migration or racing the bootstrap cannot produce two admins.
 
 ### Write-side projection, read-side untouched
 
-`DashboardAuthRepository` mirrors password/TOTP writes to the user row **before** the legacy write inside the same session and commits once; the retry-on-version-conflict path re-applies the legacy mutation only (the user mirror is not versioned). New code does not read the user row: introducing `users OR legacy` reads now would create a second truth to unwind in N+1, so the switch happens atomically in the next change.
+`DashboardAuthRepository` mirrors password/TOTP writes to the user row inside the same session as the legacy write and commits once. The retry-on-version-conflict path re-applies **both** mutations: the conflict rollback discards the flushed user-row update along with the legacy one, so a mirror applied only before the first attempt would be lost silently. New code does not read the user row: introducing `users OR legacy` reads now would create a second truth to unwind in N+1, so the switch happens atomically in the next change.
 
 ### Replay counter advances on both rows or neither
 
@@ -36,8 +36,13 @@ As with roles, `status` and `role_source` are `String` columns validated by `str
 
 `owner_user_id`, `created_by_user_id`, and `deactivated_reason` are nullable and unused; adding them here avoids a second `api_keys` ALTER (SQLite table rebuild) when self-service keys arrive.
 
+### Legacy columns stay authoritative through release N
+
+Every replica of release N still authenticates against `dashboard_settings`. A replica of the previous release that is still running during the rolling upgrade writes password/TOTP changes to the legacy columns only, so the `admin` user row can lag behind them. That is harmless while nothing reads the user row, and the change that switches authority (`user-login-and-session-v2`) re-projects the legacy columns onto the `admin` row in its migration before the first read, then reverses the mirror direction. The user row is therefore never the source of truth for a credential that an old writer could still change.
+
 ## Risks / Trade-offs
 
 - [Risk] Migration backfill and runtime creation race on a fresh install during rolling upgrade. → Deterministic id + unique username make the second insert fail idempotently; the runtime path checks existence first.
 - [Risk] A future refactor writes the legacy column without going through the repository. → All legacy credential writes already funnel through `DashboardAuthRepository`; the mirror lives there.
-- [Trade-off] The compat user's `password_hash` mirror is not covered by the optimistic version of `dashboard_settings`. → Acceptable for one release: both writes happen in one transaction from one request, and the next change makes the user row authoritative.
+- [Trade-off] The compat user's `password_hash` mirror is not covered by the optimistic version of `dashboard_settings`. → Both writes happen in one transaction from one request and the mirror is re-applied on the conflict retry; the next change re-projects legacy → user once more before making the user row authoritative.
+- [Risk] Old-release replicas write only the legacy columns during the rolling window. → Legacy stays authoritative for this release (see above); the authority switch re-projects first.

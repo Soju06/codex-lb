@@ -33,7 +33,7 @@ The Alembic revision `20260909_010000_add_dashboard_users` MUST create the table
 
 ### Requirement: Legacy credential columns are a projection of the admin user
 
-During the expand/contract release, every write to the legacy dashboard credential MUST be mirrored onto the `admin` user row within the same transaction: first-run password setup MUST create the `admin` user (deterministic id, admin preset, break-glass designation); password change and removal MUST update or clear the user's `password_hash`; TOTP secret set and clear MUST update the user's secret and reset its replay step; password removal MUST also clear the user's TOTP fields. Advancing the TOTP replay counter MUST succeed only if both the legacy column and the user row advance; otherwise nothing is written and the code is rejected as a replay. Authentication and session reads MUST continue to use the legacy columns in this release.
+During the expand/contract release, every write to the legacy dashboard credential MUST be mirrored onto the `admin` user row within the same transaction: first-run password setup MUST create the `admin` user (deterministic id, admin preset, break-glass designation); password change and removal MUST update or clear the user's `password_hash`; TOTP secret set and clear MUST update the user's secret and reset its replay step; password removal MUST also clear the user's TOTP fields. Advancing the TOTP replay counter MUST succeed only if both the legacy column and the user row advance; otherwise nothing is written and the code is rejected as a replay. When the legacy write is retried after an optimistic version conflict, the mirror MUST be re-applied so both rows are committed together. Setting a password again after removal MUST re-arm the existing `admin` row rather than create a second user, and a mirrored write that finds a legacy password without an `admin` row MUST create the row from the legacy credential. Authentication and session reads MUST continue to use the legacy columns in this release, and the release that makes the user row authoritative MUST re-project the legacy columns onto the `admin` user before its first read.
 
 #### Scenario: First-run setup creates the admin account
 
@@ -45,6 +45,24 @@ During the expand/contract release, every write to the legacy dashboard credenti
 
 - **WHEN** the dashboard password is changed
 - **THEN** the `admin` user's `password_hash` equals the legacy column
+
+#### Scenario: Setup after removal re-arms the admin row
+
+- **GIVEN** the password was removed and the `admin` row remains with no credentials
+- **WHEN** `POST /api/dashboard-auth/password/setup` succeeds again
+- **THEN** the same `admin` row holds the new password hash and exactly one user exists
+
+#### Scenario: Legacy password without an admin row is projected on the next write
+
+- **GIVEN** a legacy password hash set by a replica of the previous release and no `admin` row
+- **WHEN** a TOTP secret or a new password is written through the repository
+- **THEN** the `admin` row is created carrying the legacy password hash and the new value
+
+#### Scenario: Mirror survives a settings version conflict
+
+- **GIVEN** a concurrent settings update commits between the credential read and its commit
+- **WHEN** the password change is retried on the fresh row
+- **THEN** the `admin` user's `password_hash` equals the new legacy column value
 
 #### Scenario: One-sided replay counter advance is refused
 

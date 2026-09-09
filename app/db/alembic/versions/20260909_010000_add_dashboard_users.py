@@ -10,14 +10,18 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug
-from app.modules.dashboard_roles.seed import seed_preset_dashboard_roles
-from app.modules.dashboard_users.compat import COMPAT_ADMIN_USER_ID, COMPAT_ADMIN_USERNAME
-
 revision = "20260909_010000_add_dashboard_users"
 down_revision = "20260909_000000_add_dashboard_roles"
 branch_labels = None
 depends_on = None
+
+# Frozen copies of the runtime identifiers (see
+# app.modules.dashboard_users.compat and app.core.auth.dashboard_access). A
+# migration must not import transient runtime modules; the unit test
+# tests/unit/test_dashboard_users_compat.py asserts these stay in sync.
+COMPAT_ADMIN_USER_ID = "7a4fc02d-216e-5be7-b974-bc437f23df60"
+COMPAT_ADMIN_USERNAME = "admin"
+ADMIN_ROLE_ID = "3fe7dc57-aabd-5b16-9850-b6d464087f07"
 
 _API_KEY_COLUMNS = ("owner_user_id", "created_by_user_id", "deactivated_reason")
 
@@ -101,9 +105,6 @@ def upgrade() -> None:
             if "deactivated_reason" in missing:
                 batch_op.add_column(sa.Column("deactivated_reason", sa.String(length=32), nullable=True))
 
-    # Preset rows must exist for the FK below; harmless re-seed otherwise.
-    seed_preset_dashboard_roles(bind)
-
     # Backfill: the legacy shared admin password becomes the `admin` user. Runs
     # outside the table guards so a re-run after a partial failure still
     # migrates the credential. Idempotent on the deterministic user id and on
@@ -131,7 +132,7 @@ def upgrade() -> None:
                 {
                     "id": COMPAT_ADMIN_USER_ID,
                     "username": COMPAT_ADMIN_USERNAME,
-                    "role_id": PRESET_ROLE_IDS[PresetRoleSlug.ADMIN],
+                    "role_id": ADMIN_ROLE_ID,
                     "password_hash": settings_row[0],
                     "totp_secret": settings_row[1],
                     "totp_step": settings_row[2],

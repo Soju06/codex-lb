@@ -106,6 +106,7 @@ async def test_consent_api_env_override_wins_and_suppresses_undecided_state(asyn
     assert payload["active"] is True
     assert payload["preview"] is None
     builder.assert_not_called()
+    assert await _notice_version() == 0
 
 
 @pytest.mark.asyncio
@@ -278,10 +279,18 @@ async def test_read_only_notice_preview_does_not_acknowledge_and_write_principal
 ) -> None:
     monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
     get_settings.cache_clear()
+    await async_client.put("/api/settings/telemetry", json={"enabled": False})
     app_instance.dependency_overrides[validate_dashboard_session] = lambda: guest_principal()
     try:
         response = await async_client.get("/api/settings/telemetry")
         assert response.status_code == 200
+        assert response.json()["state"] == "disabled"
+        assert response.json()["preview"] is not None
+        assert await _notice_version() == 0
+
+        response = await async_client.get("/api/settings/telemetry?include_preview=true")
+        assert response.status_code == 200
+        assert response.json()["state"] == "disabled"
         assert response.json()["preview"] is not None
         assert await _notice_version() == 0
     finally:
@@ -289,11 +298,13 @@ async def test_read_only_notice_preview_does_not_acknowledge_and_write_principal
 
     response = await async_client.get("/api/settings/telemetry")
     assert response.status_code == 200
+    assert response.json()["state"] == "disabled"
     assert response.json()["preview"] is not None
     assert await _notice_version() == 2
 
     response = await async_client.get("/api/settings/telemetry")
     assert response.status_code == 200
+    assert response.json()["state"] == "disabled"
     assert response.json()["preview"] is None
 
 

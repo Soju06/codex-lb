@@ -60,7 +60,10 @@ def _disable_background_loops(
     The lifespan resolves these names from ``app.main`` globals at startup, so
     rebinding them here is sufficient. The live-usage ingestor is a queue
     consumer fed only by proxied responses; the smoke drives the dashboard, so
-    returning ``None`` matches the disabled path exactly (``stop`` accepts it).
+    returning ``None`` is equivalent to the disabled path in this fresh
+    backend process: the disabled branch additionally resets the hub publisher
+    to ``None``, which is already its initial value here, and
+    ``stop_live_usage_ingestor(None)`` is a no-op.
     """
     for builder_name in BACKGROUND_LOOP_BUILDERS:
         setter(main_module, builder_name, lambda: _NoopScheduler())

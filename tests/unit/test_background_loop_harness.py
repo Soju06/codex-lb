@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 import app.main as main_module
+from app.core.config.settings import Settings
 from tests.conftest import BACKGROUND_LOOP_BUILDERS, _NoopScheduler
 
 # Always-on database maintenance loops the suite deliberately leaves running:
@@ -93,8 +94,40 @@ async def test_autouse_fixture_replaces_every_background_loop_builder(
 
 
 def test_harness_does_not_export_background_loop_env_kill_switches() -> None:
+    """The retired toggles must be unset in the whole test process, not just absent from conftest.
+
+    The suite already relies on a clean process environment for these names
+    (test_settings_multi_replica.py asserts the production default of
+    ``auth_guardian_enabled``), so an inherited shell export is a harness
+    misconfiguration and is reported as such rather than surfacing as an
+    unrelated default assertion elsewhere.
+    """
     exported = sorted(name for name in RETIRED_HARNESS_ENV_OVERRIDES if name in os.environ)
-    assert exported == [], f"tests must disable loops through the fixture seam, not env: {exported}"
+    assert exported == [], (
+        "tests must disable loops through the fixture seam, not env; unset these in the shell "
+        f"or the pytest launcher before running the suite: {exported}"
+    )
     conftest_source = (Path(__file__).parents[1] / "conftest.py").read_text(encoding="utf-8")
     leaked = sorted(name for name in RETIRED_HARNESS_ENV_OVERRIDES if f'os.environ["{name}"]' in conftest_source)
     assert leaked == []
+
+
+def test_usage_refresh_env_export_still_has_a_settings_field_behind_it() -> None:
+    """Hand-off guard for the follow-up that constantizes ``usage_refresh_enabled``.
+
+    tests/conftest.py still exports ``CODEX_LB_USAGE_REFRESH_ENABLED=false``
+    because the field also gates request-path refreshes (``UsageUpdater.
+    refresh_accounts`` on account import, ``request_refresh`` after a streamed
+    ``usage_limit_reached``); without it every account-importing test spends
+    20-30 s failing to reach ``example.invalid``. ``Settings`` ignores unknown
+    env names, so the day the field is removed this export becomes a silent
+    no-op and the suite slows ~30x with no failing test. Fail loudly instead.
+    """
+    conftest_source = (Path(__file__).parents[1] / "conftest.py").read_text(encoding="utf-8")
+    if 'os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"]' not in conftest_source:
+        return
+    assert "usage_refresh_enabled" in Settings.model_fields, (
+        "usage_refresh_enabled was removed from Settings but tests/conftest.py still exports "
+        "CODEX_LB_USAGE_REFRESH_ENABLED: replace the export with a request-path seam (autouse patch of "
+        "UsageUpdater.refresh_accounts / request_refresh, or a stubbed usage client) before deleting the env line"
+    )

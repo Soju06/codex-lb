@@ -1459,6 +1459,24 @@ def test_synthetic_source_chat_stream_aclose_is_a_no_op() -> None:
     asyncio.run(stream.aclose())
 
 
+@pytest.mark.parametrize(
+    ("label", "error"),
+    [
+        ("idle_timeout", forwarding_module._idle_timeout_error(300.0)),
+        ("unreachable", forwarding_module._unreachable_error(aiohttp.ClientPayloadError("mid-body"))),
+        ("withheld_cap", forwarding_module._withheld_cap_error(forwarding_module.SOURCE_STREAM_WITHHELD_CAP_BYTES + 1)),
+        ("empty_stream", forwarding_module.empty_stream_error(200)),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_body_phase_errors_carry_no_retry_after(label: str, error: ModelSourceForwardingError) -> None:
+    """Every ``ModelSourceForwardingError`` a started body can raise is post-open: a source ``Retry-After`` rides a
+    pre-open 4xx/5xx that the open site answers, so handlers that only consume a started body (the buffered
+    limited-key chat handler) have no header to merge. Adding ``retry_after`` to one of these means revisiting them."""
+
+    assert error.retry_after is None, label
+
+
 # -- status passthrough and credential recode -----------------------------------
 
 

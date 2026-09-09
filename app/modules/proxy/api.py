@@ -5736,6 +5736,11 @@ async def _buffered_limited_source_chat_stream_response(
             raise close_exc
         raise cancel_exc
     except ModelSourceForwardingError as exc:
+        # Post-open failures only (idle timeout, transport loss, the
+        # empty-stream verdict above): a source ``Retry-After`` rides a
+        # pre-open 4xx/5xx, which the open site answers before this handler
+        # exists, so these errors never carry one and there is nothing to
+        # merge into the headers here (``test_body_phase_errors_carry_no_retry_after``).
         await _release_reservation(reservation)
         await _log_source_chat_completion(
             request,
@@ -5747,9 +5752,7 @@ async def _buffered_limited_source_chat_stream_response(
             error_message=_source_error_message(exc.payload),
             upstream_status_code=exc.upstream_status_code,
         )
-        return _logged_error_json_response(
-            request, exc.status_code, exc.payload, headers=_source_error_response_headers(rate_limit_headers, exc)
-        )
+        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
     except Exception as exc:
         await _release_reservation(reservation)
         error = openai_error(

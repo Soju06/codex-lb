@@ -3298,6 +3298,7 @@ class _WebSocketMixin:
                 continuity_state,
                 responses_payload=responses_payload,
                 codex_session_affinity=codex_session_affinity,
+                api_key_id=refreshed_api_key.id if refreshed_api_key is not None else None,
             )
         if session_anchor is not None:
             original_input_items = cast(list[JsonValue], responses_payload.input)

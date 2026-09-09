@@ -234,6 +234,7 @@ async fn consume_sse(
         }
     } else if interpret_responses {
         let mut event = interpret(text);
+        let stream_complete = event.completes_http_stream();
         // Type metadata is not fragmented; keep it within the text budget too.
         if event
             .event_type
@@ -253,10 +254,12 @@ async fn consume_sse(
                         more,
                         event_type: if more { None } else { event.event_type.clone() },
                         python_normalization: !more && event.python_normalization,
+                        stream_complete: !more && stream_complete,
                     },
                 )
                 .await?;
         }
+        return Ok(stream_complete);
     } else {
         emit_sse(output, request_id, text, batch).await?;
     }

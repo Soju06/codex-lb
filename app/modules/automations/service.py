@@ -17,8 +17,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy import compact_responses as core_compact_responses
-from app.core.config.dashboard_overrides import dashboard_overrides_bound, with_dashboard_overrides
-from app.core.config.settings import get_settings
+from app.core.config.dashboard_overrides import dashboard_overrides_bound
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
@@ -35,6 +34,8 @@ from app.modules.automations.repository import (
     AutomationRunCycleRecord,
     AutomationRunRecord,
     AutomationsRepository,
+    effective_compact_request_budget_seconds,
+    run_stale_started_before,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.helpers import _header_account_id
@@ -821,13 +822,17 @@ class AutomationsService:
     ) -> int:
         cycle_key = cycle.cycle_key
         existing_cycle_runs = await self._repository.list_runs_for_cycle_key(cycle_key=cycle_key)
-        stale_started_before = now_utc - timedelta(seconds=_manual_run_execution_claim_timeout_seconds())
+        fallback_budget_seconds = effective_compact_request_budget_seconds()
         if not cycle.accounts:
             if existing_cycle_runs:
                 existing_cycle_run = existing_cycle_runs[0]
-                existing_run_is_stale = existing_cycle_run.status == AUTOMATION_RUN_STATUS_RUNNING and (
-                    existing_cycle_run.started_at <= existing_cycle_run.scheduled_for
-                    or existing_cycle_run.started_at < stale_started_before
+                existing_run_is_stale = (
+                    existing_cycle_run.status == AUTOMATION_RUN_STATUS_RUNNING
+                    and _is_reclaimable_running_claim(
+                        existing_cycle_run,
+                        now_utc=now_utc,
+                        fallback_budget_seconds=fallback_budget_seconds,
+                    )
                 )
                 if not existing_run_is_stale:
                     return 0
@@ -835,7 +840,11 @@ class AutomationsService:
                     run_id=existing_cycle_run.id,
                     observed_started_at=existing_cycle_run.started_at,
                     claimed_started_at=now_utc,
-                    stale_started_before=stale_started_before,
+                    stale_started_before=_run_stale_started_before(
+                        existing_cycle_run,
+                        now_utc=now_utc,
+                        fallback_budget_seconds=fallback_budget_seconds,
+                    ),
                 )
                 if claim is None:
                     return 0
@@ -906,9 +915,10 @@ class AutomationsService:
                     if deleted:
                         cycle_expected_accounts = max(0, cycle_expected_accounts - 1)
                     continue
-                existing_run_is_stale = (
-                    existing_cycle_run.started_at <= existing_cycle_run.scheduled_for
-                    or existing_cycle_run.started_at < stale_started_before
+                existing_run_is_stale = _is_reclaimable_running_claim(
+                    existing_cycle_run,
+                    now_utc=now_utc,
+                    fallback_budget_seconds=fallback_budget_seconds,
                 )
                 if not existing_run_is_stale:
                     continue
@@ -916,7 +926,11 @@ class AutomationsService:
                     run_id=existing_cycle_run.id,
                     observed_started_at=existing_cycle_run.started_at,
                     claimed_started_at=now_utc,
-                    stale_started_before=stale_started_before,
+                    stale_started_before=_run_stale_started_before(
+                        existing_cycle_run,
+                        now_utc=now_utc,
+                        fallback_budget_seconds=fallback_budget_seconds,
+                    ),
                 )
                 if claim is None:
                     continue
@@ -932,9 +946,10 @@ class AutomationsService:
                 executed += 1
                 continue
             if existing_cycle_run is not None:
-                existing_run_is_stale = (
-                    existing_cycle_run.started_at <= existing_cycle_run.scheduled_for
-                    or existing_cycle_run.started_at < stale_started_before
+                existing_run_is_stale = _is_reclaimable_running_claim(
+                    existing_cycle_run,
+                    now_utc=now_utc,
+                    fallback_budget_seconds=fallback_budget_seconds,
                 )
                 if not existing_run_is_stale:
                     continue
@@ -942,7 +957,11 @@ class AutomationsService:
                     run_id=existing_cycle_run.id,
                     observed_started_at=existing_cycle_run.started_at,
                     claimed_started_at=now_utc,
-                    stale_started_before=stale_started_before,
+                    stale_started_before=_run_stale_started_before(
+                        existing_cycle_run,
+                        now_utc=now_utc,
+                        fallback_budget_seconds=fallback_budget_seconds,
+                    ),
                 )
                 if claim is None:
                     continue
@@ -973,14 +992,10 @@ class AutomationsService:
         return executed
 
     async def _run_due_manual_runs(self, *, now_utc: datetime, cycle_key: str | None = None) -> int:
-        stale_started_before = now_utc - timedelta(seconds=_manual_run_execution_claim_timeout_seconds())
-        due_runs = await self._repository.list_due_manual_runs(
-            now_utc=now_utc,
-            stale_started_before=stale_started_before,
-            cycle_key=cycle_key,
-        )
+        due_runs = await self._repository.list_due_manual_runs(now_utc=now_utc, cycle_key=cycle_key)
         if not due_runs:
             return 0
+        fallback_budget_seconds = effective_compact_request_budget_seconds()
         jobs_by_id = await self._repository.get_jobs_by_ids([run.job_id for run in due_runs])
         cycles_by_key: dict[str, AutomationRunCycleRecord | None] = {}
         executed = 0
@@ -1026,7 +1041,11 @@ class AutomationsService:
                 run.id,
                 observed_started_at=run.started_at,
                 claimed_started_at=claimed_started_at,
-                stale_started_before=stale_started_before,
+                stale_started_before=_run_stale_started_before(
+                    run,
+                    now_utc=now_utc,
+                    fallback_budget_seconds=fallback_budget_seconds,
+                ),
             )
             if claimed_run is None:
                 continue
@@ -1178,7 +1197,7 @@ class AutomationsService:
                         route=route,
                         allow_direct_egress=route is None,
                     ),
-                    timeout=_automation_compact_request_timeout_seconds(),
+                    timeout=_automation_compact_request_timeout_seconds(run),
                 )
                 latency_ms = _elapsed_ms(request_started_at)
                 request_id = _automation_request_id(getattr(compact_response, "id", None), run.id, attempt_count)
@@ -2433,13 +2452,42 @@ def _automation_request_id(response_id: str | None, run_id: str, attempt_count: 
     return f"automation-{run_id}-attempt-{attempt_count}"
 
 
-def _manual_run_execution_claim_timeout_seconds() -> float:
-    settings = with_dashboard_overrides(get_settings())
-    return max(30.0, settings.compact_request_budget_seconds + 30.0)
+def _automation_compact_request_timeout_seconds(run: AutomationRunRecord) -> float:
+    """The compact budget the run was claimed under; the current budget for legacy rows.
+
+    The reclaim window is derived from the same value, so a run can never be
+    reclaimed while its own compact request may still be in flight.
+    """
+    if run.claim_budget_seconds is not None:
+        return run.claim_budget_seconds
+    return effective_compact_request_budget_seconds()
 
 
-def _automation_compact_request_timeout_seconds() -> float:
-    return with_dashboard_overrides(get_settings()).compact_request_budget_seconds
+def _run_stale_started_before(
+    run: AutomationRunRecord,
+    *,
+    now_utc: datetime,
+    fallback_budget_seconds: float,
+) -> datetime:
+    return run_stale_started_before(
+        now_utc=now_utc,
+        claim_budget_seconds=run.claim_budget_seconds,
+        fallback_budget_seconds=fallback_budget_seconds,
+    )
+
+
+def _is_reclaimable_running_claim(
+    run: AutomationRunRecord,
+    *,
+    now_utc: datetime,
+    fallback_budget_seconds: float,
+) -> bool:
+    """True for an unclaimed placeholder or a claim held past its own reclaim window."""
+    return run.started_at <= run.scheduled_for or run.started_at < _run_stale_started_before(
+        run,
+        now_utc=now_utc,
+        fallback_budget_seconds=fallback_budget_seconds,
+    )
 
 
 def _elapsed_ms(started_at: float | None) -> int | None:

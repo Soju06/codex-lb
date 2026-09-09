@@ -14,6 +14,7 @@ pub const CAPABILITIES: &[&str] = &[
     "http_compact_sse_v1",
     "http_sse_v1",
     "http_responses_events_v1",
+    "http_responses_completion_v1",
     "websocket",
     "websocket_responses_events_v1",
     "websocket_send_ack",
@@ -121,6 +122,8 @@ pub enum NativeEvent {
         more: bool,
         event_type: Option<String>,
         python_normalization: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        stream_complete: bool,
     },
     SseEventTooLarge {
         request_id: String,

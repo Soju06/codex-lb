@@ -6693,6 +6693,7 @@ class _WebSocketMixin:
         request_state: _WebSocketRequestState,
         error_code: str,
         error_message: str,
+        status: str = "error",
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -6705,7 +6706,7 @@ class _WebSocketMixin:
             archive_request_id=request_state.archive_request_id,
             model=request_state.model or "",
             latency_ms=int((clock_for(proxy).monotonic() - request_state.started_at) * 1000),
-            status="error",
+            status=status,
             error_code=error_code,
             error_message=error_message,
             failure_phase=request_state.failure_phase_override,
@@ -6750,7 +6751,7 @@ class _WebSocketMixin:
                 else "direct"
             ),
             sticky=request_state.affinity_policy.key is not None or request_state.previous_response_id is not None,
-            status="error",
+            status=status,
         )
 
     async def _emit_websocket_connect_failure(

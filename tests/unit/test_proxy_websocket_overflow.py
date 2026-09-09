@@ -925,17 +925,92 @@ async def test_pinned_lookup_failure_bounces_without_a_bounce_row(
 
 
 @pytest.mark.asyncio
-async def test_pinned_lookup_cancellation_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_pinned_lookup_cancellation_disposes_the_prepared_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mixin calls this helper after the turn's API-key usage was reserved and before the turn is registered in
+    ``pending_requests`` (the scope cleanup fails registered turns only), so a cancellation inside the lookup must
+    release the reservation and finalize a ``cancelled`` row before it propagates. Mutant: the cancellation
+    propagates with nothing released -- the reservation leaks until the 6 h stale reclaim and no terminal row
+    exists."""
+
     _install_settings(monkeypatch, _settings(source_id=_SOURCE_ID))
     counter = _install_counter(monkeypatch)
     _PureHelpers().install(monkeypatch)
     _PinStore(error=cast(Any, asyncio.CancelledError())).install(monkeypatch)
-    service, _, released = _service(monkeypatch)
+    service, request_logs, released = _service(monkeypatch)
+    request_state = _request_state()
 
     with pytest.raises(asyncio.CancelledError):
-        await _run_pinned(service, _request_state())
+        await _run_pinned(service, request_state)
 
-    released.assert_not_awaited()
+    released.assert_awaited_once_with(request_state)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert [(call["status"], call["error_code"]) for call in request_logs.calls] == [("cancelled", "stream_incomplete")]
+    assert counter.outcomes() == []
+
+
+@pytest.mark.asyncio
+async def test_pinned_bounce_row_write_cancellation_disposes_the_prepared_turn_without_an_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same window, one await later: a cancellation inside the bounce-row write disposes the turn and emits nothing."""
+
+    _install_settings(monkeypatch, _settings(source_id=_SOURCE_ID))
+    counter = _install_counter(monkeypatch)
+    _install_bounce_executor(monkeypatch, _BounceExecutor(error=asyncio.CancelledError()))
+    _PureHelpers().install(monkeypatch)
+    pin_key = thread_pin_key(_thread_key())
+    record = _pin_record(pin_key, kind=PIN_KIND_THREAD, expires_in=timedelta(days=3))
+    _PinStore({pin_key: PinLookupResult("live", record)}).install(monkeypatch)
+    service, request_logs, released = _service(monkeypatch)
+    request_state = _request_state()
+    websocket_send = AsyncMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await ws_overflow.bounce_pinned_or_anchored_websocket_turn(
+            cast(Any, service),
+            cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+            client_send_lock=anyio.Lock(),
+            api_key=None,
+            request_state=request_state,
+            headers=_NATIVE_HEADERS,
+        )
+
+    websocket_send.assert_not_awaited()
+    released.assert_awaited_once_with(request_state)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert [(call["status"], call["error_code"]) for call in request_logs.calls] == [("cancelled", "stream_incomplete")]
+    assert counter.outcomes() == []
+
+
+@pytest.mark.asyncio
+async def test_cancellation_inside_the_bounce_emitter_is_not_disposed_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect-failure emitter owns its own release and row; a cancellation delivered at its send leaves exactly
+    one release and one (error) row behind -- the guard must not add a second disposal."""
+
+    _install_settings(monkeypatch, _settings(source_id=_SOURCE_ID))
+    counter = _install_counter(monkeypatch)
+    _install_bounce_executor(monkeypatch)
+    _PureHelpers().install(monkeypatch)
+    pin_key = thread_pin_key(_thread_key())
+    record = _pin_record(pin_key, kind=PIN_KIND_THREAD, expires_in=timedelta(days=3))
+    _PinStore({pin_key: PinLookupResult("live", record)}).install(monkeypatch)
+    service, request_logs, released = _service(monkeypatch)
+    request_state = _request_state()
+    websocket_send = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await ws_overflow.bounce_pinned_or_anchored_websocket_turn(
+            cast(Any, service),
+            cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+            client_send_lock=anyio.Lock(),
+            api_key=None,
+            request_state=request_state,
+            headers=_NATIVE_HEADERS,
+        )
+
+    assert released.await_count == 1
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert [(call["status"], call["error_code"]) for call in request_logs.calls] == [("error", WS_BOUNCE_CODE)]
     assert counter.outcomes() == []
 
 
@@ -1169,6 +1244,56 @@ async def test_reused_socket_pinned_turn_is_bounced_with_reservation_released_an
     assert counter.outcomes() == ["bounced_ws_event"]
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert WS_BOUNCE_CODE in {call.get("error_code") for call in request_logs.calls}
+
+
+@pytest.mark.asyncio
+async def test_scope_cancellation_during_the_pinned_lookup_disposes_the_prepared_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through the mixin: the session task is cancelled while the first turn's pin lookup is in flight -- after the
+    turn's reservation, before its registration -- and the turn is disposed exactly once with a ``cancelled`` row.
+    Without the guard the scope cleanup sees no registered turn and the reservation leaks."""
+
+    _install_settings(monkeypatch, _settings(source_id=_SOURCE_ID))
+    counter = _install_counter(monkeypatch)
+    _PureHelpers().install(monkeypatch)
+    lookup_entered = asyncio.Event()
+    never = asyncio.Event()
+
+    async def blocking_lookup(pin_key: str, *, cache: object, scheduler: object, clock: object) -> PinLookupResult:
+        del pin_key, cache, scheduler, clock
+        lookup_entered.set()
+        await never.wait()
+        return PinLookupResult("none", None)
+
+    monkeypatch.setattr(ws_overflow, "lookup_pin_bounded", blocking_lookup)
+    service, request_logs = _session_service(monkeypatch)
+    connect = AsyncMock(side_effect=AssertionError("the cancelled turn must not reach the connect path"))
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect)
+    released = AsyncMock()
+    monkeypatch.setattr(proxy_service.ProxyService, "_release_websocket_request_state_reservation", released)
+    downstream = _Downstream([_create_frame(_MODEL)])
+
+    session = asyncio.create_task(
+        service.proxy_responses_websocket(
+            cast(WebSocket, downstream),
+            dict(_NATIVE_HEADERS),
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            api_key=None,
+        )
+    )
+    await asyncio.wait_for(lookup_entered.wait(), timeout=5)
+    session.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await session
+
+    assert released.await_count == 1
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert [(call["status"], call["error_code"]) for call in request_logs.calls] == [("cancelled", "stream_incomplete")]
+    assert downstream.sent_text == []
+    connect.assert_not_awaited()
+    assert counter.outcomes() == []
 
 
 @pytest.mark.asyncio

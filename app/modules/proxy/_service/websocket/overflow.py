@@ -18,7 +18,13 @@ row write and event shape lives here (design v3 §3, §6, §7.3, §7.5).
   recorded subscription owner, one anchor lookup (``live`` -> bounce). A lookup
   timeout or infrastructure error bounces too: fail-closed toward HTTP, where
   the decision answers 503 for the pinned context (I7, CL-12). It runs before
-  the socket-reuse guard, so a first turn and a reused socket behave alike.
+  the socket-reuse guard, so a first turn and a reused socket behave alike,
+  and it owns the prepared turn across its own awaits: the mixin calls it
+  after the turn's API-key usage was reserved and before the turn is
+  registered in ``pending_requests`` (the scope cleanup fails registered
+  turns only), so a scope cancellation delivered inside the settings read, a
+  lookup or the bounce-row write releases the reservation and writes the
+  turn's ``cancelled`` row before it propagates (I13 on this transport).
 
 Ship-dark (I9): both helpers start with two attribute reads on the already-warm
 settings row and one comparison; with the designation and the drain deadline
@@ -28,21 +34,26 @@ after the client's session-scoped downgrade. Handshake 426 denial lives in
 ``api.py`` via ``app.modules.proxy.overflow.handshake_denial``.
 
 Zero timing allowance: the bounded lookups and the bounce write take the proxy
-service's ``Scheduler``/``Clock``; no owned tasks are created here.
+service's ``Scheduler``/``Clock``; the only owned task is the
+cancellation-deferred disposal of a prepared turn, spawned through the
+scheduler seam.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from app.core.clock import clock_for, scheduler_for
 from app.core.errors import openai_error
 from app.core.metrics import prometheus as _prometheus
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.modules.model_sources.projection import strip_source_telemetry
 from app.modules.model_sources.selection import select_overflow_model_source
 from app.modules.proxy.model_source_pins import (
@@ -117,6 +128,12 @@ WS_BOUNCE_PINNED_MESSAGE = (
 # optimisation (Codex re-handshakes on every retry), not a correctness
 # requirement (design §7.3).
 _BOUNCE_EXECUTOR = PinWriteExecutor()
+
+# Row of a prepared turn the scope cancelled before it was registered: the code,
+# message and status the session's own scope cleanup writes for a registered
+# turn (``finalize_websocket_scope``).
+_CANCELLED_TURN_CODE = "stream_incomplete"
+_CANCELLED_TURN_MESSAGE = "Websocket scope cancelled before response.completed"
 
 
 def _facade() -> Any:
@@ -313,11 +330,39 @@ async def _bounce(
             api_key_id=api_key.id if api_key is not None else None,
             drain_until=drain_until,
         )
+    await _emit_bounce(
+        proxy,
+        websocket,
+        client_send_lock=client_send_lock,
+        api_key=api_key,
+        request_state=request_state,
+        thread_key_present=thread_key is not None,
+        bounce_row=bounce_row,
+        message=message,
+        outcome=outcome,
+    )
+
+
+async def _emit_bounce(
+    proxy: _WebSocketServiceProtocol,
+    websocket: WebSocket,
+    *,
+    client_send_lock: anyio.Lock,
+    api_key: ApiKeyData | None,
+    request_state: _WebSocketRequestState,
+    thread_key_present: bool,
+    bounce_row: bool,
+    message: str,
+    outcome: str,
+) -> None:
+    """The in-band 503 event through the connect-failure emitter (which releases the reservation and writes the row),
+    then the counter."""
+
     logger.info(
         "subscription_overflow_websocket_bounce outcome=%s request_id=%s thread_key_present=%s bounce_row=%s",
         outcome,
         _request_id(request_state),
-        thread_key is not None,
+        thread_key_present,
         bounce_row,
     )
     # ``_emit_websocket_connect_failure`` releases the turn's usage
@@ -403,6 +448,106 @@ async def bounce_exhausted_websocket_turn(
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class _PinnedBounce:
+    """What the pinned/anchored lookups decided: the bounce row's key material (``None`` if unknown) and the outcome."""
+
+    thread_key: str | None
+    source_id: str | None
+    outcome: str
+
+
+async def _pinned_or_anchored_bounce(
+    proxy: _WebSocketServiceProtocol,
+    *,
+    api_key: ApiKeyData | None,
+    request_state: _WebSocketRequestState,
+    headers: Mapping[str, str],
+) -> _PinnedBounce | None:
+    """The lookups of ``bounce_pinned_or_anchored_websocket_turn``; ``None`` when the turn is not bounced."""
+
+    scheduler = scheduler_for(proxy)
+    clock = clock_for(proxy)
+    thread_key: str | None = None
+    try:
+        thread_key = overflow_thread_key(headers)
+        previous_response_id = (request_state.previous_response_id or "").strip()
+        if thread_key is None and not previous_response_id:
+            return None
+        if thread_key is not None:
+            pin = await lookup_pin_bounded(thread_pin_key(thread_key), cache=None, scheduler=scheduler, clock=clock)
+            if pin.state in ("live", "expired") and pin.record is not None:
+                return _PinnedBounce(thread_key, pin.record.source_id, OUTCOME_BOUNCED_WS_EVENT)
+        if previous_response_id and request_state.previous_response_owner_account_id is None:
+            api_key_id = api_key.id if api_key is not None else None
+            anchor = await lookup_pin_bounded(
+                anchor_pin_key(api_key_id, previous_response_id), cache=None, scheduler=scheduler, clock=clock
+            )
+            if anchor.state == "live" and anchor.record is not None:
+                return _PinnedBounce(thread_key, anchor.record.source_id, OUTCOME_BOUNCED_WS_EVENT)
+    except PinLookupTimeout:
+        logger.warning("subscription_overflow_websocket_pin_lookup_timeout request_id=%s", _request_id(request_state))
+        # No bounce row: the pin store just failed to answer, and the event
+        # alone makes the client re-handshake (fail-closed toward HTTP).
+        return _PinnedBounce(None, None, OUTCOME_PINNED_LOOKUP_TIMEOUT)
+    except Exception:
+        # Never ``CancelledError``. A thread-keyed or anchored turn whose pin
+        # state is unknowable fails closed toward HTTP (CL-12), where the
+        # decision answers 503 ``model_source_unavailable``.
+        logger.warning(
+            "subscription_overflow_decision_error stage=websocket_pin_lookup request_id=%s",
+            _request_id(request_state),
+            exc_info=True,
+        )
+        return _PinnedBounce(None, None, OUTCOME_DECISION_ERROR)
+    return None
+
+
+async def _dispose_prepared_turn(
+    proxy: _WebSocketServiceProtocol,
+    *,
+    request_state: _WebSocketRequestState,
+    api_key: ApiKeyData | None,
+) -> None:
+    """Release a prepared, unregistered turn's reservation and finalize its ``cancelled`` row, cancellation deferred.
+
+    Each step is isolated: a failing release never skips the row and neither
+    replaces the caller's ``CancelledError``. The reservation release is
+    idempotent, so a later release by the mixin is harmless.
+    """
+
+    scheduler = scheduler_for(proxy)
+    try:
+        await _await_cleanup_deferring_cancellation(
+            proxy._release_websocket_request_state_reservation(request_state), scheduler=scheduler
+        )
+    except Exception:
+        logger.warning(
+            "subscription_overflow_websocket_prepared_turn_release_failed request_id=%s",
+            _request_id(request_state),
+            exc_info=True,
+        )
+    try:
+        await _await_cleanup_deferring_cancellation(
+            proxy._write_websocket_connect_failure(
+                account_id=None,
+                api_key=api_key,
+                request_state=request_state,
+                error_code=_CANCELLED_TURN_CODE,
+                error_message=_CANCELLED_TURN_MESSAGE,
+                status="cancelled",
+            ),
+            scheduler=scheduler,
+        )
+    except Exception:
+        logger.warning(
+            "subscription_overflow_websocket_prepared_turn_row_failed request_id=%s",
+            _request_id(request_state),
+            exc_info=True,
+        )
+    logger.info("subscription_overflow_websocket_prepared_turn_cancelled request_id=%s", _request_id(request_state))
+
+
 async def bounce_pinned_or_anchored_websocket_turn(
     proxy: _WebSocketServiceProtocol,
     websocket: WebSocket,
@@ -420,82 +565,49 @@ async def bounce_pinned_or_anchored_websocket_turn(
     (pinned conversations drain on their source, §8.8) and read the row
     directly: a pinned turn is bounced at once, and only the handshake denial
     keeps a positive replica cache.
+
+    Cancellation (I13 on this transport): the caller has reserved the turn's
+    API-key usage but not yet registered the turn in ``pending_requests``, and
+    the session's scope cleanup fails registered turns only. Every await up to
+    the connect-failure emitter -- the settings read, the lookups, the
+    bounce-row write -- therefore runs under a guard that, on
+    ``CancelledError``, releases the reservation and writes the turn's
+    ``cancelled`` row with the cancellation deferred before re-raising. The
+    emitter owns its own release and row and runs outside the guard, so
+    nothing is disposed twice.
     """
 
-    window = await _overflow_window(proxy)
-    if window is None:
-        return False
-    _designated, drain_until = window
-    scheduler = scheduler_for(proxy)
-    clock = clock_for(proxy)
-    thread_key: str | None = None
     try:
-        thread_key = overflow_thread_key(headers)
-        previous_response_id = (request_state.previous_response_id or "").strip()
-        if thread_key is None and not previous_response_id:
+        window = await _overflow_window(proxy)
+        if window is None:
             return False
-        if thread_key is not None:
-            pin = await lookup_pin_bounded(thread_pin_key(thread_key), cache=None, scheduler=scheduler, clock=clock)
-            if pin.state in ("live", "expired") and pin.record is not None:
-                await _bounce(
-                    proxy,
-                    websocket,
-                    client_send_lock=client_send_lock,
-                    api_key=api_key,
-                    request_state=request_state,
-                    thread_key=thread_key,
-                    source_id=pin.record.source_id,
-                    drain_until=drain_until,
-                    message=WS_BOUNCE_PINNED_MESSAGE,
-                    outcome=OUTCOME_BOUNCED_WS_EVENT,
-                )
-                return True
-        if previous_response_id and request_state.previous_response_owner_account_id is None:
-            api_key_id = api_key.id if api_key is not None else None
-            anchor = await lookup_pin_bounded(
-                anchor_pin_key(api_key_id, previous_response_id), cache=None, scheduler=scheduler, clock=clock
+        _designated, drain_until = window
+        bounce = await _pinned_or_anchored_bounce(proxy, api_key=api_key, request_state=request_state, headers=headers)
+        if bounce is None:
+            return False
+        bounce_row = bounce.thread_key is not None and bounce.source_id is not None
+        if bounce.thread_key is not None and bounce.source_id is not None:
+            # Written before the event so the re-handshake this event triggers
+            # finds the row on every replica.
+            await _write_bounce_row(
+                proxy,
+                thread_key=bounce.thread_key,
+                source_id=bounce.source_id,
+                api_key_id=api_key.id if api_key is not None else None,
+                drain_until=drain_until,
             )
-            if anchor.state == "live" and anchor.record is not None:
-                await _bounce(
-                    proxy,
-                    websocket,
-                    client_send_lock=client_send_lock,
-                    api_key=api_key,
-                    request_state=request_state,
-                    thread_key=thread_key,
-                    source_id=anchor.record.source_id,
-                    drain_until=drain_until,
-                    message=WS_BOUNCE_PINNED_MESSAGE,
-                    outcome=OUTCOME_BOUNCED_WS_EVENT,
-                )
-                return True
-    except PinLookupTimeout:
-        logger.warning("subscription_overflow_websocket_pin_lookup_timeout request_id=%s", _request_id(request_state))
-        outcome = OUTCOME_PINNED_LOOKUP_TIMEOUT
-    except Exception:
-        # Never ``CancelledError``. A thread-keyed or anchored turn whose pin
-        # state is unknowable fails closed toward HTTP (CL-12), where the
-        # decision answers 503 ``model_source_unavailable``.
-        logger.warning(
-            "subscription_overflow_decision_error stage=websocket_pin_lookup request_id=%s",
-            _request_id(request_state),
-            exc_info=True,
-        )
-        outcome = OUTCOME_DECISION_ERROR
-    else:
-        return False
-    # No bounce row here: the pin store just failed to answer, and the event
-    # alone makes the client re-handshake (fail-closed toward HTTP).
-    await _bounce(
+    except asyncio.CancelledError:
+        await _dispose_prepared_turn(proxy, request_state=request_state, api_key=api_key)
+        raise
+    await _emit_bounce(
         proxy,
         websocket,
         client_send_lock=client_send_lock,
         api_key=api_key,
         request_state=request_state,
-        thread_key=None,
-        source_id=None,
-        drain_until=drain_until,
+        thread_key_present=bounce.thread_key is not None,
+        bounce_row=bounce_row,
         message=WS_BOUNCE_PINNED_MESSAGE,
-        outcome=outcome,
+        outcome=bounce.outcome,
     )
     return True

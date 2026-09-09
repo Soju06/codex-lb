@@ -1669,6 +1669,11 @@ class AutomationRun(Base):
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    # Compact request budget (seconds) in effect when this row was last
+    # claimed; the stale-claim reclaim window is derived from it so a later
+    # dashboard change cannot reclaim an in-flight run early. NULL on rows
+    # claimed before the column existed (they use the current budget).
+    claim_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="runs")

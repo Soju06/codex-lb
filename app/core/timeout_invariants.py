@@ -36,6 +36,7 @@ class TimeoutSettings(Protocol):
     proxy_request_budget_seconds: float
     http_responses_stream_request_budget_seconds: float
     compact_request_budget_seconds: float
+    transcription_request_budget_seconds: float
     sse_keepalive_interval_seconds: float
     http_responses_session_bridge_request_budget_seconds: float
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float
@@ -95,7 +96,9 @@ def _expr(label: str, anchor: str, evaluate: Callable[[TimeoutSettings], float])
     return TimeoutOperand(label, evaluate, anchor)
 
 
+UPSTREAM_CONNECT_TIMEOUT = _field("upstream_connect_timeout_seconds", "app/core/clients/proxy.py:5276")
 PROXY_BUDGET = _field("proxy_request_budget_seconds", "app/core/config/settings.py:260")
+TRANSCRIPTION_BUDGET = _field("transcription_request_budget_seconds", "app/core/clients/proxy.py:5733")
 STREAM_BUDGET = _field(
     "http_responses_stream_request_budget_seconds",
     "app/modules/proxy/_service/streaming/helpers.py:724",
@@ -155,6 +158,27 @@ def _durable_bridge_retry_circuit_min_ttl_seconds() -> float:
 
 
 TIMEOUT_INVARIANT_RULES: tuple[TimeoutInvariantRule, ...] = (
+    TimeoutInvariantRule(
+        "upstream-connect-within-proxy-budget",
+        UPSTREAM_CONNECT_TIMEOUT,
+        "<=",
+        PROXY_BUDGET,
+        "The upstream connect timeout is clamped to the request budget; a larger value can never be honoured.",
+    ),
+    TimeoutInvariantRule(
+        "upstream-connect-within-compact-budget",
+        UPSTREAM_CONNECT_TIMEOUT,
+        "<=",
+        COMPACT_BUDGET,
+        "Compact requests connect inside their own budget; a connect timeout above it can never be honoured.",
+    ),
+    TimeoutInvariantRule(
+        "upstream-connect-within-transcription-budget",
+        UPSTREAM_CONNECT_TIMEOUT,
+        "<=",
+        TRANSCRIPTION_BUDGET,
+        "Transcription requests connect inside their own budget; a connect timeout above it can never be honoured.",
+    ),
     TimeoutInvariantRule(
         "admission-wait-within-proxy-budget",
         ADMISSION_WAIT,

@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 def test_default_settings_satisfy_timeout_invariants() -> None:
     settings = Settings()
-    assert len(TIMEOUT_INVARIANT_RULES) == 8
+    assert len(TIMEOUT_INVARIANT_RULES) == 11
     assert find_timeout_invariant_violations(settings) == []
 
 
@@ -35,6 +35,7 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
             "proxy_request_budget_seconds",
             "http_responses_stream_request_budget_seconds",
             "compact_request_budget_seconds",
+            "transcription_request_budget_seconds",
             "stream_idle_timeout_seconds",
             "sse_keepalive_interval_seconds",
             "usage_fetch_timeout_seconds",
@@ -60,6 +61,9 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
 @pytest.mark.parametrize(
     ("rule_id", "overrides"),
     [
+        ("upstream-connect-within-proxy-budget", {"upstream_connect_timeout_seconds": 601.0}),
+        ("upstream-connect-within-compact-budget", {"upstream_connect_timeout_seconds": 181.0}),
+        ("upstream-connect-within-transcription-budget", {"upstream_connect_timeout_seconds": 121.0}),
         ("admission-wait-within-proxy-budget", {"proxy_request_budget_seconds": 9.0}),
         ("admission-wait-within-stream-budget", {"http_responses_stream_request_budget_seconds": 9.0}),
         ("admission-wait-within-compact-budget", {"compact_request_budget_seconds": 9.0}),

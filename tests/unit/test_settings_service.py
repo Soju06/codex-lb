@@ -7,6 +7,8 @@ from typing import cast
 import pytest
 
 import app.modules.settings.service as settings_service_module
+from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
+from app.core.config.settings import Settings
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import (
@@ -78,11 +80,57 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         "soft_drain_enabled": InheritableValue(True, "default", True, True),
         "deterministic_failover_enabled": InheritableValue(True, "default", True, True),
         "circuit_breaker_enabled": InheritableValue(False, "default", False, False),
+        # C2-1 timeouts: NULL columns and a startup fake without the fields
+        # resolve to the code default.
+        **{
+            name: InheritableValue(
+                Settings.model_fields[name].default,
+                "default",
+                Settings.model_fields[name].default,
+                Settings.model_fields[name].default,
+            )
+            for name in DASHBOARD_TIMEOUT_SETTINGS
+        },
     }
     # The flat effective fields come from the same resolution.
     assert settings.proxy_account_stream_limit == 12
     assert settings.proxy_account_stream_recovery_reserve == 3
     assert settings.request_log_retention_days == 30
+
+
+def test_resolve_inheritable_handles_float_timeouts_including_zero_keepalive() -> None:
+    assert resolve_inheritable(None, 12.5, 10.0) == InheritableValue(12.5, "env", 12.5, 10.0)
+    assert resolve_inheritable(None, 10.0, 10.0) == InheritableValue(10.0, "default", 10.0, 10.0)
+    assert resolve_inheritable(0.0, 12.5, 10.0) == InheritableValue(0.0, "dashboard", 12.5, 10.0)
+
+
+@pytest.mark.asyncio
+async def test_timeout_settings_resolve_dashboard_then_environment_then_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = DashboardSettings()
+    row.proxy_request_budget_seconds = 900.0
+    row.sse_keepalive_interval_seconds = None
+    row.upstream_connect_timeout_seconds = None
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(proxy_request_budget_seconds=601.0, sse_keepalive_interval_seconds=3.0),
+    )
+
+    settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+
+    assert settings.proxy_request_budget_seconds == 900.0
+    assert settings.provenance["proxy_request_budget_seconds"] == InheritableValue(900.0, "dashboard", 601.0, 600.0)
+    assert settings.sse_keepalive_interval_seconds == 3.0
+    assert settings.provenance["sse_keepalive_interval_seconds"] == InheritableValue(3.0, "env", 3.0, 10.0)
+    assert settings.upstream_connect_timeout_seconds == 8.0
+    assert settings.provenance["upstream_connect_timeout_seconds"] == InheritableValue(8.0, "default", 8.0, 8.0)
 
 
 @pytest.mark.asyncio

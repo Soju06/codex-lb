@@ -24,6 +24,7 @@ import { ResetCreditSettings } from "@/features/settings/components/reset-credit
 import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
+import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream-timeout-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
@@ -242,6 +243,21 @@ export function SettingsPage() {
                   settings.usageHistoryRetentionOverrideDays,
                   settings.requestLogRetentionDays,
                   settings.usageHistoryRetentionDays,
+                ].join(":")}
+                settings={settings}
+                busy={controlsDisabled}
+                onSave={handleSave}
+              />
+              <UpstreamTimeoutSettings
+                key={[
+                  settings.version,
+                  settings.upstreamConnectTimeoutSeconds,
+                  settings.proxyRequestBudgetSeconds,
+                  settings.compactRequestBudgetSeconds,
+                  settings.transcriptionRequestBudgetSeconds,
+                  settings.streamIdleTimeoutSeconds,
+                  settings.proxyDownstreamWebsocketIdleTimeoutSeconds,
+                  settings.sseKeepaliveIntervalSeconds,
                 ].join(":")}
                 settings={settings}
                 busy={controlsDisabled}

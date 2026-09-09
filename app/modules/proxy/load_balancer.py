@@ -39,6 +39,7 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.clock import REAL_CLOCK, Clock
 from app.core.config import settings as config_settings
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -514,7 +515,7 @@ class LoadBalancer:
         *,
         redact_sensitive_details: bool = False,
     ) -> None:
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         now = self._clock.monotonic()
         for runtime in self._runtime.values():
             if not runtime.leases:
@@ -533,7 +534,7 @@ class LoadBalancer:
 
     def _detached_runtime_snapshot(self) -> dict[str, RuntimeState]:
         """Runtime as ordinary selection would see it, for observations that must not touch it."""
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         return detached_runtime_snapshot(
             self._runtime,
             now=self._clock.monotonic(),

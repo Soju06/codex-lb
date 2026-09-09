@@ -88,7 +88,9 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket as connect_responses_websocket,
 )
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
-from app.core.config.settings import get_settings
+from app.core.config.dashboard_overrides import with_dashboard_overrides
+from app.core.config.settings import Settings as _Settings
+from app.core.config.settings import get_settings as get_environment_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE
@@ -769,6 +771,18 @@ from app.modules.proxy.ring_membership import (
 )
 from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.work_admission import WorkAdmissionController
+
+
+def get_settings() -> _Settings:
+    """Startup ``Settings`` with the request-bound dashboard overrides applied.
+
+    Every proxy consumer reads settings through this facade (directly or via
+    ``_service_get_settings()``), so the dashboard-managed timeouts (C2-1) take
+    effect here without touching each call site; outside a bound request context
+    the environment values apply unchanged.
+    """
+    return with_dashboard_overrides(get_environment_settings())
+
 
 logger = logging.getLogger(__name__)
 

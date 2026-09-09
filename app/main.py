@@ -28,6 +28,7 @@ from app.core.balancer import configure_replica_salt
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.clients.native_egress import close_discovered_native_egress_client
+from app.core.config.dashboard_overrides import effective_settings
 from app.core.config.key_fingerprint import verify_encryption_key_fingerprint
 from app.core.config.settings import (
     _bridge_advertise_hostname_is_replica_specific,
@@ -52,6 +53,7 @@ from app.core.middleware import (
     add_trusted_proxy_headers_middleware,
 )
 from app.core.middleware.dashboard_gzip import add_dashboard_gzip_middleware
+from app.core.middleware.dashboard_overrides import DashboardOverridesMiddleware
 from app.core.middleware.inflight import InFlightMiddleware
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.resilience.backpressure import BackpressureMiddleware
@@ -114,6 +116,7 @@ from app.modules.reports import api as reports_api
 from app.modules.request_logs import api as request_logs_api
 from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
+from app.modules.settings.service import warn_environment_shadowed_by_dashboard
 from app.modules.sticky_sessions import api as sticky_sessions_api
 from app.modules.sticky_sessions.cleanup_scheduler import (
     OperationRetentionCleanupResult,
@@ -481,6 +484,7 @@ async def lifespan(app: FastAPI):
     if _auto_bootstrap_token:
         log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
+    warn_environment_shadowed_by_dashboard(await get_settings_cache().get(), settings)
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready is True:
         startup_module.mark_bridge_durable_schema_ready()
@@ -699,7 +703,9 @@ async def lifespan(app: FastAPI):
         await svc.register(iid, endpoint_base_url=None)
         await _wait_for_bridge_advertise_endpoint(
             bridge_endpoint_base_url,
-            connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+            connect_timeout_seconds=effective_settings(
+                await get_settings_cache().get(), settings
+            ).upstream_connect_timeout_seconds,
         )
         await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
         startup_module.mark_bridge_registration_complete()
@@ -923,6 +929,10 @@ def create_app() -> FastAPI:
 
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
 
+    # Innermost of the app-level middlewares: binds the dashboard-managed
+    # settings overrides (C2-1 timeouts) for the request/socket once the
+    # admission middlewares below have let it through.
+    app.add_middleware(cast(Any, DashboardOverridesMiddleware))
     app.add_middleware(cast(Any, InFlightMiddleware))
     add_dashboard_gzip_middleware(app)
     add_dashboard_auth_proxy_middleware(app)

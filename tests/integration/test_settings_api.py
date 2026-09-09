@@ -357,6 +357,14 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "soft_drain_enabled",
         "deterministic_failover_enabled",
         "circuit_breaker_enabled",
+        # C2-1 timeouts
+        "upstream_connect_timeout_seconds",
+        "proxy_request_budget_seconds",
+        "compact_request_budget_seconds",
+        "transcription_request_budget_seconds",
+        "stream_idle_timeout_seconds",
+        "proxy_downstream_websocket_idle_timeout_seconds",
+        "sse_keepalive_interval_seconds",
     }
     # Retention is database-only: no environment value, NULL reads as default.
     assert provenance["request_log_retention_days"] == {"source": "default", "envValue": None, "default": 0}
@@ -430,6 +438,107 @@ async def test_settings_api_resilience_toggles_round_trip_with_provenance(async_
         assert row.circuit_breaker_enabled is None
         assert row.soft_drain_enabled is None
         assert row.deterministic_failover_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_settings_api_timeout_round_trip_with_provenance_and_null_clear(async_client, monkeypatch):
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["proxyRequestBudgetSeconds"] == 600.0
+    assert payload["provenance"]["proxy_request_budget_seconds"] == {
+        "source": "default",
+        "envValue": 600.0,
+        "default": 600.0,
+    }
+    assert payload["provenance"]["sse_keepalive_interval_seconds"]["source"] == "default"
+
+    configured = await async_client.put(
+        "/api/settings",
+        json={"proxyRequestBudgetSeconds": 900, "sseKeepaliveIntervalSeconds": 0},
+    )
+    assert configured.status_code == 200
+    configured_payload = configured.json()
+    assert configured_payload["proxyRequestBudgetSeconds"] == 900.0
+    assert configured_payload["provenance"]["proxy_request_budget_seconds"] == {
+        "source": "dashboard",
+        "envValue": 600.0,
+        "default": 600.0,
+    }
+    # 0 disables keepalives and is a dashboard value like any other.
+    assert configured_payload["sseKeepaliveIntervalSeconds"] == 0.0
+    assert configured_payload["provenance"]["sse_keepalive_interval_seconds"]["source"] == "dashboard"
+
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.proxy_request_budget_seconds == 900.0
+        assert row.sse_keepalive_interval_seconds == 0.0
+        assert row.upstream_connect_timeout_seconds is None
+
+    # Omitting the fields leaves them untouched.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["proxyRequestBudgetSeconds"] == 900.0
+
+    # null clears the column; with the environment differing from the default
+    # the value is inherited from the environment.
+    inherited = settings_service.get_settings().model_copy(update={"proxy_request_budget_seconds": 700.0})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put(
+        "/api/settings", json={"proxyRequestBudgetSeconds": None, "sseKeepaliveIntervalSeconds": None}
+    )
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["proxyRequestBudgetSeconds"] == 700.0
+    assert cleared_payload["provenance"]["proxy_request_budget_seconds"] == {
+        "source": "env",
+        "envValue": 700.0,
+        "default": 600.0,
+    }
+    assert cleared_payload["provenance"]["sse_keepalive_interval_seconds"]["source"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_timeouts_that_break_invariants_against_effective_values(async_client):
+    # Connect timeout above the (default 600 s) effective proxy budget.
+    response = await async_client.put("/api/settings", json={"upstreamConnectTimeoutSeconds": 700})
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "timeout_invariant_violation"
+    assert "upstream-connect-within-proxy-budget" in body["error"]["message"]
+
+    # Proxy budget below the (environment-only) admission wait of 10 s.
+    response = await async_client.put("/api/settings", json={"proxyRequestBudgetSeconds": 5})
+    assert response.status_code == 400
+    assert "admission-wait-within-proxy-budget" in response.json()["error"]["message"]
+
+    # Raising the budgets in the same PUT satisfies the rules on the effective values.
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "upstreamConnectTimeoutSeconds": 130,
+            "compactRequestBudgetSeconds": 200,
+            "transcriptionRequestBudgetSeconds": 150,
+            "proxyRequestBudgetSeconds": 700,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["upstreamConnectTimeoutSeconds"] == 130.0
+
+    # Lowering one budget below the stored connect timeout is rejected on the
+    # effective (dashboard) values, not the environment ones.
+    response = await async_client.put("/api/settings", json={"compactRequestBudgetSeconds": 100})
+    assert response.status_code == 400
+    assert "upstream-connect-within-compact-budget" in response.json()["error"]["message"]
+
+    # Out-of-range scalars are schema errors.
+    response = await async_client.put("/api/settings", json={"streamIdleTimeoutSeconds": 0})
+    assert response.status_code == 422
+    response = await async_client.put("/api/settings", json={"sseKeepaliveIntervalSeconds": -1})
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,8 @@ from __future__ import annotations
 import ipaddress
 import socket
 import time
+from collections.abc import Mapping
+from typing import Any, cast
 
 import aiohttp
 import httpx
@@ -19,11 +21,14 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.clients.http import _shared_ssl_context
+from app.core.config import settings as settings_module
+from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError, DashboardSettingsConflictError
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
+from app.core.timeout_invariants import find_timeout_invariant_violations
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint, sends_plaintext_credentials
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
@@ -226,6 +231,15 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         deterministic_failover_enabled=settings.deterministic_failover_enabled,
         circuit_breaker_enabled=settings.circuit_breaker_enabled,
         version=settings.version,
+        # C2-1 timeouts
+        upstream_connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+        proxy_request_budget_seconds=settings.proxy_request_budget_seconds,
+        compact_request_budget_seconds=settings.compact_request_budget_seconds,
+        transcription_request_budget_seconds=settings.transcription_request_budget_seconds,
+        stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
+        proxy_downstream_websocket_idle_timeout_seconds=settings.proxy_downstream_websocket_idle_timeout_seconds,
+        sse_keepalive_interval_seconds=settings.sse_keepalive_interval_seconds,
+        # end C2-1 timeouts
         provenance={
             name: SettingProvenance(source=resolved.source, env_value=resolved.env_value, default=resolved.default)
             for name, resolved in settings.provenance.items()
@@ -632,6 +646,77 @@ def _elapsed_ms(started: float) -> int:
     return max(0, round((time.monotonic() - started) * 1000))
 
 
+# C2-1 timeouts
+def _proposed_timeout_settings(payload: DashboardSettingsUpdateRequest, current, startup_settings) -> dict[str, float]:
+    """Effective timeout values after ``payload`` is applied: value = store, null = inherit, absent = current."""
+    proposed: dict[str, float] = {}
+    for name in DASHBOARD_TIMEOUT_SETTINGS:
+        if name in payload.model_fields_set:
+            value = getattr(payload, name)
+            proposed[name] = float(value if value is not None else getattr(startup_settings, name))
+        else:
+            proposed[name] = float(getattr(current, name))
+    return proposed
+
+
+class _EffectiveTimeoutView:
+    """``TimeoutSettings`` view: effective timeout values over the startup settings.
+
+    Fields a startup-settings fake does not carry are read from the process
+    ``Settings`` so constant-only rules keep evaluating.
+    """
+
+    def __init__(self, base: object, overrides: Mapping[str, float]) -> None:
+        self._base = base
+        self._overrides = overrides
+
+    def __getattr__(self, name: str) -> object:
+        if name in self._overrides:
+            return self._overrides[name]
+        if hasattr(self._base, name):
+            return getattr(self._base, name)
+        return getattr(settings_module.get_settings(), name)
+
+
+def _validate_timeout_invariants(payload: DashboardSettingsUpdateRequest, current, startup_settings) -> None:
+    """Reject a PUT that introduces a timeout-invariant violation against the effective values.
+
+    The same rules as startup (``app.core.timeout_invariants``) are evaluated on
+    the effective settings — dashboard value, else environment, else default —
+    before and after the change; only violations the change introduces are
+    rejected, so a deployment whose environment already violates a rule can
+    still edit unrelated fields.
+    """
+    if not set(DASHBOARD_TIMEOUT_SETTINGS) & payload.model_fields_set:
+        return
+    before = _EffectiveTimeoutView(
+        startup_settings, {name: float(getattr(current, name)) for name in DASHBOARD_TIMEOUT_SETTINGS}
+    )
+    after = _EffectiveTimeoutView(startup_settings, _proposed_timeout_settings(payload, current, startup_settings))
+    before_ids = {violation.rule.id for violation in find_timeout_invariant_violations(cast(Any, before))}
+    introduced = [
+        violation
+        for violation in find_timeout_invariant_violations(cast(Any, after))
+        if violation.rule.id not in before_ids
+    ]
+    if introduced:
+        raise DashboardBadRequestError(
+            "; ".join(violation.format() for violation in introduced),
+            code="timeout_invariant_violation",
+        )
+
+
+def _timeout_field(payload: DashboardSettingsUpdateRequest, name: str) -> tuple[float | None, bool]:
+    """(value to store, clear flag) for one tri-state timeout field of ``payload``."""
+    if name not in payload.model_fields_set:
+        return None, False
+    value = getattr(payload, name)
+    return value, value is None
+
+
+# end C2-1 timeouts
+
+
 @router.put("", response_model=DashboardSettingsResponse)
 async def update_settings(
     request: Request,
@@ -743,6 +828,8 @@ async def update_settings(
                 "proxyAccountStreamRecoveryReserve must not exceed proxyAccountStreamLimit",
                 code="invalid_proxy_account_stream_recovery_reserve",
             )
+        _validate_timeout_invariants(payload, current, startup_settings)  # C2-1 timeouts
+        timeout_fields = {name: _timeout_field(payload, name) for name in DASHBOARD_TIMEOUT_SETTINGS}
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
                 sticky_threads_enabled=(
@@ -983,6 +1070,26 @@ async def update_settings(
                 clear_circuit_breaker_enabled=(
                     "circuit_breaker_enabled" in payload.model_fields_set and payload.circuit_breaker_enabled is None
                 ),
+                # C2-1 timeouts
+                upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][0],
+                clear_upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][1],
+                proxy_request_budget_seconds=timeout_fields["proxy_request_budget_seconds"][0],
+                clear_proxy_request_budget_seconds=timeout_fields["proxy_request_budget_seconds"][1],
+                compact_request_budget_seconds=timeout_fields["compact_request_budget_seconds"][0],
+                clear_compact_request_budget_seconds=timeout_fields["compact_request_budget_seconds"][1],
+                transcription_request_budget_seconds=timeout_fields["transcription_request_budget_seconds"][0],
+                clear_transcription_request_budget_seconds=timeout_fields["transcription_request_budget_seconds"][1],
+                stream_idle_timeout_seconds=timeout_fields["stream_idle_timeout_seconds"][0],
+                clear_stream_idle_timeout_seconds=timeout_fields["stream_idle_timeout_seconds"][1],
+                proxy_downstream_websocket_idle_timeout_seconds=timeout_fields[
+                    "proxy_downstream_websocket_idle_timeout_seconds"
+                ][0],
+                clear_proxy_downstream_websocket_idle_timeout_seconds=timeout_fields[
+                    "proxy_downstream_websocket_idle_timeout_seconds"
+                ][1],
+                sse_keepalive_interval_seconds=timeout_fields["sse_keepalive_interval_seconds"][0],
+                clear_sse_keepalive_interval_seconds=timeout_fields["sse_keepalive_interval_seconds"][1],
+                # end C2-1 timeouts
             ),
             # CAS anchor: omitted fields above were merged from `current`
             # (version checked against expectedVersion when supplied), so the
@@ -1058,6 +1165,7 @@ async def update_settings(
             "soft_drain_enabled",
             "deterministic_failover_enabled",
             "circuit_breaker_enabled",
+            *DASHBOARD_TIMEOUT_SETTINGS,  # C2-1 timeouts
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
@@ -1065,6 +1173,14 @@ async def update_settings(
     # changes ownership without changing the effective value; audit that too.
     for field_name in RESILIENCE_TOGGLE_SETTINGS:
         if current.provenance[field_name] != updated.provenance[field_name] and field_name not in changed_fields:
+            changed_fields.append(field_name)
+    # C2-1 timeouts: a dashboard value equal to the inherited one still changes
+    # the setting's owner (provenance source), which the audit log must record.
+    for field_name in DASHBOARD_TIMEOUT_SETTINGS:
+        if (
+            field_name not in changed_fields
+            and current.provenance[field_name].source != updated.provenance[field_name].source
+        ):
             changed_fields.append(field_name)
     capacity_override_fields = (
         "proxy_account_response_create_limit",

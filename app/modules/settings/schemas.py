@@ -124,6 +124,16 @@ class DashboardSettingsResponse(DashboardModel):
     deterministic_failover_enabled: bool
     circuit_breaker_enabled: bool
     version: int = Field(ge=1)
+    # C2-1 timeouts: effective values; ``provenance[<name>]`` says whether the
+    # dashboard, the environment or the code default supplied each one.
+    upstream_connect_timeout_seconds: float = Field(gt=0)
+    proxy_request_budget_seconds: float = Field(gt=0)
+    compact_request_budget_seconds: float = Field(gt=0)
+    transcription_request_budget_seconds: float = Field(gt=0)
+    stream_idle_timeout_seconds: float = Field(gt=0)
+    proxy_downstream_websocket_idle_timeout_seconds: float = Field(gt=0)
+    sse_keepalive_interval_seconds: float = Field(ge=0)
+    # end C2-1 timeouts
     # Provenance of every inheritable setting keyed by its setting name (the
     # ``dashboard_settings`` column / ``Settings`` field name). Additive: the
     # flat ``<name>``, ``<name>_environment_value`` and ``<name>_override``
@@ -212,6 +222,17 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     soft_drain_enabled: bool | None = None
     deterministic_failover_enabled: bool | None = None
     circuit_breaker_enabled: bool | None = None
+    # C2-1 timeouts: tri-state like the caps (absent = unchanged, null = clear
+    # to inherit the environment / default, value = store). Cross-field timeout
+    # invariants are checked against the effective values in the API handler.
+    upstream_connect_timeout_seconds: float | None = Field(default=None, gt=0, le=86400)
+    proxy_request_budget_seconds: float | None = Field(default=None, gt=0, le=86400)
+    compact_request_budget_seconds: float | None = Field(default=None, gt=0, le=86400)
+    transcription_request_budget_seconds: float | None = Field(default=None, gt=0, le=86400)
+    stream_idle_timeout_seconds: float | None = Field(default=None, gt=0, le=86400)
+    proxy_downstream_websocket_idle_timeout_seconds: float | None = Field(default=None, gt=0, le=86400)
+    sse_keepalive_interval_seconds: float | None = Field(default=None, ge=0, le=86400)
+    # end C2-1 timeouts
 
     @field_validator("request_log_retention_override_days")
     @classmethod

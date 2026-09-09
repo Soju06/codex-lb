@@ -22,6 +22,7 @@ const quotaPlannerSectionMock = vi.fn();
 const stickySessionsSectionMock = vi.fn();
 const modelSourcesSettingsMock = vi.fn();
 const dataRetentionSettingsMock = vi.fn();
+const upstreamTimeoutSettingsMock = vi.fn();
 const telemetrySettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
@@ -85,6 +86,13 @@ vi.mock("@/features/settings/components/data-retention-settings", () => ({
   DataRetentionSettings: (props: unknown) => {
     dataRetentionSettingsMock(props);
     return <div>Data Retention Settings</div>;
+  },
+}));
+
+vi.mock("@/features/settings/components/upstream-timeout-settings", () => ({
+  UpstreamTimeoutSettings: (props: unknown) => {
+    upstreamTimeoutSettingsMock(props);
+    return <div>Upstream Timeout Settings</div>;
   },
 }));
 
@@ -261,6 +269,7 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Quota Planner Section")).toBeInTheDocument();
     expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
     expect(screen.getByText("Data Retention Settings")).toBeInTheDocument();
+    expect(screen.getByText("Upstream Timeout Settings")).toBeInTheDocument();
   });
 
   it("disables write-capable sections for read-only guests", async () => {
@@ -284,6 +293,7 @@ describe("SettingsPage", () => {
     expect(quotaPlannerSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(dataRetentionSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
+    expect(upstreamTimeoutSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
   });
 
   it("keeps guest access settings available for writable sessions", async () => {

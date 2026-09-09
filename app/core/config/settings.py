@@ -261,14 +261,20 @@ class Settings(BaseSettings):
     database_alembic_auto_remap_enabled: bool = True
     database_migration_lock_timeout_seconds: float = Field(default=300.0, gt=0)
     upstream_base_url: str = "https://chatgpt.com/backend-api"
+    # T3 → dashboard (deprecated env alias, remove next minor)
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     stream_idle_timeout_seconds: float = Field(default=7200.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
     # Applies to both upstream SSE event buffering and upstream websocket message
     # frames. Keep the default aligned with the common 16 MiB websocket ceiling so
@@ -287,6 +293,7 @@ class Settings(BaseSettings):
     # must not lose its claim mid-work.
     token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
     auth_guardian_enabled: bool = True
+    # T3 → dashboard (deprecated env alias, remove next minor)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
     token_refresh_interval_days: int = 8
     usage_fetch_timeout_seconds: float = 10.0

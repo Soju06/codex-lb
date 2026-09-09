@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
+
+from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 
 # Re-exported: the resolver lives in ``app.core.config.inheritable`` so hot
 # paths in ``app.core`` share it without importing this module.
@@ -18,6 +22,8 @@ from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
     normalize_additional_quota_key,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,9 +90,19 @@ class DashboardSettingsData:
     deterministic_failover_enabled: bool
     circuit_breaker_enabled: bool
     version: int
+    # C2-1 timeouts: effective values (dashboard column, else environment,
+    # else code default); the column values are exposed through ``provenance``.
+    upstream_connect_timeout_seconds: float
+    proxy_request_budget_seconds: float
+    compact_request_budget_seconds: float
+    transcription_request_budget_seconds: float
+    stream_idle_timeout_seconds: float
+    proxy_downstream_websocket_idle_timeout_seconds: float
+    sse_keepalive_interval_seconds: float
+    # end C2-1 timeouts
     # Effective value, source and fallbacks of every inheritable setting, keyed
     # by setting name; the settings API exposes it as ``provenance``.
-    provenance: Mapping[str, InheritableValue[int] | InheritableValue[bool]] = field(default_factory=dict)
+    provenance: Mapping[str, InheritableValue[Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +175,23 @@ class DashboardSettingsUpdateData:
     clear_deterministic_failover_enabled: bool = False
     circuit_breaker_enabled: bool | None = None
     clear_circuit_breaker_enabled: bool = False
+    # C2-1 timeouts (tri-state like the caps: value = store, clear = NULL,
+    # neither = untouched).
+    upstream_connect_timeout_seconds: float | None = None
+    clear_upstream_connect_timeout_seconds: bool = False
+    proxy_request_budget_seconds: float | None = None
+    clear_proxy_request_budget_seconds: bool = False
+    compact_request_budget_seconds: float | None = None
+    clear_compact_request_budget_seconds: bool = False
+    transcription_request_budget_seconds: float | None = None
+    clear_transcription_request_budget_seconds: bool = False
+    stream_idle_timeout_seconds: float | None = None
+    clear_stream_idle_timeout_seconds: bool = False
+    proxy_downstream_websocket_idle_timeout_seconds: float | None = None
+    clear_proxy_downstream_websocket_idle_timeout_seconds: bool = False
+    sse_keepalive_interval_seconds: float | None = None
+    clear_sse_keepalive_interval_seconds: bool = False
+    # end C2-1 timeouts
 
 
 class SettingsService:
@@ -251,6 +284,24 @@ class SettingsService:
             clear_deterministic_failover_enabled=payload.clear_deterministic_failover_enabled,
             circuit_breaker_enabled=payload.circuit_breaker_enabled,
             clear_circuit_breaker_enabled=payload.clear_circuit_breaker_enabled,
+            # C2-1 timeouts
+            upstream_connect_timeout_seconds=payload.upstream_connect_timeout_seconds,
+            clear_upstream_connect_timeout_seconds=payload.clear_upstream_connect_timeout_seconds,
+            proxy_request_budget_seconds=payload.proxy_request_budget_seconds,
+            clear_proxy_request_budget_seconds=payload.clear_proxy_request_budget_seconds,
+            compact_request_budget_seconds=payload.compact_request_budget_seconds,
+            clear_compact_request_budget_seconds=payload.clear_compact_request_budget_seconds,
+            transcription_request_budget_seconds=payload.transcription_request_budget_seconds,
+            clear_transcription_request_budget_seconds=payload.clear_transcription_request_budget_seconds,
+            stream_idle_timeout_seconds=payload.stream_idle_timeout_seconds,
+            clear_stream_idle_timeout_seconds=payload.clear_stream_idle_timeout_seconds,
+            proxy_downstream_websocket_idle_timeout_seconds=payload.proxy_downstream_websocket_idle_timeout_seconds,
+            clear_proxy_downstream_websocket_idle_timeout_seconds=(
+                payload.clear_proxy_downstream_websocket_idle_timeout_seconds
+            ),
+            sse_keepalive_interval_seconds=payload.sse_keepalive_interval_seconds,
+            clear_sse_keepalive_interval_seconds=payload.clear_sse_keepalive_interval_seconds,
+            # end C2-1 timeouts
         )
         return _settings_data(row)
 
@@ -264,18 +315,18 @@ _ENVIRONMENT_INHERITABLE_SETTINGS = (
     "proxy_account_stream_limit",
     "proxy_account_stream_recovery_reserve",
     "proxy_api_key_fair_share_congestion_threshold_pct",
+    *DASHBOARD_TIMEOUT_SETTINGS,  # C2-1 timeouts
 )
 # Retention has no environment fallback: NULL = never set from the dashboard =
 # disabled; 0 = explicitly disabled.
 _RETENTION_DISABLED_DAYS = 0
 
 
-def _resolve_environment_inheritable(row: DashboardSettings, name: str) -> InheritableValue[int]:
-    return resolve_inheritable(
-        getattr(row, name),
-        getattr(get_settings(), name),
-        Settings.model_fields[name].default,
-    )
+def _resolve_environment_inheritable(row: DashboardSettings, name: str) -> InheritableValue[Any]:
+    default = Settings.model_fields[name].default
+    # ``Settings`` always carries every field; startup-settings fakes in tests
+    # may carry only the fields they exercise, so fall back to the code default.
+    return resolve_inheritable(getattr(row, name), getattr(get_settings(), name, default), default)
 
 
 def _resolve_environment_toggle(row: DashboardSettings, name: str) -> InheritableValue[bool]:
@@ -284,10 +335,32 @@ def _resolve_environment_toggle(row: DashboardSettings, name: str) -> Inheritabl
     return resolve_inheritable(getattr(row, name), bool(getattr(get_settings(), name, default)), default)
 
 
+def warn_environment_shadowed_by_dashboard(row: DashboardSettings, settings: Settings | None = None) -> list[str]:
+    """Log one startup WARN naming env vars that are set but ignored because the dashboard owns the value.
+
+    Only settings whose environment variable is explicitly set (``model_fields_set``)
+    AND whose dashboard column is non-NULL are reported, so an operator who
+    edits the variable learns why nothing changed. Returns the names for tests.
+    """
+    environment = settings if settings is not None else get_settings()
+    shadowed = [
+        name
+        for name in _ENVIRONMENT_INHERITABLE_SETTINGS
+        if name in environment.model_fields_set and getattr(row, name, None) is not None
+    ]
+    if shadowed:
+        logger.warning(
+            "environment value(s) ignored because the dashboard owns the setting: %s "
+            "(Settings -> Advanced; clear the dashboard value to inherit the environment again)",
+            ", ".join(f"CODEX_LB_{name.upper()}" for name in shadowed),
+        )
+    return shadowed
+
+
 def _resolve_inheritable_settings(
     row: DashboardSettings,
-) -> dict[str, InheritableValue[int] | InheritableValue[bool]]:
-    resolved: dict[str, InheritableValue[int] | InheritableValue[bool]] = {
+) -> dict[str, InheritableValue[Any]]:
+    resolved: dict[str, InheritableValue[Any]] = {
         name: _resolve_environment_inheritable(row, name) for name in _ENVIRONMENT_INHERITABLE_SETTINGS
     }
     resolved["request_log_retention_days"] = resolve_inheritable(
@@ -373,6 +446,17 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         deterministic_failover_enabled=bool(resolved["deterministic_failover_enabled"].value),
         circuit_breaker_enabled=bool(resolved["circuit_breaker_enabled"].value),
         version=row.version,
+        # C2-1 timeouts
+        upstream_connect_timeout_seconds=float(resolved["upstream_connect_timeout_seconds"].value),
+        proxy_request_budget_seconds=float(resolved["proxy_request_budget_seconds"].value),
+        compact_request_budget_seconds=float(resolved["compact_request_budget_seconds"].value),
+        transcription_request_budget_seconds=float(resolved["transcription_request_budget_seconds"].value),
+        stream_idle_timeout_seconds=float(resolved["stream_idle_timeout_seconds"].value),
+        proxy_downstream_websocket_idle_timeout_seconds=float(
+            resolved["proxy_downstream_websocket_idle_timeout_seconds"].value
+        ),
+        sse_keepalive_interval_seconds=float(resolved["sse_keepalive_interval_seconds"].value),
+        # end C2-1 timeouts
         provenance=resolved,
     )
 

@@ -163,6 +163,23 @@ class SettingsRepository:
         clear_deterministic_failover_enabled: bool = False,
         circuit_breaker_enabled: bool | None = None,
         clear_circuit_breaker_enabled: bool = False,
+        # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
+        # inherit, neither = untouched).
+        upstream_connect_timeout_seconds: float | None = None,
+        clear_upstream_connect_timeout_seconds: bool = False,
+        proxy_request_budget_seconds: float | None = None,
+        clear_proxy_request_budget_seconds: bool = False,
+        compact_request_budget_seconds: float | None = None,
+        clear_compact_request_budget_seconds: bool = False,
+        transcription_request_budget_seconds: float | None = None,
+        clear_transcription_request_budget_seconds: bool = False,
+        stream_idle_timeout_seconds: float | None = None,
+        clear_stream_idle_timeout_seconds: bool = False,
+        proxy_downstream_websocket_idle_timeout_seconds: float | None = None,
+        clear_proxy_downstream_websocket_idle_timeout_seconds: bool = False,
+        sse_keepalive_interval_seconds: float | None = None,
+        clear_sse_keepalive_interval_seconds: bool = False,
+        # end C2-1 timeouts
         expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -313,6 +330,33 @@ class SettingsRepository:
             settings.circuit_breaker_enabled = None
         elif circuit_breaker_enabled is not None:
             settings.circuit_breaker_enabled = circuit_breaker_enabled
+        # C2-1 timeouts
+        for column_name, value, clear in (
+            (
+                "upstream_connect_timeout_seconds",
+                upstream_connect_timeout_seconds,
+                clear_upstream_connect_timeout_seconds,
+            ),
+            ("proxy_request_budget_seconds", proxy_request_budget_seconds, clear_proxy_request_budget_seconds),
+            ("compact_request_budget_seconds", compact_request_budget_seconds, clear_compact_request_budget_seconds),
+            (
+                "transcription_request_budget_seconds",
+                transcription_request_budget_seconds,
+                clear_transcription_request_budget_seconds,
+            ),
+            ("stream_idle_timeout_seconds", stream_idle_timeout_seconds, clear_stream_idle_timeout_seconds),
+            (
+                "proxy_downstream_websocket_idle_timeout_seconds",
+                proxy_downstream_websocket_idle_timeout_seconds,
+                clear_proxy_downstream_websocket_idle_timeout_seconds,
+            ),
+            ("sse_keepalive_interval_seconds", sse_keepalive_interval_seconds, clear_sse_keepalive_interval_seconds),
+        ):
+            if clear:
+                setattr(settings, column_name, None)
+            elif value is not None:
+                setattr(settings, column_name, value)
+        # end C2-1 timeouts
         # Force the optimistic-version CAS to run even when the payload makes no
         # net change. `version_id_col` only raises `StaleDataError` when the
         # flush emits an ORM UPDATE; a full-row save that assigns values all

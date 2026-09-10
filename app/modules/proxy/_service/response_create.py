@@ -15,20 +15,27 @@ from uuid import uuid4
 
 from app.core.clients.proxy import (
     _AGENT_CONTROL_OUTPUT_ITEM_TYPES,
+    _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE,
     CODEX_INSTALLATION_ID_HEADER,
+    UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
     ImageFetchSession,
     ProxyResponseError,
     _agent_control_tool_output_occurrences,
     _finalize_responses_lite_reasoning_context,
     _historical_agent_control_output_occurrences,
     _inline_content_images,
+    _is_inline_image_reference,
     _normalize_responses_lite_websocket_client_metadata,
     _payload_has_responses_lite_websocket_marker,
     _payload_uses_responses_lite,
+    _response_create_inline_image_notice_item,
+    _response_create_recent_suffix_start,
+    _response_create_too_large_error_envelope,
+    _should_slim_historical_tool_output,
+    _slim_historical_response_content,
     apply_codex_installation_metadata,
 )
 from app.core.config.settings import DEFAULT_HOME_DIR, get_settings
-from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
@@ -42,16 +49,12 @@ from app.modules.proxy._service.support import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 
-_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = UPSTREAM_RESPONSE_CREATE_MAX_BYTES
 _UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
 _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS = 10
 _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE = (
     "[codex-lb omitted {count} historical input items to fit upstream websocket budget]"
 )
-_RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
-    "[codex-lb omitted historical tool output ({bytes} bytes) to fit upstream websocket budget]"
-)
-_RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline image to fit upstream websocket budget]"
 _OVERSIZED_RESPONSE_CREATE_DUMP_DIR: Path | None = None
 _RESPONSE_CREATE_DUMP_SUFFIX = ".response-create.json.gz"
 _RESPONSE_CREATE_META_SUFFIX = ".meta.json"
@@ -437,35 +440,6 @@ def _response_output_item_done_tool_call(payload: dict[str, JsonValue] | None) -
     return call_id, item_type
 
 
-def _response_create_too_large_error_envelope(
-    actual_bytes: int,
-    max_bytes: int,
-) -> OpenAIErrorEnvelope:
-    payload = openai_error(
-        "payload_too_large",
-        (
-            "response.create is too large for upstream websocket "
-            f"({actual_bytes} bytes > {max_bytes} bytes). "
-            "Reduce historical images/screenshots or compact the thread."
-        ),
-        error_type="invalid_request_error",
-    )
-    payload["error"]["param"] = "input"
-    return payload
-
-
-def _response_create_recent_suffix_start(input_items: list[JsonValue]) -> int:
-    last_user_index: int | None = None
-    for index, item in enumerate(input_items):
-        if not is_json_mapping(item):
-            continue
-        if item.get("role") == "user":
-            last_user_index = index
-    if last_user_index is not None:
-        return last_user_index
-    return 0
-
-
 def _slim_historical_response_input_item(
     item: JsonValue,
     *,
@@ -515,50 +489,6 @@ def _slim_historical_response_input_item(
     return item_mapping, tool_outputs_slimmed, images_slimmed
 
 
-def _slim_historical_response_content(content: JsonValue) -> tuple[JsonValue, int]:
-    if is_json_mapping(content):
-        return _slim_historical_response_content_part(content)
-    if not isinstance(content, list):
-        return content, 0
-
-    slimmed_parts: list[JsonValue] = []
-    images_slimmed = 0
-    for part in content:
-        slimmed_part, part_images_slimmed = _slim_historical_response_content_part(part)
-        slimmed_parts.append(slimmed_part)
-        images_slimmed += part_images_slimmed
-    return slimmed_parts, images_slimmed
-
-
-def _slim_historical_response_content_part(part: JsonValue) -> tuple[JsonValue, int]:
-    if not is_json_mapping(part):
-        return part, 0
-
-    part_mapping = dict(cast(dict[str, JsonValue], deepcopy(part)))
-    part_type = part_mapping.get("type")
-    if part_type == "input_image" and _is_inline_image_reference(part_mapping.get("image_url")):
-        return _response_create_inline_image_notice_part(), 1
-
-    if part_type == "image_url":
-        image_url_value = part_mapping.get("image_url")
-        if is_json_mapping(image_url_value):
-            image_url = image_url_value.get("url")
-        else:
-            image_url = image_url_value
-        if _is_inline_image_reference(image_url):
-            return _response_create_inline_image_notice_part(), 1
-
-    return part_mapping, 0
-
-
-def _response_create_inline_image_notice_part() -> dict[str, JsonValue]:
-    return {"type": "input_text", "text": _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
-
-
-def _response_create_inline_image_notice_item() -> dict[str, JsonValue]:
-    return {"role": "user", "content": [_response_create_inline_image_notice_part()]}
-
-
 def _response_create_history_omission_notice_item(count: int) -> dict[str, JsonValue]:
     return {
         "role": "assistant",
@@ -569,10 +499,6 @@ def _response_create_history_omission_notice_item(count: int) -> dict[str, JsonV
             }
         ],
     }
-
-
-def _is_inline_image_reference(value: JsonValue) -> bool:
-    return isinstance(value, str) and value.startswith("data:image/")
 
 
 async def _inline_top_level_input_image_urls(
@@ -624,10 +550,6 @@ def _count_external_image_urls(payload: dict[str, JsonValue]) -> int:
             if isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
                 count += 1
     return count
-
-
-def _should_slim_historical_tool_output(output: str) -> bool:
-    return "data:image/" in output or len(output.encode("utf-8")) > 32 * 1024
 
 
 def _enforce_response_create_size_limit(request_state: _WebSocketRequestState) -> None:

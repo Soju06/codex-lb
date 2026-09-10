@@ -3,17 +3,18 @@ import { describe, expect, it } from "vitest";
 import {
   DashboardSettingsSchema,
   SettingsUpdateRequestSchema,
+  SubscriptionOverflowPreflightSchema,
   TelemetryConsentSchema,
   TelemetrySnapshotEnvelopeSchema,
   UpstreamProxyAdminSchema,
 } from "@/features/settings/schemas";
-import { createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
+import { createDashboardSettings, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
 
 describe("DashboardSettingsSchema", () => {
   it("parses settings payload", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       upstreamProxyRoutingEnabled: true,
       upstreamProxyDefaultPoolId: "pool_1",
       preferEarlierResetAccounts: false,
@@ -56,7 +57,7 @@ describe("DashboardSettingsSchema", () => {
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
-    expect(parsed.upstreamStreamTransport).toBe("default");
+    expect(parsed.upstreamStreamTransport).toBe("auto");
     expect(parsed.upstreamProxyRoutingEnabled).toBe(true);
     expect(parsed.upstreamProxyDefaultPoolId).toBe("pool_1");
     expect(parsed.routingStrategy).toBe("relative_availability");
@@ -92,6 +93,19 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(true);
   });
 
+  it("reads an inherited in-flight penalty above the dashboard write cap", () => {
+    // The environment field has no upper bound; only dashboard writes cap at 100.
+    const parsed = DashboardSettingsSchema.parse({
+      ...createDashboardSettings(),
+      proxyAccountInflightPenaltyPct: 150,
+      provenance: { proxy_account_inflight_penalty_pct: { source: "env", envValue: 150, default: 2.5 } },
+    });
+    expect(parsed.proxyAccountInflightPenaltyPct).toBe(150);
+    expect(parsed.provenance?.proxy_account_inflight_penalty_pct?.source).toBe("env");
+    expect(SettingsUpdateRequestSchema.safeParse({ proxyAccountInflightPenaltyPct: 150 }).success).toBe(false);
+    expect(SettingsUpdateRequestSchema.safeParse({ proxyAccountInflightPenaltyPct: null }).success).toBe(true);
+  });
+
   it("parses legacy settings payload and applies defaults for missing routing fields", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
@@ -104,7 +118,7 @@ describe("DashboardSettingsSchema", () => {
       hideUpstreamQuotaFromApiKeys: false,
     });
 
-    expect(parsed.upstreamStreamTransport).toBe("default");
+    expect(parsed.upstreamStreamTransport).toBe("auto");
     expect(parsed.upstreamProxyRoutingEnabled).toBe(false);
     expect(parsed.upstreamProxyDefaultPoolId).toBeNull();
     expect(parsed.routingStrategy).toBe("usage_weighted");
@@ -137,7 +151,7 @@ describe("DashboardSettingsSchema", () => {
   it("falls back to the legacy sticky threshold during mixed-version rollout", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -156,7 +170,7 @@ describe("DashboardSettingsSchema", () => {
   it("uses local defaults when mixed-version settings omit sticky thresholds", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -627,5 +641,99 @@ describe("retention fields", () => {
   it("rejects override updates above 3650 days", () => {
     expect(() => SettingsUpdateRequestSchema.parse({ requestLogRetentionOverrideDays: 3651 })).toThrow();
     expect(() => SettingsUpdateRequestSchema.parse({ usageHistoryRetentionOverrideDays: 3651 })).toThrow();
+  });
+});
+
+describe("subscription overflow fields", () => {
+  it("defaults the designation and drain deadline to null for older backends", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "auto",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      apiKeyAuthEnabled: false,
+    });
+
+    expect(parsed.subscriptionOverflowSourceId).toBeNull();
+    expect(parsed.subscriptionOverflowDrainUntil).toBeNull();
+    expect(parsed.subscriptionOverflowPinsExpireBy).toBeNull();
+  });
+
+  it("round-trips a designation, an ISO drain deadline and the derived pin expiry", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "auto",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      apiKeyAuthEnabled: false,
+      subscriptionOverflowSourceId: "src_1",
+      subscriptionOverflowDrainUntil: "2026-10-07T12:34:56.123456Z",
+      subscriptionOverflowPinsExpireBy: "2026-09-15T12:34:56.123456Z",
+    });
+
+    expect(parsed.subscriptionOverflowSourceId).toBe("src_1");
+    expect(parsed.subscriptionOverflowDrainUntil).toBe("2026-10-07T12:34:56.123456Z");
+    expect(parsed.subscriptionOverflowPinsExpireBy).toBe("2026-09-15T12:34:56.123456Z");
+  });
+
+  it("accepts the tri-state designation on update requests and rejects the read-only deadlines", () => {
+    expect(SettingsUpdateRequestSchema.parse({ subscriptionOverflowSourceId: "src_1" }).subscriptionOverflowSourceId).toBe(
+      "src_1",
+    );
+    expect(SettingsUpdateRequestSchema.parse({ subscriptionOverflowSourceId: null }).subscriptionOverflowSourceId).toBeNull();
+    expect(SettingsUpdateRequestSchema.parse({}).subscriptionOverflowSourceId).toBeUndefined();
+    expect(
+      "subscriptionOverflowDrainUntil" in SettingsUpdateRequestSchema.parse({ subscriptionOverflowDrainUntil: "x" }),
+    ).toBe(false);
+    expect(
+      "subscriptionOverflowPinsExpireBy" in
+        SettingsUpdateRequestSchema.parse({ subscriptionOverflowPinsExpireBy: "x" }),
+    ).toBe(false);
+  });
+
+  it("parses the preflight report", () => {
+    const preflight = SubscriptionOverflowPreflightSchema.parse({
+      sourceId: "src_1",
+      sourceName: "vLLM",
+      sourceEnabled: true,
+      eligible: false,
+      blockers: ["source_responses_unsupported"],
+      drainUntil: null,
+      servedModels: [
+        {
+          slug: "gpt-5.4",
+          enabled: true,
+          neverOverflows: false,
+          undeclaredToolTypes: ["shell"],
+          supportsVision: false,
+          supportsStreaming: true,
+          priced: false,
+          contextWindowMismatch: { registry: 272000, source: null, maxOutputTokens: null },
+          warnings: ["undeclared_tool_types", "context_window_missing"],
+        },
+      ],
+      missingModels: [],
+      scopedApiKeyCount: 0,
+      livePinCount: 0,
+      tombstoneCount: 0,
+    });
+
+    expect(preflight.eligible).toBe(false);
+    expect(preflight.servedModels[0].neverOverflowsReason).toBeNull();
+    expect(preflight.servedModels[0].contextWindowMismatch).toEqual({
+      registry: 272000,
+      source: null,
+      maxOutputTokens: null,
+    });
   });
 });

@@ -22,6 +22,9 @@ export function buildSettingsUpdateRequest(
     relativeAvailabilityPower: settings.relativeAvailabilityPower,
     relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
     singleAccountId: settings.singleAccountId,
+    // Always sent, so "Off" reaches the backend as an explicit null rather
+    // than an omitted (unchanged) field.
+    subscriptionOverflowSourceId: settings.subscriptionOverflowSourceId,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
     dashboardSessionTtlSeconds: settings.dashboardSessionTtlSeconds,
     warmupModel: settings.warmupModel,

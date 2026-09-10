@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -203,6 +202,7 @@ def _additional_quota_eligibility(
     latest_secondary: dict[str, AdditionalUsageHistory],
     fresh_primary: dict[str, AdditionalUsageHistory],
     fresh_secondary: dict[str, AdditionalUsageHistory],
+    now: float,
 ) -> str:
     latest_primary_entry = latest_primary.get(account_id)
     latest_secondary_entry = latest_secondary.get(account_id)
@@ -223,9 +223,9 @@ def _additional_quota_eligibility(
     if latest_secondary_entry is not None and secondary_entry is None:
         return "data_unavailable"
 
-    if primary_entry is not None and _additional_usage_is_exhausted(primary_entry):
+    if primary_entry is not None and _additional_usage_is_exhausted(primary_entry, now=now):
         return "quota_exhausted"
-    if secondary_entry is not None and _additional_usage_is_exhausted(secondary_entry):
+    if secondary_entry is not None and _additional_usage_is_exhausted(secondary_entry, now=now):
         return "quota_exhausted"
     return "eligible"
 
@@ -242,9 +242,9 @@ def _additional_quota_applies_to_plan(*, quota_key: str | None, plan_type: str |
     return normalized_plan not in _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES
 
 
-def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
+def _additional_usage_is_exhausted(entry: AdditionalUsageHistory, *, now: float) -> bool:
     if entry.used_percent is None:
         return False
-    if entry.reset_at is not None and int(entry.reset_at) <= int(time.time()):
+    if entry.reset_at is not None and int(entry.reset_at) <= int(now):
         return False
     return float(entry.used_percent) >= 100.0

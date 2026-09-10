@@ -106,15 +106,19 @@ describe("DataRetentionSettings", () => {
     expect(screen.getByRole("button", { name: "Save retention" })).toBeDisabled();
   });
 
-  it("shows empty inputs with the inherited effective value as a hint while no override is set", () => {
+  it("shows empty inputs with the shared Default badge while no value is stored", () => {
     render(
       <DataRetentionSettings
         settings={{
           ...baseSettings,
-          requestLogRetentionDays: 90,
+          requestLogRetentionDays: 0,
           usageHistoryRetentionDays: 0,
           requestLogRetentionOverrideDays: null,
           usageHistoryRetentionOverrideDays: null,
+          provenance: {
+            request_log_retention_days: { source: "default", envValue: null, default: 0 },
+            usage_history_retention_days: { source: "default", envValue: null, default: 0 },
+          },
         }}
         busy={false}
         onSave={vi.fn().mockResolvedValue(undefined)}
@@ -122,13 +126,56 @@ describe("DataRetentionSettings", () => {
     );
     expect(screen.getByLabelText("Request log retention days")).toHaveDisplayValue("");
     expect(screen.getByLabelText("Usage history retention days")).toHaveDisplayValue("");
-    expect(
-      screen.getByText("Inherited: 90 days (environment default; 0 = disabled)"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("Inherited: 0 days (environment default; 0 = disabled)"),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText("Default (0)")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Reset to inherited" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not configured/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save retention" })).toBeDisabled();
+  });
+
+  it("offers reset to inherited for a dashboard-owned window and clears only that field", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const settings = {
+      ...baseSettings,
+      requestLogRetentionDays: 90,
+      usageHistoryRetentionDays: 0,
+      requestLogRetentionOverrideDays: 90,
+      usageHistoryRetentionOverrideDays: null,
+      provenance: {
+        request_log_retention_days: { source: "dashboard" as const, envValue: null, default: 0 },
+        usage_history_retention_days: { source: "default" as const, envValue: null, default: 0 },
+      },
+    };
+
+    render(<DataRetentionSettings settings={settings} busy={false} onSave={onSave} />);
+
+    expect(screen.getByText("Default (0)")).toBeInTheDocument();
+    const reset = screen.getByRole("button", { name: "Reset to inherited" });
+    await user.click(reset);
+
+    expect(onSave).toHaveBeenCalledWith(
+      buildSettingsUpdateRequest(settings, { requestLogRetentionOverrideDays: null }),
+    );
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty("usageHistoryRetentionOverrideDays");
+  });
+
+  it("renders no badge or hint against a backend that reports no provenance", () => {
+    render(
+      <DataRetentionSettings
+        settings={{
+          ...baseSettings,
+          requestLogRetentionDays: 90,
+          requestLogRetentionOverrideDays: null,
+          provenance: undefined,
+        }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    expect(screen.getByLabelText("Request log retention days")).toHaveDisplayValue("");
+    expect(screen.queryByText(/Default \(/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not configured/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reset to inherited" })).not.toBeInTheDocument();
   });
 
   it("submits only the edited override field", async () => {
@@ -157,7 +204,7 @@ describe("DataRetentionSettings", () => {
       <DataRetentionSettings
         settings={{
           ...baseSettings,
-          requestLogRetentionDays: 90, // effective via env alias
+          requestLogRetentionDays: 90, // effective value reported by the server
           requestLogRetentionOverrideDays: null,
         }}
         busy={false}

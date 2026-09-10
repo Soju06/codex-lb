@@ -1,11 +1,19 @@
-"""Subscription-exhaustion overflow designation (#2123 WP-B).
+"""Subscription-exhaustion overflow designation: the dashboard side (#2123 WP-B, WP-G).
 
 Dashboard-only helpers behind the ``subscription_overflow_source_id`` setting:
 the drain-deadline arithmetic, the eligibility rule a designated source must
-satisfy, and the read-only preflight report. Nothing on the request path reads
-the designation in this stage -- ``tests/unit/test_subscription_overflow_inert.py``
-pins that -- so overflow routing stays unreachable until the routing stages
-(WP-C1/WP-C2) deliberately relax the ratchet and import the constants below.
+satisfy, the read-only preflight report, and the overview's windowed spend and
+live-pin aggregate. The pin lifetimes and ``PIN_KIND_THREAD`` are defined here
+and imported by the routing stage's pin primitive so the 29-day drain window is
+written down once.
+
+This module never touches the request path itself; the positive ratchet in
+``tests/unit/test_subscription_overflow_inert.py`` records which production files
+may name the designation, which may name the pin table, and which may import
+this module (the settings and model-source APIs, plus the dashboard overview's
+repository). Nothing here imports ``app.modules.proxy.overflow``: the decision
+module owns the load-balancer probe, the pin primitive and the dispatch owner,
+and none of them belong in a dashboard read's import graph.
 """
 
 from __future__ import annotations
@@ -13,9 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import case, func, literal, select
+from sqlalchemy import Select, case, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import Select
 
 from app.core.exceptions import DashboardBadRequestError
 from app.core.openai.model_registry import (
@@ -322,7 +329,6 @@ class SubscriptionOverflowActivity:
     cost_usd: float
     usage_less_requests: int
     live_pins: int
-    ever_dispatched: bool
 
 
 def _aware_utc(value: datetime) -> datetime:
@@ -420,7 +426,6 @@ async def load_subscription_overflow_activity(
         cost_usd=cost_usd,
         usage_less_requests=usage_less_requests,
         live_pins=live_pins,
-        ever_dispatched=ever_dispatched,
     )
 
 

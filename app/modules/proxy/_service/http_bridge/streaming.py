@@ -2674,25 +2674,14 @@ class _HTTPBridgeStreamingMixin:
                         request_scope_id=owner_recovery_scope_id,
                     )
                 retry_request_state: _WebSocketRequestState | None = None
-                retry_unowned_lifecycle: _DeferredAccountBackoffLifecycle | None = None
                 try:
-                    retry_api_key_reservation = api_key_reservation
-                    retry_reservation_reacquired = False
-                    if api_key is not None and api_key_reservation is not None:
-                        retry_api_key_reservation = await self._reserve_websocket_api_key_usage(
-                            api_key,
-                            request_model=recovery_payload.model,
-                            request_service_tier=_normalize_service_tier_value(
-                                dict(recovery_payload.to_payload()).get("service_tier"),
-                            ),
-                            request_usage_budget=estimate_api_key_request_usage(recovery_payload),
-                        )
-                        retry_reservation_reacquired = True
-                        retry_unowned_lifecycle = begin_bridge_lifecycle(retry_api_key_reservation)
-
                     retry_request_state, retry_text_data = prepare_bridge_request(
                         recovery_payload,
-                        reservation=retry_api_key_reservation,
+                        # The owner rejected before dispatch, so the origin's
+                        # reservation is transferred to the local request.
+                        # Reacquiring here would consume quota twice and leave
+                        # the original hold without its lifecycle owner.
+                        reservation=request_state.api_key_reservation,
                     )
                     retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                     retry_request_state.affinity_policy = affinity
@@ -2748,21 +2737,6 @@ class _HTTPBridgeStreamingMixin:
                         request_deadline=request_deadline,
                     ):
                         yield event_block
-                except BaseException:
-                    if retry_reservation_reacquired and retry_api_key_reservation is not None:
-                        retry_lifecycle = (
-                            retry_request_state.deferred_account_backoff_lifecycle
-                            if retry_request_state is not None
-                            else retry_unowned_lifecycle
-                        )
-                        try:
-                            await release_unowned_bridge_lifecycle(retry_lifecycle, retry_request_state)
-                        except Exception:
-                            logger.warning(
-                                "Failed to release owner-recovery HTTP bridge reservation",
-                                exc_info=True,
-                            )
-                    raise
                 finally:
                     if owner_recovery_scope_id is not None:
                         _release_http_bridge_unanchored_handoff(

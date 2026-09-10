@@ -39,7 +39,6 @@ from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
 from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
-    OpenAIErrorEnvelope,
     openai_error,
     response_failed_event,
 )
@@ -86,6 +85,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _capture_http_bridge_denied_anchor_fence,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_client_full_history_recovery_error,
     _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
@@ -106,6 +106,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_requires_cluster_registration,
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _http_bridge_runtime_config,
+    _http_bridge_server_anchored_replay_enabled,
     _http_bridge_should_attempt_local_bootstrap_rebind,
     _http_bridge_should_attempt_local_previous_response_recovery,
     _http_bridge_should_attempt_soft_affinity_reroute,
@@ -134,7 +135,6 @@ from app.modules.proxy._service.http_bridge.quarantine import (
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
-    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -183,6 +183,9 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.observability import (
+    record_http_bridge_routing,
+)
 from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
@@ -202,6 +205,7 @@ from app.modules.proxy._service.support import (
     _signal_propagated_responses_service_cleanup_ready,
     _ttft_event_visible_at,
     _WebSocketRequestState,
+    configured_upstream_stream_transport,
     mark_upstream_websocket_transport_failure,
     upstream_websocket_transport_recently_failed,
     websocket_connect_transport_failure_code,
@@ -468,33 +472,6 @@ def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketR
         and request_state.response_event_count == 0
         and not request_state.fresh_upstream_request_is_retry_safe
     )
-
-
-def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
-    """Return whether the one permitted server-side anchored replay is unused."""
-    settings = _service_get_settings()
-    return (
-        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
-        in {"server_anchored_replay_once", "server_indefinite_recovery"}
-        and request_state.previous_response_id is not None
-        and request_state.response_id is None
-        and request_state.response_event_count == 0
-        and (
-            request_state.replay_count == 0
-            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
-            == "server_indefinite_recovery"
-        )
-    )
-
-
-def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
-    payload = openai_error(
-        "previous_response_not_found",
-        "Previous response was not found; retry without previous_response_id.",
-        error_type="invalid_request_error",
-    )
-    payload["error"]["param"] = "previous_response_id"
-    return payload
 
 
 _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL = "The previous bridge owner is no longer available."
@@ -1000,8 +977,9 @@ class _HTTPBridgeStreamingMixin:
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             require_forwarded_file_owner=forwarded_request,
         )
-        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
+        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes()
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
+            record_http_bridge_routing(stage="bypass", reason="payload_size")
             logger.info(
                 "stream_responses bypassing http bridge for large payload size=%s budget=%s request_id=%s",
                 payload_size_estimate_bytes,
@@ -1013,6 +991,7 @@ class _HTTPBridgeStreamingMixin:
         image_generation_request = _responses_request_uses_image_generation(payload)
         force_upstream_stream_transport = "http" if image_request else None
         if runtime_config.enabled and (image_request or image_generation_request):
+            record_http_bridge_routing(stage="bypass", reason="image")
             logger.info(
                 "stream_responses bypassing http bridge for image-capable request input_image=%s "
                 "image_generation=%s request_id=%s",
@@ -1024,10 +1003,8 @@ class _HTTPBridgeStreamingMixin:
         # The bridge exists to hold upstream websocket sessions, so a pinned
         # "http" upstream transport must bypass it; without this gate the
         # dashboard pin is silently ignored for bridged follow-up turns.
-        configured_upstream_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
-        if configured_upstream_transport == "default":
-            configured_upstream_transport = getattr(_service_get_settings(), "upstream_stream_transport", "auto")
-        if runtime_config.enabled and configured_upstream_transport == "http":
+        if runtime_config.enabled and configured_upstream_stream_transport(dashboard_settings) == "http":
+            record_http_bridge_routing(stage="bypass", reason="explicit_http")
             logger.info(
                 "stream_responses bypassing http bridge for pinned http upstream transport request_id=%s",
                 request_id,
@@ -1041,6 +1018,7 @@ class _HTTPBridgeStreamingMixin:
         # unavailable websocket upstream.
         if force_upstream_stream_transport is None and upstream_websocket_transport_recently_failed():
             if runtime_config.enabled:
+                record_http_bridge_routing(stage="bypass", reason="recent_ws_failure")
                 logger.info(
                     "stream_responses bypassing http bridge for recent upstream websocket transport failure "
                     "request_id=%s",
@@ -2898,6 +2876,7 @@ class _HTTPBridgeStreamingMixin:
             and not fresh_reattach_anchor_suppressed_quarantined
             and not proxy_injected_previous_response_id
             and effective_payload.previous_response_id is None
+            and not effective_payload.conversation
             and session.last_completed_response_id is not None
             and (session_anchor_trimmable or recovery_session_can_anchor)
         )
@@ -3461,6 +3440,7 @@ class _HTTPBridgeStreamingMixin:
                             max_sessions=max_sessions,
                             previous_response_id=None,
                             gateway_safe_mode=runtime_config.gateway_safe_mode,
+                            request_service_tier=request_state.requested_service_tier,
                             allow_forward_to_owner=False,
                             forwarded_request=forwarded_request,
                             durable_lookup=None,
@@ -4199,7 +4179,6 @@ class _HTTPBridgeStreamingMixin:
                     "fail_closed",
                 )
                 in {"server_anchored_replay_once", "server_indefinite_recovery"}
-                and getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
                 and request_state.hard_continuity_anchor
                 and session.durable_session_id is not None
                 and session.durable_owner_epoch is not None
@@ -4376,12 +4355,11 @@ class _HTTPBridgeStreamingMixin:
             if observed_response_events > 0 or consecutive_failures is None:
                 return
 
-            # Same capped, fenced flow as the idle-recovery exhaustion: the
-            # consult applies the effective (circuit-capped) threshold and
-            # captures the continuity the abandonment fences on, so this
-            # retry-transport funnel can neither wait past the opened
-            # circuit for the raw configured threshold nor erase continuity
-            # a sibling registered during the window. Only the strike above
+            # Same fenced flow as the idle-recovery exhaustion: the consult
+            # applies the circuit threshold and captures the continuity the
+            # abandonment fences on, so this retry-transport funnel can
+            # neither wait past the opened circuit nor erase continuity a
+            # sibling registered during the window. Only the strike above
             # runs before publication; the consult and abandonment run as
             # an owned settlement task the stream finalizer awaits, so a
             # slow durable store never delays the client-visible terminal
@@ -4398,11 +4376,6 @@ class _HTTPBridgeStreamingMixin:
                 ) = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=consecutive_failures,
-                    configured_threshold=getattr(
-                        _service_get_settings(),
-                        "http_responses_session_bridge_anchor_poison_failure_threshold",
-                        _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
-                    ),
                 )
                 if poison_episode is None:
                     return
@@ -5109,11 +5082,6 @@ class _HTTPBridgeStreamingMixin:
                                             ) = await self._http_bridge_poison_anchor_clear_owed(
                                                 session,
                                                 consecutive_failures=idle_consecutive_failures,
-                                                configured_threshold=getattr(
-                                                    _service_get_settings(),
-                                                    "http_responses_session_bridge_anchor_poison_failure_threshold",
-                                                    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
-                                                ),
                                             )
                                             if poison_episode is None:
                                                 return

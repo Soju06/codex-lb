@@ -6,6 +6,7 @@
 //! the stdio worker binary.
 
 mod http;
+mod output;
 mod runtime;
 mod sse;
 mod websocket;

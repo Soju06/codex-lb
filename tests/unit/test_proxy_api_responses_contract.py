@@ -1224,6 +1224,48 @@ async def test_normalize_public_responses_stream_drops_codex_rate_limits_prefix(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "diagnostic_position", [0, 1, 2], ids=["before-created", "before-completed", "after-completed"]
+)
+@pytest.mark.parametrize("enforce_contract", [True, False], ids=["public", "native"])
+async def test_normalize_responses_stream_filters_timing_only_for_public_contract(
+    diagnostic_position: int, enforce_contract: bool
+) -> None:
+    upstream_blocks = [
+        'data: {"type":"response.created","sequence_number":0,'
+        '"response":{"id":"resp_timing","object":"response","status":"in_progress","output":[]}}\n\n',
+        'data: {"type":"response.completed","sequence_number":1,'
+        '"response":{"id":"resp_timing","object":"response","status":"completed","output":[]}}\n\n',
+    ]
+    upstream_blocks.insert(diagnostic_position, 'data: {"type":"responsesapi.websocket_timing","latency_ms":12}\n\n')
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(*upstream_blocks), enforce_openai_sdk_contract=enforce_contract
+        )
+    ]
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    event_types = [payload["type"] for payload in payloads if payload is not None]
+    expected_types = ["response.created", "response.completed"]
+    if not enforce_contract:
+        expected_types.insert(diagnostic_position, "responsesapi.websocket_timing")
+    assert event_types == expected_types
+
+
+@pytest.mark.parametrize(
+    ("event_type", "forwarded"),
+    [("response.future_event", True), ("error", True), ("vendor.future_event", False)],
+)
+def test_public_responses_event_family_contract(event_type: str, forwarded: bool) -> None:
+    payload: dict[str, JsonValue] = {"type": event_type, "code": "server_error", "message": "test error"}
+    normalized, violation = proxy_api_module._normalize_public_stream_payload(payload)
+    assert (normalized is not None) is forwarded
+    if normalized is not None:
+        assert normalized["type"] == event_type
+    assert violation is None
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_backfills_terminal_output_from_items() -> None:
     """G3: terminal `response.completed.output` MUST be backfilled from
     `response.output_item.done` events when upstream sends empty output.

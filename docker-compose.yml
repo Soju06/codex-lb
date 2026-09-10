@@ -43,7 +43,7 @@ services:
     build:
       context: ./frontend
       dockerfile_inline: |
-        FROM oven/bun:1.4.0-alpine
+        FROM oven/bun:1.4.2-alpine
         WORKDIR /app
         COPY package.json bun.lock ./
         RUN bun install --frozen-lockfile
@@ -115,7 +115,7 @@ services:
     restart: unless-stopped
 
   postgres-upgrade:
-    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:9b9908c5cda86e05291d00f770914ab24dcae1c657a7afe701ffe2496f997503
+    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:823404dccffe3f8b92177b308455445aab86a0f343661d65e624099ae6780459
     profiles: ["postgres-upgrade"]
     environment:
       POSTGRES_USER: codex_lb

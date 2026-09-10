@@ -87,13 +87,13 @@ async def test_account_export_writes_audit_log(async_client) -> None:
     assert create_response.status_code == 200
 
     export_response = await async_client.post(
-        f"/api/accounts/{expected_account_id}/export",
+        f"/api/accounts/{expected_account_id}/export/auth",
         headers={"x-request-id": "audit-account-export"},
     )
 
     assert export_response.status_code == 200
 
-    audit_log = await _wait_for_audit_log("account_exported")
+    audit_log = await _wait_for_audit_log("account_auth_exported")
     assert audit_log.request_id == "audit-account-export"
     assert audit_log.details == json.dumps({"account_id": expected_account_id})
 

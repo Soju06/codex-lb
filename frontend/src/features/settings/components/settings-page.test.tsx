@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -22,6 +22,7 @@ const quotaPlannerSectionMock = vi.fn();
 const stickySessionsSectionMock = vi.fn();
 const modelSourcesSettingsMock = vi.fn();
 const dataRetentionSettingsMock = vi.fn();
+const upstreamTimeoutSettingsMock = vi.fn();
 const telemetrySettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
@@ -77,10 +78,37 @@ vi.mock("@/features/settings/components/session-settings", () => ({
   SessionSettings: () => <div>Session Settings</div>,
 }));
 
+vi.mock("@/features/settings/components/resilience-settings", () => ({
+  ResilienceSettings: () => <div>Resilience Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/session-bridge-settings", () => ({
+  SessionBridgeSettings: () => <div>Session Bridge Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/model-catalogue-settings", () => ({
+  ModelCatalogueSettings: () => <div>Model Catalogue Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/background-jobs-settings", () => ({
+  BackgroundJobsSettings: () => <div>Background Jobs Settings</div>,
+}));
+
 vi.mock("@/features/settings/components/data-retention-settings", () => ({
   DataRetentionSettings: (props: unknown) => {
     dataRetentionSettingsMock(props);
     return <div>Data Retention Settings</div>;
+  },
+}));
+
+vi.mock("@/features/settings/components/conversation-archive-settings", () => ({
+  ConversationArchiveSettings: () => <div>Conversation Archive Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/upstream-timeout-settings", () => ({
+  UpstreamTimeoutSettings: (props: unknown) => {
+    upstreamTimeoutSettingsMock(props);
+    return <div>Upstream Timeout Settings</div>;
   },
 }));
 
@@ -257,6 +285,8 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Quota Planner Section")).toBeInTheDocument();
     expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
     expect(screen.getByText("Data Retention Settings")).toBeInTheDocument();
+    expect(screen.getByText("Conversation Archive Settings")).toBeInTheDocument();
+    expect(screen.getByText("Upstream Timeout Settings")).toBeInTheDocument();
   });
 
   it("disables write-capable sections for read-only guests", async () => {
@@ -280,6 +310,7 @@ describe("SettingsPage", () => {
     expect(quotaPlannerSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(dataRetentionSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
+    expect(upstreamTimeoutSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
   });
 
   it("keeps guest access settings available for writable sessions", async () => {
@@ -431,6 +462,50 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Firewall Section")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Hide advanced settings" })).toBeInTheDocument();
     expect(firewallSectionMock).toHaveBeenCalled();
+  });
+
+  it("waits for the model catalogue query before scrolling to firewall", async () => {
+    // The Model catalogue card sits above Firewall and grows by a table row per
+    // override, so a late overrides response would otherwise land after the
+    // one-shot #firewall scroll and push the target back out of view.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let resolveOverrides: ((value: unknown) => void) | undefined;
+    const overridesQuery = queryClient.fetchQuery({
+      queryKey: ["settings", "model-context-window-overrides"],
+      queryFn: () =>
+        new Promise((resolve) => {
+          resolveOverrides = resolve;
+        }),
+    });
+    const scrollIntoView = vi.fn();
+    const elementLookup = vi
+      .spyOn(document, "getElementById")
+      .mockReturnValue({ scrollIntoView } as unknown as HTMLElement);
+    const animationFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/settings?advanced=1#firewall"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveOverrides?.({ overrides: [] });
+      await overridesQuery;
+    });
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+    animationFrame.mockRestore();
+    elementLookup.mockRestore();
   });
 
 });

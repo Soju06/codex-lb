@@ -1,0 +1,4 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+reviews:
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true

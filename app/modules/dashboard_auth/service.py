@@ -178,12 +178,6 @@ class DashboardSessionStore:
             return False
         return state.role == DashboardRole.ADMIN and state.password_verified
 
-    def is_totp_verified(self, session_id: str | None) -> bool:
-        state = self.get(session_id)
-        if state is None:
-            return False
-        return state.role == DashboardRole.ADMIN and state.totp_verified
-
     def delete(self, session_id: str | None) -> None:
         # Stateless: deletion is handled by clearing the cookie client-side.
         return

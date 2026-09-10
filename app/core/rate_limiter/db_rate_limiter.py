@@ -178,45 +178,6 @@ class DatabaseRateLimiter:
         )
         await session.commit()
 
-    async def check_and_record(self, key: str, session: AsyncSession) -> None:
-        """Legacy method: check + unconditionally record. Kept for TOTP backward compatibility."""
-        now = datetime.now(UTC)
-        window_start = now - timedelta(seconds=self.window_seconds)
-
-        count = await session.scalar(
-            select(func.count())
-            .select_from(RateLimitAttempt)
-            .where(
-                RateLimitAttempt.key == key,
-                RateLimitAttempt.type == self.type,
-                RateLimitAttempt.attempted_at >= window_start,
-            )
-        )
-
-        oldest_attempt = await session.scalar(
-            select(RateLimitAttempt.attempted_at)
-            .where(
-                RateLimitAttempt.key == key,
-                RateLimitAttempt.type == self.type,
-                RateLimitAttempt.attempted_at >= window_start,
-            )
-            .order_by(RateLimitAttempt.attempted_at.asc())
-            .limit(1)
-        )
-
-        session.add(RateLimitAttempt(key=key, type=self.type, attempted_at=now))
-        await session.flush()
-        await session.commit()
-
-        if (count or 0) >= self.max_attempts:
-            retry_after = self.window_seconds
-            if oldest_attempt is not None:
-                if oldest_attempt.tzinfo is None:
-                    oldest_attempt = oldest_attempt.replace(tzinfo=UTC)
-                reset_at = oldest_attempt + timedelta(seconds=self.window_seconds)
-                retry_after = max(1, int((reset_at - now).total_seconds()))
-            raise DashboardRateLimitError("Too many attempts", retry_after=retry_after)
-
     async def cleanup(self, session: AsyncSession, older_than_seconds: int = 3600) -> None:
         cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
         await session.execute(delete(RateLimitAttempt).where(RateLimitAttempt.attempted_at < cutoff))

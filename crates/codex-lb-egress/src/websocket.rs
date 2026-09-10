@@ -213,6 +213,8 @@ pub(crate) async fn execute_websocket(
                                     text,
                                     event_type: event.event_type,
                                     payload: event.payload,
+                                    payload_response_id: event.payload_response_id,
+                                    sequence_number: event.sequence_number,
                                 },
                             )
                             .await?;

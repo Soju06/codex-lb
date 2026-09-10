@@ -37,6 +37,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "http_responses_completion_v1",
         "websocket",
         "websocket_responses_events_v1",
+        "websocket_responses_routing_v1",
         "websocket_send_ack",
     }
 )
@@ -69,6 +70,12 @@ def _event_payload_size(item: object) -> int:
     if isinstance(text, str):
         kind = item.get("event_type")
         metadata_size = len(kind.encode("utf-8")) if isinstance(kind, str) else 0
+        response_id = item.get("payload_response_id")
+        if isinstance(response_id, str):
+            metadata_size += len(response_id.encode("utf-8", errors="surrogatepass"))
+        sequence = item.get("sequence_number")
+        if isinstance(sequence, int):
+            metadata_size += len(str(sequence))
         # Responses WebSocket IPC embeds the original JSON a second time as
         # payload. Charge both copies without reserializing the decoded object.
         copies = 2 if item.get("type") == "websocket_responses_text" else 1
@@ -186,6 +193,12 @@ class NativeWebSocketRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeWebSocketRoutingMetadata:
+    payload_response_id: str | None
+    sequence_number: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class NativeWebSocketMessage:
     kind: str
     text: str | None = None
@@ -195,6 +208,7 @@ class NativeWebSocketMessage:
     responses_interpreted: bool = False
     event_type: str | None = None
     payload: dict[str, JsonValue] | None = None
+    routing: NativeWebSocketRoutingMetadata | None = None
 
 
 class NativeEgressClient(Protocol):
@@ -584,11 +598,17 @@ class NativeEgressWebSocket:
                     text = item.get("text")
                     kind = item.get("event_type")
                     payload = item.get("payload")
+                    response_id = item.get("payload_response_id")
+                    sequence = item.get("sequence_number")
                     if (
                         not isinstance(text, str)
                         or "event_type" not in item
                         or (kind is not None and not isinstance(kind, str))
                         or not isinstance(payload, dict)
+                        or "payload_response_id" not in item
+                        or (response_id is not None and not isinstance(response_id, str))
+                        or "sequence_number" not in item
+                        or (sequence is not None and type(sequence) is not int)
                     ):
                         raise NativeEgressProtocolError("native Responses websocket event is invalid")
                     self._queue_message(
@@ -598,6 +618,7 @@ class NativeEgressWebSocket:
                             responses_interpreted=True,
                             event_type=kind,
                             payload=cast(dict[str, JsonValue], payload),
+                            routing=NativeWebSocketRoutingMetadata(response_id, sequence),
                         )
                     )
                     continue

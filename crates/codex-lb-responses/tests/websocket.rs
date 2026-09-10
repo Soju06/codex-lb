@@ -34,3 +34,34 @@ fn large_websocket_object_retains_opaque_delivery() {
     );
     assert!(interpret_websocket(&text).is_none());
 }
+
+#[derive(Deserialize)]
+struct RoutingCase {
+    name: String,
+    text: String,
+    interpreted: bool,
+    // Opaque cases may contain an unpaired surrogate ID.
+    payload_response_id: Box<serde_json::value::RawValue>,
+    sequence_token: Option<String>,
+}
+
+#[test]
+fn shared_websocket_routing_fixtures_preserve_id_and_integer_semantics() {
+    let cases: Vec<RoutingCase> =
+        serde_json::from_str(include_str!("fixtures/websocket-routing-v1.json")).unwrap();
+    for case in cases {
+        let result = interpret_websocket(&case.text);
+        assert_eq!(result.is_some(), case.interpreted, "{}", case.name);
+        if let Some(event) = result {
+            let expected: Option<String> =
+                serde_json::from_str(case.payload_response_id.get()).unwrap();
+            assert_eq!(event.payload_response_id, expected, "{}", case.name);
+            assert_eq!(
+                event.sequence_number.as_ref().map(|value| value.get()),
+                case.sequence_token.as_deref(),
+                "{}",
+                case.name
+            );
+        }
+    }
+}

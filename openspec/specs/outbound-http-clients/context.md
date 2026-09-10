@@ -133,3 +133,26 @@ empty-body and JSON-syntax handling follow the default Python session. Usage
 credit consumption remains a separate call, and resolved routes retain
 CodexClient ownership. Loopback probes validate these semantics; they do not
 measure production performance.
+
+## Native WebSocket routing metadata
+
+The `websocket_responses_routing_v1` capability transfers payload-only response-ID
+extraction and integer sequence recognition to the Responses crate. Python still
+validates lifecycle models. A valid completed event with nested ID ` nested `
+and top-level ID `direct` matches ` nested ` without stripping; if its
+`response.status` is invalid, validation fails and the payload ID `direct` wins.
+This preserves existing matching without duplicating Pydantic models in Rust.
+
+Rust applies Python whitespace rules (including U+001C through U+001F) and
+last-key precedence. Selected IDs that cannot decode into Rust strings use
+opaque delivery. Integer tokens, including large and negative values, cross
+IPC without numeric conversion; booleans and floats produce null metadata.
+The Python adapter validates required metadata and charges it against its queue
+byte budget. An invalid exchange is cancelled without replay or closing peers.
+
+Direct WebSocket matching and archive attribution consume the same parsed ID;
+bridge matching uses native metadata only when its existing SSE framing rules
+permit direct JSON interpretation. Pending queues, retry, settlement and shared
+socket lifetime remain Python-owned. Sequence watermarks advance only after
+successful downstream sends, preserving suppression and replay behavior.
+Loopback compatibility tests do not establish a throughput improvement.

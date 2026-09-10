@@ -4,9 +4,12 @@
 
 The service SHALL transmit one heartbeat at startup and one per 24-hour interval thereafter.
 On each tick, after the heartbeat, the service SHALL transmit completed-UTC-day aggregate bodies
-that have not been acknowledged, newest first, at most seven bodies per tick. Completed days
-older than the seven most recent completed days MUST be marked acknowledged without transmission
-so an extended outage cannot produce an unbounded backlog.
+that have not been acknowledged, newest first, at most seven bodies per tick. The service MUST
+capture one UTC date per tick and restrict day discovery in SQL to the seven completed calendar
+days `[today_utc - 7 days, today_utc)`. Days older than this window MUST be marked acknowledged
+without constructing or transmitting their bodies, even when the window contains no traffic.
+The watermark MUST advance through only contiguous successful populated days from the oldest
+end of the window; a failed day MUST remain unacknowledged while it is within the window.
 In a multi-replica deployment sharing a database, snapshot construction and transmission MUST
 run only under the existing leader-election gate so at most one replica performs each tick.
 Telemetry transmission failures MUST NOT affect proxy operation, MUST use a bounded timeout,
@@ -29,6 +32,18 @@ MUST NOT retry more than once per interval, and MUST log failures at debug level
 - **WHEN** the next tick runs
 - **THEN** at most seven completed-day bodies are transmitted and the older unacknowledged days
   are marked acknowledged without transmission
+
+#### Scenario: Sparse and empty recent traffic do not extend backfill
+
+- **WHEN** a tick has traffic yesterday and forty days ago, or only traffic forty days ago
+- **THEN** no body is constructed or transmitted for the forty-day-old traffic
+- **AND** dates before the calendar window are acknowledged even if no recent body is sent
+
+#### Scenario: A failed in-window day remains eligible
+
+- **WHEN** some completed-day transmissions fail while others succeed
+- **THEN** the watermark covers out-of-window dates and only the contiguous successful
+  populated dates before the oldest failed day
 
 ### Requirement: One-time consent dialog with exact payload preview
 
@@ -163,6 +178,11 @@ as instance-computed percentiles alone. Bucket edges MUST NOT be configurable pe
 Each histogram MUST carry a `sample_count` equal to the sum of its bucket counts. Buckets with
 a zero count MAY be omitted.
 
+TPS samples MUST require both measured latency and measured time-to-first-token, using the
+reports definition `(output_tokens - coalesce(reasoning_tokens, 0)) * 1000 /
+(latency_ms - latency_first_token_ms)` with positive numerator and denominator. A measured
+time-to-first-token of zero MUST remain eligible; a NULL measurement MUST NOT produce a sample.
+
 Percentiles reported by any collector or public surface MUST be computed by summing bucket counts
 across contributing instances. A percentile MUST NOT be derived by averaging or taking a
 percentile of per-instance percentiles.
@@ -176,6 +196,12 @@ percentile of per-instance percentiles.
 
 - **WHEN** a histogram is serialized
 - **THEN** its `sample_count` equals the sum of its bucket counts
+
+#### Scenario: Missing measurements cannot fabricate throughput
+
+- **WHEN** latency or TTFT is NULL, or latency does not exceed TTFT
+- **THEN** the row contributes no TPS sample
+- **AND** a measured TTFT of zero with positive latency and net output tokens contributes a sample
 
 #### Scenario: Bucket edges are identical across installations
 
@@ -192,7 +218,13 @@ The payload MUST NOT contain any statistic keyed by two or more dimensions simul
 the outbound wire-schema test MUST reject a body containing such a cell.
 
 Dimension values MUST come from the existing allowlists, with unmatched values folded into
-`other`.
+`other`. Both heartbeat and day model names MUST use the application's bundled bootstrap slug
+allowlist, independent of operator configuration or upstream catalog discovery. Persisted upstream
+transport `websocket` MUST map to `ws`; `openai_compatible_http` and `http` MUST map to `http`.
+Unmatched upstream transport values MUST map to `other`.
+
+Day discovery and aggregation MUST use the reports normal-traffic predicate, excluding rows with
+source `limit_warmup` or request kind `warmup` or `limit_warmup`.
 
 #### Scenario: Dimension totals are exact
 
@@ -209,11 +241,26 @@ Dimension values MUST come from the existing allowlists, with unmatched values f
 - **WHEN** traffic uses a model or client value absent from the allowlist
 - **THEN** its counts are attributed to `other` and the unmatched raw value is absent from the payload
 
+#### Scenario: Live catalog discovery cannot disclose private models
+
+- **WHEN** an upstream catalog advertises a private model alongside a bundled bootstrap model
+- **THEN** both serialized outbound bodies preserve the bootstrap model name and replace the
+  private name with `other`
+
+#### Scenario: Warmups do not populate a day aggregate
+
+- **WHEN** a day contains normal requests, warmup requests, and limit-warmup requests
+- **THEN** its day aggregate counts the same normal requests as the reports aggregate
+- **AND** a warmup-only day is absent from day discovery
+
 ### Requirement: Structured error taxonomy without free text
 
 Error statistics MUST report exact counts for upstream error class, internal failure phase, and
 HTTP status class as three independent count maps, plus exact success, error, and cancelled
 totals. Values outside the documented enumerations MUST be reported as `other`.
+
+Persisted failure phases MUST map `usage_settlement` to `settle`, `upstream` to `stream`, and
+`bridge` to `bridge_queue`; unrecognized phases MUST remain `other`.
 
 Free-text error messages, failure details, exception type names, and bridge stage strings MUST
 NOT be transmitted.

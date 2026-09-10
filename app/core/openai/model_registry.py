@@ -369,6 +369,10 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
     ),
 )
 
+# Telemetry allowlist: these slugs are shipped by the application and cannot
+# contain operator-configured models from the live registry snapshot.
+BOOTSTRAP_MODEL_SLUGS = frozenset(model.slug for model in _BOOTSTRAP_STATIC_MODELS)
+
 
 # Speed/service-tier metadata must aggregate (union) when the same slug is
 # fetched from multiple accounts/plans, rather than be overwritten

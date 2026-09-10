@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from dataclasses import replace
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import get_args
 
 import pytest
+from pydantic import create_model
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.balancer.logic import RoutingStrategy
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.openai.model_registry import ModelRegistry
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey, Base, ModelSource, RequestLog
+from app.modules.reports.repository import ReportsRepository
 from app.modules.telemetry.clients import (
     CANONICAL_CLIENT_FAMILIES,
     CLIENT_FAMILY_BY_RAW_GROUP,
@@ -23,13 +28,16 @@ from app.modules.telemetry.clients import (
 )
 from app.modules.telemetry.schemas import (
     TelemetryActivation,
+    TelemetryDay,
     TelemetryOptOut,
     TelemetryRegistration,
     build_snapshot_envelope,
 )
+from app.modules.telemetry.sender import _json_bytes
 from app.modules.telemetry.snapshot import (
     _ROUTING_POLICIES,
     TelemetrySnapshotBuilder,
+    _build_day_from_rows,
     _canonical_routing_policy,
     cost_bucket,
     count_bucket,
@@ -38,6 +46,189 @@ from app.modules.telemetry.snapshot import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+async def hostile_bodies(async_session, monkeypatch):
+    registry = ModelRegistry()
+    official = registry.get_models_with_fallback()["gpt-5.6-sol"]
+    private = replace(official, slug="corp-project-alice-private")
+    await registry.update({"plus": [official, private]})
+    monkeypatch.setattr("app.core.openai.model_registry._model_registry", registry)
+    live_catalog = registry.get_snapshot()
+    assert live_catalog is not None
+    assert "corp-project-alice-private" in live_catalog.models
+    now = datetime(2026, 9, 10, 12)
+    monkeypatch.setattr("app.modules.telemetry.snapshot.utcnow", lambda: now)
+    rows = [
+        _request_log(
+            "private",
+            model=private.slug,
+            useragent_group="private-client-group",
+            status="error",
+            upstream_error_code="private-error-code",
+            failure_phase="private-phase",
+            upstream_status_code=429,
+            failure_detail="private-failure-detail",
+            failure_exception_type="PrivateException",
+            error_message="private-message",
+        ),
+        _request_log(
+            "official",
+            model=official.slug,
+            useragent_group="codex_exec",
+            status="error",
+            upstream_error_code="server_error",
+            failure_phase="upstream",
+            upstream_status_code=503,
+        ),
+        _request_log("success", model=official.slug, useragent_group="codex_exec", upstream_status_code=200),
+    ]
+    for row in rows:
+        row.requested_at = now - timedelta(days=1)
+        row.upstream_transport = "websocket"
+        row.transport = "websocket"
+    async_session.add_all(rows)
+    await async_session.commit()
+    builder = TelemetrySnapshotBuilder(async_session)
+    heartbeat = build_snapshot_envelope(await builder.build("instance", consent="enabled"))
+    day = await builder.build_day("instance", date(2026, 9, 9))
+    return heartbeat, day
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_index", [0, 1], ids=["heartbeat", "day"])
+async def test_live_private_model_never_reaches_wire(hostile_bodies, body_index: int) -> None:
+    wire = _json_bytes(hostile_bodies[body_index])
+    for forbidden in (
+        b"corp-project-alice-private",
+        b"private-client-group",
+        b"private-error-code",
+        b"private-phase",
+        b"private-failure-detail",
+        b"PrivateException",
+        b"private-message",
+    ):
+        assert forbidden not in wire
+    assert b'"other"' in wire
+    assert b'"gpt-5.6-sol"' in wire
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [("websocket", "ws"), ("openai_compatible_http", "http"), ("http", "http"), ("private", "other")],
+)
+def test_day_upstream_transport_uses_producer_spellings(stored: str, expected: str) -> None:
+    row = _request_log("transport", model="gpt-5.6-sol", useragent_group="codex_exec", upstream_transport=stored)
+    row.transport = "websocket"
+    day = _build_day_from_rows("instance", date(2026, 9, 9), [row])
+    assert [entry.name for entry in day.dimensions.upstream_transport] == [expected]
+    assert [entry.name for entry in day.dimensions.transport] == ["ws"]
+
+
+@pytest.mark.parametrize(
+    ("latency", "ttft", "expected_samples"),
+    [(1000, None, 0), (None, 100, 0), (100, 100, 0), (100, 200, 0), (1000, 0, 1)],
+)
+def test_day_tps_requires_measured_duration(latency, ttft, expected_samples: int) -> None:
+    row = _request_log("tps", model="gpt-5.6-sol", useragent_group="codex_exec")
+    row.latency_ms = latency
+    row.latency_first_token_ms = ttft
+    day = _build_day_from_rows("instance", date(2026, 9, 9), [row])
+    for entry in [
+        day.dimensions.global_,
+        *day.dimensions.models,
+        *day.dimensions.clients,
+        *day.dimensions.transport,
+        *day.dimensions.upstream_transport,
+        *day.dimensions.service_tier,
+    ]:
+        assert entry.tps.sample_count == expected_samples
+    if ttft == 0:
+        assert day.dimensions.global_.ttft_ms.model_dump() == {"sample_count": 1, "buckets": {"0": 1}}
+        assert day.dimensions.global_.tps.model_dump() == {"sample_count": 1, "buckets": {"6": 1}}
+
+
+def _assert_day_wire_keys(body) -> None:
+    assert set(body) == {"schema_version", "instance_id", "utc_date", "dimensions", "errors"}
+    dimensions = body["dimensions"]
+    marginal_names = {"models", "clients", "transport", "upstream_transport", "service_tier"}
+    assert set(dimensions) == marginal_names | {"global", "request_kinds"}
+    assert set(dimensions["request_kinds"]) == {"responses", "chat", "images", "unknown"}
+    for name in marginal_names:
+        assert dimensions[name], f"fixture must populate {name}"
+    for entry in [dimensions["global"], *(entry for name in marginal_names for entry in dimensions[name])]:
+        assert set(entry) == {"name", "requests", "latency_ms", "ttft_ms", "tps"}
+        for metric in ("latency_ms", "ttft_ms", "tps"):
+            histogram = entry[metric]
+            assert set(histogram) == {"sample_count", "buckets"}
+            assert set(histogram["buckets"]) <= {str(i) for i in range(11 if metric == "tps" else 14)}
+            assert all(type(count) is int and count > 0 for count in histogram["buckets"].values())
+            assert histogram["sample_count"] == sum(histogram["buckets"].values())
+    errors = body["errors"]
+    assert set(errors) == {"upstream_error_class", "failure_phase", "http_status_class", "outcomes"}
+    assert set(errors["upstream_error_class"]) == {"other", "server_error"}
+    assert set(errors["failure_phase"]) == {"other", "stream"}
+    assert set(errors["http_status_class"]) == {"2xx", "429", "5xx"}
+    assert set(errors["outcomes"]) == {"success", "error", "cancelled"}
+    for counts in errors.values():
+        assert all(type(count) is int and count >= 0 for count in counts.values())
+
+
+@pytest.mark.asyncio
+async def test_populated_day_sender_wire_has_exact_recursive_allowlist(hostile_bodies) -> None:
+    _assert_day_wire_keys(json.loads(_json_bytes(hostile_bodies[1])))
+
+
+@pytest.mark.asyncio
+async def test_day_wire_allowlist_detects_undeclared_python_model_field(hostile_bodies) -> None:
+    extended_model = create_model(
+        "ExtendedTelemetryDay", __base__=TelemetryDay, private_tag=(str, "undeclared-private-value")
+    )
+    extended = extended_model.model_validate(hostile_bodies[1].model_dump(by_alias=True))
+    wire = _json_bytes(extended)
+    assert b"undeclared-private-value" in wire
+    with pytest.raises(AssertionError):
+        _assert_day_wire_keys(json.loads(wire))
+
+
+@pytest.mark.parametrize(
+    ("stored", "wire_phase"),
+    [("usage_settlement", "settle"), ("upstream", "stream"), ("bridge", "bridge_queue"), ("private-phase", "other")],
+)
+def test_day_failure_phase_uses_producer_spellings(stored: str, wire_phase: str) -> None:
+    row = _request_log("phase", model="gpt-5.6-sol", useragent_group="codex_exec", status="error", failure_phase=stored)
+    day = _build_day_from_rows("instance", date(2026, 9, 9), [row])
+    assert day.errors.failure_phase == {wire_phase: 1}
+
+
+@pytest.mark.asyncio
+async def test_day_excludes_warmups_like_reports_and_heartbeat(async_session, monkeypatch) -> None:
+    now = datetime(2026, 9, 10, 12)
+    monkeypatch.setattr("app.modules.telemetry.snapshot.utcnow", lambda: now)
+    rows = [
+        _request_log("real", model="gpt-5.6-sol", useragent_group="codex_exec", request_kind="normal"),
+        _request_log("warmup", model="gpt-5.6-sol", useragent_group="codex_exec", request_kind="warmup"),
+        _request_log("limit-kind", model="gpt-5.6-sol", useragent_group="codex_exec", request_kind="limit_warmup"),
+        _request_log("limit-source", model="gpt-5.6-sol", useragent_group="codex_exec", source="limit_warmup"),
+    ]
+    for row in rows:
+        row.requested_at = now - timedelta(days=1)
+    only_warmup = _request_log(
+        "warmup-only-day", model="gpt-5.6-sol", useragent_group="codex_exec", request_kind="warmup"
+    )
+    only_warmup.requested_at = now - timedelta(days=2)
+    async_session.add_all([*rows, only_warmup])
+    await async_session.commit()
+    builder = TelemetrySnapshotBuilder(async_session)
+    days = await builder.completed_days("instance")
+    summary = await ReportsRepository(async_session).aggregate_summary(datetime(2026, 9, 9), datetime(2026, 9, 10))
+    heartbeat = await builder.build("instance", consent="enabled")
+
+    assert [day.utc_date for day in days] == [date(2026, 9, 9)]
+    assert days[0].dimensions.global_.requests == summary.total_requests == heartbeat.usage_7d.requests == 1
+    assert days[0].errors.outcomes.success == 1
+    assert days[0].dimensions.global_.latency_ms.sample_count == 1
 
 
 @pytest.fixture

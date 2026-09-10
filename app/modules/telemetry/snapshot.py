@@ -22,7 +22,7 @@ from app.core.balancer.logic import RoutingStrategy
 from app.core.config.background_jobs import resolve_background_job_toggle
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import resolve_archive_enabled
-from app.core.openai.model_registry import get_model_registry
+from app.core.openai.model_registry import BOOTSTRAP_MODEL_SLUGS
 from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -37,6 +37,7 @@ from app.db.models import (
     RequestLog,
 )
 from app.db.sqlite_utils import sqlite_db_path_from_url
+from app.modules.reports.filters import _normal_traffic_clause
 from app.modules.reports.repository import ReportsRepository, _report_conditions
 from app.modules.settings.repository import SettingsRepository
 from app.modules.telemetry.clients import ClientCount, catalog_model_name, client_family, client_shares
@@ -277,31 +278,40 @@ class TelemetrySnapshotBuilder:
             ),
         )
 
-    async def build_day(self, instance_id: str, utc_date: date) -> TelemetryDay:
+    async def build_day(self, instance_id: str, utc_date: date, *, today_utc: date | None = None) -> TelemetryDay:
         start = datetime(utc_date.year, utc_date.month, utc_date.day)
         end = start + timedelta(days=1)
-        now = utcnow()
-        if utc_date >= now.date():
+        today = today_utc if today_utc is not None else utcnow().date()
+        if utc_date >= today:
             raise ValueError("in-progress UTC day cannot be aggregated")
         result = await self._session.execute(
-            select(RequestLog).where(RequestLog.requested_at >= start, RequestLog.requested_at < end)
+            select(RequestLog).where(
+                RequestLog.requested_at >= start,
+                RequestLog.requested_at < end,
+                _normal_traffic_clause(),
+            )
         )
         rows = list(result.scalars())
         return _build_day_from_rows(instance_id, utc_date, rows)
 
-    async def completed_days(self, instance_id: str, *, acknowledged: date | None = None) -> list[TelemetryDay]:
-        today = utcnow().date()
+    async def completed_days(
+        self, instance_id: str, *, acknowledged: date | None = None, today_utc: date | None = None
+    ) -> list[TelemetryDay]:
+        today = today_utc if today_utc is not None else utcnow().date()
+        window_start = today - timedelta(days=7)
+        start = max(window_start, acknowledged + timedelta(days=1)) if acknowledged is not None else window_start
         result = await self._session.execute(
-            select(func.date(RequestLog.requested_at)).distinct().order_by(func.date(RequestLog.requested_at).desc())
+            select(func.date(RequestLog.requested_at))
+            .where(
+                _normal_traffic_clause(),
+                RequestLog.requested_at >= datetime.combine(start, datetime.min.time()),
+                RequestLog.requested_at < datetime.combine(today, datetime.min.time()),
+            )
+            .distinct()
+            .order_by(func.date(RequestLog.requested_at).desc())
         )
-        days = [
-            date.fromisoformat(str(value))
-            for (value,) in result.all()
-            if value
-            and date.fromisoformat(str(value)) < today
-            and (acknowledged is None or date.fromisoformat(str(value)) > acknowledged)
-        ]
-        return [await self.build_day(instance_id, day) for day in days]
+        days = [date.fromisoformat(str(value)) for (value,) in result.all()]
+        return [await self.build_day(instance_id, day, today_utc=today) for day in days]
 
     async def _account_aggregates(self) -> tuple[int, bool, dict[str, int], dict[str, int]]:
         result = await self._session.execute(
@@ -332,7 +342,7 @@ class TelemetrySnapshotBuilder:
             .where(and_(*conditions))
             .group_by(RequestLog.model, RequestLog.reasoning_effort)
         )
-        catalog = frozenset(get_model_registry().get_models_with_fallback())
+        catalog = BOOTSTRAP_MODEL_SLUGS
         grouped: defaultdict[str, _ModelAccumulator] = defaultdict(_ModelAccumulator)
         for row in result.all():
             name = catalog_model_name(row.model, catalog)
@@ -537,8 +547,12 @@ def _histogram(values: list[float], edges: tuple[float, ...]) -> Histogram:
 
 
 def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog]) -> TelemetryDay:
-    catalog = frozenset(get_model_registry().get_models_with_fallback())
-    upstream_allow = {"ws", "http"}
+    catalog = BOOTSTRAP_MODEL_SLUGS
+    upstream_transport_map = {
+        "websocket": "ws",
+        "openai_compatible_http": "http",
+        "http": "http",
+    }
     tiers = {"default", "flex", "priority"}
     families = {
         "codex-cli",
@@ -554,22 +568,21 @@ def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog
     }
     upstream_codes = _SAFE_UPSTREAM_ERROR_CODES
     phases = {"connect", "response_create", "bridge_queue", "stream", "settle", "other"}
+    # Producer locations and the phase translations are documented in
+    # openspec/specs/telemetry/context.md; raw failure details are never used.
+    phase_map = {"usage_settlement": "settle", "upstream": "stream", "bridge": "bridge_queue"}
     dims: dict[str, dict[str, list[RequestLog]]] = {
         key: defaultdict(list) for key in ("models", "clients", "transport", "upstream_transport", "service_tier")
     }
     global_rows: list[RequestLog] = rows
     for row in rows:
         model = catalog_model_name(row.model, catalog)
-        if model not in catalog and model != "other":
-            model = "other"
         dims["models"][model].append(row)
         dims["clients"][
             client_family(row.useragent_group) if client_family(row.useragent_group) in families else "other"
         ].append(row)
         dims["transport"]["ws" if row.transport == "websocket" else "http_bridge"].append(row)
-        dims["upstream_transport"][
-            row.upstream_transport if row.upstream_transport in upstream_allow else "other"
-        ].append(row)
+        dims["upstream_transport"][upstream_transport_map.get(row.upstream_transport or "", "other")].append(row)
         tier = row.actual_service_tier or row.service_tier or "default"
         dims["service_tier"][tier if tier in tiers else "other"].append(row)
 
@@ -583,7 +596,9 @@ def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog
         tps: list[float] = []
         for r in subset:
             numerator = (r.output_tokens or 0) - (r.reasoning_tokens or 0)
-            denominator = (r.latency_ms or 0) - (r.latency_first_token_ms or 0)
+            if r.latency_ms is None or r.latency_first_token_ms is None:
+                continue
+            denominator = r.latency_ms - r.latency_first_token_ms
             if numerator > 0 and denominator > 0:
                 tps.append(numerator * 1000.0 / denominator)
         return DimensionEntry(
@@ -634,7 +649,14 @@ def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog
             upstream_error_class=count_map(
                 [r.upstream_error_code for r in rows if r.status not in NON_ERROR_STATUSES], set(upstream_codes)
             ),
-            failure_phase=count_map([r.failure_phase for r in rows if r.status not in NON_ERROR_STATUSES], phases),
+            failure_phase=count_map(
+                [
+                    phase_map.get(r.failure_phase or "", r.failure_phase)
+                    for r in rows
+                    if r.status not in NON_ERROR_STATUSES
+                ],
+                phases,
+            ),
             http_status_class=count_map(
                 [
                     "429"

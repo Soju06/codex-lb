@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from functools import partial
 
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
+from app.core.utils.time import utcnow
 from app.db.session import get_background_session
 from app.modules.telemetry.consent import TelemetryConsentStore
 from app.modules.telemetry.sender import TelemetrySender
@@ -60,6 +61,7 @@ class TelemetryScheduler:
     async def _tick_as_leader(self, *, log_undecided_notice: bool = False) -> None:
         async with self._lock:
             try:
+                today_utc = utcnow().date()
                 async with get_background_session() as session:
                     store = TelemetryConsentStore(session)
                     consent = await store.resolve()
@@ -76,14 +78,16 @@ class TelemetryScheduler:
                     builder = TelemetrySnapshotBuilder(session)
                     snapshot = await builder.build(identity.instance_id, consent=consent.state)
                     acknowledged = (await store._repository.get_or_create()).telemetry_day_acknowledged_date
-                    days = await builder.completed_days(
-                        identity.instance_id, acknowledged=acknowledged.date() if acknowledged else None
-                    )
-                    to_send = days[:7]
                 try:
                     await self.sender.send_snapshot(snapshot)
                 except Exception as exc:
                     logger.debug("Anonymous telemetry snapshot transmission failed", exc_info=exc)
+                async with get_background_session() as day_session:
+                    to_send = await TelemetrySnapshotBuilder(day_session).completed_days(
+                        identity.instance_id,
+                        acknowledged=acknowledged.date() if acknowledged else None,
+                        today_utc=today_utc,
+                    )
                 results: list[bool] = []
                 for day in to_send:
                     try:
@@ -91,19 +95,16 @@ class TelemetryScheduler:
                     except Exception as exc:
                         logger.debug("Anonymous telemetry day transmission failed", exc_info=exc)
                         results.append(False)
-                if to_send:
-                    previous_date = acknowledged.date() if acknowledged else None
-                    oldest_in_window = to_send[-1].utc_date
-                    if all(results):
-                        watermark = to_send[0].utc_date
-                    else:
-                        watermark = oldest_in_window - timedelta(days=1)
-                        for day, succeeded in zip(reversed(to_send), reversed(results), strict=True):
-                            if not succeeded:
-                                break
-                            watermark = day.utc_date
-                    if previous_date is not None and watermark < previous_date:
-                        watermark = previous_date
+                previous_date = acknowledged.date() if acknowledged else None
+                # The watermark is inclusive; today - 8 is the last date outside
+                # the seven completed calendar days, even for empty histories.
+                window_floor = today_utc - timedelta(days=8)
+                watermark = max(previous_date, window_floor) if previous_date is not None else window_floor
+                for day, succeeded in zip(reversed(to_send), reversed(results), strict=True):
+                    if not succeeded:
+                        break
+                    watermark = day.utc_date
+                if previous_date is None or watermark > previous_date:
                     async with get_background_session() as ack_session:
                         ack_store = TelemetryConsentStore(ack_session)
                         row = await ack_store._repository.get_or_create()

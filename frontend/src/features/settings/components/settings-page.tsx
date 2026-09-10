@@ -269,6 +269,10 @@ export function SettingsPage() {
                   settings.usageHistoryRetentionOverrideDays,
                   settings.requestLogRetentionDays,
                   settings.usageHistoryRetentionDays,
+                  // R2 spool retention: a saved value (or a layer move back to
+                  // inherited) must re-seed the card's draft.
+                  settings.httpResponsesSessionBridgeOperationSpoolRetentionSeconds,
+                  settings.provenance?.http_responses_session_bridge_operation_spool_retention_seconds?.source ?? "",
                 ].join(":")}
                 settings={settings}
                 busy={controlsDisabled}

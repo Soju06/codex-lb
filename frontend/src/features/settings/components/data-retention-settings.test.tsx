@@ -310,10 +310,89 @@ describe("DataRetentionSettings", () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
+  it("saves the bridge operation spool retention and states the privacy meaning", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(<DataRetentionSettings settings={baseSettings} busy={false} onSave={onSave} />);
+
+    expect(
+      screen.getByText(
+        /Holds raw request payloads and their response events so an interrupted turn can be replayed; shorter retention deletes them sooner/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /At least 7200 seconds — the longest window in which a spooled operation can still be replayed/i,
+      ),
+    ).toBeInTheDocument();
+
+    const input = screen.getByLabelText("HTTP bridge operation spool retention seconds");
+    // Inherited: the field starts empty rather than pre-filled with the
+    // effective value, so a full save never copies it into the column.
+    expect(input).toHaveDisplayValue("");
+    await user.type(input, "86400");
+    await user.click(screen.getByRole("button", { name: "Save retention" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ httpResponsesSessionBridgeOperationSpoolRetentionSeconds: 86400 }),
+    );
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty("requestLogRetentionOverrideDays");
+  });
+
+  it("mirrors the backend replay floor before saving", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(<DataRetentionSettings settings={baseSettings} busy={false} onSave={onSave} />);
+
+    const input = screen.getByLabelText("HTTP bridge operation spool retention seconds");
+    await user.type(input, "7199");
+
+    expect(
+      screen.getByText(/Spool retention must be a whole number of seconds between 7200 and 315360000/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save retention" })).toBeDisabled();
+
+    await user.clear(input);
+    await user.type(input, "7200");
+    expect(screen.queryByText(/Spool retention must be a whole number of seconds/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save retention" }));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ httpResponsesSessionBridgeOperationSpoolRetentionSeconds: 7200 }),
+    );
+  });
+
+  it("offers reset-to-inherited once the spool retention is dashboard-owned", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const settings = {
+      ...baseSettings,
+      httpResponsesSessionBridgeOperationSpoolRetentionSeconds: 86400,
+      provenance: {
+        http_responses_session_bridge_operation_spool_retention_seconds: {
+          source: "dashboard" as const,
+          envValue: 604800,
+          default: 604800,
+        },
+      },
+    };
+
+    render(<DataRetentionSettings settings={settings} busy={false} onSave={onSave} />);
+
+    expect(screen.getByLabelText("HTTP bridge operation spool retention seconds")).toHaveDisplayValue("86400");
+    await user.click(screen.getByRole("button", { name: "Reset to inherited" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ httpResponsesSessionBridgeOperationSpoolRetentionSeconds: null }),
+    );
+  });
+
   it("disables inputs while busy", () => {
     render(<DataRetentionSettings settings={baseSettings} busy={true} onSave={vi.fn()} />);
     expect(screen.getByLabelText("Request log retention days")).toBeDisabled();
     expect(screen.getByLabelText("Usage history retention days")).toBeDisabled();
+    expect(screen.getByLabelText("HTTP bridge operation spool retention seconds")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save retention" })).toBeDisabled();
   });
 });

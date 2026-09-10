@@ -153,7 +153,6 @@ MIGRATING: Final[dict[str, str]] = {
     "token_refresh_interval_days": "backlog",
     # K2 bridge: http_responses_session_bridge_enabled is a T4 kill switch, not
     # a tunable, so it has no MIGRATING row.
-    "http_responses_session_bridge_operation_spool_retention_seconds": "backlog",
 }
 
 # T3 fields whose database home already exists under a different column name

@@ -363,6 +363,7 @@ class Settings(BaseSettings):
     )
     # Keep durable transcript material short-lived by default. The transcript
     # is sensitive prompt/output data and is only a recovery aid.
+    # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_session_bridge_operation_spool_retention_seconds: float = Field(
         default=7 * 24 * 60 * 60,
         gt=0,

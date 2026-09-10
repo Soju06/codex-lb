@@ -17,6 +17,7 @@ from app.core.config.inheritable import SettingScalar as SettingScalar
 from app.core.config.inheritable import SettingSource as SettingSource
 from app.core.config.inheritable import resolve_inheritable as resolve_inheritable
 from app.core.config.settings import Settings, get_settings
+from app.core.config.spool_retention import OPERATION_SPOOL_RETENTION_SETTING
 from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.db.models import DashboardSettings
@@ -114,6 +115,11 @@ class DashboardSettingsData:
     # M5 conversation archive: effective toggle; provenance carries the source.
     conversation_archive_enabled: bool
     # end M5 conversation archive
+    # R2 spool retention: effective retention of the durable HTTP-bridge
+    # operation spool (dashboard column, else the deprecated env alias, else
+    # the code default); provenance carries the source.
+    http_responses_session_bridge_operation_spool_retention_seconds: float
+    # end R2 spool retention
     version: int
     # C2-1 timeouts: effective values (dashboard column, else environment,
     # else code default); the column values are exposed through ``provenance``.
@@ -229,6 +235,10 @@ class DashboardSettingsUpdateData:
     conversation_archive_enabled: bool | None = None
     clear_conversation_archive_enabled: bool = False
     # end M5 conversation archive
+    # R2 spool retention: tri-state like the C2-1 timeouts.
+    http_responses_session_bridge_operation_spool_retention_seconds: float | None = None
+    clear_http_responses_session_bridge_operation_spool_retention_seconds: bool = False
+    # end R2 spool retention
     # C2-1 timeouts (tri-state like the caps: value = store, clear = NULL,
     # neither = untouched).
     upstream_connect_timeout_seconds: float | None = None
@@ -361,6 +371,14 @@ class SettingsService:
             conversation_archive_enabled=payload.conversation_archive_enabled,
             clear_conversation_archive_enabled=payload.clear_conversation_archive_enabled,
             # end M5 conversation archive
+            # R2 spool retention
+            http_responses_session_bridge_operation_spool_retention_seconds=(
+                payload.http_responses_session_bridge_operation_spool_retention_seconds
+            ),
+            clear_http_responses_session_bridge_operation_spool_retention_seconds=(
+                payload.clear_http_responses_session_bridge_operation_spool_retention_seconds
+            ),
+            # end R2 spool retention
             deterministic_failover_enabled=payload.deterministic_failover_enabled,
             clear_deterministic_failover_enabled=payload.clear_deterministic_failover_enabled,
             circuit_breaker_enabled=payload.circuit_breaker_enabled,
@@ -436,6 +454,8 @@ _ENVIRONMENT_INHERITABLE_SETTINGS = (
     "http_responses_session_bridge_codex_prewarm_enabled",
     # end M3 codex prewarm
     CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive (bool, env alias)
+    # R2 spool retention: float; a NULL column inherits the deprecated env alias.
+    OPERATION_SPOOL_RETENTION_SETTING,
 )
 # Retention has no environment fallback: NULL = never set from the dashboard =
 # disabled; 0 = explicitly disabled.
@@ -599,6 +619,11 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         # M5 conversation archive
         conversation_archive_enabled=bool(resolved[CONVERSATION_ARCHIVE_SETTING].value),
         # end M5 conversation archive
+        # R2 spool retention
+        http_responses_session_bridge_operation_spool_retention_seconds=float(
+            resolved[OPERATION_SPOOL_RETENTION_SETTING].value
+        ),
+        # end R2 spool retention
         version=row.version,
         # C2-1 timeouts
         upstream_connect_timeout_seconds=float(resolved["upstream_connect_timeout_seconds"].value),

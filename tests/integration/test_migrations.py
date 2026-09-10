@@ -2807,6 +2807,55 @@ async def test_dashboard_conversation_archive_migration_upgrade_and_downgrade(tm
 # end M5 conversation archive
 
 
+# R2 spool retention
+@pytest.mark.asyncio
+async def test_dashboard_spool_retention_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the nullable ``http_responses_session_bridge_operation_spool_retention_seconds``
+    column; downgrade drops it; a final walk to head proves the revision sits on a single-head graph."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'spool-retention.sqlite'}"
+    spool_revision = "20260910_010000_dashboard_spool_retention"
+    column = "http_responses_session_bridge_operation_spool_retention_seconds"
+    # Read the parent from the graph, not from a literal: a rebase onto a
+    # newer main re-chains ``down_revision``.
+    parent_revision = (
+        ScriptDirectory.from_config(_build_alembic_config(db_url)).get_revision(spool_revision).down_revision
+    )
+    assert isinstance(parent_revision, str)
+
+    async def _columns(engine) -> dict[str, dict[str, object]]:
+        async with engine.connect() as conn:
+            result = await conn.execute(text("PRAGMA table_info(dashboard_settings)"))
+            return {row[1]: {"notnull": row[3], "default": row[4]} for row in result.fetchall()}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert column not in await _columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, spool_revision, bootstrap_legacy=False))
+        columns = await _columns(engine)
+        # Nullable without a default: NULL = inherit the env alias / 7-day default.
+        assert columns[column] == {"notnull": 0, "default": None}
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert column not in await _columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert column in await _columns(engine)
+    finally:
+        await engine.dispose()
+
+
+# end R2 spool retention
+
+
 _LIVE_FACET_INDEXES = {
     "idx_logs_live_api_key",
     "idx_logs_live_model_effort",

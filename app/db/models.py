@@ -1207,6 +1207,16 @@ class DashboardSettings(Base):
     # default, off); a non-NULL value is dashboard-owned.
     conversation_archive_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # end M5 conversation archive
+    # R2 spool retention: how long the durable HTTP-bridge operation spool --
+    # raw request payloads and their spooled response events -- is kept before
+    # the retention sweep deletes it. NULL inherits the deprecated
+    # ``CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_RETENTION_SECONDS``
+    # env alias (then the code default, 7 days); a non-NULL value is
+    # dashboard-owned and must stay at or above the replay floor.
+    http_responses_session_bridge_operation_spool_retention_seconds: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    # end R2 spool retention
     version: Mapped[int] = mapped_column(
         Integer,
         default=1,

@@ -107,6 +107,11 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         # M5 conversation archive: NULL column, env double without the field
         # -> code default (off).
         "conversation_archive_enabled": InheritableValue(False, "default", False, False),
+        # R2 spool retention: NULL column, env double without the field -> the
+        # 7-day code default.
+        "http_responses_session_bridge_operation_spool_retention_seconds": InheritableValue(
+            604800.0, "default", 604800.0, 604800.0
+        ),
         # C2-1 timeouts: NULL columns and a startup fake without the fields
         # resolve to the code default.
         **{

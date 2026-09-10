@@ -32,6 +32,12 @@ from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 from app.core.config.inheritable import resolve_inheritable
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.config.spool_retention import (
+    OPERATION_SPOOL_RETENTION_SETTING,
+    SPOOL_RETENTION_FLOOR_INPUTS,
+    binding_spool_retention_floor_term,
+    operation_spool_retention_floor_seconds,
+)
 from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING, CONVERSATION_ARCHIVE_TOGGLED_ACTION
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError, DashboardSettingsConflictError
@@ -296,6 +302,15 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         conversation_archive_enabled=settings.conversation_archive_enabled,
         conversation_archive_dir=conversation_archive_dir,
         # end M5 conversation archive
+        # R2 spool retention: the effective window plus the floor the API would
+        # enforce, so the data retention card can mirror the check client-side.
+        http_responses_session_bridge_operation_spool_retention_seconds=(
+            settings.http_responses_session_bridge_operation_spool_retention_seconds
+        ),
+        http_responses_session_bridge_operation_spool_retention_floor_seconds=(
+            operation_spool_retention_floor_seconds(settings, startup_settings=environment_settings)
+        ),
+        # end R2 spool retention
         version=settings.version,
         # C2-1 timeouts
         upstream_connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
@@ -888,6 +903,81 @@ def _validate_timeout_invariants(payload: DashboardSettingsUpdateRequest, curren
         )
 
 
+# R2 spool retention
+class _ProposedSpoolRetentionInputs:
+    """Effective floor inputs after ``payload`` is applied, over ``current``.
+
+    The three inputs behave differently in the update request: the two reuse
+    windows are non-nullable dashboard columns with no environment layer, so a
+    ``None`` there only ever means "unchanged"; the bridge request budget is
+    tri-state, so an explicit null returns it to the environment value.
+    """
+
+    __slots__ = ("_values",)
+
+    def __init__(self, payload: DashboardSettingsUpdateRequest, current, startup_settings) -> None:
+        values: dict[str, float] = {}
+        for name in SPOOL_RETENTION_FLOOR_INPUTS:
+            proposed = getattr(payload, name, None)
+            inheritable = name in settings_module.Settings.model_fields
+            if proposed is None and inheritable and name in payload.model_fields_set:
+                # Explicit null on a tri-state field: inherit the environment
+                # value (the process default for a partial startup fake).
+                proposed = getattr(startup_settings, name, None)
+                if proposed is None:
+                    proposed = getattr(settings_module.get_settings(), name)
+            values[name] = float(proposed if proposed is not None else getattr(current, name))
+        self._values = values
+
+    def __getattr__(self, name: str) -> object:
+        try:
+            return self._values[name]
+        except KeyError as exc:  # keep ``getattr(obj, name, default)`` working
+            raise AttributeError(name) from exc
+
+
+def _proposed_spool_retention_seconds(payload: DashboardSettingsUpdateRequest, current, startup_settings) -> float:
+    """Effective spool retention after ``payload``: value = store, null = inherit, absent = current."""
+    if OPERATION_SPOOL_RETENTION_SETTING not in payload.model_fields_set:
+        return float(getattr(current, OPERATION_SPOOL_RETENTION_SETTING))
+    proposed = getattr(payload, OPERATION_SPOOL_RETENTION_SETTING)
+    if proposed is not None:
+        return float(proposed)
+    inherited = current.provenance[OPERATION_SPOOL_RETENTION_SETTING]
+    return float(resolve_inheritable(None, inherited.env_value, inherited.default).value)
+
+
+def _validate_spool_retention_floor(payload: DashboardSettingsUpdateRequest, current, startup_settings) -> None:
+    """Reject a PUT that would leave the operation spool shorter than its replay floor.
+
+    The spool holds the raw request payload and the response events that
+    durable bridge recovery replays, so it must outlive every window in which
+    a spooled operation may still be read. Both the retention window and the
+    floor are evaluated on the effective values (dashboard column, else
+    environment, else code default) before and after the change, and only a
+    violation the change introduces is rejected -- an environment alias that is
+    already below the floor must not block unrelated edits.
+    """
+    if not {OPERATION_SPOOL_RETENTION_SETTING, *SPOOL_RETENTION_FLOOR_INPUTS} & payload.model_fields_set:
+        return
+    before_floor = operation_spool_retention_floor_seconds(current, startup_settings=startup_settings)
+    if float(getattr(current, OPERATION_SPOOL_RETENTION_SETTING)) < before_floor:
+        return
+    after_inputs = _ProposedSpoolRetentionInputs(payload, current, startup_settings)
+    after_retention = _proposed_spool_retention_seconds(payload, current, startup_settings)
+    term, floor = binding_spool_retention_floor_term(after_inputs, startup_settings=startup_settings)
+    if after_retention >= floor:
+        return
+    raise DashboardBadRequestError(
+        f"{OPERATION_SPOOL_RETENTION_SETTING} must be at least {floor:g}s: the operation spool is replayed "
+        f"for as long as {term} ({floor:g}s), so a shorter window deletes transcripts a recovery still needs",
+        code="spool_retention_below_floor",
+    )
+
+
+# end R2 spool retention
+
+
 def _proposed_reset_credit_polling_enabled(payload: DashboardSettingsUpdateRequest, current) -> bool:
     """M2 background jobs: the reset-credit polling toggle as it will be after this update.
 
@@ -1044,6 +1134,7 @@ async def update_settings(
                 code="invalid_proxy_account_stream_recovery_reserve",
             )
         _validate_timeout_invariants(payload, current, startup_settings)  # C2-1 timeouts + C2-2 lease TTL
+        _validate_spool_retention_floor(payload, current, startup_settings)  # R2 spool retention
         timeout_fields = {name: _timeout_field(payload, name) for name in DASHBOARD_TIMEOUT_SETTINGS}
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
@@ -1340,6 +1431,14 @@ async def update_settings(
                     and payload.conversation_archive_enabled is None
                 ),
                 # end M5 conversation archive
+                # R2 spool retention: tri-state via model_fields_set.
+                http_responses_session_bridge_operation_spool_retention_seconds=_dashboard_value(
+                    payload, OPERATION_SPOOL_RETENTION_SETTING
+                ),
+                clear_http_responses_session_bridge_operation_spool_retention_seconds=_clears_dashboard_value(
+                    payload, OPERATION_SPOOL_RETENTION_SETTING
+                ),
+                # end R2 spool retention
                 # C2-1 timeouts
                 upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][0],
                 clear_upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][1],
@@ -1454,6 +1553,7 @@ async def update_settings(
             "circuit_breaker_enabled",
             *BACKGROUND_JOB_SETTINGS,  # M2 background jobs
             CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive
+            OPERATION_SPOOL_RETENTION_SETTING,  # R2 spool retention
             *DASHBOARD_TIMEOUT_SETTINGS,  # C2-1 timeouts
         )
         if getattr(current, field_name) != getattr(updated, field_name)
@@ -1462,7 +1562,12 @@ async def update_settings(
     # storing the inherited value (or clearing it) changes ownership without
     # changing the effective value; audit that too. An effective archive flip
     # additionally gets its own audit line naming the actor (further below).
-    for field_name in (*RESILIENCE_TOGGLE_SETTINGS, *BACKGROUND_JOB_SETTINGS, CONVERSATION_ARCHIVE_SETTING):
+    for field_name in (
+        *RESILIENCE_TOGGLE_SETTINGS,
+        *BACKGROUND_JOB_SETTINGS,
+        CONVERSATION_ARCHIVE_SETTING,
+        OPERATION_SPOOL_RETENTION_SETTING,  # R2 spool retention
+    ):
         if current.provenance[field_name] != updated.provenance[field_name] and field_name not in changed_fields:
             changed_fields.append(field_name)
     # C2-1 timeouts: a dashboard value equal to the inherited one still changes

@@ -38,6 +38,7 @@ from app.core.config.settings import (
     warn_removed_settings,
 )
 from app.core.config.settings_cache import get_settings_cache
+from app.core.config.spool_retention import resolve_operation_spool_retention_seconds
 from app.core.handlers import add_exception_handlers
 from app.core.metrics.middleware import MetricsMiddleware
 from app.core.metrics.prometheus import MULTIPROCESS_MODE, PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
@@ -526,7 +527,10 @@ async def lifespan(app: FastAPI):
                 },
             )
         purged_operation_rows = await _purge_operation_spool_on_startup(
-            retention_seconds=settings.http_responses_session_bridge_operation_spool_retention_seconds,
+            # R2 spool retention: the dashboard column wins over the deprecated
+            # env alias; ``dashboard_settings`` is the snapshot this startup
+            # step already loaded above.
+            retention_seconds=resolve_operation_spool_retention_seconds(dashboard_settings, startup_settings=settings),
         )
         if purged_operation_rows > 0:
             logger.info(

@@ -153,6 +153,18 @@ class DashboardSettingsResponse(DashboardModel):
     conversation_archive_enabled: bool
     conversation_archive_dir: str | None = None
     # end M5 conversation archive
+    # R2 spool retention: effective retention of the durable HTTP-bridge
+    # operation spool (raw request payloads + spooled response events);
+    # ``provenance[<name>]`` says whether the dashboard, the deprecated env
+    # alias or the code default supplied it. Unbounded here for the same reason
+    # as the C2-1 timeouts: an environment value ``Settings`` accepts must
+    # never make ``GET /api/settings`` fail.
+    http_responses_session_bridge_operation_spool_retention_seconds: float
+    # Lowest value the API would accept for the field above, derived from the
+    # longest window in which a spooled operation may still be replayed. The
+    # dashboard mirrors this floor client-side.
+    http_responses_session_bridge_operation_spool_retention_floor_seconds: float
+    # end R2 spool retention
     version: int = Field(ge=1)
     # C2-1 timeouts: effective values; ``provenance[<name>]`` says whether the
     # dashboard, the environment or the code default supplied each one. No
@@ -286,6 +298,14 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     # for confirmation first and the API audits every effective on/off change.
     conversation_archive_enabled: bool | None = None
     # end M5 conversation archive
+    # R2 spool retention: tri-state like the C2-1 timeouts (absent = unchanged,
+    # null = clear and inherit the deprecated env alias / code default, value =
+    # store). The replay floor is enforced in the API layer against the
+    # effective value, because it depends on the other dashboard reuse windows.
+    http_responses_session_bridge_operation_spool_retention_seconds: float | None = Field(
+        default=None, gt=0, le=315360000
+    )
+    # end R2 spool retention
     # C2-1 timeouts: tri-state like the caps (absent = unchanged, null = clear
     # to inherit the environment / default, value = store). Cross-field timeout
     # invariants are checked against the effective values in the API handler.

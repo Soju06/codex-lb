@@ -370,6 +370,7 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "automations_scheduler_enabled",
         "rate_limit_reset_credits_refresh_enabled",
         "conversation_archive_enabled",  # M5 conversation archive
+        "http_responses_session_bridge_operation_spool_retention_seconds",  # R2 spool retention
         # C2-1 timeouts
         "upstream_connect_timeout_seconds",
         "proxy_request_budget_seconds",
@@ -2510,3 +2511,113 @@ async def test_settings_api_conversation_archive_round_trip_with_provenance(asyn
 
 
 # end M5 conversation archive
+
+
+# R2 spool retention
+@pytest.mark.asyncio
+async def test_settings_api_spool_retention_round_trip_with_provenance(async_client, monkeypatch):
+    """default -> dashboard value -> cleared/env -> unchanged on omit; the floor is reported."""
+    from app.modules.settings import service as settings_service
+
+    setting = "http_responses_session_bridge_operation_spool_retention_seconds"
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 604800.0
+    assert payload["provenance"][setting] == {"source": "default", "envValue": 604800.0, "default": 604800.0}
+    # The floor the API enforces, so the card can mirror it before saving. At
+    # shipped defaults the bridge request budget (7200s) binds.
+    floor = payload["httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds"]
+    assert floor == 7200.0
+
+    configured = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 86400}
+    )
+    assert configured.status_code == 200
+    assert configured.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 86400.0
+    assert configured.json()["provenance"][setting]["source"] == "dashboard"
+
+    # Explicit null clears the column; the deprecated env alias applies again.
+    inherited = settings_service.get_settings().model_copy(update={setting: 259200.0})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": None}
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 259200.0
+    assert cleared.json()["provenance"][setting] == {
+        "source": "env",
+        "envValue": 259200.0,
+        "default": 604800.0,
+    }
+
+    # Omitting the field never copies the inherited value into the column.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["provenance"][setting]["source"] == "env"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert getattr(row, setting) is None
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_spool_retention_below_the_replay_floor(async_client):
+    """A window shorter than the longest replay window is refused, naming the binding term."""
+    at_floor = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7200}
+    )
+    assert at_floor.status_code == 200
+    assert at_floor.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 7200.0
+
+    below = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7199}
+    )
+    assert below.status_code == 400
+    body = below.json()
+    assert body["error"]["code"] == "spool_retention_below_floor"
+    assert "stale_operation_abandonment_window" in body["error"]["message"]
+
+    # The rejected value was not stored.
+    unchanged = await async_client.get("/api/settings")
+    assert unchanged.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 7200.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_raising_a_reuse_window_above_the_spool_retention(async_client):
+    """Raising a reuse window past the stored spool retention introduces the same violation."""
+    configured = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7200}
+    )
+    assert configured.status_code == 200
+
+    raised = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 10800}
+    )
+    assert raised.status_code == 400
+    body = raised.json()
+    assert body["error"]["code"] == "spool_retention_below_floor"
+    assert "bridge_session_reuse_window" in body["error"]["message"]
+
+    # An explicit null on a non-nullable reuse window means "unchanged", not
+    # "inherit"; the floor check must not treat it as a missing environment layer.
+    null_window = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgePromptCacheIdleTtlSeconds": None}
+    )
+    assert null_window.status_code == 200
+
+    # Raising it together with a spool retention that covers it is accepted.
+    both = await async_client.put(
+        "/api/settings",
+        json={
+            "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 10800,
+            "httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 10800,
+        },
+    )
+    assert both.status_code == 200
+    assert both.json()["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 10800
+    assert both.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 10800.0
+
+
+# end R2 spool retention

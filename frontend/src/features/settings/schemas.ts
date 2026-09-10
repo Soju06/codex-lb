@@ -221,6 +221,14 @@ export const DashboardSettingsSchema = z
     conversationArchiveEnabled: z.boolean().optional().default(false),
     conversationArchiveDir: z.string().nullable().optional().default(null),
     // end M5 conversation archive
+    // R2 spool retention: effective retention of the durable HTTP bridge
+    // operation spool (raw request payloads + response events) and the floor
+    // the API enforces, so the card can mirror the check before saving.
+    // `provenance.http_responses_session_bridge_operation_spool_retention_seconds`
+    // says which layer owns the value.
+    httpResponsesSessionBridgeOperationSpoolRetentionSeconds: z.number().optional().default(604800),
+    httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds: z.number().optional().default(0),
+    // end R2 spool retention
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -324,6 +332,16 @@ export const SettingsUpdateRequestSchema = z
     // the confirmation dialog.
     conversationArchiveEnabled: z.boolean().nullable().optional(),
     // end M5 conversation archive
+    // R2 spool retention: tri-state (omitted = unchanged, null = reset to
+    // inherited, value = dashboard value in seconds). The replay floor is
+    // enforced by the backend against the effective values.
+    httpResponsesSessionBridgeOperationSpoolRetentionSeconds: z
+      .number()
+      .positive()
+      .max(315360000)
+      .nullable()
+      .optional(),
+    // end R2 spool retention
     // C2-1 timeouts, tri-state like the caps: absent = unchanged, null = clear
     // (inherit environment / default), value = store. Cross-field invariants
     // are enforced by the backend against the effective values.

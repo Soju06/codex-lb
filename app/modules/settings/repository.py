@@ -101,6 +101,8 @@ class SettingsRepository:
             rate_limit_reset_credits_refresh_enabled=None,
             # M5 conversation archive: NULL = inherit the env alias / default.
             conversation_archive_enabled=None,
+            # R2 spool retention: NULL = inherit the env alias / default (7d).
+            http_responses_session_bridge_operation_spool_retention_seconds=None,
         )
         self._session.add(row)
         try:
@@ -203,6 +205,10 @@ class SettingsRepository:
         conversation_archive_enabled: bool | None = None,
         clear_conversation_archive_enabled: bool = False,
         # end M5 conversation archive
+        # R2 spool retention (tri-state like the C2-1 timeouts)
+        http_responses_session_bridge_operation_spool_retention_seconds: float | None = None,
+        clear_http_responses_session_bridge_operation_spool_retention_seconds: bool = False,
+        # end R2 spool retention
         # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
         # inherit, neither = untouched).
         upstream_connect_timeout_seconds: float | None = None,
@@ -434,6 +440,15 @@ class SettingsRepository:
         elif conversation_archive_enabled is not None:
             settings.conversation_archive_enabled = conversation_archive_enabled
         # end M5 conversation archive
+        # R2 spool retention: clear flag resets to NULL (inherit the env alias
+        # / code default); a non-None value is dashboard-owned.
+        if clear_http_responses_session_bridge_operation_spool_retention_seconds:
+            settings.http_responses_session_bridge_operation_spool_retention_seconds = None
+        elif http_responses_session_bridge_operation_spool_retention_seconds is not None:
+            settings.http_responses_session_bridge_operation_spool_retention_seconds = (
+                http_responses_session_bridge_operation_spool_retention_seconds
+            )
+        # end R2 spool retention
         # C2-1 timeouts
         for column_name, value, clear in (
             (

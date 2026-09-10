@@ -6549,6 +6549,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
         require_security_work_authorized,
         require_preferred_account,
         defer_no_account_error,
+        headers=None,
     ):
         del (
             self,
@@ -6570,6 +6571,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
             require_security_work_authorized,
             require_preferred_account,
             defer_no_account_error,
+            headers,
         )
         assert request_state.previous_response_id == "resp_ws_prev_anchor"
         return SimpleNamespace(id="acct_ws_prev_connect_failure")
@@ -11140,6 +11142,7 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
         require_security_work_authorized,
         require_preferred_account,
         defer_no_account_error,
+        headers=None,
     ):
         del (
             self,
@@ -11161,6 +11164,7 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
             require_security_work_authorized,
             require_preferred_account,
             defer_no_account_error,
+            headers,
         )
         assert request_state.previous_response_id == "resp_ws_prev_anchor_client"
         assert request_state.fresh_upstream_request_is_retry_safe is True

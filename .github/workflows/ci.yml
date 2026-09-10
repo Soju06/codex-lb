@@ -356,7 +356,7 @@ jobs:
         run: |
           uv sync --dev --frozen
           cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress
-          uv run pytest -q -ra tests/integration/test_native_routed_egress.py tests/integration/test_native_sse_egress.py tests/integration/test_native_websocket_events.py
+          uv run pytest -q -ra tests/integration/test_native_routed_egress.py tests/integration/test_native_sse_egress.py tests/integration/test_native_websocket_events.py tests/integration/test_native_usage_egress.py
 
       - name: Audit Rust dependencies and licenses
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25

@@ -1203,7 +1203,6 @@
   "settings.routing.singleAccount.empty": "Import an account before enabling single-account routing.",
   "settings.routing.subscriptionOverflow.label": "Overflow to model source when all subscription accounts are exhausted",
   "settings.routing.subscriptionOverflow.description": "When every eligible subscription account has hit its usage limit, new requests are sent to this source at its own cost. Default off. Turning it off stops new overflow immediately; conversations already pinned to the source keep working until their pins expire.",
-  "settings.routing.subscriptionOverflow.stagedNotice": "Shipping in stages: choosing and preflighting a source is available now; overflow routing itself lands in a later release.",
   "settings.routing.subscriptionOverflow.off": "Off",
   "settings.routing.subscriptionOverflow.placeholder": "Choose model source",
   "settings.routing.subscriptionOverflow.loading": "Loading model sources...",

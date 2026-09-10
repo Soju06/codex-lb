@@ -40,6 +40,7 @@ from app.modules.proxy.replay_safety import (
     _STATELESS_TOOL_DECLARATION_FIELDS,
     PortabilityVerdict,
     _classification_view,
+    input_carries_image_parts,
     is_binding_turn_state,
     responses_payload_is_account_neutral_fresh_replay,
     responses_payload_is_provider_portable,
@@ -188,6 +189,18 @@ def test_declaring_vision_restores_portability() -> None:
 
     assert _verdict(body) == PortabilityVerdict(False, "not_portable_vision", "input_image")
     assert _verdict(body, supports_vision=True) == PortabilityVerdict(True)
+
+
+def test_input_carries_image_parts_is_the_vision_step_alone() -> None:
+    """The pinned dispatch's gate: message content and tool output parts count, a bare-string input never does."""
+
+    image = {"type": "input_image", "image_url": _DATA_IMAGE_URL}
+    assert input_carries_image_parts([{"type": "message", "role": "user", "content": [image]}])
+    assert input_carries_image_parts([{"type": "function_call_output", "call_id": "c1", "output": [image]}])
+    assert not input_carries_image_parts([{"type": "message", "role": "user", "content": [{"type": "input_text"}]}])
+    assert not input_carries_image_parts([{"type": "message", "role": "user", "content": "plain"}])
+    assert not input_carries_image_parts("plain text input")
+    assert not input_carries_image_parts(None)
 
 
 def test_catalog_declarations_drive_the_verdict() -> None:

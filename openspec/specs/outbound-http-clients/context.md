@@ -114,3 +114,22 @@ Compact, raw HTTP and WebSocket messages keep immediate writes through this same
 cancellation-safe owner. Python queue fairness, bounds and replay policy are
 unchanged. Benchmark methodology and limitations are recorded in the archived
 `batch-ready-native-sse-output` change.
+
+## Direct usage GET transport
+
+Direct usage queries without an injected Python client prefer the existing
+native helper after the direct-egress admission check. Python owns routes,
+retry policy and UsagePayload validation; Rust owns each HTTP attempt and body.
+Only a missing/unstartable helper on the initial request permits Python fallback.
+
+For example, a 503 response whose body never ends closes before the next attempt
+and uses the existing ExponentialRetry delay (1, 2, then 2 seconds). A truncated
+200 body remains a transport error instead of becoming an invalid-payload 502.
+Cancellation retires one exchange without closing the shared helper.
+
+The adapter explicitly forwards aiohttp's default Accept-Encoding value because
+the helper enables decompression only for requests that negotiate it. Charset,
+empty-body and JSON-syntax handling follow the default Python session. Usage
+credit consumption remains a separate call, and resolved routes retain
+CodexClient ownership. Loopback probes validate these semantics; they do not
+measure production performance.

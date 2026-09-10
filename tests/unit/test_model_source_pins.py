@@ -743,3 +743,121 @@ def test_bounce_ttl_matches_the_design_constant() -> None:
     assert expires_at == purge_at == _T0 + timedelta(seconds=60)
     capped_expires, capped_purge = pins_module._bounce_expiry(_T0, _T0 + 10 * _DAY)
     assert capped_expires == capped_purge < _T0 + 10 * _DAY
+
+
+# --- PinIntent.resolve, the process cache and the multi-key lookup (#2123 WP-C2, C1 gaps) -----
+
+
+def test_pin_intent_resolve_appends_the_anchor_only_when_anchored_and_minted() -> None:
+    thread_write = PinWrite("thread\nkey", PIN_KIND_THREAD, "src_a", "key-1")
+    anchored = PinIntent(
+        writes=(thread_write,), thread_key="key", source_id="src_a", anchor_api_key_id="key-1", anchor=True
+    )
+
+    resolved = anchored.resolve("resp_source_1")
+    assert resolved is not anchored
+    assert resolved.writes == (
+        thread_write,
+        PinWrite("anchor\nkey-1\nresp_source_1", PIN_KIND_ANCHOR, "src_a", "key-1"),
+    )
+    assert resolved.thread_key == "key" and resolved.anchor is True
+    # No response id (a source that never sent ``response.created``): the intent is unchanged.
+    assert anchored.resolve(None) is anchored
+    assert anchored.resolve("") is anchored
+    # Keyless client: the anchor namespace uses ``-``.
+    keyless = PinIntent(writes=(), thread_key=None, source_id="src_a", anchor=True).resolve("resp_2")
+    assert keyless.writes == (PinWrite("anchor\n-\nresp_2", PIN_KIND_ANCHOR, "src_a", None),)
+
+
+def test_pin_intent_store_false_never_anchors() -> None:
+    """Mutant: anchor row for ``store: false`` (``anchor=False``)."""
+
+    intent = PinIntent(writes=(), thread_key="key", source_id="src_a", anchor_api_key_id="key-1", anchor=False)
+    assert intent.resolve("resp_source_1") is intent
+    assert intent.resolve("resp_source_1").writes == ()
+
+
+def test_pin_intent_anchor_requires_the_source_id() -> None:
+    with pytest.raises(ValueError):
+        PinIntent(writes=(), thread_key=None, anchor=True)
+    # The pre-C2 shape (writes + thread key) still constructs.
+    assert PinIntent(writes=(), thread_key=None).anchor is False
+
+
+def test_get_pin_cache_is_a_process_singleton(monkeypatch) -> None:
+    monkeypatch.setattr(pins_module, "_PIN_CACHE", None)
+    first = pins_module.get_pin_cache()
+    assert pins_module.get_pin_cache() is first
+    assert isinstance(first, PinCache)
+    assert len(first) == 0
+
+
+@pytest.mark.asyncio
+async def test_lookup_pins_bounded_reads_the_missing_keys_in_one_bounded_read(monkeypatch, virtual) -> None:
+    clock, scheduler = virtual
+    reads: list[tuple[str, ...]] = []
+    live = _record(created_at=clock.now())
+    bounce_key = bounce_pin_key(_thread_only_key("thread-2"))
+    bounce = PinRecord(
+        pin_key=bounce_key,
+        kind=PIN_KIND_BOUNCE,
+        source_id="src_a",
+        api_key_id=None,
+        created_at=clock.now(),
+        last_seen_at=clock.now(),
+        expires_at=clock.now() + timedelta(seconds=WS_BOUNCE_TTL_SECONDS),
+        purge_at=clock.now() + timedelta(seconds=WS_BOUNCE_TTL_SECONDS),
+    )
+
+    async def read(pin_keys, session_factory: object) -> dict[str, PinRecord]:
+        reads.append(tuple(pin_keys))
+        return {bounce.pin_key: bounce}
+
+    monkeypatch.setattr(pins_module, "_read_pins", read)
+    cache = PinCache()
+    cache.put(live, now=clock.monotonic())
+    results = await pins_module.lookup_pins_bounded(
+        [live.pin_key, bounce_key, "thread\nabsent", live.pin_key], cache=cache, scheduler=scheduler, clock=clock
+    )
+    assert reads == [(bounce_key, "thread\nabsent")], (
+        "the cached live key is served without a read; keys are deduplicated"
+    )
+    assert results[live.pin_key] == PinLookupResult("live", live)
+    assert results[bounce_key] == PinLookupResult("bounce", bounce)
+    assert results["thread\nabsent"] == PinLookupResult("none", None)
+    assert cache.get("thread\nabsent", now=clock.monotonic()) is None, "absence is never cached"
+    assert cache.get(bounce_key, now=clock.monotonic()) is None, "only live records are cached"
+
+
+@pytest.mark.asyncio
+async def test_lookup_pins_bounded_times_out_after_the_lookup_deadline(monkeypatch, virtual) -> None:
+    clock, scheduler = virtual
+
+    async def hang(pin_keys, session_factory: object) -> dict[str, PinRecord]:
+        await asyncio.Event().wait()
+        return {}
+
+    monkeypatch.setattr(pins_module, "_read_pins", hang)
+    task = scheduler.create_task(
+        pins_module.lookup_pins_bounded(["thread\nkey", "bounce\nkey"], cache=None, scheduler=scheduler, clock=clock)
+    )
+    await scheduler.advance(PIN_LOOKUP_DEADLINE_SECONDS + 0.01)
+    assert task.done()
+    with pytest.raises(PinLookupTimeout):
+        task.result()
+    await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_lookup_pins_bounded_with_every_key_cached_never_reads(monkeypatch, virtual) -> None:
+    clock, scheduler = virtual
+    live = _record(created_at=clock.now())
+
+    async def read(pin_keys, session_factory: object) -> dict[str, PinRecord]:
+        raise AssertionError("no read expected")
+
+    monkeypatch.setattr(pins_module, "_read_pins", read)
+    cache = PinCache()
+    cache.put(live, now=clock.monotonic())
+    results = await pins_module.lookup_pins_bounded([live.pin_key], cache=cache, scheduler=scheduler, clock=clock)
+    assert results == {live.pin_key: PinLookupResult("live", live)}

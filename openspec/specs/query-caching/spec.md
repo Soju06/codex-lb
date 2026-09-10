@@ -3,7 +3,9 @@
 ## Purpose
 
 Define query caching and quota-key normalization contracts so selection and dashboard reads remain fast and consistent.
+
 ## Requirements
+
 ### Requirement: Additional usage persistence normalizes upstream aliases to canonical quota keys
 Persisted additional-usage rows MUST record one internal canonical `quota_key` even when upstream changes raw `limit_name` or `metered_feature` aliases.
 
@@ -325,24 +327,32 @@ Additional usage latest-per-account reads on SQLite MUST avoid `row_number()` wi
 
 ### Requirement: Unfiltered request-log filter options avoid full DISTINCT passes
 
-When `GET /api/request-logs/options` is requested without user-supplied filters, each facet (account ids, model/reasoning-effort pairs, api-key ids, status/error-code pairs) MUST be computed with loose-index-scan probes bounded by the facet's distinct-value count, not by the size of `request_logs`. The returned option sets, their ordering, and the soft-delete/status-facet semantics MUST be identical to the unbounded `DISTINCT` results.
+When `GET /api/request-logs/options` is requested without user-supplied filters, each facet MUST traverse ordered distinct values with index probes rather than repeatedly scan the live request-log cohort or perform a full `DISTINCT` pass. A candidate value MUST be returned only when a row satisfies the endpoint's visibility and status predicates. Returned option sets, ordering, NULL handling, and soft-delete/status-facet semantics MUST match the unbounded `DISTINCT` results.
 
 #### Scenario: Unfiltered facets return identical option sets via bounded probes
 
-- **GIVEN** request logs spanning multiple accounts, models with and without reasoning effort, api keys, and statuses with and without error codes
+- **GIVEN** request logs spanning multiple accounts, models with and without reasoning effort, API keys, and statuses with and without error codes
 - **WHEN** the options endpoint is called with no filters
-- **THEN** each facet MUST be produced by per-distinct-value index probes (recursive skip scan) rather than a full `DISTINCT` pass
+- **THEN** each facet MUST advance through indexed distinct values rather than a full `DISTINCT` pass
 - **AND** the response MUST equal the legacy `DISTINCT` results, including `(value, NULL)` pairs and ordering
+
+#### Scenario: SQLite facet traversal does not require planner statistics
+
+- **GIVEN** SQLite request logs with many repeated visible rows, the standard facet indexes, and no planner statistics
+- **WHEN** the unfiltered options endpoint is called
+- **THEN** facet traversal MUST use the facet's ordered values and equality-constrained eligibility checks
+- **AND** adding duplicate visible rows MUST NOT cause each recursive step to rescan the entire live-row cohort
 
 #### Scenario: Soft-deleted rows stay excluded from skip-scanned facets
 
-- **GIVEN** request-log rows with `deleted_at` set
-- **WHEN** the options endpoint is called with no filters
-- **THEN** values appearing only on soft-deleted rows MUST NOT appear in any facet
+- **GIVEN** request-log values present only in rows with `deleted_at` set or an unsupported status
+- **WHEN** the options endpoint is called without filters
+- **THEN** those values MUST NOT be returned
+- **AND** a value shared by visible and invisible rows MUST be returned exactly once when a visible row qualifies
 
 #### Scenario: Filtered requests keep bounded DISTINCT semantics
 
-- **WHEN** the options endpoint is called with any user filter (`since`, `until`, account, api-key, model, or reasoning-effort constraints)
+- **WHEN** the options endpoint receives user filters such as time bounds, account, API-key, model, or reasoning-effort constraints
 - **THEN** the facets MUST apply those filters with unchanged semantics and results
 
 ### Requirement: Proxy API-key auth caching is invalidation-driven with a TTL backstop
@@ -1031,4 +1041,3 @@ empty conversation ID and return a detail not-found response.
 - **WHEN** the API handles `GET /api/conversations/`
 - **THEN** it returns the same collection envelope as `GET /api/conversations`
 - **AND** it does not invoke detail lookup for an empty conversation ID
-

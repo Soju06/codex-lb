@@ -2416,6 +2416,32 @@ Index(
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
 )
+# Live-row partial indexes for the unfiltered request-log facet skip scan
+# (recursive ``facet_skip`` probes: ``min(column) WHERE deleted_at IS NULL AND
+# column > previous``). The predicate matches the probe so a probe never walks
+# the soft-deleted cohort sharing a value. Account ids need none: soft deletion
+# detaches account_id (NULL), which ``account_id > previous`` never walks.
+# Enforced via the manual drift index requirements like the covering index.
+Index(
+    "idx_logs_live_api_key",
+    RequestLog.api_key_id,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
+)
+Index(
+    "idx_logs_live_model_effort",
+    RequestLog.model,
+    RequestLog.reasoning_effort,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
+)
+Index(
+    "idx_logs_live_status_error",
+    RequestLog.status,
+    RequestLog.error_code,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
+)
 Index(
     "idx_logs_request_status_api_key_time",
     RequestLog.request_id,

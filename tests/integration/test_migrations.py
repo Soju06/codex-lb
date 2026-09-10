@@ -644,6 +644,9 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "idx_logs_status_error_time" in request_log_index_names
             assert "idx_logs_api_key_time" in request_log_index_names
             assert "idx_logs_source_requested_at" in request_log_index_names
+            assert "idx_logs_live_api_key" in request_log_index_names
+            assert "idx_logs_live_model_effort" in request_log_index_names
+            assert "idx_logs_live_status_error" in request_log_index_names
             warmup_table_exists = (
                 await session.execute(
                     text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account_limit_warmups'")
@@ -2802,3 +2805,128 @@ async def test_dashboard_conversation_archive_migration_upgrade_and_downgrade(tm
 
 
 # end M5 conversation archive
+
+
+_LIVE_FACET_INDEXES = {
+    "idx_logs_live_api_key",
+    "idx_logs_live_model_effort",
+    "idx_logs_live_status_error",
+}
+_LIVE_FACET_PARENT_REVISION = "20260909_120000_dashboard_conversation_archive"
+_LIVE_FACET_REVISION = "20260909_130000_add_request_logs_live_facet_indexes"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_live_facet_indexes_migration_upgrade_and_downgrade(tmp_path):
+    """The three live-row partial facet indexes round-trip and tolerate re-application."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'request-logs-live-facet.sqlite'}"
+
+    async def _request_log_indexes(engine) -> dict[str, bool]:
+        async with engine.connect() as conn:
+            rows = (await conn.execute(text("PRAGMA index_list('request_logs')"))).fetchall()
+            # PRAGMA index_list columns: seq, name, unique, origin, partial.
+            return {str(row[1]): bool(row[4]) for row in rows}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, _LIVE_FACET_PARENT_REVISION, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        indexes = await _request_log_indexes(engine)
+        assert not (_LIVE_FACET_INDEXES & indexes.keys())
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, _LIVE_FACET_REVISION, bootstrap_legacy=False))
+        indexes = await _request_log_indexes(engine)
+        assert _LIVE_FACET_INDEXES <= indexes.keys()
+        # Partial: the predicate excludes soft-deleted rows.
+        assert all(indexes[name] for name in _LIVE_FACET_INDEXES)
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), _LIVE_FACET_PARENT_REVISION))
+        indexes = await _request_log_indexes(engine)
+        assert not (_LIVE_FACET_INDEXES & indexes.keys())
+
+        # Re-upgrade against an operator-precreated index (the out-of-band
+        # mitigation shares the migration's names) so IF NOT EXISTS is
+        # exercised on an existing index, not only the fresh-create branch.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("CREATE INDEX idx_logs_live_api_key ON request_logs (api_key_id) WHERE deleted_at IS NULL")
+            )
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        indexes = await _request_log_indexes(engine)
+        assert _LIVE_FACET_INDEXES <= indexes.keys()
+        assert all(indexes[name] for name in _LIVE_FACET_INDEXES)
+    finally:
+        await engine.dispose()
+
+    assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only invalid live facet index repair test",
+)
+async def test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql(db_setup):
+    """An invalid leftover from an interrupted CREATE INDEX CONCURRENTLY is
+    rebuilt as a partial index, while a valid operator-precreated index (the
+    out-of-band mitigation shares the migration's names) is kept by IF NOT
+    EXISTS."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    index_name = "idx_logs_live_model_effort"
+    precreated_index_name = "idx_logs_live_api_key"
+
+    await run_startup_migrations(_DATABASE_URL)
+    await to_thread.run_sync(
+        lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), _LIVE_FACET_PARENT_REVISION)
+    )
+
+    async with SessionLocal() as session:
+        await session.execute(
+            text(f"CREATE INDEX {precreated_index_name} ON request_logs (api_key_id) WHERE deleted_at IS NULL")
+        )
+        await session.execute(text(f"CREATE INDEX {index_name} ON request_logs (model)"))
+        await session.execute(
+            text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = CAST(:name AS regclass)"),
+            {"name": index_name},
+        )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        validity = {
+            str(row[0]): bool(row[1])
+            for row in (
+                await session.execute(
+                    text(
+                        "SELECT c.relname, i.indisvalid FROM pg_index i "
+                        "JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname LIKE 'idx_logs_live_%'"
+                    )
+                )
+            ).fetchall()
+        }
+        indexdefs = {
+            str(row[0]): str(row[1])
+            for row in (
+                await session.execute(
+                    text(
+                        "SELECT indexname, indexdef FROM pg_indexes "
+                        "WHERE tablename = 'request_logs' AND indexname LIKE 'idx_logs_live_%'"
+                    )
+                )
+            ).fetchall()
+        }
+
+    assert validity == dict.fromkeys(_LIVE_FACET_INDEXES, True)
+    assert set(indexdefs) == _LIVE_FACET_INDEXES
+    assert "(model, reasoning_effort)" in indexdefs[index_name]  # rebuilt, not the accepted decoy
+    assert "(api_key_id)" in indexdefs[precreated_index_name]  # kept by IF NOT EXISTS
+    assert all("WHERE (deleted_at IS NULL)" in indexdef for indexdef in indexdefs.values())

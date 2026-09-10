@@ -276,6 +276,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
+from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingResponse
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
@@ -283,6 +284,16 @@ from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_STARTED_AT_STATE,
     IMAGE_ROUTE_STREAM_STATE,
     record_images_route_observability,
+)
+from app.modules.proxy.overflow import (
+    ROUTE_CODEX_RESPONSES,
+    ROUTE_V1_RESPONSES,
+    OverflowDispatch,
+    apply_usage_limit_hint,
+    compact_pin_denial,
+    handshake_denial,
+    resolve_subscription_overflow,
+    restore_client_store,
 )
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
@@ -1222,6 +1233,43 @@ async def responses(
         )
         if disabled_denial is not None:
             return disabled_denial
+    if source is None:
+        apply_enforced_service_tier_model_fallback(
+            responses_payload,
+            service_tier_was_enforced=service_tier_was_enforced,
+        )
+    # Subscription-exhaustion overflow is decided once here (design v3 §4.1):
+    # probe inputs equal selection inputs, and nothing is reserved, leased or
+    # written yet. The decision precedes a direct source dispatch as well: a
+    # conversation pinned or anchored to an overflow source stays there even
+    # when another source serves the requested model directly (I7), while a
+    # directly owned model without pin evidence never overflows fresh.
+    # ``None`` is the unchanged direct-routing or subscription path.
+    overflow = await resolve_subscription_overflow(
+        request,
+        responses_payload,
+        context,
+        api_key,
+        raw_model=raw_source_model,
+        require_streaming=not backend_non_streaming_requested,
+        source_route_excluded=source_route_excluded,
+        route=ROUTE_CODEX_RESPONSES,
+        direct_source=source,
+    )
+    if isinstance(overflow, Response):
+        return overflow
+    if overflow is not None:
+        return await _overflow_source_response(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            overflow,
+            pre_normalization_effort=pre_normalization_effort,
+            enforce_openai_sdk_contract=openai_sdk_request,
+            native_codex_heartbeat=native_codex_heartbeat,
+            non_streaming=backend_non_streaming_requested,
+        )
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -1240,11 +1288,6 @@ async def responses(
             native_codex_heartbeat=native_codex_heartbeat,
             context=context,
         )
-
-    apply_enforced_service_tier_model_fallback(
-        responses_payload,
-        service_tier_was_enforced=service_tier_was_enforced,
-    )
 
     if not backend_non_streaming_requested:
         response = await _stream_responses(
@@ -1318,6 +1361,10 @@ async def responses_websocket(
         transport_denial = await _websocket_upstream_transport_denial()
         if transport_denial is not None:
             await websocket.send_denial_response(transport_denial)
+            return
+        overflow_denial = await handshake_denial(websocket.headers, context=context)
+        if overflow_denial is not None:
+            await websocket.send_denial_response(overflow_denial)
             return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
@@ -1431,6 +1478,37 @@ async def v1_responses(
         )
         if disabled_denial is not None:
             return disabled_denial
+    if source is None:
+        apply_enforced_service_tier_model_fallback(
+            responses_payload,
+            service_tier_was_enforced=service_tier_was_enforced,
+        )
+    # Decided before a direct source dispatch for the same reason as on the
+    # Codex route: a pin or anchor owns the conversation whichever source
+    # serves the model directly (I7).
+    overflow = await resolve_subscription_overflow(
+        request,
+        responses_payload,
+        context,
+        api_key,
+        raw_model=raw_source_model,
+        require_streaming=responses_payload.stream is True,
+        source_route_excluded=source_route_excluded,
+        route=ROUTE_V1_RESPONSES,
+        direct_source=source,
+    )
+    if isinstance(overflow, Response):
+        return overflow
+    if overflow is not None:
+        return await _overflow_source_response(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            overflow,
+            pre_normalization_effort=pre_normalization_effort,
+            non_streaming=not responses_payload.stream,
+        )
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -1445,10 +1523,6 @@ async def v1_responses(
             pre_normalization_effort=pre_normalization_effort,
             context=context,
         )
-    apply_enforced_service_tier_model_fallback(
-        responses_payload,
-        service_tier_was_enforced=service_tier_was_enforced,
-    )
     if responses_payload.stream:
         response = await _stream_responses(
             request,
@@ -1689,6 +1763,10 @@ async def v1_responses_websocket(
         transport_denial = await _websocket_upstream_transport_denial()
         if transport_denial is not None:
             await websocket.send_denial_response(transport_denial)
+            return
+        overflow_denial = await handshake_denial(websocket.headers, context=context)
+        if overflow_denial is not None:
+            await websocket.send_denial_response(overflow_denial)
             return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
@@ -5121,6 +5199,50 @@ async def _source_audio_transcription_response(
     return Response(content=result.body, status_code=200, headers=headers)
 
 
+async def _overflow_source_response(
+    request: Request,
+    payload: ResponsesRequest,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    overflow: OverflowDispatch,
+    *,
+    pre_normalization_effort: str | None,
+    enforce_openai_sdk_contract: bool = True,
+    native_codex_heartbeat: bool = False,
+    non_streaming: bool = False,
+) -> Response:
+    """Serve an admitted subscription-overflow decision through the hardened source route.
+
+    Route-helper latch (design v3 I13): the decision claimed the bulkhead slot
+    (and any breaker trial) as its last await-free step; until a
+    ``SourceDispatch`` takes the claims over inside ``_source_responses_response``
+    this ``finally`` is their only releaser, so a key raising in the reservation
+    step, a shutdown or any other exception never leaks them. Nothing else is
+    owned here: the reservation is taken, and the owner built, by the source
+    route itself.
+    """
+
+    payload.model = overflow.model
+    if not non_streaming:
+        payload.stream = True
+    try:
+        rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+        return await _source_responses_response(
+            request,
+            payload,
+            source=overflow.source,
+            api_key=api_key,
+            rate_limit_headers=rate_limit_headers,
+            pre_normalization_effort=pre_normalization_effort,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            native_codex_heartbeat=native_codex_heartbeat,
+            context=context,
+            overflow=overflow,
+        )
+    finally:
+        overflow.claims.release_if_unowned()
+
+
 async def _source_responses_response(
     request: Request,
     payload: ResponsesRequest,
@@ -5132,6 +5254,7 @@ async def _source_responses_response(
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
     context: ProxyContext | None = None,
+    overflow: OverflowDispatch | None = None,
 ) -> Response:
     """Serve a Responses request from an OpenAI-compatible model source.
 
@@ -5141,6 +5264,12 @@ async def _source_responses_response(
     is raced against the client disconnecting, and the settlement generator is
     the outermost body layer for limited and unlimited keys alike (live
     streaming; limited keys settle at an estimate when usage is missing).
+
+    With ``overflow`` (a subscription-exhaustion decision) the admission claims
+    were taken by the decision and are handed to the owner here; the owner
+    carries the decision's attribution (``request_log_source``,
+    ``dispatch_kind``), pin intent and error codes, and the source body is
+    shaped with ``service_tier`` stripped (source pricing has no tier).
     """
 
     preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(request.headers)
@@ -5152,7 +5281,7 @@ async def _source_responses_response(
         source,
         pre_normalization_effort=pre_normalization_effort,
     )
-    claims = try_claim_source_admission(source)
+    claims = overflow.claims if overflow is not None else try_claim_source_admission(source)
     if claims is None:
         return _logged_error_json_response(
             request,
@@ -5185,13 +5314,25 @@ async def _source_responses_response(
             clock=clock_for(context.service) if context is not None else REAL_CLOCK,
             settle_reservation=_settle_source_reservation,
             release_reservation=_release_reservation,
+            **(overflow.owner_kwargs() if overflow is not None else {}),
         )
         claims.transfer_to(owner)
     except BaseException:
         claims.release_if_unowned()
         raise
     try:
-        source_payload = _shape_source_responses_payload(payload, source, api_key=api_key)
+        source_payload = _shape_source_responses_payload(
+            payload,
+            source,
+            api_key=api_key,
+            strip_service_tier=overflow is not None,
+        )
+        if overflow is not None:
+            # The source keeps the client's storage intent (an SDK
+            # ``previous_response_id`` chain resolves only at a source that
+            # stored the previous response); the ChatGPT-forced ``store: false``
+            # stays on direct routing.
+            source_payload = restore_client_store(source_payload, payload)
         if payload.stream:
             await open_with_disconnect_watch(request, owner, _open_owned_source_stream(owner, source_payload))
             stream = owner.stream
@@ -5251,10 +5392,19 @@ def _shape_source_responses_payload(
     source: ModelSource,
     *,
     api_key: ApiKeyData | None,
+    strip_service_tier: bool = False,
 ) -> dict[str, JsonValue]:
-    """Project the client body onto what the source may see (telemetry stripped, reasoning aliases resolved)."""
+    """Project the client body onto what the source may see (telemetry stripped, reasoning aliases resolved).
 
-    source_payload = strip_source_telemetry(payload.model_dump_for_forwarding())
+    ``strip_service_tier`` (overflow dispatch only, design §4.6 P9) also drops
+    ``service_tier``: source pricing has no tier dimension and the row records
+    ``requested_service_tier`` instead; direct routing keeps forwarding it.
+    """
+
+    source_payload = strip_source_telemetry(
+        payload.model_dump_for_forwarding(),
+        strip_service_tier=strip_service_tier,
+    )
     preserve_materialized_provider_alias = payload._codex_lb_provider_reasoning_effort_materialized and (
         api_key is None or (api_key.enforced_reasoning_effort is None and api_key.allowed_reasoning_efforts is None)
     )
@@ -5328,6 +5478,39 @@ async def _finish_non_stream_source_dispatch(
             upstream_status_code=result.upstream_status_code,
         )
         return Response()
+    if owner.pin_intent is not None and owner.pin_executor is not None and result.payload.get("output"):
+        # Pin/anchor rows are committed only for a delivered answer and only
+        # before the JSON leaves (I11): the anchor row for an SDK
+        # ``previous_response_id`` chain is resolved from the source's
+        # response id and written in the same transaction as the thread pin.
+        # A verified non-write fails closed -- never "proceed unpinned".
+        pin_outcome = await owner.pin_executor.commit(
+            owner.pin_intent.resolve(owner.source_response_id),
+            drain_until=owner.drain_until,
+            scheduler=owner.scheduler,
+            clock=owner.clock,
+        )
+        owner.pin_outcome = pin_outcome
+        if pin_outcome != "written":
+            await owner.finish(
+                status="error",
+                error_code=owner.pin_failure_row_code,
+                error_message="model-source pin write did not verify as durable",
+                usage=result.usage,
+                timings=result.timings,
+                upstream_status_code=result.upstream_status_code,
+            )
+            error = openai_error(
+                owner.pin_failure_error_code,
+                "The model source could not record continuity for this conversation; retry the request",
+                error_type="server_error",
+            )
+            return _logged_error_json_response(
+                request,
+                503,
+                error,
+                headers={**rate_limit_headers, "Retry-After": "2"},
+            )
     await owner.finish(
         status="success",
         usage=result.usage,
@@ -6798,8 +6981,9 @@ async def _stream_responses(
         responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
         responses_owner_forward_rejected_event=responses_owner_forward_rejected_event,
     )
-    return StreamingResponse(
+    return DeliveryTracedStreamingResponse(
         stream,
+        surface="responses",
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -7109,6 +7293,9 @@ async def _compact_responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
     validate_model_access(api_key, payload.model)
+    pin_denial = await compact_pin_denial(request, payload, context=context)
+    if pin_denial is not None:
+        return pin_denial
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)
     except ClientPayloadError as exc:
@@ -8556,6 +8743,15 @@ def _logged_error_json_response(
         public_content = content
     code, message = _error_details_from_content(public_content)
     effective_headers = dict(headers or {})
+    if status_code == 429 and code == USAGE_LIMIT_REACHED:
+        # The envelope TypedDict is a plain JSON object at runtime; the hint
+        # helper reads ``request.state`` once and returns both unchanged
+        # unless the overflow decision declined with ``not_portable_history``.
+        public_content, effective_headers = apply_usage_limit_hint(
+            request,
+            cast("Mapping[str, JsonValue]", public_content),
+            effective_headers,
+        )
     if status_code == 429 and is_local_overload_error_code(code):
         effective_headers = merge_retry_after_headers(effective_headers)
     log_error_response(

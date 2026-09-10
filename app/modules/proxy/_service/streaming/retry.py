@@ -2878,16 +2878,19 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
-                    verified_owner_replay_moved = _move_verified_fresh_replay_from_owner(
-                        account_id=account.id,
-                        outcome="owner_previsible_retryable_failure",
-                    )
-                    if not verified_owner_replay_moved and classify_upstream_failure(
+                    failure_class = classify_upstream_failure(
                         error_code=exc.code,
                         error=exc.error,
                         http_status=None,
                         phase="first_event",
-                    )["failure_class"] in ("rate_limit", "quota"):
+                    )["failure_class"]
+                    if not resilience.deterministic_failover_enabled and failure_class in ("rate_limit", "quota"):
+                        break
+                    verified_owner_replay_moved = _move_verified_fresh_replay_from_owner(
+                        account_id=account.id,
+                        outcome="owner_previsible_retryable_failure",
+                    )
+                    if not verified_owner_replay_moved and failure_class in ("rate_limit", "quota"):
                         _move_previsible_quota_rejection_from_soft_owner(
                             account_id=account.id,
                             outcome="owner_previsible_retryable_quota_rejection",

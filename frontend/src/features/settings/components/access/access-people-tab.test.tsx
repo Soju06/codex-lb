@@ -196,6 +196,33 @@ describe("AccessPeopleTab", () => {
     expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual(["Log out everywhere"]);
   });
 
+  it("marks SSO-only rows as awaiting sign-in and offers no link to copy", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/dashboard-users", () =>
+        HttpResponse.json([
+          ...createDefaultDashboardUsers(),
+          createDashboardUser({
+            id: "user_sso",
+            username: "sso.person",
+            role: { id: PRESET_ROLE_IDS.viewer, slug: "viewer", name: "Viewer", kind: "preset" },
+            status: "invited",
+            isBreakGlass: false,
+            totpConfigured: false,
+            hasPassword: false,
+            lastLoginAt: null,
+            pendingInvite: { expiresAt: null, ssoOnly: true },
+          }),
+        ]),
+      ),
+    );
+    renderTab();
+
+    const row = await screen.findByTestId("people-row-sso.person");
+    expect(row).toHaveTextContent("Awaiting first sign-in through the proxy");
+    expect(menuLabels(await openRowMenu(user, "sso.person", "sso.person"))).toEqual(["Revoke invite"]);
+  });
+
   it("gates row actions: self, invited and the migrated admin row", async () => {
     const user = userEvent.setup();
     renderTab();

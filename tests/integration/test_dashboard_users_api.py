@@ -176,7 +176,7 @@ async def test_list_shape_exposes_no_secrets_and_marks_pending_invites(async_cli
     assert users["admin"]["role"] == {"id": ADMIN_ROLE, "slug": "admin", "name": "Admin", "kind": "preset"}
     assert users["bob"]["status"] == "invited" and users["bob"]["hasPassword"] is False
     assert users["bob"]["roleSource"] == "manual"
-    assert users["bob"]["pendingInvite"] == {"expiresAt": created["invite"]["expiresAt"]}
+    assert users["bob"]["pendingInvite"] == {"expiresAt": created["invite"]["expiresAt"], "ssoOnly": False}
 
     session = await async_client.get("/api/dashboard-auth/session")
     assert session.json()["accessSummary"]["pendingInvites"] == 1
@@ -297,9 +297,15 @@ async def test_locked_username_and_username_collisions_on_accept(async_client: A
             json={"token": locked["invite"]["token"], "password": PASSWORD, "username": "other"},
         )
         assert refused.status_code == 422 and _error(refused) == "username_locked"
-        taken = await guest.post(
+        reserved = await guest.post(
             "/api/dashboard-auth/invite/accept",
             json={"token": free["invite"]["token"], "password": PASSWORD, "username": "ADMIN"},
+        )
+        # `admin` belongs to the local break-glass account and is never handed out.
+        assert reserved.status_code == 422 and _error(reserved) == "validation_error"
+        taken = await guest.post(
+            "/api/dashboard-auth/invite/accept",
+            json={"token": free["invite"]["token"], "password": PASSWORD, "username": "LOCKED"},
         )
         assert taken.status_code == 409 and _error(taken) == "username_taken"
         # The refused attempts did not consume either invite.

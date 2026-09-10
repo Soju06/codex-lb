@@ -29,6 +29,8 @@ let isAdminLoginInProgress = false;
 
 type AuthState = {
   passwordRequired: boolean;
+  /** An active account holds a password; drives the Password card, unlike `passwordRequired`. */
+  localPasswordConfigured: boolean;
   authenticated: boolean;
   totpRequiredOnLogin: boolean;
   totpConfigured: boolean;
@@ -120,6 +122,7 @@ export function usePermission(permission: Permission): boolean {
 function applySession(set: (next: Partial<AuthState>) => void, session: AuthSession): AuthSession {
   set({
     passwordRequired: session.passwordRequired,
+    localPasswordConfigured: session.localPasswordConfigured,
     authenticated: session.authenticated,
     totpRequiredOnLogin: session.totpRequiredOnLogin,
     totpConfigured: session.totpConfigured,
@@ -149,6 +152,7 @@ function applySession(set: (next: Partial<AuthState>) => void, session: AuthSess
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   passwordRequired: false,
+  localPasswordConfigured: false,
   authenticated: false,
   totpRequiredOnLogin: false,
   totpConfigured: false,

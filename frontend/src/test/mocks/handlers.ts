@@ -76,6 +76,8 @@ const DashboardUserCreatePayloadSchema = z.looseObject({
   username: z.string(),
   displayName: z.string().optional(),
   roleId: z.string(),
+  ssoOnly: z.boolean().optional(),
+  expectedIdentity: z.object({ provider: z.string(), providerKey: z.string(), subject: z.string() }).optional(),
 });
 
 const DashboardUserUpdatePayloadSchema = z.looseObject({
@@ -2238,7 +2240,12 @@ export const handlers = [
         displayName: payload.displayName ?? null,
         role: { id: "role_operator", slug: "operator", name: "Operator", kind: "preset" },
       }),
-      login: { usernameField: "shown", providers: [{ kind: "password", label: "Password", loginUrl: null }], localLogin: "enabled" },
+      login: {
+        usernameField: "shown",
+        providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }],
+        localLogin: "enabled",
+        pendingIdentity: false,
+      },
     });
     return HttpResponse.json(state.authSession);
   }),
@@ -2282,10 +2289,12 @@ export const handlers = [
       hasPassword: false,
       createdAt: new Date().toISOString(),
       lastLoginAt: null,
-      pendingInvite: { expiresAt },
+      pendingInvite: payload.ssoOnly ? { expiresAt: null, ssoOnly: true } : { expiresAt, ssoOnly: false },
     };
     state.dashboardUsers = [...state.dashboardUsers, user];
-    return HttpResponse.json({ user, invite: { token: MOCK_ISSUED_INVITE_TOKEN, expiresAt } }, { status: 201 });
+    // An SSO-only account has no link: the token never leaves the server.
+    const invite = payload.ssoOnly ? null : { token: MOCK_ISSUED_INVITE_TOKEN, expiresAt };
+    return HttpResponse.json({ user, invite }, { status: 201 });
   }),
 
   http.get("/api/dashboard-users/invites", () => {
@@ -2296,8 +2305,9 @@ export const handlers = [
           userId: user.id,
           username: user.username,
           roleId: user.role.id,
-          expiresAt: user.pendingInvite?.expiresAt,
+          expiresAt: user.pendingInvite?.expiresAt ?? null,
           createdByUserId: "user_admin",
+          ssoOnly: user.pendingInvite?.ssoOnly ?? false,
         })),
     );
   }),
@@ -2387,7 +2397,7 @@ export const handlers = [
     }
     const expiresAt = new Date(Date.now() + 24 * 3600_000).toISOString();
     state.dashboardUsers = state.dashboardUsers.map((candidate) =>
-      candidate.id === user.id ? { ...candidate, pendingInvite: { expiresAt } } : candidate,
+      candidate.id === user.id ? { ...candidate, pendingInvite: { expiresAt, ssoOnly: false } } : candidate,
     );
     return HttpResponse.json({ token: MOCK_ISSUED_INVITE_TOKEN, expiresAt });
   }),

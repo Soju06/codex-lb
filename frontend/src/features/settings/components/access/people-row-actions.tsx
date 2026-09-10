@@ -84,8 +84,9 @@ export function PeopleRowActions({
 
   const items: MenuItem[] = [];
   if (user.status === "invited") {
-    items.push(
-      {
+    // An SSO-only account has no link: nothing to resend.
+    if (!user.pendingInvite?.ssoOnly) {
+      items.push({
         key: "resend",
         label: t("access.people.actions.copyNewLink"),
         onSelect: () =>
@@ -93,7 +94,9 @@ export function PeopleRowActions({
             .mutateAsync(user.id)
             .then((invite) => onIssued({ invite, username: null }))
             .catch(() => undefined),
-      },
+      });
+    }
+    items.push(
       {
         key: "revoke",
         label: t("access.people.actions.revokeInvite"),

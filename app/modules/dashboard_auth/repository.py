@@ -167,7 +167,7 @@ class DashboardAuthRepository:
     async def create_first_admin(self, password_hash: str) -> DashboardUser | None:
         """First-run setup: give the install its ``admin`` account.
 
-        Refused (``None``) when an active user can already sign in. The users
+        Refused (``None``) when an active user already holds a password. The users
         table is the only authority and the write is compare-and-set: a missing
         row is inserted (deterministic id + unique username make a concurrent
         insert fail), an existing credential-less row is re-armed with
@@ -181,7 +181,9 @@ class DashboardAuthRepository:
         await self._settings_repository.get_or_create()
         user_id: str | None = None
         for attempt in range(2):
-            if (await self._users.local_auth_state()).requires_auth:
+            # Identity-only accounts (reverse-proxy users) do not count: the
+            # local ``admin`` remains creatable as the break-glass password login.
+            if (await self._users.local_auth_state()).active_local_password_users > 0:
                 return None
             existing = (
                 await self._session.execute(
@@ -206,6 +208,9 @@ class DashboardAuthRepository:
                     await self._session.rollback()
                     return None
                 user_id = COMPAT_ADMIN_USER_ID
+            elif existing.id != COMPAT_ADMIN_USER_ID or not existing.is_break_glass:
+                # Only the migrated/bootstrapped break-glass row may be re-armed.
+                return None
             else:
                 armed = await self._session.execute(
                     update(DashboardUser)

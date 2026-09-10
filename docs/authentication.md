@@ -20,6 +20,14 @@ CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User
 
 If the trusted header is missing and no fallback password is configured, the dashboard fails closed and shows a reverse-proxy-required message instead of loading the UI.
 
+### Accounts behind the proxy
+
+Every identity the proxy sends gets its own dashboard account. The first time a new value arrives in the header, the dashboard creates an account for it (username derived from the value: `alice@example.com` becomes `alice.example.com`; a proxy user called `admin` becomes `admin-2`, because `admin` is reserved for the local password account), links the identity to it, and records `user_created` and `identity_linked` in the audit log. From then on every request from that identity is served as that account, with that account's role, and everything it changes is attributed to it. Accounts created before this release keep the roles they have; nothing is re-evaluated.
+
+Unknown identities become **Admin** by default so an existing reverse-proxy install keeps working unchanged. To tighten this, change the trusted-header provider's default role through the API: `GET /api/auth-providers` lists the providers (`security:write`), and `PATCH /api/auth-providers/{id}` with `{"unknownIdentityRoleId": "<role id>"}` picks the role new identities receive — the viewer preset for a read-only default, or `null` to refuse anyone who has not been added first (role ids come from `GET /api/dashboard-roles`). Changing the default affects only identities that arrive afterwards. The same PATCH accepts `linkByEmail` (off by default: when on, an identity whose value is an e-mail address held by an existing account is linked to that account instead of getting a new one) and `idpMfaEnforced` (recorded for the upcoming step-up rules).
+
+A refused identity — the default role is `null`, or the account was disabled — is answered with `401 identity_not_provisioned` (or `account_disabled`) and the dashboard shows "Your account is not ready yet" at `/auth/pending`; once an administrator adds the person, **Try again** signs them in. If a local `admin` password exists, that screen also offers the local login, and a browser already signed in as `admin` keeps working behind the proxy even when the header names someone the dashboard refuses. To add someone before their first visit, use **Invite → Add without a password** in Settings → Access (or `POST /api/dashboard-users` with `ssoOnly: true` and `expectedIdentity: {"provider": "trusted_header", "subject": "<header value>"}`): no link is handed over, the account never expires while it waits, and it activates the moment the proxy first sends that exact value (one waiting account per identity). The local `admin` password account remains the break-glass fallback: an account holding `users:manage` (typically a proxy admin) creates it from the setup screen, and the name `admin` cannot be given to anyone else.
+
 Ready-to-run Docker commands for both non-default modes are in [Docker deployment — auth mode examples](deployment/docker.md#auth-mode-examples). For Helm, pass the same values through `extraEnv`.
 
 ## Signing in
@@ -62,4 +70,4 @@ Setting the initial dashboard password from a remote machine requires a one-time
 
 ---
 
-*Specs: [admin-auth](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/admin-auth) · [dashboard-users](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/dashboard-users) · [dashboard-roles](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/dashboard-roles) · [api-firewall](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-firewall)*
+*Specs: [admin-auth](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/admin-auth) · [identity-providers](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/identity-providers) · [dashboard-users](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/dashboard-users) · [dashboard-roles](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/dashboard-roles) · [api-firewall](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-firewall)*

@@ -920,6 +920,12 @@ class ApiKeyDeactivatedReason(str, Enum):
     EXPIRED = "expired"
 
 
+class AuthProviderKind(str, Enum):
+    PASSWORD = "password"
+    TRUSTED_HEADER = "trusted_header"
+    OIDC = "oidc"
+
+
 #: Username of the account the legacy shared dashboard password is migrated
 #: into. During the expand/contract release its credentials are mirrored to the
 #: legacy ``dashboard_settings`` columns so older replicas keep working.
@@ -1026,6 +1032,18 @@ class DashboardUserInvite(Base):
     """
 
     __tablename__ = "dashboard_user_invites"
+    __table_args__ = (
+        # One open invite per expected identity: two pre-created accounts must not wait for the same person.
+        Index(
+            "uq_dashboard_user_invites_expected_identity",
+            "expected_provider",
+            "expected_provider_key",
+            "expected_subject",
+            unique=True,
+            postgresql_where=text("consumed_at IS NULL AND revoked_at IS NULL"),
+            sqlite_where=text("consumed_at IS NULL AND revoked_at IS NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(
@@ -1041,9 +1059,55 @@ class DashboardUserInvite(Base):
     created_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
     sso_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     username_locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    #: The external identity this pre-created account waits for; the identity
+    #: resolver links it (and activates the account) on an exact triple match.
+    expected_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expected_provider_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    expected_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     user: Mapped["DashboardUser"] = relationship("DashboardUser")
+
+
+class DashboardAuthProvider(Base):
+    """One way of signing in to the dashboard (password, trusted header, later OIDC).
+
+    Rows carry the settings the identity resolver reads: which role an unknown
+    identity gets (``NULL`` = refuse), where a mapped user without a matching
+    mapping lands, whether e-mail linking is allowed, and whether the IdP is
+    trusted for MFA. The password and trusted-header providers have one row
+    each (``provider_key`` ``default``). ``enabled`` is not a copy of the auth
+    mode: a provider is *active* when its row is enabled and the mode allows
+    it. ``config_encrypted`` holds provider secrets (OIDC) and is never returned
+    in clear.
+    """
+
+    __tablename__ = "dashboard_auth_providers"
+    __table_args__ = (UniqueConstraint("kind", "provider_key", name="uq_dashboard_auth_providers_kind_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    unknown_identity_role_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    no_match_role_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    link_by_email: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    skip_role_sync: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    idp_mfa_enforced: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class DashboardRoleRecord(Base):

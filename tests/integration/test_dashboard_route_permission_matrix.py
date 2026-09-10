@@ -108,6 +108,9 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("POST", "/api/dashboard-users/{user_id}/reactivate-keys"): PermissionRequirement(Permission.USERS_MANAGE),
     ("GET", "/api/dashboard-roles"): PermissionRequirement(Permission.USERS_MANAGE),
     ("GET", "/api/dashboard-roles/permissions"): PermissionRequirement(Permission.USERS_MANAGE),
+    # Sign-in provider settings (PR-2c-1): security:write throughout.
+    ("GET", "/api/auth-providers"): PermissionRequirement(Permission.SECURITY_WRITE),
+    ("PATCH", "/api/auth-providers/{provider_id}"): PermissionRequirement(Permission.SECURITY_WRITE),
     **DASHBOARD_AUTH_GATED,
 }
 

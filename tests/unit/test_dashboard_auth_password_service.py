@@ -11,7 +11,15 @@ import pytest
 from app.core.audit.service import AuditActor, AuditSeverity, AuditTarget
 from app.core.auth.dashboard_access import PRESET_ROLE_IDS, DashboardPermission, DashboardRole, PresetRoleSlug
 from app.core.auth.dashboard_mode import DashboardAuthMode
-from app.db.models import COMPAT_ADMIN_USERNAME, DashboardRoleRecord, DashboardUser
+from app.core.auth.providers import DEFAULT_PROVIDER_KEY, PasswordProvider
+from app.core.auth.providers.registry import ActiveProvider
+from app.db.models import (
+    COMPAT_ADMIN_USERNAME,
+    AuthProviderKind,
+    DashboardAuthProvider,
+    DashboardRoleRecord,
+    DashboardUser,
+)
 from app.modules.dashboard_auth.service import (
     DashboardAuthService,
     DashboardSessionStore,
@@ -243,9 +251,29 @@ class _FakeRepository:
         return self.settings
 
 
+async def _password_only_providers() -> list[ActiveProvider]:
+    """The provider list these tests run against.
+
+    The real one is a process cache over ``dashboard_auth_providers``; unit
+    tests have no schema, so the service takes the list by injection.
+    """
+
+    row = DashboardAuthProvider(
+        id="provider-password",
+        kind=AuthProviderKind.PASSWORD.value,
+        provider_key=DEFAULT_PROVIDER_KEY,
+        enabled=True,
+        label="Password",
+    )
+    return [ActiveProvider(row=row, provider=PasswordProvider())]
+
+
 def _service(repository: _FakeRepository, store: DashboardSessionStore | None = None) -> DashboardAuthService:
     return DashboardAuthService(
-        repository, store or DashboardSessionStore(), auth_state_provider=repository.get_local_auth_state
+        repository,
+        store or DashboardSessionStore(),
+        auth_state_provider=repository.get_local_auth_state,
+        active_providers_provider=_password_only_providers,
     )
 
 

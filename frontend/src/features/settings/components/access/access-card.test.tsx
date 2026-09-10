@@ -145,7 +145,7 @@ describe("AccessCard", () => {
     ["without users:manage", { permissions: OPERATOR_PERMISSIONS, accessSummary: null, assignableRoleIds: [], user: createSessionUser({ id: "user_ops", username: "ops" }) }, PERSONAL_ORDER],
     ["as a viewer without write", { permissions: VIEWER_PERMISSIONS, canWrite: false, accessSummary: null, assignableRoleIds: [], user: createSessionUser({ id: "user_viewer", username: "viewer" }) }, PERSONAL_ORDER],
     ["standard mode without an account", { user: null }, TODAYS_ORDER],
-    ["on a trusted-header install", { user: null, authMode: "trusted_header" as const }, TODAYS_ORDER],
+    ["on a trusted-header install without an account", { user: null, authMode: "trusted_header" as const }, TODAYS_ORDER],
     ["when auth is disabled", { user: null, authMode: "disabled" as const }, TODAYS_ORDER],
   ])("team tier %s shows only the sign-in controls, no tabs, no invite", async (_label, overrides, order) => {
     signInAsTeamAdmin({ accessSummary: createAccessSummary({ usersTotal: 2, nonAdminUsers: 1 }), ...overrides });
@@ -156,6 +156,15 @@ describe("AccessCard", () => {
     expect(screen.queryByRole("button", { name: /Invite/ })).not.toBeInTheDocument();
     expect(screen.queryByTestId("access-solo-line")).not.toBeInTheDocument();
     expect(await controlLabels()).toEqual(order);
+  });
+
+  it("offers People to a reverse-proxy account that manages users", async () => {
+    signInAsTeamAdmin({ authMode: "trusted_header", accessSummary: createAccessSummary({ usersTotal: 2, nonAdminUsers: 1 }) });
+
+    renderCard();
+
+    expect(screen.getByRole("tablist")).toBeInTheDocument();
+    expect(await screen.findByTestId("people-row-ops")).toBeInTheDocument();
   });
 
   it("#access-people selects People, #access selects My sign-in, #totp reaches the TOTP section", async () => {

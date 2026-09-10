@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
 from time import time
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import bcrypt
 import segno
@@ -28,6 +28,7 @@ from app.core.auth.dashboard_access import (
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
+from app.core.auth.providers.registry import ActiveProvider, get_auth_provider_registry
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -41,6 +42,7 @@ from app.modules.dashboard_auth.schemas import (
     DashboardMeResponse,
     DashboardSessionUser,
     DashboardUserRoleSummary,
+    LoginProviderKind,
     TotpSetupStartResponse,
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
@@ -334,6 +336,7 @@ class SessionDescription:
 
 
 AuthStateProvider = Callable[[], Awaitable[LocalAuthState]]
+ActiveProvidersProvider = Callable[[], Awaitable[list[ActiveProvider]]]
 
 
 @dataclass(slots=True, frozen=True)
@@ -416,14 +419,16 @@ class DashboardAuthService:
         session_store: DashboardSessionStore,
         *,
         auth_state_provider: AuthStateProvider | None = None,
+        active_providers_provider: ActiveProvidersProvider | None = None,
     ) -> None:
         self._repository = repository
         self._session_store = session_store
         self._encryptor = TokenEncryptor()
         # The session response is served on every page load; it reads the derived
-        # auth state through the process cache. Login and setup decisions keep
-        # reading the repository directly.
+        # auth state and the active providers through the process caches. Login
+        # and setup decisions keep reading the repository directly.
         self._auth_state = auth_state_provider or _cached_local_auth_state
+        self._active_providers = active_providers_provider or _cached_active_providers
 
     # --- session resolution ---
 
@@ -560,6 +565,7 @@ class DashboardAuthService:
         response = DashboardAuthSessionResponse(
             authenticated=authenticated,
             password_required=password_required,
+            local_password_configured=auth_state.active_local_password_users > 0,
             totp_required_on_login=totp_pending,
             totp_configured=totp_configured,
             role=role,
@@ -570,17 +576,25 @@ class DashboardAuthService:
             auth_method=auth_method,
             must_change_password=bool(user is not None and user.must_change_password),
             totp_enrollment_required=totp_enrollment_required,
-            login=self.login_hint(auth_state),
+            login=await self.login_hint(auth_state),
             access_summary=await self.access_summary() if manages_users else None,
             assignable_role_ids=assignable_role_ids() if manages_users else [],
         )
         return SessionDescription(response=response, resolved=resolved)
 
-    @staticmethod
-    def login_hint(auth_state: LocalAuthState) -> DashboardLoginHint:
+    async def login_hint(self, auth_state: LocalAuthState) -> DashboardLoginHint:
         return DashboardLoginHint(
             username_field="hidden" if auth_state.active_local_password_users == 1 else "shown",
-            providers=[DashboardLoginProvider(kind="password", label="Password", login_url=None)],
+            providers=[
+                DashboardLoginProvider(
+                    # The registry only activates kinds with an implementation, which are the wire kinds.
+                    kind=cast(LoginProviderKind, item.row.kind),
+                    provider_key=item.row.provider_key,
+                    label=item.row.label,
+                    login_url=None,
+                )
+                for item in await self._active_providers()
+            ],
             local_login="enabled",
         )
 
@@ -594,7 +608,7 @@ class DashboardAuthService:
             pending_invites=counts.pending_invites,
             non_admin_users=counts.non_admin,
             custom_roles=await self._repository.count_custom_roles(),
-            providers_enabled=["password"],
+            providers_enabled=[item.row.kind for item in await self._active_providers()],
             role_mappings=0,
             scim_tokens=0,
             audit_sinks=0,
@@ -942,6 +956,10 @@ def assignable_role_ids() -> list[str]:
 
 async def _cached_local_auth_state() -> LocalAuthState:
     return await get_dashboard_users_cache().local_auth_state()
+
+
+async def _cached_active_providers() -> list[ActiveProvider]:
+    return await get_auth_provider_registry().get_active_providers(get_settings().dashboard_auth_mode)
 
 
 _dashboard_session_store = DashboardSessionStore()

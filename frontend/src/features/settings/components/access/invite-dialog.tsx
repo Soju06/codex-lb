@@ -2,10 +2,12 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 
 import { AlertMessage } from "@/components/alert-message";
 import { CopyButton } from "@/components/copy-button";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -16,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   DashboardUserCreateRequestSchema,
@@ -93,14 +96,22 @@ export type InviteDialogProps = {
  * preselected, Admin adds a warning, and the very first invite says that the
  * sign-in screen will ask for a username from now on. The session is not
  * refreshed here: the owner does that after the link has been acknowledged.
+ *
+ * When a provider other than the password is active (the reverse proxy), the
+ * dialog also offers to add the person without a password: the account waits
+ * for the identity the proxy sends and there is no link to hand over.
  */
 export function InviteDialog({ open, onOpenChange, onIssued }: InviteDialogProps) {
   const { t } = useTranslation();
   const assignableRoleIds = useAuthStore((state) => state.assignableRoleIds);
   const accessSummary = useAuthStore((state) => state.accessSummary);
   const username = useAuthStore((state) => state.user?.username ?? "admin");
+  const ssoProvider = useAuthStore((state) => state.loginHint.providers.find((p) => p.kind !== "password") ?? null);
   const rolesQuery = useDashboardRoles(open);
   const [error, setError] = useState<string | null>(null);
+  const [ssoOnly, setSsoOnly] = useState(false);
+  const [subject, setSubject] = useState("");
+  const [subjectError, setSubjectError] = useState<string | null>(null);
   const form = useForm<DashboardUserCreateRequest>({
     resolver: zodResolver(DashboardUserCreateRequestSchema),
     defaultValues: { username: "", displayName: "", roleId: "" },
@@ -118,17 +129,43 @@ export function InviteDialog({ open, onOpenChange, onIssued }: InviteDialogProps
     onOpenChange(false);
     form.reset();
     setError(null);
+    setSsoOnly(false);
+    setSubject("");
+    setSubjectError(null);
   };
 
   const submit = async (values: DashboardUserCreateRequest) => {
     setError(null);
+    setSubjectError(null);
+    const useSso = ssoOnly && ssoProvider !== null;
+    const trimmedSubject = subject.trim();
+    if (useSso && trimmedSubject === "") {
+      setSubjectError(t("access.invite.sso.validation.identityRequired"));
+      return;
+    }
     try {
       const created = await createUser.mutateAsync({
         username: values.username.toLowerCase(),
         displayName: values.displayName?.trim() ? values.displayName.trim() : undefined,
         roleId: values.roleId || defaultRoleId,
+        ...(useSso
+          ? {
+              ssoOnly: true,
+              expectedIdentity: {
+                provider: ssoProvider.kind,
+                providerKey: ssoProvider.providerKey,
+                subject: trimmedSubject,
+              },
+            }
+          : {}),
       });
       close();
+      if (created.invite === null) {
+        // Nothing to hand over: the account activates on the person's first proxy sign-in.
+        toast.success(t("access.invite.sso.added", { username: created.user.username }));
+        void useAuthStore.getState().refreshSession().catch(() => undefined);
+        return;
+      }
       onIssued({ invite: created.invite, username: created.user.username });
     } catch (caught) {
       if (caught instanceof ApiError && caught.code === "username_taken") {
@@ -202,6 +239,39 @@ export function InviteDialog({ open, onOpenChange, onIssued }: InviteDialogProps
             {selectedRole?.slug === "admin" ? (
               <AlertMessage variant="warning">{t("access.invite.adminWarning")}</AlertMessage>
             ) : null}
+            {ssoProvider ? (
+              <div className="space-y-3 rounded-lg border p-3" data-testid="invite-sso-option">
+                <div className="flex items-start gap-2">
+                  <Checkbox
+                    id="invite-sso-only"
+                    checked={ssoOnly}
+                    onCheckedChange={(checked) => setSsoOnly(checked === true)}
+                  />
+                  <div className="grid gap-1">
+                    <Label htmlFor="invite-sso-only" className="text-sm font-medium">
+                      {t("access.invite.sso.label")}
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      {t("access.invite.sso.description", { provider: ssoProvider.label })}
+                    </p>
+                  </div>
+                </div>
+                {ssoOnly ? (
+                  <div className="space-y-1">
+                    <Label htmlFor="invite-sso-subject">{t("access.invite.sso.identityLabel")}</Label>
+                    <Input
+                      id="invite-sso-subject"
+                      value={subject}
+                      autoComplete="off"
+                      placeholder={t("access.invite.sso.identityPlaceholder")}
+                      onChange={(event) => setSubject(event.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">{t("access.invite.sso.identityHelp")}</p>
+                    {subjectError ? <p className="text-xs text-destructive">{subjectError}</p> : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {isFirstInvite ? (
               <p className="text-xs text-muted-foreground" data-testid="first-invite-note">
                 {t("access.invite.firstInviteNote", { username })}
@@ -212,7 +282,7 @@ export function InviteDialog({ open, onOpenChange, onIssued }: InviteDialogProps
                 {t("common.cancel")}
               </Button>
               <Button type="submit" disabled={createUser.isPending || roles.length === 0}>
-                {t("access.invite.submit")}
+                {ssoOnly && ssoProvider ? t("access.invite.sso.submit") : t("access.invite.submit")}
               </Button>
             </DialogFooter>
           </form>

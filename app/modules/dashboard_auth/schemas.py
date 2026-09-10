@@ -24,18 +24,28 @@ class DashboardSessionUser(DashboardModel):
     role: DashboardUserRoleSummary
 
 
+LoginProviderKind = Literal["password", "trusted_header"]
+
+
 class DashboardLoginProvider(DashboardModel):
-    kind: Literal["password"]
+    kind: LoginProviderKind
+    provider_key: str = "default"
     label: str
     login_url: str | None = None
 
 
 class DashboardLoginHint(DashboardModel):
-    """Login-screen hints served to unauthenticated clients too; never carries a username."""
+    """Login-screen hints served to unauthenticated clients too; never carries a username.
+
+    ``pending_identity`` is true when the request carried a provider-asserted
+    identity that has no account here (refused or not provisioned): the client
+    shows "your account is not ready yet" instead of a login form.
+    """
 
     username_field: Literal["hidden", "shown"]
     providers: list[DashboardLoginProvider]
     local_login: Literal["enabled"] = "enabled"
+    pending_identity: bool = False
 
 
 class DashboardAccessSummary(DashboardModel):
@@ -58,6 +68,9 @@ class DashboardAccessSummary(DashboardModel):
 class DashboardAuthSessionResponse(DashboardModel):
     authenticated: bool
     password_required: bool
+    #: An active account holds a password (drives the Password card; accounts that
+    #: sign in through a provider alone do not count).
+    local_password_configured: bool = False
     totp_required_on_login: bool
     totp_configured: bool
     bootstrap_required: bool = False

@@ -26,8 +26,8 @@ describe("AccessPage (/settings/access)", () => {
   it.each([
     ["without users:manage", { permissions: OPERATOR_PERMISSIONS }],
     ["without an account (implicit admin)", { user: null }],
-    ["on a trusted-header install", { authMode: "trusted_header" as const }],
-    ["when auth is disabled", { authMode: "disabled" as const }],
+    ["without an account on a trusted-header install", { user: null, authMode: "trusted_header" as const }],
+    ["without an account when auth is disabled", { user: null, authMode: "disabled" as const }],
   ])("sends a principal %s back to Settings", (_label, overrides) => {
     signInAsTeamAdmin(overrides);
 

@@ -23,11 +23,11 @@ export function AccessSoloBody({ onInvite, ...props }: AccessSoloBodyProps) {
   const user = useAuthStore((state) => state.user);
   const [setupOpen, setSetupOpen] = useState(false);
 
-  // Only a password-backed account can invite (`409 admin_account_required`);
-  // the implicit local admin is told to set a password first. Trusted-header
-  // and disabled-auth installs manage people through other means, so the line
-  // is not rendered there at all.
-  const showPeopleLine = canManageUsers && authMode === "standard";
+  // Only an account can invite (`409 admin_account_required`): a password
+  // account or one the reverse proxy created. The implicit local admin is told
+  // to set a password first; the disabled-auth principal has no account and
+  // no way to get one, so the line is not rendered there at all.
+  const showPeopleLine = canManageUsers && authMode !== "disabled";
   const needsPassword = user === null;
 
   return (

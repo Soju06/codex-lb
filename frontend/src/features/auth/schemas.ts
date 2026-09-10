@@ -59,14 +59,19 @@ export const AuthSessionUserSchema = z.object({
 
 export const LoginProviderSchema = z.object({
   kind: z.string(),
+  providerKey: z.string().default("default"),
   label: z.string(),
   loginUrl: z.string().nullable().default(null),
 });
 
 export const LoginHintSchema = z.object({
   usernameField: z.enum(["hidden", "shown"]).default("hidden"),
-  providers: z.array(LoginProviderSchema).default([{ kind: "password", label: "Password", loginUrl: null }]),
+  providers: z
+    .array(LoginProviderSchema)
+    .default([{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }]),
   localLogin: z.string().default("enabled"),
+  // The request carried a provider identity that has no account here yet.
+  pendingIdentity: z.boolean().default(false),
 });
 
 // Team-size facts served only to `users:manage` holders; `null` for everyone
@@ -89,6 +94,8 @@ export const AccessSummarySchema = z.object({
 export const AuthSessionSchema = z.object({
   authenticated: z.boolean(),
   passwordRequired: z.boolean(),
+  // An active account holds a password (proxy-created accounts do not count).
+  localPasswordConfigured: z.boolean().default(false),
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
   bootstrapRequired: z.boolean().optional().default(false),
@@ -189,6 +196,7 @@ export const StatusResponseSchema = z.object({
 export type AuthSession = z.infer<typeof AuthSessionSchema>;
 export type AuthSessionUser = z.infer<typeof AuthSessionUserSchema>;
 export type LoginHint = z.infer<typeof LoginHintSchema>;
+export type LoginProvider = z.infer<typeof LoginProviderSchema>;
 export type AccessSummary = z.infer<typeof AccessSummarySchema>;
 export type Permission = z.infer<typeof PermissionSchema>;
 export type PermissionScope = z.infer<typeof PermissionScopeSchema>;

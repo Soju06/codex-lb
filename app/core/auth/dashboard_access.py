@@ -385,13 +385,14 @@ def user_principal(
     *,
     auth_method: str | None,
     totp_enrollment_required: bool = False,
+    auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD,
 ) -> DashboardPrincipal:
     """A signed-in user account. ``grants`` is the resolved grant table of ``user.role``."""
 
     return DashboardPrincipal(
         role=DashboardRole.ADMIN,
         permissions=legacy_permissions(grants),
-        auth_mode=DashboardAuthMode.STANDARD,
+        auth_mode=auth_mode,
         actor=user.username,
         grants=grants,
         user_id=user.id,

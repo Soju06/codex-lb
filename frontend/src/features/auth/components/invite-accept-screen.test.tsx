@@ -50,7 +50,7 @@ describe("InviteAcceptScreen", () => {
       ...useAuthStore.getInitialState(),
       initialized: true,
       passwordRequired: true,
-      loginHint: { usernameField: "shown", providers: [], localLogin: "enabled" },
+      loginHint: { usernameField: "shown", providers: [], localLogin: "enabled", pendingIdentity: false },
     });
     server.use(http.get("/api/dashboard-auth/session", () => HttpResponse.json(visitorSession)));
   });

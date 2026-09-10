@@ -22,19 +22,20 @@ import app.modules.dashboard_users.repository as users_repository
 from app.core.audit.service import AuditActor, AuditDetails, AuditService, AuditTarget
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.dashboard_access import (
-    ASSIGNABLE_PRESET_ROLES,
     PRESET_ROLE_IDS,
     DashboardPrincipal,
     PresetRoleSlug,
-    RoleKind,
     assert_can_act_on,
     assert_can_delegate,
 )
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
+from app.core.auth.providers.registry import get_auth_provider_registry
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
+from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
 from app.db.models import (
     COMPAT_ADMIN_USERNAME,
+    AuthProviderKind,
     DashboardRoleRecord,
     DashboardUser,
     DashboardUserInvite,
@@ -43,7 +44,7 @@ from app.db.models import (
 )
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
 from app.modules.dashboard_roles.repository import DashboardRolesRepository
-from app.modules.dashboard_roles.service import resolve_role_grants
+from app.modules.dashboard_roles.service import resolve_assignable_role, resolve_role_grants
 from app.modules.dashboard_users.credentials import assert_credential_remains
 from app.modules.dashboard_users.repository import (
     DashboardUsersRepository,
@@ -55,6 +56,7 @@ from app.modules.dashboard_users.repository import (
 from app.modules.dashboard_users.schemas import (
     DashboardUserCreateRequest,
     DashboardUserUpdateRequest,
+    ExpectedIdentityRequest,
     ProfileUpdateRequest,
 )
 
@@ -83,10 +85,6 @@ class InvalidUsernameError(ValueError):
 
 
 class InvalidEmailError(ValueError):
-    pass
-
-
-class RoleNotAssignableError(ValueError):
     pass
 
 
@@ -122,10 +120,31 @@ class UserNotActiveError(ValueError):
     pass
 
 
+class SsoNotAvailableError(ValueError):
+    pass
+
+
+class IdentityTakenError(ValueError):
+    pass
+
+
+class SsoOnlyInviteError(ValueError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class IssuedInvite:
     token: str
     expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CreatedAccount:
+    """A pre-created account and its invite; the token is handed out only when ``sso_only`` is false."""
+
+    user: DashboardUser
+    invite: IssuedInvite
+    sso_only: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +159,7 @@ class InviteDescription:
 @dataclass(frozen=True, slots=True)
 class UserListing:
     user: DashboardUser
-    pending_invite_expires_at: datetime | None
+    pending_invite: DashboardUserInvite | None
 
 
 def _now() -> datetime:
@@ -194,13 +213,7 @@ class DashboardUsersService:
         await self._purge_expired()
         now = _now()
         invites = {invite.user_id: invite for invite in await self._repo.list_live_invites(now)}
-        return [
-            UserListing(
-                user=user,
-                pending_invite_expires_at=as_utc(invites[user.id].expires_at) if user.id in invites else None,
-            )
-            for user in await self._repo.list_users()
-        ]
+        return [UserListing(user=user, pending_invite=invites.get(user.id)) for user in await self._repo.list_users()]
 
     async def list_pending_invites(self) -> Sequence[DashboardUserInvite]:
         await self._purge_expired()
@@ -210,15 +223,18 @@ class DashboardUsersService:
 
     async def create_user(
         self, principal: DashboardPrincipal, payload: DashboardUserCreateRequest, *, actor_ip: str | None
-    ) -> tuple[DashboardUser, IssuedInvite]:
+    ) -> CreatedAccount:
+        """Pre-create an account. With a link (the default) the person sets a password;
+        SSO-only accounts get no link and are activated by their first provider sign-in
+        matching ``expected_identity`` exactly."""
+
         caller_id = self._require_account(principal)
         await self._purge_expired()
-        username = normalize_username(payload.username)
-        if not is_valid_username(username):
-            raise InvalidUsernameError("Username must be 1-64 characters of a-z, 0-9, '.', '_' or '-'")
+        username = self._new_username(payload.username)
         email = self._normalized_email(payload.email)
         role = await self._assignable_role(payload.role_id)
         assert_can_delegate(principal.grants, resolve_role_grants(role))
+        expected = await self._expected_identity(payload)
         if await self._repo.get_by_username(username) is not None:
             raise UsernameTakenError("Username is already taken")
         if email is not None and await self._repo.get_by_email(email) is not None:
@@ -239,18 +255,72 @@ class DashboardUsersService:
             username_locked=payload.username_locked,
             expires_at=_now() + INVITE_TTL,
         )
+        invite.sso_only = payload.sso_only
+        if expected is not None:
+            invite.expected_provider = expected.provider
+            invite.expected_provider_key = expected.provider_key
+            invite.expected_subject = expected.subject
         role_slug = role.slug
         self._repo.add(user, invite)
         try:
             user = await self._repo.commit_user(user.id)
         except IntegrityError as exc:
-            if await self._repo.conflicting_field(username, email) == "email":
+            conflict = await self._repo.conflicting_field(username, email)
+            if conflict == "email":
                 raise EmailTakenError("E-mail is already in use") from exc
+            if conflict is None and expected is not None:
+                # The partial unique index on the open expected identity fired: a concurrent create won.
+                raise IdentityTakenError("Another pending account already waits for that identity") from exc
             raise UsernameTakenError("Username is already taken") from exc
         await self._invalidate_users()
         self._audit("user_created", principal, user.id, actor_ip, {"username": user.username, "role": role_slug})
-        self._audit("user_invited", principal, user.id, actor_ip, {"expires_at": issued.expires_at.isoformat()})
-        return user, issued
+        invited: AuditDetails = {"sso_only": payload.sso_only}
+        if not payload.sso_only:
+            invited = {**invited, "expires_at": issued.expires_at.isoformat()}
+        if expected is not None:
+            invited = {**invited, "expected_provider": expected.provider, "expected_subject": expected.subject}
+        self._audit("user_invited", principal, user.id, actor_ip, invited)
+        return CreatedAccount(user=user, invite=issued, sso_only=payload.sso_only)
+
+    @staticmethod
+    def _new_username(raw: str) -> str:
+        """Normalise and validate a username chosen for a person; ``admin`` stays the break-glass account's."""
+
+        username = normalize_username(raw)
+        if not is_valid_username(username):
+            raise InvalidUsernameError("Username must be 1-64 characters of a-z, 0-9, '.', '_' or '-'")
+        if username == COMPAT_ADMIN_USERNAME:
+            raise InvalidUsernameError("'admin' is reserved for the local break-glass account")
+        return username
+
+    async def _expected_identity(self, payload: DashboardUserCreateRequest) -> ExpectedIdentityRequest | None:
+        """Validate the SSO fields: they need an active non-password provider, and the
+        identity must not be linked yet. Trusted-header subjects are case-folded like the
+        resolver does, so the first sign-in matches regardless of the proxy's spelling."""
+
+        expected = payload.expected_identity
+        if not payload.sso_only and expected is None:
+            return None
+        if expected is None:
+            raise InvalidUsernameError("An SSO-only account needs the identity it will sign in with")
+        mode = get_settings().dashboard_auth_mode
+        active = {
+            (item.row.kind, item.row.provider_key)
+            for item in await get_auth_provider_registry().get_active_providers(mode)
+            if item.row.kind != AuthProviderKind.PASSWORD.value
+        }
+        if (expected.provider, expected.provider_key) not in active:
+            raise SsoNotAvailableError("No sign-in provider other than the password is active")
+        subject = expected.subject.strip()
+        if expected.provider == AuthProviderKind.TRUSTED_HEADER.value:
+            subject = subject.casefold()
+        if not subject:
+            raise InvalidUsernameError("The expected identity must not be empty")
+        if await self._repo.get_identity(expected.provider, expected.provider_key, subject) is not None:
+            raise IdentityTakenError("That identity already belongs to an account")
+        if await self._repo.find_invite_expecting_identity(expected.provider, expected.provider_key, subject, _now()):
+            raise IdentityTakenError("Another pending account already waits for that identity")
+        return ExpectedIdentityRequest(provider=expected.provider, provider_key=expected.provider_key, subject=subject)
 
     async def update_user(
         self, principal: DashboardPrincipal, user_id: str, payload: DashboardUserUpdateRequest, *, actor_ip: str | None
@@ -334,7 +404,7 @@ class DashboardUsersService:
             self._audit("user_keys_deactivated", principal, user.id, actor_ip, {"count": len(key_hashes)})
         elif new_status == DashboardUserStatus.ACTIVE.value:
             self._audit("user_enabled", principal, user.id, actor_ip, {"username": user.username})
-        return UserListing(user=user, pending_invite_expires_at=await self._pending_expiry(user.id))
+        return UserListing(user=user, pending_invite=await self._repo.live_invite_for_user(user.id, _now()))
 
     async def update_profile(
         self, user: DashboardUser, payload: ProfileUpdateRequest, *, actor_ip: str | None
@@ -389,6 +459,9 @@ class DashboardUsersService:
         user = await self._get(user_id)
         if user.status != DashboardUserStatus.INVITED.value:
             raise InviteNotPendingError("The account has no pending invite")
+        current = await self._repo.get_invite_for_user(user.id)
+        if current is not None and current.sso_only:
+            raise SsoOnlyInviteError("This account signs in through a provider; there is no link to resend")
         assert_can_act_on(principal.grants, resolve_role_grants(user.role))
         issued, fresh = self._new_invite(
             user.id, created_by_user_id=caller_id, username_locked=False, expires_at=_now() + INVITE_TTL
@@ -499,9 +572,7 @@ class DashboardUsersService:
             if username is not None and normalize_username(username) != user.username:
                 if invite.username_locked:
                     raise UsernameLockedError("The username of this invite cannot be changed")
-                normalized = normalize_username(username)
-                if not is_valid_username(normalized):
-                    raise InvalidUsernameError("Username must be 1-64 characters of a-z, 0-9, '.', '_' or '-'")
+                normalized = self._new_username(username)
                 if await self._repo.get_by_username(normalized) is not None:
                     raise UsernameTakenError("Username is already taken")
                 user.username = normalized
@@ -537,6 +608,7 @@ class DashboardUsersService:
         invite = await self._repo.get_invite_by_token_hash(invite_token_hash(token))
         if (
             invite is None
+            or invite.sso_only  # no link exists for an SSO-only account, whatever the token claims
             or invite.consumed_at is not None
             or invite.revoked_at is not None
             or as_utc(invite.expires_at) <= _now()
@@ -562,10 +634,6 @@ class DashboardUsersService:
         )
         return IssuedInvite(token=token, expires_at=expires_at), invite
 
-    async def _pending_expiry(self, user_id: str) -> datetime | None:
-        expires_at = await self._repo.live_invite_expiry(user_id, _now())
-        return None if expires_at is None else as_utc(expires_at)
-
     async def _purge_expired(self) -> None:
         if await self._repo.purge_expired_invited_users(_now()):
             await self._invalidate_users()
@@ -577,17 +645,7 @@ class DashboardUsersService:
         return user
 
     async def _assignable_role(self, role_id: str) -> DashboardRoleRecord:
-        role = await self._roles.get_role(role_id)
-        if role is None:
-            raise RoleNotAssignableError("Unknown role")
-        assignable = (
-            role.slug in {slug.value for slug in ASSIGNABLE_PRESET_ROLES}
-            if RoleKind(role.kind) is RoleKind.PRESET
-            else role.assignable_to_users
-        )
-        if not assignable:
-            raise RoleNotAssignableError(f"Role '{role.slug}' cannot be assigned to an account")
-        return role
+        return await resolve_assignable_role(self._roles, role_id)
 
     async def _assert_other_active_admin(self, user_id: str) -> None:
         if await self._repo.count_active_admins(exclude_user_id=user_id) == 0:

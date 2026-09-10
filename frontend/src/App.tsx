@@ -105,6 +105,8 @@ export default function App() {
         <Routes>
           <Route element={<AppLayout />}>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            {/* Public pending screen: once the account exists, "Try again" lands in the app. */}
+            <Route path="/auth/pending" element={<Navigate to="/dashboard" replace />} />
             <Route element={<RouteGuard />}>
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/reports" element={<ReportsPage />} />

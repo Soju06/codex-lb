@@ -17,11 +17,10 @@ export function AccessPage() {
   const { t } = useTranslation();
   const canManageUsers = usePermission("users:manage");
   const user = useAuthStore((state) => state.user);
-  const authMode = useAuthStore((state) => state.authMode);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [issued, setIssued] = useState<IssuedLink | null>(null);
 
-  if (!canManageUsers || user === null || authMode !== "standard") {
+  if (!canManageUsers || user === null) {
     return <Navigate to="/settings" replace />;
   }
   return (

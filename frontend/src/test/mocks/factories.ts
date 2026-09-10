@@ -731,7 +731,7 @@ export function createDefaultDashboardUsers(): DashboardUser[] {
 			totpConfigured: false,
 			hasPassword: false,
 			lastLoginAt: null,
-			pendingInvite: { expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString() },
+			pendingInvite: { expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString(), ssoOnly: false },
 		}),
 	];
 }
@@ -743,6 +743,7 @@ export function createPendingInvite(overrides: Partial<PendingInvite> = {}): Pen
 		roleId: PRESET_ROLE_IDS.viewer,
 		expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString(),
 		createdByUserId: "user_admin",
+		ssoOnly: false,
 		...overrides,
 	};
 }

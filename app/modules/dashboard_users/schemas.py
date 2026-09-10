@@ -5,12 +5,15 @@ from typing import Literal
 
 from pydantic import ConfigDict, Field
 
+from app.core.auth.providers import MAX_SUBJECT_LENGTH
 from app.modules.dashboard_auth.schemas import DashboardUserRoleSummary
 from app.modules.shared.schemas import DashboardModel
 
 
 class PendingInviteSummary(DashboardModel):
-    expires_at: datetime
+    #: ``null`` for an SSO-only account: it waits for its first provider sign-in and never expires.
+    expires_at: datetime | None = None
+    sso_only: bool = False
 
 
 class DashboardUserResponse(DashboardModel):
@@ -38,8 +41,19 @@ class IssuedInviteResponse(DashboardModel):
     expires_at: datetime
 
 
+class ExpectedIdentityRequest(DashboardModel):
+    """The external identity a pre-created account waits for (exact triple match)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(max_length=32)
+    provider_key: str = Field(default="default", max_length=128)
+    subject: str = Field(min_length=1, max_length=MAX_SUBJECT_LENGTH)
+
+
 class DashboardUserCreateRequest(DashboardModel):
-    #: ``sso_only`` / ``expected_identity`` are not accepted until a non-password provider exists.
+    """``sso_only`` / ``expected_identity`` need an active non-password provider (``409 sso_not_available``)."""
+
     model_config = ConfigDict(extra="forbid")
 
     username: str = Field(max_length=64)
@@ -47,11 +61,15 @@ class DashboardUserCreateRequest(DashboardModel):
     email: str | None = Field(default=None, max_length=320)
     role_id: str
     username_locked: bool = False
+    #: No invite link: the account is linked and activated by its first provider sign-in.
+    sso_only: bool = False
+    expected_identity: ExpectedIdentityRequest | None = None
 
 
 class DashboardUserCreateResponse(DashboardModel):
     user: DashboardUserResponse
-    invite: IssuedInviteResponse
+    #: ``null`` for an SSO-only account: there is no link to hand over.
+    invite: IssuedInviteResponse | None
 
 
 class DashboardUserUpdateRequest(DashboardModel):
@@ -78,8 +96,9 @@ class PendingInviteResponse(DashboardModel):
     user_id: str
     username: str
     role_id: str
-    expires_at: datetime
+    expires_at: datetime | None = None
     created_by_user_id: str
+    sso_only: bool = False
 
 
 class ReactivateKeysResponse(DashboardModel):

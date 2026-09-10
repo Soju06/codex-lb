@@ -55,12 +55,16 @@ function StatusCell({ user }: { user: DashboardUser }) {
       </Badge>
     );
   }
-  const expiresIn = user.pendingInvite ? formatExpiresIn(user.pendingInvite.expiresAt) : null;
+  const expiresIn = user.pendingInvite?.expiresAt ? formatExpiresIn(user.pendingInvite.expiresAt) : null;
   return (
     <div className="space-y-0.5">
       <Badge variant="outline">{t("access.people.status.invited")}</Badge>
       <p className="text-[11px] text-muted-foreground">
-        {expiresIn ? t("access.people.inviteExpires", { when: expiresIn }) : t("access.people.inviteExpired")}
+        {user.pendingInvite?.ssoOnly
+          ? t("access.people.awaitingSignIn")
+          : expiresIn
+            ? t("access.people.inviteExpires", { when: expiresIn })
+            : t("access.people.inviteExpired")}
       </p>
     </div>
   );

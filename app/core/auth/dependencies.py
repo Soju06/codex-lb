@@ -24,8 +24,9 @@ from app.core.auth.dashboard_access import (
     totp_policy_applies,
     user_principal,
 )
-from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
+from app.core.auth.dashboard_mode import DashboardAuthMode, DashboardRequestAuth, get_dashboard_request_auth
 from app.core.auth.dashboard_users_cache import DashboardUsersCache, get_dashboard_users_cache
+from app.core.auth.external_identity import resolve_trusted_header_request
 from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -255,12 +256,65 @@ def _user_session_principal(
     return _set_dashboard_principal(request, principal)
 
 
+async def _password_fallback_principal(request: Request) -> DashboardPrincipal | None:
+    """A password-verified cookie for an active account, so the break-glass admin
+    stays reachable while the proxy asserts an identity the resolver refuses."""
+
+    users_cache = get_dashboard_users_cache()
+    state = get_dashboard_session_store().get(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+    session_user = await _resolve_session_user(state, users_cache)
+    if state is None or session_user is None or not state.password_verified:
+        return None
+    settings = await get_settings_cache().get()
+    return _user_session_principal(request, session_user, state, settings=settings)
+
+
+async def _trusted_header_principal(request: Request, request_auth: DashboardRequestAuth) -> DashboardPrincipal:
+    """The account behind the proxy-asserted identity, or a 401 naming why there is none.
+
+    Unknown identities become accounts through the provider's
+    ``unknown_identity_role_id`` (admin by default, D10). A refused identity
+    answers ``identity_not_provisioned`` and a disabled account
+    ``account_disabled`` -- unless a password-verified cookie rides along, in
+    which case that account is served (a resolved header account always wins
+    over the cookie). The TOTP policy is not applied to header sessions yet:
+    there is no cookie to carry a verified step, so applying it would lock
+    every header user out (the step-up change wires it, honouring the
+    provider's ``idp_mfa_enforced``).
+    """
+
+    resolution = await resolve_trusted_header_request(request, request_auth)
+    if resolution is None:
+        raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
+    if resolution.user is None:
+        fallback = await _password_fallback_principal(request)
+        if fallback is not None:
+            return fallback
+        if resolution.denial == "account_disabled":
+            raise DashboardAuthError("This account is disabled", code="account_disabled")
+        raise DashboardAuthError(
+            "Your account is not ready yet; ask an administrator to add you", code="identity_not_provisioned"
+        )
+    grants = resolve_role_grants(resolution.user.role)
+    if not scope_satisfies(grants.get(Permission.DASHBOARD_READ), Scope.ALL):
+        raise DashboardPermissionError(
+            f"Dashboard permission '{Permission.DASHBOARD_READ.value}' is required",
+            code="permission_required",
+            param=Permission.DASHBOARD_READ.value,
+        )
+    return user_principal(
+        resolution.user, grants, auth_method=request_auth.mode.value, auth_mode=DashboardAuthMode.TRUSTED_HEADER
+    )
+
+
 async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     cached = _get_cached_dashboard_principal(request)
     if cached is not None:
         return cached
 
     request_auth = get_dashboard_request_auth(request)
+    if request_auth is not None and request_auth.mode == DashboardAuthMode.TRUSTED_HEADER:
+        return _set_dashboard_principal(request, await _trusted_header_principal(request, request_auth))
     if request_auth is not None:
         return _set_dashboard_principal(
             request,

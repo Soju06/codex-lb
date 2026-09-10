@@ -4,6 +4,7 @@ import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { LoginHintSchema } from "@/features/auth/schemas";
 import { InviteDialog } from "@/features/settings/components/access/invite-dialog";
 import { renderAt, signInAsTeamAdmin } from "@/test/access-test-utils";
 import { createAccessSummary } from "@/test/mocks/factories";
@@ -106,5 +107,70 @@ describe("InviteDialog", () => {
     await user.click(within(dialog).getByRole("button", { name: "Create invite link" }));
     expect(await within(dialog).findByText("Usernames can be at most 64 characters.")).toBeInTheDocument();
     expect(within(dialog).getByText("Display names can be at most 128 characters.")).toBeInTheDocument();
+  });
+
+  it("offers the password-less option only when a non-password provider is active and posts the expected identity", async () => {
+    const user = userEvent.setup();
+    const { onIssued, onOpenChange } = renderDialog();
+    await openDialog();
+    expect(screen.queryByTestId("invite-sso-option")).not.toBeInTheDocument();
+
+    signInAsTeamAdmin({
+      authMode: "trusted_header",
+      loginHint: LoginHintSchema.parse({
+        usernameField: "shown",
+        providers: [
+          { kind: "password", providerKey: "default", label: "Password", loginUrl: null },
+          { kind: "trusted_header", providerKey: "default", label: "Authelia", loginUrl: null },
+        ],
+      }),
+    });
+    const dialog = await openDialog();
+    expect(within(dialog).getByTestId("invite-sso-option")).toHaveTextContent("They sign in through Authelia.");
+
+    let posted: unknown = null;
+    server.use(
+      http.post("/api/dashboard-users", async ({ request }) => {
+        posted = await request.json();
+        return HttpResponse.json(
+          {
+            user: {
+              id: "user_sarah",
+              username: "sarah",
+              displayName: null,
+              email: null,
+              role: { id: "role_operator", slug: "operator", name: "Operator", kind: "preset" },
+              roleSource: "manual",
+              status: "invited",
+              isBreakGlass: false,
+              totpConfigured: false,
+              hasPassword: false,
+              createdAt: new Date().toISOString(),
+              lastLoginAt: null,
+              pendingInvite: { expiresAt: null, ssoOnly: true },
+            },
+            invite: null,
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    await user.type(within(dialog).getByLabelText("Username"), "sarah");
+    await user.click(within(dialog).getByLabelText("Add without a password"));
+    await user.click(within(dialog).getByRole("button", { name: "Add person" }));
+    expect(await within(dialog).findByText("Enter the identity the proxy will send.")).toBeInTheDocument();
+
+    await user.type(within(dialog).getByLabelText("Identity the proxy sends"), " Sarah@Example.com ");
+    await user.click(within(dialog).getByRole("button", { name: "Add person" }));
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(posted).toMatchObject({
+      username: "sarah",
+      ssoOnly: true,
+      expectedIdentity: { provider: "trusted_header", providerKey: "default", subject: "Sarah@Example.com" },
+    });
+    // No link to hand over.
+    expect(onIssued).not.toHaveBeenCalled();
   });
 });

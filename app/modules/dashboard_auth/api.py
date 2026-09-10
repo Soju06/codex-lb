@@ -26,7 +26,13 @@ from app.core.auth.dashboard_session_ttl import (
     resolve_dashboard_session_ttl_seconds,
 )
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
-from app.core.auth.dependencies import require_dashboard_permission, set_dashboard_error_format
+from app.core.auth.dependencies import (
+    ensure_dashboard_permission,
+    require_dashboard_permission,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
+from app.core.auth.external_identity import ExternalResolution, resolve_trusted_header_request
 from app.core.bootstrap import (
     ensure_auto_bootstrap_token,
     get_bootstrap_validation_status,
@@ -95,7 +101,9 @@ from app.modules.dashboard_auth.service import (
     get_totp_rate_limiter,
     hash_password,
     log_login_failed,
+    session_user,
 )
+from app.modules.dashboard_roles.service import resolve_role_grants
 from app.modules.dashboard_users.api import mapped_user_errors
 from app.modules.dashboard_users.credentials import CredentialRequiredError
 from app.modules.dashboard_users.schemas import ProfileUpdateRequest
@@ -188,16 +196,46 @@ async def _decorate_session_response(
             "password_management_enabled": password_management_enabled(auth_mode),
             "password_session_active": fully_authorized,
         }
-        if (
-            auth_mode == DashboardAuthMode.TRUSTED_HEADER
-            and not response.password_required
-            and not response.totp_required_on_login
-        ):
-            update["authenticated"] = False
-            update.update(_UNAUTHENTICATED_ACCOUNT_FIELDS)
+        # Without the header only a password session gets in. When no account
+        # holds a password (proxy-created accounts do not count) there is no
+        # form to show: the client renders the reverse-proxy notice.
+        if auth_mode == DashboardAuthMode.TRUSTED_HEADER and not fully_authorized and not totp_pending:
+            local_password_users = (await get_dashboard_users_cache().local_auth_state()).active_local_password_users
+            if local_password_users == 0 or not response.password_required:
+                update["authenticated"] = False
+                update["password_required"] = False
+                update.update(_UNAUTHENTICATED_ACCOUNT_FIELDS)
         return response.model_copy(update=update)
 
-    # Trusted-header / disabled auth: the implicit admin holds every permission.
+    if request_auth.mode == DashboardAuthMode.TRUSTED_HEADER:
+        resolution = await resolve_trusted_header_request(request, request_auth)
+        if resolution is None:
+            # Header present but the provider is inactive: the dependency answers
+            # proxy_auth_required, so the session must not describe an admin.
+            return response.model_copy(
+                update={
+                    "authenticated": False,
+                    "password_required": False,
+                    "auth_mode": DashboardAuthMode.TRUSTED_HEADER,
+                    "password_session_active": fully_authorized,
+                    **_UNAUTHENTICATED_ACCOUNT_FIELDS,
+                }
+            )
+        if resolution.user is None and has_pwd:
+            # Refused identity but a password cookie rides along: describe that
+            # session (the break-glass admin stays reachable behind the proxy).
+            return response.model_copy(
+                update={
+                    "auth_mode": DashboardAuthMode.TRUSTED_HEADER,
+                    "password_management_enabled": True,
+                    "password_session_active": fully_authorized,
+                }
+            )
+        return await _trusted_header_session_response(
+            response, resolution, context=context, password_session_active=fully_authorized
+        )
+
+    # Disabled auth: the implicit admin holds every permission.
     return response.model_copy(
         update={
             "authenticated": force_authenticated or response.authenticated,
@@ -210,6 +248,59 @@ async def _decorate_session_response(
             "totp_enrollment_required": False,
             "access_summary": await context.service.access_summary(),
             "assignable_role_ids": assignable_role_ids(),
+        }
+    )
+
+
+async def _trusted_header_session_response(
+    response: DashboardAuthSessionResponse,
+    resolution: ExternalResolution,
+    *,
+    context: DashboardAuthContext,
+    password_session_active: bool,
+) -> DashboardAuthSessionResponse:
+    """The session as the proxy-asserted account sees it, or the "not ready" state for a refused identity.
+
+    ``password_session_active`` reports whether a fallback password cookie also
+    rode along, so the settings page keeps gating password management on it.
+    """
+
+    user = resolution.user
+    if user is None:
+        return response.model_copy(
+            update={
+                "authenticated": False,
+                "auth_mode": DashboardAuthMode.TRUSTED_HEADER,
+                "totp_required_on_login": False,
+                "totp_configured": False,
+                "password_session_active": password_session_active,
+                "auth_method": None,
+                "totp_enrollment_required": False,
+                "login": response.login.model_copy(update={"pending_identity": True}) if response.login else None,
+                **_UNAUTHENTICATED_ACCOUNT_FIELDS,
+            }
+        )
+    grants = resolve_role_grants(user.role)
+    manages_users = Permission.USERS_MANAGE in grants
+    return response.model_copy(
+        update={
+            "authenticated": True,
+            # An account with an identity exists (this one), so sign-in is required
+            # even when the cached auth state predates its just-in-time creation.
+            "password_required": True,
+            "auth_mode": DashboardAuthMode.TRUSTED_HEADER,
+            "password_management_enabled": True,
+            "password_session_active": password_session_active,
+            "totp_required_on_login": False,
+            "totp_configured": user.totp_secret_encrypted is not None,
+            "role": DashboardRole.ADMIN,
+            "permissions": permission_strings(grants),
+            "user": session_user(user),
+            "auth_method": DashboardAuthMode.TRUSTED_HEADER.value,
+            "must_change_password": False,
+            "totp_enrollment_required": False,
+            "access_summary": await context.service.access_summary() if manages_users else None,
+            "assignable_role_ids": assignable_role_ids() if manages_users else [],
         }
     )
 
@@ -357,24 +448,20 @@ async def setup_password(
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> DashboardAuthSessionResponse | JSONResponse:
     settings = get_settings()
-    request_auth = get_dashboard_request_auth(request)
     auth_state = await context.repository.get_local_auth_state()
     if settings.dashboard_auth_mode == DashboardAuthMode.DISABLED:
         raise DashboardBadRequestError(
             "Password management is disabled while dashboard auth is bypassed",
             code="password_management_disabled",
         )
-    if (
-        settings.dashboard_auth_mode == DashboardAuthMode.TRUSTED_HEADER
-        and request_auth is None
-        and not auth_state.requires_auth
-    ):
-        raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
-    if (
-        not auth_state.requires_auth
-        and settings.dashboard_auth_mode != DashboardAuthMode.TRUSTED_HEADER
-        and not is_local_request(request)
-    ):
+    if settings.dashboard_auth_mode == DashboardAuthMode.TRUSTED_HEADER:
+        # Behind the proxy the break-glass admin is created by an account that
+        # manages users (a header-resolved account or a password session), never
+        # by a bare request: without the header this is proxy_auth_required, with
+        # a refused identity identity_not_provisioned, as for every other route.
+        principal = await validate_dashboard_session(request)
+        ensure_dashboard_permission(principal, Permission.USERS_MANAGE)
+    elif not auth_state.requires_auth and not is_local_request(request):
         submitted_bootstrap_token = (payload.bootstrap_token or "").strip()
         validation_status = await get_bootstrap_validation_status(submitted_bootstrap_token)
         if validation_status == "unavailable":

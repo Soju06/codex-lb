@@ -16,6 +16,8 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeysService
 from app.modules.audit.repository import AuditRepository
 from app.modules.audit.service import AuditLogsService
+from app.modules.auth_providers.repository import AuthProvidersRepository
+from app.modules.auth_providers.service import AuthProvidersService
 from app.modules.automations.repository import AutomationsRepository
 from app.modules.automations.service import AutomationsService
 from app.modules.dashboard.repository import DashboardRepository
@@ -90,6 +92,13 @@ class DashboardUsersContext:
     session: AsyncSession
     repository: DashboardUsersRepository
     service: DashboardUsersService
+
+
+@dataclass(slots=True)
+class AuthProvidersContext:
+    session: AsyncSession
+    repository: AuthProvidersRepository
+    service: AuthProvidersService
 
 
 @dataclass(slots=True)
@@ -264,6 +273,14 @@ def get_dashboard_users_context(
     repository = DashboardUsersRepository(session)
     service = DashboardUsersService(repository, DashboardRolesRepository(session), DashboardAuthRepository(session))
     return DashboardUsersContext(session=session, repository=repository, service=service)
+
+
+def get_auth_providers_context(
+    session: AsyncSession = Depends(get_session),
+) -> AuthProvidersContext:
+    repository = AuthProvidersRepository(session)
+    service = AuthProvidersService(repository, DashboardRolesRepository(session))
+    return AuthProvidersContext(session=session, repository=repository, service=service)
 
 
 def get_dashboard_roles_context(

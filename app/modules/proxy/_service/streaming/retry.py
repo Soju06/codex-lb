@@ -929,7 +929,10 @@ class _StreamingRetryMixin:
                     request_id,
                     False,
                     request_started_at=start,
-                    allow_transient_retry=True,
+                    # Forced refresh has its own bounded same-account recovery
+                    # and ordered settlement path. The fresh-request sibling
+                    # replay buffer must not escape that lifecycle.
+                    allow_transient_retry=False,
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     settlement=settlement,
@@ -2220,8 +2223,14 @@ class _StreamingRetryMixin:
                                 allow_retry_flag,
                                 request_started_at=start,
                                 allow_transient_retry=(
-                                    transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1
-                                    or allow_retry_flag
+                                    resilience.deterministic_failover_enabled
+                                    and allow_retry_flag
+                                    and payload.previous_response_id is None
+                                    and affinity.kind != StickySessionKind.CODEX_SESSION
+                                    and not _stream_owner_bound_to(account)
+                                    and responses_payload_is_account_neutral_fresh_replay(
+                                        payload.to_replay_safety_payload()
+                                    )
                                 ),
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,

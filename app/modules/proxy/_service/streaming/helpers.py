@@ -88,6 +88,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.accepted_replay import _terminal_payload_reports_output
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -302,6 +303,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _event_type_from_payload,
     _RequestLogFailureMetadata,
+    _RetryableStreamError,
     _signal_propagated_capacity_startup_ready,
     _StreamSettlement,
     _WebSocketRequestState,
@@ -501,6 +503,78 @@ def _stream_iterator_after_capacity_admission(
 
 
 _REQUEST_TRANSPORT_HTTP = "http"
+
+
+class _OutputFreeOverloadReplayBuffer:
+    """Keep a fresh direct-HTTP lifecycle prelude replayable until model output."""
+
+    _PRELUDE_EVENT_TYPES = frozenset({"response.created", "response.in_progress"})
+
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self._lines: list[str] = []
+        self._buffered_prelude_types: set[str] = set()
+
+    def raise_if_retryable(
+        self,
+        event_type: str | None,
+        error_code: str | None,
+        event_payload: dict[str, JsonValue] | None,
+        settlement: _StreamSettlement,
+        error_message: str | None,
+    ) -> None:
+        if not self.enabled or settlement.downstream_visible or event_type not in {"response.failed", "error"}:
+            return
+        if error_code not in UPSTREAM_OVERLOAD_CODES or _terminal_payload_reports_output(event_payload):
+            return
+        raise _RetryableStreamError(
+            error_code,
+            settlement.error or cast(UpstreamError, {"message": error_message or "Upstream overloaded"}),
+            exclude_account=True,
+        )
+
+    @staticmethod
+    def should_retry_first_terminal(
+        allow_retry: bool, error_code: str | None, event_payload: dict[str, JsonValue] | None
+    ) -> bool:
+        return (
+            allow_retry
+            and not _terminal_payload_reports_output(event_payload)
+            and _facade()._should_retry_stream_error(error_code)
+        )
+
+    def relay(
+        self, event_type: str | None, line: str, settlement: _StreamSettlement, terminal: bool = False
+    ) -> list[str]:
+        if self.enabled and self._is_account_neutral_comment(line):
+            return [line]
+        if (
+            self.enabled
+            and not terminal
+            and event_type in self._PRELUDE_EVENT_TYPES
+            and event_type not in self._buffered_prelude_types
+        ):
+            self._buffered_prelude_types.add(event_type)
+            self._lines.append(line)
+            return []
+        lines, self._lines = [*self._lines, line], []
+        self._buffered_prelude_types.clear()
+        settlement.downstream_visible = True
+        if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+            settlement.downstream_text_visible = True
+        return lines
+
+    def flush(self, settlement: _StreamSettlement) -> list[str]:
+        lines, self._lines = self._lines, []
+        self._buffered_prelude_types.clear()
+        if lines:
+            settlement.downstream_visible = True
+        return lines
+
+    @staticmethod
+    def _is_account_neutral_comment(line: str) -> bool:
+        """SSE comments carry no response state and do not commit replay."""
+        return bool(line.strip()) and all(not field or field.lstrip().startswith(":") for field in line.splitlines())
 
 
 def _should_penalize_stream_error(code: str | None) -> bool:

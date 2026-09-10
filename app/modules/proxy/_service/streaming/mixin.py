@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from typing import Any, AsyncIterator, Mapping, cast
 
 import aiohttp
@@ -272,10 +271,12 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.streaming.helpers import (
     _classify_terminal_stream_error_frame,
+    _facade,
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
     _observe_terminal_stream_error_frame,
     _openai_error_fields,
+    _OutputFreeOverloadReplayBuffer,
     _rewrite_malformed_stream_error_event,
     _stamp_terminal,
     _stream_transport_failure_event_or_raise,
@@ -429,13 +430,6 @@ from app.modules.proxy.tool_call_dedupe import (
 from app.modules.proxy.work_admission import AdmissionLease
 
 
-def _facade() -> Any:
-    return sys.modules["app.modules.proxy.service"]
-
-
-_REQUEST_TRANSPORT_HTTP = "http"
-
-
 class _StreamingMixin(_StreamingRetryMixin):
     _handle_stream_error = _handle_stream_error_helper
     _resolve_upstream_route_for_account = _resolve_upstream_route_for_account_helper
@@ -452,7 +446,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
-        request_transport: str = _REQUEST_TRANSPORT_HTTP,
+        request_transport: str = "http",
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
@@ -505,13 +499,11 @@ class _StreamingMixin(_StreamingRetryMixin):
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
         model = payload.model
-        requested_service_tier = payload.service_tier
-        service_tier = requested_service_tier
+        requested_service_tier = service_tier = payload.service_tier
         actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
-        # Keep selection/failover waits out of latency and TTFT, record them as
-        # queue time, then re-anchor after this attempt's admission wait.
+        # Keep selection/failover waits out of latency and TTFT; re-anchor after this attempt's admission wait.
         attempt_started_at = start = clock.monotonic()
         latency_queue_ms = max(0, int((start - request_started_at) * 1000))
         status, error_code, error_message = "success", None, None
@@ -522,6 +514,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         route_trace = UpstreamProxyRouteTrace()
         route_fail_closed_reason: str | None = None
         saw_text_delta = terminal_event_seen = suppressed_duplicate_tool_call = False
+        overload_replay = _OutputFreeOverloadReplayBuffer(enabled=allow_transient_retry)
         latency_first_token_ms: int | None = None
         ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], Any] = {}
         if tool_call_dedupe is None:
@@ -726,7 +719,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                             _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
                             upstream_error,
                         )
-                    if allow_retry and _facade()._should_retry_stream_error(code):
+                    if overload_replay.should_retry_first_terminal(allow_retry, code, first_payload):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
@@ -746,6 +739,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.error = {"message": error_message or "Upstream error"}
                 settlement.record_success = False
                 settlement.account_health_error = False
+
+            overload_replay.raise_if_retryable(event_type, error_code, first_payload, settlement, error_message)
 
             if event and event.type in ("response.completed", "response.incomplete"):
                 usage = event.response.usage if event.response else None
@@ -778,10 +773,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                         latency_first_token_ms = _ttft_event_latency_ms(
                             event_type, first_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                         )
-                    settlement.downstream_visible = True
-                    if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                        settlement.downstream_text_visible = True
-                    yield first
+                    for relay_line in overload_replay.relay(event_type, first, settlement, terminal_event_seen):
+                        yield relay_line
             if terminal_stream_error is not None:
                 raise terminal_stream_error
             async for line in iterator:
@@ -905,6 +898,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.error = {"message": raw_error_message or "Upstream error"}
                     settlement.record_success = False
                     settlement.account_health_error = not saw_text_delta
+                overload_replay.raise_if_retryable(event_type, error_code, event_payload, settlement, error_message)
                 if event_type in ("response.completed", "response.incomplete"):
                     response = event.response if event is not None else None
                     usage = response.usage if response else None
@@ -943,14 +937,16 @@ class _StreamingMixin(_StreamingRetryMixin):
                     continue
                 if event_payload is not None and not preserve_raw_sse_line:
                     line = format_sse_event(event_payload)
-                settlement.downstream_visible = True
-                if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                    settlement.downstream_text_visible = True
                 terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
-                yield line
+                for relay_line in overload_replay.relay(event_type, line, settlement, terminal_event_seen):
+                    yield relay_line
             if not terminal_event_seen:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
+                for deferred_line in overload_replay.flush(settlement):
+                    yield deferred_line
         except ProxyResponseError as exc:
+            for deferred_line in overload_replay.flush(settlement):
+                yield deferred_line
             response_create_lease.release()
             failure_metadata = _facade()._request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
@@ -1004,13 +1000,15 @@ class _StreamingMixin(_StreamingRetryMixin):
                 )
             )
             return
-        except _TerminalStreamError:
+        except (_TerminalStreamError, _RetryableStreamError):
             raise
         except (asyncio.CancelledError, GeneratorExit):
             if not terminal_event_seen:
                 status, error_code, error_message, failure_metadata = _mark_downstream_stream_cancelled(settlement)
             raise
         except Exception:
+            for deferred_line in overload_replay.flush(settlement):
+                yield deferred_line
             if settlement.downstream_visible:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
                 yield _stream_transport_failure_event_or_raise(

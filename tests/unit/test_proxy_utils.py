@@ -71,6 +71,7 @@ from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
+from app.modules.proxy import account_cache as account_cache_module
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import helpers as proxy_helpers_module
@@ -512,6 +513,29 @@ async def test_rate_limit_still_marks_rate_limit(code: str) -> None:
     load_balancer.mark_rate_limit.assert_awaited_once()
     load_balancer.mark_quota_exceeded.assert_not_awaited()
     load_balancer.record_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_revoked_token_downgrade_miss_clears_pending_routing_mark(monkeypatch: pytest.MonkeyPatch) -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(return_value=False),
+    )
+    clear_routing_mark = MagicMock()
+    monkeypatch.setattr(account_cache_module, "clear_account_routing_unavailable", clear_routing_mark)
+
+    await streaming_helpers_module._handle_stream_error(
+        SimpleNamespace(_load_balancer=load_balancer),
+        cast(Account, SimpleNamespace(id="acc-reauth-race")),
+        {"message": "Authentication token revoked"},
+        "token_revoked",
+        401,
+    )
+
+    load_balancer.mark_permanent_failure.assert_awaited_once()
+    clear_routing_mark.assert_called_once_with("acc-reauth-race")
 
 
 def _stream_error_load_balancer() -> SimpleNamespace:

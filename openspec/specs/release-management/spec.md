@@ -1,7 +1,7 @@
 # release-management Specification
 
 ## Purpose
-TBD - created by archiving change add-beta-release-channel. Update Purpose after archive.
+Governs the release channels of codex-lb: the stable path owned by release-please and the PR-driven beta channel layered on it. Beta releases must be prepared through release PRs, publish as GitHub prereleases on merge, never advance stable aliases or the stable manifest, and withdraw public release metadata when publishing fails, so stable promotion stays release-please owned and every release-managed version field is guarded.
 ## Requirements
 ### Requirement: Beta releases are prepared through release PRs
 
@@ -200,4 +200,3 @@ If the Release workflow is triggered by a public GitHub Release event and any re
 - **WHEN** the failure cleanup job runs
 - **THEN** the GitHub Release is changed back to draft
 - **AND** the release no longer appears as the public latest release
-

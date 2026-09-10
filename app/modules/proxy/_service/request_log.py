@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import Protocol, cast
 
 import anyio
 
+from app.core.clock import clock_for, scheduler_for
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, proxy_phase_latency_seconds
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy._load_balancer.throughput_cohort import record_tps_sample
+from app.modules.proxy._load_balancer.ttft_cohort import record_ttft_sample
 from app.modules.proxy.affinity import _extract_model_class
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 
@@ -94,7 +96,7 @@ class _RequestLogMixin:
         """
         if not request_id or not model:
             return
-        task = asyncio.create_task(
+        task = scheduler_for(self).create_task(
             self._rewrite_request_log_model_once(request_id, model),
             name=f"proxy-request-log-rewrite-{request_id}",
         )
@@ -103,10 +105,11 @@ class _RequestLogMixin:
     async def _rewrite_request_log_model_once(self, request_id: str, model: str) -> None:
         proxy = cast(_RequestLogServiceProtocol, self)
         insert_task_name = f"proxy-request-log-{request_id}"
+        clock = clock_for(self)
+        scheduler = scheduler_for(self)
         with anyio.CancelScope(shield=True):
             try:
-                loop = asyncio.get_running_loop()
-                deadline = loop.time() + 30
+                deadline = clock.monotonic() + 30
                 rowcount = 0
                 delay = 0.0
                 while True:
@@ -120,16 +123,16 @@ class _RequestLogMixin:
                         for task in proxy._request_log_tasks
                         if task.get_name() == insert_task_name and not task.done()
                     ]:
-                        remaining = max(0.1, deadline - loop.time())
+                        remaining = max(0.1, deadline - clock.monotonic())
                         try:
-                            await asyncio.wait_for(asyncio.shield(pending_insert), timeout=remaining)
+                            await scheduler.wait_for(asyncio.shield(pending_insert), timeout=remaining)
                         except Exception:  # insert failures surface via the update probe below
                             pass
                     async with proxy._repo_factory() as repos:
                         rowcount = await repos.request_logs.update_model_for_request(request_id, model)
                     if rowcount:
                         break
-                    if loop.time() >= deadline:
+                    if clock.monotonic() >= deadline:
                         logger.warning(
                             "rewrite_request_log_model: request_log row for %s never appeared; "
                             "public effective model %s not recorded",
@@ -138,7 +141,7 @@ class _RequestLogMixin:
                         )
                         break
                     delay = min(delay + 0.05, 0.8)
-                    await asyncio.sleep(delay)
+                    await scheduler.sleep(delay)
             except Exception:
                 logger.warning(
                     "failed to rewrite request_log model request_id=%s model=%s",
@@ -196,8 +199,25 @@ class _RequestLogMixin:
         conversation_id: str | None = None,
         client_ip: str | None = None,
         archive_request_id: str | None = None,
+        # True when the row's latencies span more than one upstream send
+        # (bridge retry or direct WebSocket replay) or an account-capacity
+        # wait. Not persisted; it only keeps the row out of the latency cohort samples.
+        upstream_retried: bool = False,
+        # Start-to-upstream-send latency: how much of ``latency_first_token_ms``
+        # is local pre-send work (bridge session lookup / reconnect / slimming,
+        # WebSocket owner binding). Not persisted; the TTFT cohort sample is
+        # ``latency_first_token_ms - latency_upstream_send_ms``, so the account
+        # is only charged from its ``response.create`` send. ``None`` means the
+        # row has no send anchor and it is never TTFT-sampled (fail closed).
+        latency_upstream_send_ms: int | None = None,
+        # Start-to-upstream-terminal latency stamped when the terminal frame was
+        # parsed, before downstream delivery, terminal bookkeeping, settlement
+        # and cleanup. Not persisted; it is the end of the throughput sample's
+        # span. ``None`` (no terminal frame was parsed) falls back to
+        # ``latency_ms``; such rows are error rows and are not sampled.
+        latency_upstream_terminal_ms: int | None = None,
     ) -> None:
-        task = asyncio.create_task(
+        task = scheduler_for(self).create_task(
             self._persist_request_log(
                 account_id=account_id,
                 api_key_id=api_key.id if api_key else None,
@@ -296,6 +316,36 @@ class _RequestLogMixin:
             upstream_transport=upstream_transport,
             useragent_group=useragent_group,
             model=model,
+        )
+        # Fleet-relative latency cohort weights (first-token latency per account,
+        # output throughput per account and model): the funnel already carries
+        # every field the eligibility filters need; ineligible rows are dropped there.
+        queued_wait_ms = (latency_response_create_gate_wait_ms or 0) + (latency_bridge_queue_wait_ms or 0)
+        balancer = getattr(self, "_load_balancer", None)
+        record_ttft_sample(
+            balancer,
+            account_id=account_id,
+            status=status,
+            request_kind=request_kind,
+            latency_first_token_ms=latency_first_token_ms,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            reasoning_effort=reasoning_effort,
+            latency_upstream_send_ms=latency_upstream_send_ms,
+            queued_wait_ms=queued_wait_ms,
+            retried=upstream_retried,
+        )
+        record_tps_sample(
+            balancer,
+            account_id=account_id,
+            status=status,
+            request_kind=request_kind,
+            model=model,
+            latency_ms=latency_ms if latency_upstream_terminal_ms is None else latency_upstream_terminal_ms,
+            latency_first_token_ms=latency_first_token_ms,
+            output_tokens=output_tokens,
+            queued_wait_ms=queued_wait_ms,
+            retried=upstream_retried,
         )
 
     async def drain_persistence_tasks(
@@ -509,7 +559,7 @@ class _RequestLogMixin:
             api_key=api_key,
             request_id=request_id,
             model=model,
-            latency_ms=int((time.monotonic() - start) * 1000),
+            latency_ms=int((clock_for(self).monotonic() - start) * 1000),
             status="error",
             error_code=error_code,
             error_message=error_message,

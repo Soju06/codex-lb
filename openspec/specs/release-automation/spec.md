@@ -1,7 +1,7 @@
 # release-automation Specification
 
 ## Purpose
-TBD - created by archiving change cleanup-superseded-beta-release-prs. Update Purpose after archive.
+Governs the GitHub workflow that keeps the beta release PR in sync with the release-please train. When the train moves before a beta PR merges, older automation-created beta PRs must be closed and their branches removed so a stale PR cannot be merged, while manual, protected, and current beta PRs are preserved and newly created beta PRs carry a changelog consistent with the stable release PR.
 ## Requirements
 ### Requirement: Superseded beta release PR cleanup
 
@@ -60,4 +60,3 @@ The beta release sync workflow SHALL include a generated changelog section in th
 - **WHEN** the beta release sync workflow opens or updates the next beta release PR
 - **THEN** the PR body includes a `Changes since v1.20.0-beta.2` section
 - **AND** the section lists the releasable Conventional Commit subjects included in that beta PR
-

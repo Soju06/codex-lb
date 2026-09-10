@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Boxes, CheckCircle2, Loader2, Network, Plus, Server, XCircle } from "lucide-react";
+import { Boxes, CheckCircle2, Loader2, Network, Plus, Server, TriangleAlert, XCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -187,6 +187,16 @@ export function UpstreamProxySettings({
 	                          {t("upstreamProxy.actions.test")}
                         </Button>
                       </div>
+                      {endpoint.plaintextCredentials ? (
+                        <div
+                          role="note"
+                          className="flex items-start gap-1 text-amber-600 dark:text-amber-500"
+                          data-testid={`proxy-endpoint-plaintext-warning-${endpoint.id}`}
+                        >
+                          <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+                          <span>{t("upstreamProxy.endpoints.plaintextCredentials", { scheme: endpoint.scheme })}</span>
+                        </div>
+                      ) : null}
                       {result ? (
                         <div
                           className={

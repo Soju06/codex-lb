@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
 import anyio
 
+from app.core.clock import clock_for, scheduler_for
 from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.http_bridge.quarantine import (
@@ -20,7 +20,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _quarantine_http_bridge_session,
     _revoke_http_bridge_poison_quarantine,
 )
-from app.modules.proxy._service.observability import _hash_identifier, _service_get_settings
+from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import (
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
@@ -31,6 +31,12 @@ from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIR
 
 logger = logging.getLogger(__name__)
 
+# Consecutive failures that open the circuit. The anchor-poison threshold is
+# this same value: once the circuit opens it refuses the key for 60-600s per
+# strike, so a higher poison threshold could never be reached at any useful
+# rate (#1830/#1852), and the quarantine armed at the opening is process-local,
+# so clearing the durable anchor no later than the opening is what keeps the
+# decision replica-safe.
 _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD = 2
 _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS = 60.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS = 600.0
@@ -96,21 +102,6 @@ def _http_bridge_anchor_poison_detail(detail: str | None) -> str | None:
         return None
     aliased = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
     return _HTTP_BRIDGE_ANCHOR_POISON_DETAILS.get(aliased)
-
-
-def _http_bridge_effective_anchor_poison_threshold(configured: int) -> int:
-    """Cap the configured anchor-poison threshold at the circuit's own threshold.
-
-    Once the circuit opens it refuses the key for 60-600s per strike, so a
-    higher poison threshold cannot be reached at any useful rate; that
-    unreachability is issue #1830/#1852 itself. Capping it here also makes the
-    decision replica-safe. The quarantine armed at the opening is process-local,
-    so between the circuit threshold and a higher configured one the durable
-    anchor would survive for another worker to plan. Clearing no later than the
-    opening is what stops that. A configured value below the circuit threshold
-    is still honoured, since clearing earlier is always safe.
-    """
-    return max(1, min(configured, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD))
 
 
 def _http_bridge_poison_quarantine_minimum_seconds(cooldown_remaining: float) -> float:
@@ -344,7 +335,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 ):
                     return False
             try:
-                claimed = await asyncio.wait_for(
+                claimed = await scheduler_for(self).wait_for(
                     claim_generation(
                         session_key_kind=key.affinity_kind,
                         session_key_value=key.affinity_key,
@@ -400,14 +391,14 @@ class _HTTPBridgeRetryCircuitMixin:
                 state = self._http_bridge_retry_circuits.get(key)
                 if (
                     state is not None
-                    and time.monotonic() - state.last_durable_load_monotonic
+                    and clock_for(self).monotonic() - state.last_durable_load_monotonic
                     <= _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
                 ):
                     return
             missed_at = self._http_bridge_retry_circuit_planning_misses.get(key)
             if (
                 missed_at is not None
-                and time.monotonic() - missed_at <= _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
+                and clock_for(self).monotonic() - missed_at <= _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
             ):
                 # A confirmed durable miss within the planning window: a row
                 # another replica created since is still enforced by the
@@ -552,7 +543,7 @@ class _HTTPBridgeRetryCircuitMixin:
         if key.strength != "hard":
             return True
 
-        now_monotonic = time.monotonic()
+        now_monotonic = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             self._prune_http_bridge_retry_circuit_state(now_monotonic)
             local_state = self._http_bridge_retry_circuits.get(key)
@@ -629,7 +620,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         )
             return True
 
-        now_epoch = time.time()
+        now_epoch = clock_for(self).time()
         row_age = now_epoch - persisted.updated_at_epoch
         if (
             row_age > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
@@ -846,13 +837,7 @@ class _HTTPBridgeRetryCircuitMixin:
             # process-local: without re-arming here, this worker's probe is
             # planned with the anchor the row's failures were recorded
             # against.
-            effective_poison_threshold = _http_bridge_effective_anchor_poison_threshold(
-                getattr(
-                    _service_get_settings(),
-                    "http_responses_session_bridge_anchor_poison_failure_threshold",
-                    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
-                )
-            )
+            effective_poison_threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
             arm_poison_quarantine = (
                 not local_failure_is_newer
                 # An episode whose one-clear marker is set already abandoned
@@ -922,8 +907,8 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         state: _HTTPBridgeRetryCircuitState,
     ) -> None:
-        now_monotonic = time.monotonic()
-        now_wall = time.time()
+        now_monotonic = clock_for(self).monotonic()
+        now_wall = clock_for(self).time()
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
         key_lock = await self._acquire_http_bridge_retry_circuit_key_lock(session.key)
         try:
@@ -958,13 +943,7 @@ class _HTTPBridgeRetryCircuitMixin:
             cooldown_until = state.cooldown_until
             last_detail = state.last_detail
             persisted_updated_at_epoch = state.persisted_updated_at_epoch
-        poison_sticky_threshold = _http_bridge_effective_anchor_poison_threshold(
-            getattr(
-                _service_get_settings(),
-                "http_responses_session_bridge_anchor_poison_failure_threshold",
-                threshold,
-            )
-        )
+        poison_sticky_threshold = threshold
         base_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS)
         if last_detail == "clean_close":
             base_backoff = min(
@@ -1103,7 +1082,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         # the stale-load guard compares against this value.
                         state.last_durable_load_monotonic = max(
                             state.last_durable_load_monotonic,
-                            time.monotonic(),
+                            clock_for(self).monotonic(),
                         )
             async with self._http_bridge_retry_circuit_lock:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
@@ -1132,7 +1111,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return True
 
         await self._load_http_bridge_retry_circuit(session)
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None or state.cooldown_until <= now:
@@ -1212,7 +1191,6 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         *,
         consecutive_failures: int | None,
-        configured_threshold: int,
     ) -> "tuple[_HTTPBridgeRetryCircuitState | None, object]":
         """Return the owed episode and the durable anchor captured with it.
 
@@ -1225,7 +1203,7 @@ class _HTTPBridgeRetryCircuitMixin:
         completion this consult did not veto changes the anchor after this
         capture, and the fenced clear then matches nothing.
 
-        Capping the poison threshold at the circuit threshold is what makes the
+        The poison threshold is the circuit threshold, which is what makes the
         clear reachable at all, but it also means every later strike in the
         same episode meets the threshold too. Only the first successful
         abandonment settles the anchor; a failed one leaves the marker unset so
@@ -1241,7 +1219,7 @@ class _HTTPBridgeRetryCircuitMixin:
         """
         if consecutive_failures is None:
             return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
-        effective_threshold = _http_bridge_effective_anchor_poison_threshold(configured_threshold)
+        effective_threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             live_episode_owes = (
@@ -1407,7 +1385,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return 0.0, "none"
 
         await self._load_http_bridge_retry_circuit(session)
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None:
@@ -1449,7 +1427,7 @@ class _HTTPBridgeRetryCircuitMixin:
         """
         if key.strength != "hard":
             return 0.0, "none"
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(key)
             local_cooldown_remaining = max(0.0, state.cooldown_until - now) if state is not None else 0.0
@@ -1475,7 +1453,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return 0.0
 
         await self._load_http_bridge_retry_circuit(session)
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None:
@@ -1492,8 +1470,8 @@ class _HTTPBridgeRetryCircuitMixin:
             return 0.0
         return max(
             0.0,
-            generation[3] - time.time(),
-            generation[6] - time.monotonic(),
+            generation[3] - clock_for(self).time(),
+            generation[6] - clock_for(self).monotonic(),
         )
 
     async def _record_http_bridge_retry_circuit_failure(
@@ -1560,7 +1538,7 @@ class _HTTPBridgeRetryCircuitMixin:
             # the base backoff would otherwise persist an already-aged
             # cooldown and make the fresh failure look older than the
             # durable load for merge bookkeeping.
-            now = time.monotonic()
+            now = clock_for(self).monotonic()
             async with self._http_bridge_retry_circuit_lock:
                 if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
                     duplicate_attempt = scoped_attempt
@@ -1597,18 +1575,12 @@ class _HTTPBridgeRetryCircuitMixin:
                             # against the freshly registered anchor and
                             # starts a new abandonment story of its own.
                             state.poison_anchor_cleared = False
-                        if state.consecutive_failures >= _http_bridge_effective_anchor_poison_threshold(
-                            getattr(
-                                _service_get_settings(),
-                                "http_responses_session_bridge_anchor_poison_failure_threshold",
-                                threshold,
-                            )
-                        ):
+                        if state.consecutive_failures >= threshold:
                             # Debt exists only for an episode that reached the
-                            # effective poison threshold on poison evidence —
-                            # the same threshold that authorizes the
-                            # abandonment, so a configured threshold of one
-                            # arms the debt its failed clear leaves owed.
+                            # poison threshold on poison evidence — the same
+                            # threshold that authorizes the abandonment, so
+                            # the strike that opens the circuit arms the debt
+                            # its failed clear leaves owed.
                             # Arming below it let a clean_close opener
                             # resurrect an earlier poison detail and clear a
                             # valid anchor with no quarantine covering the
@@ -1641,23 +1613,6 @@ class _HTTPBridgeRetryCircuitMixin:
                             backoff,
                             detail,
                         )
-                    if poison_class_failure and not quarantine_poisoned_anchor:
-                        # A configured abandonment threshold below the circuit
-                        # threshold clears the anchor before the circuit ever
-                        # opens, and the terminal frame is published before that
-                        # clear. The quarantine has to cover this window too, or
-                        # an immediate client retry is planned with the dead
-                        # anchor while the clear is still awaiting I/O.
-                        configured_poison_threshold = getattr(
-                            _service_get_settings(),
-                            "http_responses_session_bridge_anchor_poison_failure_threshold",
-                            threshold,
-                        )
-                        if state.consecutive_failures >= _http_bridge_effective_anchor_poison_threshold(
-                            configured_poison_threshold
-                        ):
-                            quarantine_poisoned_anchor = True
-                            quarantine_cooldown_remaining = max(0.0, state.cooldown_until - now)
             if duplicate_attempt is None:
                 assert state is not None
                 armed_quarantine_generation: int | None = None
@@ -1670,7 +1625,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     prior_entry = _http_bridge_quarantine_registry(self).get(session.key)
                     if (
                         prior_entry is not None
-                        and prior_entry.quarantined_until > time.monotonic()
+                        and prior_entry.quarantined_until > clock_for(self).monotonic()
                         and prior_entry.reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
                     ):
                         pre_arm_quarantine_reason = prior_entry.reason
@@ -1722,8 +1677,8 @@ class _HTTPBridgeRetryCircuitMixin:
             await self._persist_http_bridge_retry_circuit_serialized(
                 session,
                 state,
-                now_monotonic=time.monotonic(),
-                now_wall=time.time(),
+                now_monotonic=clock_for(self).monotonic(),
+                now_wall=clock_for(self).time(),
                 threshold=threshold,
             )
             merged_cooldown_remaining = 0.0
@@ -1767,7 +1722,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 # no-op except for the generation bump, which is the fence the
                 # verified stale-anchor replay claims at dispatch (#1863).
                 if self._http_bridge_retry_circuits.get(session.key) is state:
-                    merged_cooldown_remaining = max(0.0, state.cooldown_until - time.monotonic())
+                    merged_cooldown_remaining = max(0.0, state.cooldown_until - clock_for(self).monotonic())
                     # The persist merge adopted the returned row, so the
                     # verdict must come from the adopted detail and count,
                     # not the local strike's class: a clean_close losing to
@@ -1776,19 +1731,12 @@ class _HTTPBridgeRetryCircuitMixin:
                     # leave its speculative quarantine suppressing a valid
                     # anchor.
                     adopted_poison_class = _http_bridge_anchor_poison_detail(state.last_detail) is not None
-                    # The effective anchor-poison threshold, which sits at
-                    # or below the circuit threshold: with a configured
-                    # threshold of one, a non-poison local strike adopting a
-                    # one-failure poison row must still arm the quarantine,
-                    # or the loaded-key cache hands the next request the
-                    # dead anchor.
-                    poison_arm_threshold = _http_bridge_effective_anchor_poison_threshold(
-                        getattr(
-                            _service_get_settings(),
-                            "http_responses_session_bridge_anchor_poison_failure_threshold",
-                            threshold,
-                        )
-                    )
+                    # The anchor-poison threshold is the circuit threshold:
+                    # a non-poison local strike adopting a poison row that
+                    # reaches it must still arm the quarantine, or the
+                    # loaded-key cache hands the next request the dead
+                    # anchor.
+                    poison_arm_threshold = threshold
                     merged_poison_opened = (
                         adopted_poison_class
                         and consecutive_failures >= poison_arm_threshold
@@ -1959,8 +1907,8 @@ class _HTTPBridgeRetryCircuitMixin:
         newer evidence.
         """
         key = session.key
-        now_wall = time.time()
-        now_monotonic = time.monotonic()
+        now_wall = clock_for(self).time()
+        now_monotonic = clock_for(self).monotonic()
         try:
             row = await self._durable_bridge.lookup_retry_circuit(
                 session_key_kind=key.affinity_kind,
@@ -2018,13 +1966,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 updated_at_epoch=now_wall,
                 base_updated_at_epoch=row.updated_at_epoch if row is not None else 0.0,
                 failure_threshold=threshold,
-                poison_sticky_threshold=_http_bridge_effective_anchor_poison_threshold(
-                    getattr(
-                        _service_get_settings(),
-                        "http_responses_session_bridge_anchor_poison_failure_threshold",
-                        threshold,
-                    )
-                ),
+                poison_sticky_threshold=threshold,
                 conflict_cooldown_until_epoch=now_wall + base_backoff,
                 base_backoff_seconds=base_backoff,
                 max_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS),
@@ -2282,7 +2224,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 # to resurrect, and stamping every completed conversation
                 # would grow this map — and its global-lock prune scan —
                 # with every key the process ever serves.
-                self._http_bridge_retry_circuit_reconcile_watermarks[key] = time.monotonic()
+                self._http_bridge_retry_circuit_reconcile_watermarks[key] = clock_for(self).monotonic()
             expected_updated_at_epoch = (
                 state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
             )
@@ -2446,17 +2388,17 @@ class _HTTPBridgeRetryCircuitMixin:
                                     state.poison_anchor_cleared = False
                                     state.owed_poison_detail = None
                                 state.consecutive_failures = max(0, surviving.consecutive_failures)
-                                state.cooldown_until = time.monotonic() + max(
-                                    0.0, surviving.cooldown_until_epoch - time.time()
+                                state.cooldown_until = clock_for(self).monotonic() + max(
+                                    0.0, surviving.cooldown_until_epoch - clock_for(self).time()
                                 )
                                 state.last_detail = surviving.last_detail
-                                if state.cooldown_until > time.monotonic():
+                                if state.cooldown_until > clock_for(self).monotonic():
                                     state.half_open_until = 0.0
                                 state.persisted_updated_at_epoch = surviving.updated_at_epoch
                                 state.persisted_admission_generation = getattr(surviving, "admission_generation", 0)
                                 state.last_durable_load_monotonic = max(
                                     state.last_durable_load_monotonic,
-                                    time.monotonic(),
+                                    clock_for(self).monotonic(),
                                 )
                             self._http_bridge_retry_circuits[key] = state
                             self._http_bridge_retry_circuit_loaded_keys.add(key)
@@ -2492,7 +2434,7 @@ class _HTTPBridgeRetryCircuitMixin:
             # row. Strikes hold this key's lock for the whole settle, so any
             # state present here was resurrected by exactly such a load —
             # drop it with the same fence.
-            self._http_bridge_retry_circuit_reconcile_watermarks[key] = time.monotonic()
+            self._http_bridge_retry_circuit_reconcile_watermarks[key] = clock_for(self).monotonic()
             resurrected = self._http_bridge_retry_circuits.get(key)
             if resurrected is not None and resurrected is not state:
                 self._http_bridge_retry_circuits.pop(key, None)

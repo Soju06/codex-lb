@@ -15,11 +15,13 @@ from fastapi import WebSocket
 
 from app.core import shutdown as shutdown_state
 from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.clock import REAL_SCHEDULER, Scheduler
 from app.core.utils.time import utcnow
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.websocket import mixin as websocket_mixin
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
 
@@ -1280,10 +1282,12 @@ async def test_terminal_message_ownership_survives_relay_cancellation(
     async def _blocking_release_gate(
         request_state: proxy_service._WebSocketRequestState,
         response_create_gate: asyncio.Semaphore,
+        *,
+        scheduler: Scheduler,
     ) -> None:
         gate_entered.set()
         await release_gate.wait()
-        await original_release_gate(request_state, response_create_gate)
+        await original_release_gate(request_state, response_create_gate, scheduler=scheduler)
 
     monkeypatch.setattr(
         websocket_mixin,
@@ -1540,6 +1544,8 @@ async def test_terminal_message_cancellation_is_bounded_by_shared_deadline(
 async def test_terminal_message_cancellation_without_drain_leaves_owned_task_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
     child_cancelled = asyncio.Event()
     release_child = asyncio.Event()
 
@@ -1551,12 +1557,19 @@ async def test_terminal_message_cancellation_without_drain_leaves_owned_task_run
             raise
 
     monkeypatch.setattr(proxy_service, "_TASK_CANCEL_TIMEOUT_SECONDS", 0.01)
-    child = asyncio.create_task(owned_child())
+    child = scheduler.create_task(owned_child())
 
-    await websocket_mixin._await_owned_websocket_task_after_reader_cancellation(
-        child,
-        failure_message="test child failure",
+    waiter = scheduler.create_task(
+        websocket_mixin._await_owned_websocket_task_after_reader_cancellation(
+            child,
+            failure_message="test child failure",
+            scheduler=scheduler,
+        )
     )
+    await scheduler.drain()
+    assert not waiter.done()
+    await scheduler.advance(0.01)
+    await waiter
 
     assert child_cancelled.is_set() is False
     assert child.done() is False
@@ -1599,6 +1612,62 @@ async def test_stuck_upstream_close_is_cancelled_after_scope_cleanup_timeout() -
     assert close_cancelled is True
     assert service._background_cleanup_tasks == set()
     release_close.set()
+
+
+@pytest.mark.asyncio
+async def test_upstream_close_cleanup_uses_injected_scheduler_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
+
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(
+        cast(proxy_service.ProxyRepoFactory, repo_factory),
+        clock=clock,
+        scheduler=scheduler,
+    )
+    close_started = asyncio.Event()
+    close_cancelled = False
+    cancellation_schedulers: list[Any] = []
+    original_await_cancelled_task = proxy_service._await_cancelled_task
+
+    async def capture_cancellation_scheduler(*args: Any, **kwargs: Any) -> bool:
+        cancellation_schedulers.append(kwargs["scheduler"])
+        return await original_await_cancelled_task(*args, **kwargs)
+
+    monkeypatch.setattr(proxy_service, "_await_cancelled_task", capture_cancellation_scheduler)
+
+    async def close() -> None:
+        nonlocal close_cancelled
+        close_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            close_cancelled = True
+            raise
+
+    upstream = cast(UpstreamWebSocket, SimpleNamespace(close=close))
+    cleanup = scheduler.create_task(
+        websocket_mixin._close_websocket_upstream_for_cleanup(
+            service,
+            upstream,
+            timeout_seconds=1.0,
+        )
+    )
+
+    await scheduler.drain()
+    assert close_started.is_set()
+    assert not cleanup.done()
+
+    await scheduler.advance(0.25)
+    await cleanup
+
+    assert close_cancelled is True
+    assert cancellation_schedulers == [scheduler]
+    assert service._background_cleanup_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -2144,7 +2213,7 @@ async def test_scope_cancellation_while_waiting_for_reconnect_reader_preserves_a
         for state in list(pending_requests):
             gate = state.response_create_gate
             if gate is not None:
-                await websocket_mixin._release_websocket_response_create_gate(state, gate)
+                await websocket_mixin._release_websocket_response_create_gate(state, gate, scheduler=REAL_SCHEDULER)
         pending_requests.clear()
 
     claim_unsent = AsyncMock(wraps=websocket_mixin._claim_unsent_websocket_request_for_reconnect)

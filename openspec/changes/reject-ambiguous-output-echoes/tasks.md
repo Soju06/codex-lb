@@ -1,0 +1,3 @@
+- [x] Reject multiple matching output subsequences without choosing an occurrence.
+- [x] Verify unique echoes still replay and ambiguous echoes cannot dispatch.
+- [ ] Validate specifications, tests, CI, and reviewer coverage.

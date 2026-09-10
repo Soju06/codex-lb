@@ -1,0 +1,3 @@
+- [x] Join current migration heads without changing historical parents.
+- [x] Verify schema/data preservation and native-event recovery compatibility.
+- [ ] Recheck CI and both reviews on the rebased head.

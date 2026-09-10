@@ -1247,6 +1247,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
 async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_probe(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Application startup registers bridge ownership without blocking on the advertise-address probe."""
     import app.core.startup as startup_module
     import app.main as main
 
@@ -1285,6 +1286,18 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
     )
     wait_for_reachable = AsyncMock()
     validate_advertise = AsyncMock()
+    seed_outage_grace = AsyncMock(return_value=0)
+    # Keep this membership-ordering test's mocked DB lifecycle free of real
+    # writes, just as the other bridge lifespan tests do.
+    monkeypatch.setattr(
+        main,
+        "AccountsRepository",
+        lambda _session: SimpleNamespace(seed_hard_sticky_outage_grace_on_startup=seed_outage_grace),
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.account_cache.get_routing_availability_cache",
+        lambda: SimpleNamespace(refresh_from_db=AsyncMock()),
+    )
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
@@ -1319,6 +1332,7 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
             connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
         )
         validate_advertise.assert_awaited_once()
+        seed_outage_grace.assert_awaited_once()
         ring_service.register.assert_awaited_once_with(
             "pod-a",
             endpoint_base_url=None,

@@ -7,11 +7,11 @@ import logging
 import math
 import sys
 import time
-from collections.abc import Callable, Coroutine, Iterable, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Final, Literal, Mapping, TypeVar, cast
+from typing import Any, Final, Literal, TypeVar, cast
 from urllib.parse import urlparse
 
 from app.core import shutdown as shutdown_state
@@ -61,6 +61,7 @@ from app.core.metrics.prometheus import (
     bridge_reattach_total,
     bridge_unanchored_handoff_recovery_total,
     http_bridge_connections_total,
+    http_bridge_parked_recovery_total,
     http_bridge_prewarm_total,
     http_bridge_stuck_retire_total,
 )
@@ -209,6 +210,17 @@ from app.modules.proxy.ring_membership import (
 from app.modules.proxy.selection_errors import selection_failure_response
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+
+def _record_http_bridge_parked_recovery(*, outcome: str, reason: str) -> None:
+    """Increment the parked-recovery metric for the classified admission outcome."""
+    if PROMETHEUS_AVAILABLE and http_bridge_parked_recovery_total is not None:
+        http_bridge_parked_recovery_total.labels(
+            outcome=outcome,
+            reason=str(reason)[:80] or "unknown",
+        ).inc()
+
+
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _TaskResultT = TypeVar("_TaskResultT")
 _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS = 60.0
@@ -791,6 +803,11 @@ def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     )
     payload["error"]["param"] = "previous_response_id"
     return payload
+
+
+def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Keep the removed ambiguous-recovery hook fail-closed for old callers."""
+    return False
 
 
 def _proxy_admission_wait_timeout_seconds() -> float:
@@ -2698,8 +2715,16 @@ def _record_bridge_drain_recovery_allowed() -> None:
 
 
 def _is_missing_durable_bridge_table_error(exc: Exception) -> bool:
+    """Recognize missing durable bridge tables without treating unrelated database errors as absence."""
     message = str(exc).lower()
-    if "http_bridge_sessions" not in message and "http_bridge_session_aliases" not in message:
+    if not any(
+        table_name in message
+        for table_name in (
+            "http_bridge_sessions",
+            "http_bridge_session_aliases",
+            "http_bridge_recovery_attempts",
+        )
+    ):
         return False
     return "no such table" in message or "does not exist" in message or "undefinedtable" in message
 
@@ -2867,6 +2892,29 @@ def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_s
     return generation
 
 
+def _remove_http_bridge_previous_response_alias_locked(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    response_id: str,
+    registration_generation: int,
+) -> None:
+    """Remove a locally published response alias if this registration still owns it."""
+
+    if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
+        return
+    session.previous_response_alias_registration_generations.pop(response_id, None)
+    session.previous_response_ids.discard(response_id)
+    alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
+    current_session = service._http_bridge_sessions.get(session.key)
+    current_generation_owns_alias = (
+        current_session is not None
+        and current_session is not session
+        and response_id in current_session.previous_response_ids
+    )
+    if not current_generation_owns_alias and service._http_bridge_previous_response_index.get(alias_key) == session.key:
+        service._http_bridge_previous_response_index.pop(alias_key, None)
+
+
 async def _persist_http_bridge_turn_state_alias(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,
@@ -2946,6 +2994,8 @@ async def _persist_http_bridge_previous_response_alias(
     session: _HTTPBridgeSession,
     *,
     response_id: str,
+    latest_response_id: str | None = None,
+    retained_replay: bool = False,
     registration_generation: int,
     input_item_count: int | None,
     input_full_fingerprint: str | None,
@@ -2954,6 +3004,7 @@ async def _persist_http_bridge_previous_response_alias(
     lease_ttl_seconds: float,
     local_alias_was_published: bool = True,
 ) -> DurableBridgeAliasRegistration | None:
+    """Persist an owned response alias and propagate whether continuity registration succeeded."""
     owner_epoch = session.durable_owner_epoch
     try:
         registered = await service._durable_bridge.register_previous_response_id(
@@ -2962,6 +3013,8 @@ async def _persist_http_bridge_previous_response_alias(
             instance_id=instance_id,
             owner_epoch=owner_epoch,
             response_id=response_id,
+            latest_response_id=latest_response_id or response_id,
+            retained_replay=retained_replay,
             lease_ttl_seconds=lease_ttl_seconds,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
@@ -2973,6 +3026,17 @@ async def _persist_http_bridge_previous_response_alias(
             async with service._http_bridge_lock:
                 if session.previous_response_alias_registration_generations.get(response_id) == registration_generation:
                     session.previous_response_alias_registration_generations.pop(response_id, None)
+        elif retained_replay:
+            # A retained client-visible ID is only safe when its replacement
+            # target survives in the durable alias table. Do not leave a
+            # local-only alias after an ambiguous write failure.
+            async with service._http_bridge_lock:
+                _remove_http_bridge_previous_response_alias_locked(
+                    service,
+                    session,
+                    response_id,
+                    registration_generation,
+                )
         return None
     if registered == DurableBridgeAliasRegistration.REGISTERED:
         return registered
@@ -2981,21 +3045,15 @@ async def _persist_http_bridge_previous_response_alias(
     async with service._http_bridge_lock:
         if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
             return
-        session.previous_response_alias_registration_generations.pop(response_id, None)
         if local_alias_was_published:
-            session.previous_response_ids.discard(response_id)
-            alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
-            current_session = service._http_bridge_sessions.get(session.key)
-            current_generation_owns_alias = (
-                current_session is not None
-                and current_session is not session
-                and response_id in current_session.previous_response_ids
+            _remove_http_bridge_previous_response_alias_locked(
+                service,
+                session,
+                response_id,
+                registration_generation,
             )
-            if (
-                not current_generation_owns_alias
-                and service._http_bridge_previous_response_index.get(alias_key) == session.key
-            ):
-                service._http_bridge_previous_response_index.pop(alias_key, None)
+        else:
+            session.previous_response_alias_registration_generations.pop(response_id, None)
         if registered == DurableBridgeAliasRegistration.OWNER_FENCED:
             fenced_out_session = _evict_fenced_out_http_bridge_session_locked(
                 service,
@@ -3463,17 +3521,36 @@ def _http_bridge_reconnect_connect_failure(
     raise exc
 
 
+def _http_bridge_previous_response_rejection_fields(
+    error: Mapping[str, Any],
+) -> tuple[str, str | None, str | None] | None:
+    """Normalize error fields while preserving blank parameters and rejecting malformed parameter types."""
+    code_value = error.get("code")
+    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
+    type_value = error.get("type")
+    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    code = _normalize_error_code(raw_code, error_type)
+    param_value = error.get("param")
+    if "param" in error and param_value is not None and not isinstance(param_value, str):
+        return None
+    param = param_value.strip() if isinstance(param_value, str) else None
+    message_value = error.get("message")
+    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
+    return code, param, message
+
+
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:
+    """Classify local recovery eligibility using explicit anchor errors and configured ambiguous-retry policy."""
     payload = exc.payload
     if not isinstance(payload, dict):
         return False
     error = payload.get("error")
     if not isinstance(error, dict):
         return False
-    code_value = error.get("code")
-    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
-    type_value = error.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    fields = _http_bridge_previous_response_rejection_fields(error)
+    if fields is None:
+        return False
+    code, _, message = fields
     param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
     if param_state.malformed:
         return False
@@ -3481,7 +3558,6 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     # carry the classifiable code only in ``type`` (or omit both code and
     # param on the terse previous-response rejection), and a raw read would
     # misclassify them into the ambiguous transport class below (issue #1830).
-    code = _normalize_error_code(raw_code, error_type)
     if code in {
         "bridge_owner_unreachable",
         "bridge_previous_response_not_found",
@@ -3500,24 +3576,22 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
 
 
 def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError) -> bool:
+    """Recognize explicit stale-anchor rejection without accepting malformed error parameters."""
     payload = exc.payload
     if not isinstance(payload, dict):
         return False
     error = payload.get("error")
     if not isinstance(error, dict):
         return False
-    code_value = error.get("code")
-    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
-    type_value = error.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    fields = _http_bridge_previous_response_rejection_fields(error)
+    if fields is None:
+        return False
+    code, _, message = fields
     param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
     if param_state.malformed:
         return False
-    code = _normalize_error_code(raw_code, error_type)
     if code == "bridge_previous_response_not_found":
         return True
-    message_value = error.get("message")
-    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
     return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
 
 
@@ -3825,6 +3899,7 @@ def _log_http_bridge_event(
     response_events_seen: int | None = None,
     transport_classification: str | None = None,
 ) -> None:
+    """Emit structured bridge event diagnostics with request, session, and recovery context."""
     if event in {"create", "reuse", "reconnect", "close", "evict_idle"} and http_bridge_connections_total is not None:
         http_bridge_connections_total.labels(event=event).inc()
     level = logging.INFO
@@ -3846,6 +3921,13 @@ def _log_http_bridge_event(
         "reallocation_orphan",
         "context_overflow_rollover",
         "reader_failure",
+        "parked_recovery_ineligible",
+        # The production Compose entrypoint launches Uvicorn directly with
+        # its default WARNING threshold. Keep bounded recovery diagnostics
+        # visible there without raising global application log verbosity.
+        "parked_recovery_lookup",
+        "submit_retry_circuit_parked",
+        "parked_recovery_admitted",
     }:
         level = logging.WARNING
     logger.log(

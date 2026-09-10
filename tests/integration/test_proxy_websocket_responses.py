@@ -9850,7 +9850,13 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
     )
 
 
-def test_backend_responses_websocket_transparently_retries_precreated_usage_limit_reached(app_instance, monkeypatch):
+@pytest.mark.parametrize("identified_failure", [False, True])
+def test_backend_responses_websocket_retries_only_identity_free_usage_limit_failures(
+    app_instance,
+    monkeypatch,
+    identified_failure,
+):
+    """Backend websocket retry requires a usage-limit error with no committed response identity."""
     first_upstream = _FakeUpstreamWebSocket(
         [
             _FakeUpstreamMessage(
@@ -9859,7 +9865,7 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
                     {
                         "type": "response.failed",
                         "response": {
-                            "id": "resp_ws_quota_fail",
+                            **({"id": "resp_ws_quota_fail"} if identified_failure else {}),
                             "status": "failed",
                             "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
                             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
@@ -9971,17 +9977,25 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
             websocket.send_text(json.dumps(request_payload))
             first_event = json.loads(websocket.receive_text())
-            assert first_event["type"] == "response.created"
-            second_event = json.loads(websocket.receive_text())
+            if identified_failure:
+                assert first_event["type"] == "response.failed"
+                assert first_event["response"]["id"] == "resp_ws_quota_fail"
+            else:
+                assert first_event["type"] == "response.created"
+                second_event = json.loads(websocket.receive_text())
 
-    assert second_event["type"] == "response.completed"
-    assert connect_models == ["gpt-5.1", "gpt-5.1"]
     assert handled_error_codes == ["usage_limit_reached"]
     assert len(first_upstream.sent_text) == 1
-    assert len(second_upstream.sent_text) == 1
-    assert _without_installation_metadata(json.loads(first_upstream.sent_text[0])) == _without_installation_metadata(
-        json.loads(second_upstream.sent_text[0])
-    )
+    if identified_failure:
+        assert connect_models == ["gpt-5.1"]
+        assert second_upstream.sent_text == []
+    else:
+        assert second_event["type"] == "response.completed"
+        assert connect_models == ["gpt-5.1", "gpt-5.1"]
+        assert len(second_upstream.sent_text) == 1
+        assert _without_installation_metadata(
+            json.loads(first_upstream.sent_text[0])
+        ) == _without_installation_metadata(json.loads(second_upstream.sent_text[0]))
 
 
 def test_backend_responses_websocket_transparently_retries_precreated_error_usage_limit_reached(
@@ -10391,6 +10405,7 @@ def test_backend_responses_websocket_transparent_replay_emits_no_accounts_when_r
     app_instance,
     monkeypatch,
 ):
+    """Failed transparent replay reconnect reports unavailable accounts without leaking stale turn state."""
     first_upstream = _FakeUpstreamWebSocket(
         [
             _FakeUpstreamMessage(
@@ -10399,7 +10414,6 @@ def test_backend_responses_websocket_transparent_replay_emits_no_accounts_when_r
                     {
                         "type": "response.failed",
                         "response": {
-                            "id": "resp_ws_quota_fail_no_accounts",
                             "status": "failed",
                             "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
                             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
@@ -13628,6 +13642,84 @@ def test_backend_responses_websocket_retries_accepted_output_free_capacity_error
     assert len(first_upstream.sent_text) == 1
     assert len(recovered_upstream.sent_text) == 1
     assert json.loads(recovered_upstream.sent_text[0])["input"] == json.loads(first_upstream.sent_text[0])["input"]
+
+
+@pytest.mark.parametrize("replay_kind", ["capacity", "fresh_anchor"])
+def test_backend_responses_websocket_replay_clears_old_output_validation(app_instance, monkeypatch, replay_kind):
+    """A replacement socket must not inherit the prior attempt's validation flag."""
+    error_code = "server_is_overloaded" if replay_kind == "capacity" else "previous_response_not_found"
+    failed_batch = [
+        _ws_event(
+            {
+                "type": "error",
+                "error": {
+                    "type": "server_error" if replay_kind == "capacity" else "invalid_request_error",
+                    "code": error_code,
+                    "message": "Our servers are overloaded."
+                    if replay_kind == "capacity"
+                    else "Previous response not found.",
+                },
+            }
+        )
+    ]
+    if replay_kind == "capacity":
+        failed_batch = [*_accepted_output_free_prelude("old-attempt"), *failed_batch]
+    batches = [failed_batch]
+    if replay_kind == "fresh_anchor":
+        batches.insert(
+            0,
+            [
+                _ws_event({"type": "response.created", "response": {"id": "old-anchor", "status": "in_progress"}}),
+                _ws_event(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "old-anchor", "status": "completed", "output": []},
+                    }
+                ),
+            ],
+        )
+    first = _SequencedUpstreamWebSocket([], deferred_message_batches=batches)
+    recovered = _recovered_upstream("clean-replay")
+    failover = _TwoAccountWebSocketFailover(first, recovered)
+    if replay_kind == "fresh_anchor":
+        failover.upstreams_by_account[failover.FIRST_ACCOUNT_ID].append(recovered)
+    failover.install(monkeypatch)
+    real_process = proxy_module.ProxyService._process_upstream_websocket_text
+    contaminated = []
+    replay_decisions = []
+
+    async def process_with_previous_attempt_state(self, text, **kwargs):
+        # Seed stale generation state at the real replay decision boundary;
+        # admission, reconnect, send, validation and downstream delivery stay real.
+        """Seed invalid old capture at the real replay boundary and record whether replacement staging clears it."""
+        if json.loads(text).get("type") == "error" and not contaminated:
+            state = kwargs["pending_requests"][0]
+            state.response_output_items_event_invalid = True
+            contaminated.append(state)
+        result = await real_process(self, text, **kwargs)
+        if json.loads(text).get("type") == "error":
+            replay_decisions.append(
+                (kwargs["upstream_control"].reconnect_requested, contaminated[0].response_output_items_event_invalid)
+            )
+        return result
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService, "_process_upstream_websocket_text", process_with_previous_attempt_state
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", AsyncMock())
+    events, disconnect = (
+        failover.run_anchored_follow_up(app_instance) if replay_kind == "fresh_anchor" else failover.run(app_instance)
+    )
+    assert len(contaminated) == 1
+    assert replay_decisions == [(True, False)]
+    _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert events[-1]["response"]["output"][0]["content"][0]["text"] == "OK"
+    assert len(recovered.sent_text) == 1
+    assert "previous_response_id" not in json.loads(recovered.sent_text[0])
+    if replay_kind == "fresh_anchor":
+        assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID, failover.FIRST_ACCOUNT_ID]
+    else:
+        assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID, failover.SECOND_ACCOUNT_ID]
 
 
 def test_backend_responses_websocket_retries_accepted_output_free_abrupt_close_on_another_account(

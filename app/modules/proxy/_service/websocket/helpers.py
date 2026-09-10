@@ -295,6 +295,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,
     _DeferredKeyedStreamHealthPenalty,
     _event_type_from_payload,
+    _reset_websocket_output_item_tracking,
     _websocket_request_can_replay_before_visible_output,
     _WebSocketContinuityAnchor,
     _WebSocketContinuityState,
@@ -454,6 +455,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     # An identity captured by an earlier replay (or staged by the terminal
     # capacity path before ``response_id`` was cleared) outlives this call, so
     # a bounded extra replay keeps rewriting to the id the client is reading.
+    """Prepare opted-in visible-output replay while resetting capture for the replacement attempt."""
     downstream_response_id = request_state.replay_downstream_response_id
     if (
         downstream_response_id is None
@@ -487,7 +489,9 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    _reset_websocket_output_item_tracking(request_state)
     request_state.replay_downstream_response_id = downstream_response_id
+    request_state.replay_downstream_sequence_offset = None
     request_state.suppress_next_created_downstream = downstream_response_id is not None
     request_state.suppress_next_in_progress_downstream = suppress_in_progress
     _clear_websocket_request_error_overrides(request_state)
@@ -597,6 +601,7 @@ def _install_fresh_replay_body(
     request_state.fresh_upstream_request_is_retry_safe = False
     request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
     _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    _reset_websocket_output_item_tracking(request_state)
     return fresh_request_text
 
 
@@ -976,7 +981,9 @@ def _websocket_precreated_retry_error_code(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     has_other_pending_requests: bool,
+    allow_unsafe_previous_response_recovery: bool = False,
 ) -> str | None:
+    """Classify identity-free precreated errors that can safely select transparent retry."""
     if request_state is None:
         return None
     if request_state.response_id is not None and not request_state.awaiting_response_created:
@@ -1012,6 +1019,14 @@ def _websocket_precreated_retry_error_code(
         return None
     if event_type not in {"error", "response.failed"}:
         return None
+
+    if allow_unsafe_previous_response_recovery:
+        if request_state.previous_response_id is None:
+            return None
+        # The caller has already classified the provider's terse invalid-anchor
+        # shape. Reuse this helper's pre-created admission checks, but do not
+        # require the strict error classifier to recognize that shape.
+        return "stream_incomplete"
 
     error_code = _normalize_error_code(
         _websocket_event_error_code(event_type, payload),
@@ -1168,6 +1183,7 @@ def _prepare_websocket_request_state_for_auth_replay(
     *,
     current_account_id: str | None = None,
 ) -> str | None:
+    """Reset eligible request state for authentication retry without retaining old output capture."""
     if request_state.verified_stale_anchor_replay:
         return None
     if request_state.last_downstream_sequence_number is not None:
@@ -1196,6 +1212,7 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    _reset_websocket_output_item_tracking(request_state)
     _clear_websocket_request_error_overrides(request_state)
     return request_text
 
@@ -1416,7 +1433,9 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     event_type: str | None,
     upstream_control: _WebSocketUpstreamControl,
     original_text: str,
+    unsafe_new_response_recovery: bool = False,
 ) -> tuple[OpenAIEvent | None, dict[str, JsonValue] | None, str | None, str]:
+    """Rewrite eligible stale-anchor errors into the documented websocket recovery envelope."""
     error_code = _normalize_error_code(
         _websocket_event_error_code(event_type, payload),
         _websocket_event_error_type(event_type, payload),
@@ -1428,6 +1447,8 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
         param=error_param,
         message=error_message,
     )
+    if not should_rewrite and unsafe_new_response_recovery:
+        should_rewrite = True
     reason = "previous_response_not_found"
     if not should_rewrite and _facade()._is_previous_response_not_found_public_shape(
         code=error_code,
@@ -1931,11 +1952,16 @@ def _match_websocket_request_state_for_anonymous_event(
 
 def _match_websocket_request_state_for_precreated_terminal_event(
     pending_requests: deque[_WebSocketRequestState],
+    *,
+    require_replay_downstream_response_id: bool = False,
 ) -> _WebSocketRequestState | None:
+    """Match a precreated terminal only to an eligible pending request without committed response identity."""
     unresolved_requests = [
         request_state
         for request_state in pending_requests
-        if request_state.response_id is None and request_state.awaiting_response_created
+        if request_state.response_id is None
+        and request_state.awaiting_response_created
+        and (not require_replay_downstream_response_id or request_state.replay_downstream_response_id is not None)
     ]
     if len(unresolved_requests) == 1:
         return unresolved_requests[0]

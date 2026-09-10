@@ -30,14 +30,65 @@ def _service(
 
 
 def test_remaining_budget_uses_injected_virtual_clock() -> None:
+    """Remaining request budget follows the injected clock rather than wall-clock time."""
     clock = VirtualClock(monotonic_value=10.0)
     service = _service(clock)
+    assert service._http_bridge_operation_event_batcher._scheduler is service._scheduler
 
     assert service._remaining_budget_seconds(15.0) == 5.0
 
     clock.advance(2.0)
 
     assert service._remaining_budget_seconds(15.0) == 3.0
+
+
+@pytest.mark.asyncio
+async def test_capacity_recovery_wait_preserves_zero_start_across_attempts() -> None:
+    """A virtual start timestamp of zero remains valid across capacity-recovery attempts."""
+    from app.modules.proxy._service.support import (
+        _account_capacity_wait_payload,
+        _sleep_for_account_selection_recovery,
+    )
+
+    clock = VirtualClock()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="capacity-zero-clock",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    async def sleep(seconds: float) -> None:
+        """Advance the controlled clock by the requested capacity-recovery wait duration."""
+        clock.advance(seconds)
+
+    for elapsed in (3, 6):
+        assert await _sleep_for_account_selection_recovery(
+            proxy_service.AccountSelection(
+                account=None,
+                error_message="Account capacity temporarily unavailable. Try again in 120s",
+                error_code="no_accounts",
+            ),
+            request_id=request_state.request_id,
+            kind="websocket",
+            request_stage="initial",
+            model=request_state.model,
+            max_sleep_seconds=3.0,
+            request_state=request_state,
+            scheduler=cast(Any, SimpleNamespace(sleep=sleep)),
+            clock=clock,
+        )
+        assert request_state.account_capacity_wait_started_at == 0.0
+        payload = _account_capacity_wait_payload(
+            request_state,
+            request_id=request_state.request_id,
+            reason=None,
+            retry_after_seconds=None,
+            now=clock.monotonic(),
+        )
+        assert payload["waited_seconds"] == elapsed
 
 
 def test_remaining_budget_keeps_real_clock_behavior(monkeypatch: pytest.MonkeyPatch) -> None:

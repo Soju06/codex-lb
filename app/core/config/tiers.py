@@ -34,6 +34,19 @@ TIERS: Final[tuple[Tier, ...]] = ("T0", "T1", "T2", "T3", "T4")
 # Declaration order follows ``Settings``; the tier is the policy answer to
 # "may this value differ between two replicas / must it exist before the DB?".
 SETTING_TIERS: Final[dict[str, Tier]] = {
+    # Safety-sensitive recovery controls are env-only until their dashboard
+    # homes are designed; T4 keeps them out of the replica-independent T3
+    # surface while retaining explicit operator opt-in.
+    "http_responses_session_bridge_complete_transcript_recovery_enabled": "T4",
+    "http_responses_session_bridge_unsafe_partial_replay_enabled": "T4",
+    "http_responses_session_bridge_complete_transcript_max_turns": "T4",
+    "http_responses_session_bridge_complete_transcript_max_input_items": "T4",
+    "http_responses_session_bridge_complete_transcript_max_bytes": "T4",
+    "http_responses_session_bridge_parked_recovery_enabled": "T4",
+    "http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds": "T4",
+    "http_responses_session_bridge_parked_recovery_recent_unknown_limit": "T4",
+    "http_responses_session_bridge_pre_response_keepalive_max_count": "T4",
+    "http_responses_session_bridge_unsafe_new_response_recovery_enabled": "T4",
     "data_dir": "T0",
     "database_url": "T0",
     "database_pool_size": "T1",

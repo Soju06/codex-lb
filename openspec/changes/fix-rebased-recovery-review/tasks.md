@@ -1,0 +1,22 @@
+- [x] Validate root recovery before UNKNOWN admission and dispatch.
+- [x] Preserve failure envelopes after partial output.
+- [x] Test both original regressions and recheck CI/review gates on `181adfec`.
+- [x] Preserve original root operation identity across sanitization and test accepted/rejected claims.
+- [x] Validate durable account ownership before arming non-neutral root recovery, with ownerless/owner-bound tests.
+- [x] Preserve legacy sanitized-root operation identity through exact and root-fallback lookup, with rejected-claim coverage.
+- [x] Preserve one-shot replay authorization across reconnect-only recovery and verify actual replay still consumes it.
+- [x] Cover both authorization types through the HTTP route, real closed-session reconnect, and upstream send; verify both regressions fail with the old consumption behavior.
+- [x] Reject terminal-only opaque output and suppress post-terminal native vendor events, with public and native route regressions.
+- [x] Select timestamp-tied transcript rows deterministically, with real-database insertion-order and newer-row precedence tests.
+- [x] Reset output tracking on admitted capacity and fresh-body replays, with rejection and WebSocket route regressions.
+- [x] Export both recovery metrics consistently and verify their public export contract.
+- [x] Preserve normalizable text-extension completion across streaming and collected paths, including terminal echoes and strict opaque-output rejection.
+- [x] Fence failed-batch cleanup to its owner and generation, with row/chunk rejection and exception race regressions.
+- [x] Bound abandoned contextless fences and replace wall-clock cleanup tests with the injected virtual scheduler.
+- [x] Verify late output cannot recapture completed bridge requests, and missing recovery journals do not bypass unavailable operation fences.
+- [x] Enforce incremental transcript byte/item bounds, release over-limit capture, and reset accounting on replay.
+- [x] Detach optional snapshots after delivery with bounded backlog/deadline, frozen fences, cancellation, and shutdown coverage.
+- [x] Clear superseded batcher contexts when fencing, and pin WebSocket replay-account expectations.
+- [x] Drain detached snapshots before bridge owner-lease release, with a real lifespan ordering regression and production cleanup reserve.
+- [x] Preserve circuit-generation claims across reconnect-only handling and bound zero-cooldown parks, with red/green retry and HTTP route regressions.
+- [x] Scope latest-parent body comparison to the latest-parent probe result.

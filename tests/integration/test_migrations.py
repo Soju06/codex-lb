@@ -1861,6 +1861,222 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("empty_registry", [False, True])
+async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path, empty_registry):
+    """Rebind-claim migration round-trips with either populated or empty ownership metadata."""
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'rebind-claim.sqlite'}"
+    parent = "20260904_000000_repair_http_bridge_ownership_registry"
+    revision = "20260906_000000_add_http_bridge_rebind_claim"
+    # Keep the independent upstream schema branches present while round-tripping
+    # this branch, so schema-drift validation compares the complete ORM schema.
+    await to_thread.run_sync(
+        lambda: run_upgrade(db_url, "20260910_000000_request_logs_missing_cost_index", bootstrap_legacy=False)
+    )
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent, bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+    if empty_registry:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM http_bridge_migration_object_ownership"))
+
+    async def columns():
+        """Inspect the operation table's live columns within the disposable migration test database."""
+        async with engine.connect() as conn:
+            return await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_operations")
+                }
+            )
+
+    try:
+        before = await columns()
+        assert "rebind_claim_id" not in before
+        async with engine.connect() as conn:
+            ownership_before = sorted(
+                tuple(row) for row in (await conn.execute(text("SELECT * FROM http_bridge_migration_object_ownership")))
+            )
+        assert bool(ownership_before) is not empty_registry
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        assert await columns() == before | {"rebind_claim_id"}
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
+        assert await columns() == before
+        async with engine.connect() as conn:
+            assert await conn.run_sync(
+                lambda sync_conn: sa_inspect(sync_conn).has_table("http_bridge_migration_object_ownership")
+            )
+            ownership_after = sorted(
+                tuple(row) for row in (await conn.execute(text("SELECT * FROM http_bridge_migration_object_ownership")))
+            )
+            assert ownership_after == ownership_before
+            assert (
+                await conn.execute(
+                    text("SELECT count(*) FROM http_bridge_migration_object_ownership WHERE revision = :revision"),
+                    {"revision": revision},
+                )
+            ).scalar_one() == 0
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        assert await columns() == before | {"rebind_claim_id"}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "merged_revision,parents",
+    [
+        (
+            "20260908_010000_merge_http_bridge_and_subscription_overflow",
+            (
+                "20260906_000000_add_http_bridge_rebind_claim",
+                "20260908_000000_add_subscription_overflow",
+            ),
+        ),
+        (
+            "20260908_020000_merge_http_bridge_and_transport_default",
+            (
+                "20260908_010000_merge_http_bridge_and_subscription_overflow",
+                "20260908_000000_replace_upstream_stream_transport_default_sentinel",
+            ),
+        ),
+        (
+            "20260909_000000_merge_recovery_and_upstream_heads",
+            (
+                "20260908_020000_merge_http_bridge_and_transport_default",
+                "20260908_020000_merge_overflow_transport_heads",
+            ),
+        ),
+        (
+            "20260909_050000_merge_recovery_and_dashboard_settings",
+            (
+                "20260909_000000_merge_recovery_and_upstream_heads",
+                "20260909_040000_dashboard_timeout_settings",
+            ),
+        ),
+        (
+            "20260909_060000_merge_recovery_and_routing_settings",
+            (
+                "20260909_050000_merge_recovery_and_dashboard_settings",
+                "20260909_050000_dashboard_routing_overload_settings",
+            ),
+        ),
+        (
+            "20260909_070000_merge_recovery_and_report_rollup",
+            (
+                "20260909_060000_merge_recovery_and_routing_settings",
+                "20260909_060000_add_report_rollup",
+            ),
+        ),
+        (
+            "20260909_080000_merge_recovery_and_automation_budget",
+            (
+                "20260909_070000_merge_recovery_and_report_rollup",
+                "20260909_070000_automation_run_claim_budget",
+            ),
+        ),
+        (
+            "20260910_000000_merge_recovery_and_codex_prewarm",
+            (
+                "20260909_080000_merge_recovery_and_automation_budget",
+                "20260909_100000_dashboard_codex_prewarm",
+            ),
+        ),
+        (
+            "20260910_010000_merge_recovery_and_request_budgets",
+            (
+                "20260910_000000_merge_recovery_and_codex_prewarm",
+                "20260909_080000_dashboard_stream_bridge_budgets",
+            ),
+        ),
+        (
+            "20260910_020000_merge_recovery_and_round_three_settings",
+            (
+                "20260910_010000_merge_recovery_and_request_budgets",
+                "20260909_120000_dashboard_conversation_archive",
+            ),
+        ),
+        (
+            "20260910_030000_merge_recovery_and_request_log_indexes",
+            (
+                "20260910_020000_merge_recovery_and_round_three_settings",
+                "20260910_010000_dashboard_spool_retention",
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize("parent_index", [0, 1])
+async def test_http_bridge_overflow_merge_preserves_rows_from_each_branch(
+    tmp_path, merged_revision, parents, parent_index
+):
+    """Each merge accepts either populated parent and retains rows through metadata downgrades."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'branch-merge.sqlite'}"
+    config = _build_alembic_config(db_url)
+    branch_revision = parents[parent_index]
+    latest_head = "20260910_030000_merge_recovery_and_request_log_indexes"
+    assert ScriptDirectory.from_config(config).get_heads() == [latest_head]
+    await to_thread.run_sync(lambda: run_upgrade(db_url, branch_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+    try:
+        async with async_sessionmaker(engine)() as session:
+            session.add(_make_account("merge-survivor", "merge@example.com", "plus"))
+            await session.commit()
+
+        async def account_row():
+            """Read the sentinel account row to verify populated branch upgrades preserve user data."""
+            async with engine.connect() as conn:
+                return tuple((await conn.execute(text("SELECT * FROM accounts WHERE id = 'merge-survivor'"))).one())
+
+        before = await account_row()
+        # Bring both parent schemas into place, then prove the joining
+        # revision itself changes only version stamps, not schema or data.
+        for parent in parents:
+            await to_thread.run_sync(lambda: command.upgrade(config, parent))
+
+        async def schema_snapshot():
+            """Capture table and index structure for comparison across metadata-only merge downgrades."""
+            async with engine.connect() as conn:
+                return tuple(
+                    (await conn.execute(text("SELECT type, name, sql FROM sqlite_master ORDER BY type, name"))).all()
+                )
+
+        parent_schema = await schema_snapshot()
+        await to_thread.run_sync(lambda: run_upgrade(db_url, merged_revision, bootstrap_legacy=False))
+        assert inspect_migration_state(db_url).current_revision == merged_revision
+        assert await account_row() == before
+        assert await schema_snapshot() == parent_schema
+        # A relative -1 is ambiguous at a merge; name the parent explicitly.
+        await to_thread.run_sync(lambda: command.downgrade(config, branch_revision))
+        expected_stamps = set(parents)
+        async with engine.connect() as conn:
+            assert (
+                set((await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars()) == expected_stamps
+            )
+        assert await account_row() == before
+        assert await schema_snapshot() == parent_schema
+        await to_thread.run_sync(lambda: run_upgrade(db_url, latest_head, bootstrap_legacy=False))
+        assert inspect_migration_state(db_url).current_revision == latest_head
+        assert await account_row() == before
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+        async with engine.connect() as conn:
+            assert await conn.run_sync(lambda sync: sa_inspect(sync).has_table("model_source_pins"))
+            assert "rebind_claim_id" in await conn.run_sync(
+                lambda sync: {column["name"] for column in sa_inspect(sync).get_columns("http_bridge_operations")}
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_quota_warmup_claim_expiry_migration_upgrade_and_downgrade(tmp_path):
     from datetime import datetime, timezone
 

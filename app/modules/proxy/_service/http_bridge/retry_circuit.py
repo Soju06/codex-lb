@@ -135,6 +135,15 @@ def _http_bridge_retry_circuit_suppression_message(block_reason: str, retry_afte
     )
 
 
+class HTTPBridgeParkedRecovery(Exception):
+    """Signal that a proven recovery request should wait through cooldown."""
+
+    def __init__(self, retry_after_seconds: float) -> None:
+        """Store a nonnegative retry-after delay on the circuit-open exception."""
+        self.retry_after_seconds = max(0.0, float(retry_after_seconds))
+        super().__init__(f"HTTP bridge recovery parked for {self.retry_after_seconds:.1f}s")
+
+
 @dataclass(slots=True)
 class _HTTPBridgeRetryCircuitState:
     consecutive_failures: int = 0

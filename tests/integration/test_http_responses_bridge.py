@@ -390,6 +390,7 @@ class _InterruptedCustomToolUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
         self._emit_added = emit_added
 
     async def send_text(self, text: str) -> None:
+        """Record outbound websocket text and emit the controlled response lifecycle used by bridge route tests."""
         self.sent_text.append(text)
         response_id = f"resp_bridge_custom_{len(self.sent_text)}"
         await self._messages.put(
@@ -459,6 +460,17 @@ class _InterruptedCustomToolUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
                             "object": "response",
                             "status": "completed",
                             "output": [
+                                {
+                                    "id": "ctc_shell",
+                                    "type": "custom_tool_call",
+                                    "status": "completed",
+                                    "call_id": "call_custom_shell",
+                                    "name": "shell",
+                                    "input": "pwd",
+                                }
+                            ]
+                            if len(self.sent_text) == 1
+                            else [
                                 {
                                     "type": "message",
                                     "role": "assistant",
@@ -6216,6 +6228,56 @@ async def test_backend_responses_http_bridge_lite_request_omits_synthesized_tool
 
 
 @pytest.mark.asyncio
+async def test_backend_bridge_zero_cooldown_yields_before_readmission(async_client, app_instance, monkeypatch):
+    """Zero cooldown still yields control so repeated admission attempts cannot monopolize the event loop."""
+    from app.core.clock import RealScheduler
+    from app.modules.proxy._service.http_bridge.retry_circuit import HTTPBridgeParkedRecovery
+
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(async_client, "acc_zero_park", "zero-park@example.com")
+    account = await _get_account(account_id)
+    upstream = _FakeBridgeUpstreamWebSocket()
+    service = get_proxy_service_for_app(app_instance)
+    sleeps = []
+    admissions = []
+
+    class RecordingScheduler(RealScheduler):
+        async def sleep[T](self, delay: float, result: T | None = None) -> T | None:
+            """Record scheduler yields while preserving the real sleep contract and optional result."""
+            sleeps.append(delay)
+            return await super().sleep(delay, result)
+
+    monkeypatch.setattr(service, "_scheduler", RecordingScheduler())
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", AsyncMock(return_value=upstream))
+    submit = service._submit_http_bridge_request
+
+    async def park_twice(*args, **kwargs):
+        """Force two zero-cooldown admissions before allowing the real submit path to run."""
+        admissions.append(len(sleeps))
+        if len(admissions) <= 2:
+            raise HTTPBridgeParkedRecovery(0.0)
+        return await submit(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", park_twice)
+    response = await async_client.post(
+        "/backend-api/codex/responses", json={"model": "gpt-5.1", "input": "hello", "stream": True}
+    )
+    assert response.status_code == 200
+    assert "response.completed" in response.text
+    assert admissions[0] == 0
+    assert admissions[1] > admissions[0]
+    assert admissions[2] > admissions[1]
+    assert all(seconds > 0 for seconds in sleeps)
+    assert len(upstream.sent_text) == 1
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_preserves_previous_response_id(
     async_client,
     monkeypatch,
@@ -7987,6 +8049,92 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
         assert bridge_session.downstream_turn_state is None
         assert bridge_session.downstream_turn_state_aliases == set()
         assert service._http_bridge_turn_state_index == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authorization",
+    ["complete_transcript_recovery_retry_authorized", "unsafe_partial_replay_retry_authorized"],
+)
+async def test_v1_responses_authorized_replay_survives_closed_session_submit(async_client, monkeypatch, authorization):
+    """Exercise the route, closed-session submit, real reconnect, and wire send.
+
+    Seed the already-authorized recovery state at the submit boundary; neither
+    reconnect nor the send helper is mocked. The ordinary retry budget is
+    exhausted, so losing the one-shot authorization cannot hide behind it.
+    """
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
+    account_id = await _import_account(async_client, "acc_replay_auth", "replay-auth@example.com")
+    account = await _get_account(account_id)
+    observed_states = []
+
+    class AuthorizedUpstream(_FakeBridgeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            """Assert replay authorization survives reconnect-only recovery before forwarding the actual send."""
+            assert len(observed_states) == 1
+            state = observed_states[0]
+            # This assertion is at the upstream transport boundary, after the
+            # route's real submit path has completed reconnect-only recovery.
+            assert getattr(state, authorization) is True
+            assert state.replay_count == 1
+            await super().send_text(text)
+
+    initial = _FakeBridgeUpstreamWebSocket("resp_unused")
+    replacement = AuthorizedUpstream("resp_authorized_replay")
+    upstreams = iter([initial, replacement])
+    connected = []
+
+    async def select_account(self, *args, **kwargs):
+        """Select the controlled account for the reconnect-only replay authorization regression."""
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def ensure_fresh(self, target, **kwargs):
+        """Return the controlled account without invoking external credential refresh."""
+        return target
+
+    async def connect(*args, **kwargs):
+        """Supply the original then replacement websocket and record each connection."""
+        upstream = next(upstreams)
+        connected.append(upstream)
+        return upstream
+
+    original_submit = proxy_module.ProxyService._submit_http_bridge_request
+
+    async def submit_authorized(self, session, *, request_state, text_data, **kwargs):
+        """Seed one replay authorization before exercising the real reconnect-only submission path."""
+        setattr(request_state, authorization, True)
+        request_state.replay_count = 1
+        request_state.fresh_upstream_request_text = text_data
+        request_state.fresh_upstream_request_is_retry_safe = True
+        observed_states.append(request_state)
+        session.closed = True
+        await original_submit(self, session, request_state=request_state, text_data=text_data, **kwargs)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    monkeypatch.setattr(proxy_module.ProxyService, "_submit_http_bridge_request", submit_authorized)
+
+    response = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "input": "hello",
+                "prompt_cache_key": f"authorized-reconnect-{account_id}-{authorization}",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "completed"
+    assert response.json()["id"] == "resp_authorized_replay_1"
+    assert connected == [initial, replacement]
+    assert initial.closed is True
+    assert initial.sent_text == []
+    assert len(replacement.sent_text) == 1
+    assert json.loads(replacement.sent_text[0])["type"] == "response.create"
+    assert observed_states[0].replay_count == 1
 
 
 @pytest.mark.asyncio
@@ -14435,6 +14583,182 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
 
 
 @pytest.mark.asyncio
+async def test_operation_fenced_retry_ignores_existing_response_id_entries(
+    app_instance,
+    monkeypatch,
+):
+    """A completed sibling must not block the operation-fenced retry claim."""
+    service = get_proxy_service_for_app(app_instance)
+    session = proxy_module._HTTPBridgeSession(
+        key=proxy_module._HTTPBridgeSessionKey("prompt_cache", "retry-fenced-race-key", None),
+        headers={},
+        affinity=proxy_module._AffinityPolicy(
+            key="retry-fenced-race-key",
+            kind=proxy_module.StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=300,
+        ),
+        request_model="gpt-5.1",
+        account=cast(Account, SimpleNamespace(id="acct-fenced-race", status=AccountStatus.ACTIVE)),
+        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=2,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    session.durable_session_id = "durable-retry-fenced-race"
+    session.durable_owner_epoch = 4
+    existing_request = proxy_module._WebSocketRequestState(
+        request_id="req-fenced-existing",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id="resp-fenced-existing",
+        awaiting_response_created=False,
+        transport="http",
+    )
+    retry_request = proxy_module._WebSocketRequestState(
+        request_id="req-fenced-retry",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        transport="http",
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.1", "input": ["retry"]}),
+        operation_id="op-fenced-retry",
+        operation_registered=True,
+        operation_attempt_generation=0,
+    )
+    session.pending_requests.extend([existing_request, retry_request])
+    replacement_upstream = _RecordingUpstreamWebSocket()
+
+    async def claim_operation(_session, state):
+        """Mark a successful recovery claim and advance the request's attempt generation."""
+        state.operation_recovery_claimed = True
+        state.operation_attempt_generation = 1
+        return True
+
+    async def fake_reconnect(
+        self,
+        target_session,
+        *,
+        request_state,
+        restart_reader=False,
+        require_same_account=False,
+        require_preferred_account=False,
+    ):
+        """Install the controlled replacement websocket without opening an external connection."""
+        del self, request_state, restart_reader, require_same_account, require_preferred_account
+        target_session.upstream = replacement_upstream
+
+    monkeypatch.setattr(service, "_claim_http_bridge_operation_fenced_continuity_replay", claim_operation)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
+
+    assert (
+        await service._retry_http_bridge_precreated_request(
+            session,
+            allow_operation_fenced_continuity_replay=True,
+        )
+        is True
+    )
+    assert len(replacement_upstream.sent_text) == 1
+    sent_payload = json.loads(replacement_upstream.sent_text[0])
+    assert sent_payload["input"] == ["retry"]
+    assert sent_payload["client_metadata"]["codex_lb_operation_id"] == "op-fenced-retry"
+
+
+@pytest.mark.asyncio
+async def test_operation_fenced_retry_rejects_response_progress_during_claim(
+    app_instance,
+    monkeypatch,
+):
+    """A response event observed during the durable claim must cancel the retry."""
+    service = get_proxy_service_for_app(app_instance)
+    session = proxy_module._HTTPBridgeSession(
+        key=proxy_module._HTTPBridgeSessionKey("prompt_cache", "retry-fenced-progress-key", None),
+        headers={},
+        affinity=proxy_module._AffinityPolicy(
+            key="retry-fenced-progress-key",
+            kind=proxy_module.StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=300,
+        ),
+        request_model="gpt-5.1",
+        account=cast(Account, SimpleNamespace(id="acct-fenced-progress", status=AccountStatus.ACTIVE)),
+        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    session.durable_session_id = "durable-retry-fenced-progress"
+    session.durable_owner_epoch = 4
+    retry_request = proxy_module._WebSocketRequestState(
+        request_id="req-fenced-progress",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        transport="http",
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.1", "input": ["retry"]}),
+        operation_id="op-fenced-progress",
+        operation_registered=True,
+        operation_attempt_generation=0,
+    )
+    session.pending_requests.append(retry_request)
+    replacement_upstream = _RecordingUpstreamWebSocket()
+    refund_claim = AsyncMock(return_value=True)
+
+    async def claim_operation(_session, state):
+        """Simulate response progress racing with durable claim completion to test claim refund."""
+        state.operation_recovery_claimed = True
+        state.operation_attempt_generation = 1
+        # Simulate an upstream response event arriving while the durable claim
+        # is awaiting its commit.
+        state.response_event_count = 1
+        return True
+
+    async def fake_reconnect(
+        self,
+        target_session,
+        *,
+        request_state,
+        restart_reader=False,
+        require_same_account=False,
+        require_preferred_account=False,
+    ):
+        """Return the controlled reconnect outcome without making a real upstream connection."""
+        del self, request_state, restart_reader, require_same_account, require_preferred_account
+        target_session.upstream = replacement_upstream
+
+    monkeypatch.setattr(service, "_claim_http_bridge_operation_fenced_continuity_replay", claim_operation)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service._durable_bridge, "mark_operation_unknown", refund_claim)
+    monkeypatch.setattr(proxy_module.ProxyService, "_reconnect_http_bridge_session", fake_reconnect)
+
+    assert (
+        await service._retry_http_bridge_precreated_request(
+            session,
+            allow_operation_fenced_continuity_replay=True,
+        )
+        is False
+    )
+    assert replacement_upstream.sent_text == []
+    refund_claim.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailable(
     async_client,
     app_instance,
@@ -14793,6 +15117,7 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
         "missing-prior-output",
         "transport-only",
         "operation-fence-unavailable",
+        "missing-journal-operation-fence-unavailable",
         "spool-reset-unavailable",
         "spool-reset-raises",
         "spool-reset-falsy",
@@ -14804,6 +15129,7 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
         "inactive-unknown-owner-bound-journal",
         "newer-circuit-before-submit",
         "account-neutral-newer-circuit-before-submit",
+        "replayed-claim-different-request",
         "circuit-advances-during-admission",
         "prior-replay-ambiguous-after-event",
         "stale-rejection-after-event-first-attempt",
@@ -14816,6 +15142,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
     monkeypatch,
     replay_case,
 ):
+    """The backend HTTP route restores continuity from verified full history after owner loss."""
     _install_bridge_settings(monkeypatch, enabled=True)
     account_neutral = replay_case in {
         "account-neutral",
@@ -14824,9 +15151,14 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         "account-neutral-newer-circuit-before-submit",
         "spool-reset-raises",
         "spool-reset-falsy",
+        "replayed-claim-different-request",
     }
     forwarded_receiver = replay_case.startswith("forwarded-")
-    operation_fence_unavailable = replay_case == "operation-fence-unavailable"
+    missing_recovery_journal = replay_case == "missing-journal-operation-fence-unavailable"
+    missing_recovery_journal_lookup = AsyncMock(
+        side_effect=RuntimeError("no such table: http_bridge_recovery_attempts")
+    )
+    operation_fence_unavailable = replay_case == "operation-fence-unavailable" or missing_recovery_journal
     spool_reset_unavailable = replay_case == "spool-reset-unavailable"
     # Required stale-anchor replay must fail closed when the durable reset
     # raises or returns false; ordinary anchored local rebind keeps this
@@ -14854,6 +15186,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         "newer-circuit-before-submit",
         "account-neutral-newer-circuit-before-submit",
     }
+    replayed_claim_different_request = replay_case == "replayed-claim-different-request"
     circuit_advances_during_admission = replay_case == "circuit-advances-during-admission"
     transport_only = replay_case == "transport-only"
     owner_bound_replay = replay_case in {
@@ -14967,6 +15300,12 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             )
             monkeypatch.setattr(service, "_load_http_bridge_retry_circuit", AsyncMock(return_value=True))
         if operation_fence_unavailable:
+            if missing_recovery_journal:
+                monkeypatch.setattr(
+                    service._durable_bridge,
+                    "lookup_recovery_attempt",
+                    missing_recovery_journal_lookup,
+                )
             monkeypatch.setattr(
                 http_bridge_streaming_module,
                 "_http_bridge_verified_stale_anchor_replay_is_operation_fenced",
@@ -15078,6 +15417,24 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             )
 
         monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", lookup_pending_tool_manifest)
+    elif replayed_claim_different_request:
+        original_record_recovery_attempt = service._durable_bridge.record_recovery_attempt
+        recovery_record_calls = 0
+
+        async def record_mismatched_replayed_claim(**kwargs):
+            """Return a different request identity for a reused claim to verify fail-closed recovery provenance."""
+            nonlocal recovery_record_calls
+            recovery_record_calls += 1
+            attempt = await original_record_recovery_attempt(**kwargs)
+            if (
+                recovery_record_calls >= 2
+                and attempt is not None
+                and getattr(attempt.state, "value", attempt.state) == "replayed"
+            ):
+                return replace(attempt, request_id="different-recovery-request")
+            return attempt
+
+        monkeypatch.setattr(service._durable_bridge, "record_recovery_attempt", record_mismatched_replayed_claim)
 
     full_resend = [
         *historical_input,
@@ -15167,6 +15524,18 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         claim_live_session.assert_not_awaited()
         mark_recovery_attempt_replayed.assert_not_awaited()
         return
+    if replayed_claim_different_request:
+        failed_response = await async_client.post(
+            "/backend-api/codex/responses",
+            json=second_payload,
+            headers={**session_headers, "x-codex-turn-state": f"http_turn_stale_{case}"},
+        )
+        assert failed_response.status_code == 502
+        assert failed_response.json()["error"]["code"] == "bridge_continuity_persistence_failed"
+        assert connected_account_ids == [owner_chatgpt_account_id]
+        assert len(owner_upstream.sent_text) == 1
+        assert alternate_upstream.sent_text == []
+        return
     if account_neutral and newer_circuit_before_submit:
         failed_response = await async_client.post(
             "/backend-api/codex/responses",
@@ -15194,6 +15563,8 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         assert connected_account_ids == [owner_chatgpt_account_id]
         assert len(owner_upstream.sent_text) == 1
         assert alternate_upstream.sent_text == []
+        if missing_recovery_journal:
+            missing_recovery_journal_lookup.assert_awaited()
         if spool_reset_raises:
             raising_reset_operation_event_spool.assert_awaited()
         if spool_reset_falsy:

@@ -48,3 +48,25 @@ async def test_generation_preserves_unchanged_snapshot_and_fails_before_writing_
         await script.main()
     assert path.read_text() == original
     assert 'CODEX_VERSION = "1.2.3"' in version_path.read_text()
+
+
+def test_fetch_rejects_oversized_response_before_json_parsing(monkeypatch):
+    from io import BytesIO
+    from unittest.mock import Mock
+
+    response = BytesIO(b" " * 33 + b"{}")
+    reader = Mock(wraps=response.read)
+    response.read = reader
+    monkeypatch.setattr(script, "MAX_CATALOG_BYTES", 32)
+    monkeypatch.setattr(script, "urlopen", lambda *args, **kwargs: response)
+    with pytest.raises(ValueError, match="Pricing response too large"):
+        script.fetch("https://example.com/prices.json")
+    reader.assert_called_once_with(33)
+
+
+def test_fetch_accepts_response_at_size_limit(monkeypatch):
+    from io import BytesIO
+
+    monkeypatch.setattr(script, "MAX_CATALOG_BYTES", 16)
+    monkeypatch.setattr(script, "urlopen", lambda *args, **kwargs: BytesIO(b'{"models": []}  '))
+    assert script.fetch("https://example.com/prices.json") == {"models": []}

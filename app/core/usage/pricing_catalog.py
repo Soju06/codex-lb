@@ -19,7 +19,7 @@ MODELS_DEV_URL = "https://models.dev/api.json"
 LITELLM_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 BUNDLE_PATH = Path(__file__).with_name("pricing_snapshot.json")
 _FIELDS = {field.name for field in fields(ModelPrice)}
-_MAX_BYTES = 16 * 1024 * 1024
+MAX_CATALOG_BYTES = 16 * 1024 * 1024
 
 
 def _object(value: JsonValue) -> dict[str, JsonValue]:
@@ -46,10 +46,11 @@ def _price(values: dict[str, float]) -> ModelPrice:
         raise ValueError("Incomplete base prices")
     for prefix in ("priority_", "flex_", "long_context_", "priority_long_context_", "flex_long_context_"):
         group = {prefix + part + "_per_1m" for part in ("input", "output")}
-        if group & values.keys() and not group <= values.keys():
+        present = (group | {prefix + "cached_input_per_1m"}) & values.keys()
+        if present and not group <= values.keys():
             raise ValueError("Incomplete tier prices")
-    if "long_context_input_per_1m" in values and values.get("long_context_threshold_tokens", 0) <= 0:
-        raise ValueError("Missing context threshold")
+        if present and "long_context_" in prefix and values.get("long_context_threshold_tokens", 0) <= 0:
+            raise ValueError("Missing context threshold")
     return ModelPrice(**values)
 
 
@@ -214,7 +215,7 @@ async def fetch_catalogs() -> dict[str, ModelPrice]:
                     body = bytearray()
                     async for chunk in response.content.iter_chunked(64 * 1024):
                         body.extend(chunk)
-                        if len(body) > _MAX_BYTES:
+                        if len(body) > MAX_CATALOG_BYTES:
                             raise ValueError("Pricing response too large")
                     catalogs.append(parser(json.loads(body)))
             except (aiohttp.ClientError, TimeoutError, ValueError):

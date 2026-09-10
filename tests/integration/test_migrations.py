@@ -2948,8 +2948,10 @@ async def test_missing_cost_index_upgrade_downgrade_and_query_plan(tmp_path):
                     text(
                         "EXPLAIN QUERY PLAN SELECT id FROM request_logs WHERE id > 0 AND cost_usd IS NULL "
                         "AND model_source_id IS NULL AND input_tokens IS NOT NULL "
-                        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) ORDER BY id LIMIT 200"
-                    )
+                        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+                        "AND (model_source_kind IS NULL OR model_source_kind = :kind) ORDER BY id LIMIT 200"
+                    ),
+                    {"kind": "subscription"},
                 )
             ).fetchall()
             assert "idx_logs_missing_cost" in str(plan)

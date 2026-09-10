@@ -434,9 +434,11 @@ def _effective_rates(
 ) -> tuple[float, float, float]:
     is_long_context = (
         price.long_context_threshold_tokens is not None
+        and price.long_context_threshold_tokens > 0
         and usage.input_tokens > price.long_context_threshold_tokens
-        and price.long_context_input_per_1m is not None
-        and price.long_context_output_per_1m is not None
+    )
+    has_standard_long_context = (
+        price.long_context_input_per_1m is not None and price.long_context_output_per_1m is not None
     )
     input_rate = price.input_per_1m
     cached_rate = price.cached_input_per_1m if price.cached_input_per_1m is not None else input_rate
@@ -469,13 +471,13 @@ def _effective_rates(
         input_rate = price.flex_input_per_1m
         cached_rate = price.flex_cached_input_per_1m if price.flex_cached_input_per_1m is not None else input_rate
         output_rate = price.flex_output_per_1m
-        if is_long_context:
+        if is_long_context and has_standard_long_context:
             input_rate *= 2.0
             cached_rate *= 2.0
             output_rate *= 1.5
         return input_rate, cached_rate, output_rate
 
-    if is_long_context:
+    if is_long_context and has_standard_long_context:
         assert price.long_context_input_per_1m is not None
         assert price.long_context_output_per_1m is not None
         input_rate = price.long_context_input_per_1m

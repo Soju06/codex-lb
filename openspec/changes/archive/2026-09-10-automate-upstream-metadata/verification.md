@@ -26,3 +26,9 @@ Existing SQLAlchemy expression-index reflection warnings occurred in historical 
 - Before/after screenshots use the real request-log UI with seeded API responses: an Astra request with 100,000 input tokens (50,000 cached) and 10,000 output tokens changes from unknown cost to **$1.05**. These are fixtures, not production screenshots.
 
 - After rebasing: focused regressions **67 passed** (8 unrelated PostgreSQL-only durability cases skipped); SQLite session and missing-cost index checks **87 passed**; `make migration-check` reports the intended head, policy OK, and no drift. Cost-backfill regressions are included in the ongoing PostgreSQL CI target.
+
+## Pre-merge review follow-up
+
+Merged current main (`43a45f786`) and addressed all five initial review findings: publish-only write credentials with non-persistent checkout authentication, independent failure backoff, tier-only long-context rate validation/selection, exact eligible-row index predicates, and bounded generator response reads. The daily workflow also regenerates and tests the settings reference. Reservation tests use fixed rates independent of the changing bundle.
+
+Affected pricing, reservation, settings, scheduler, and generator tests: **183 passed**. SQLite backfill and index upgrade/downgrade: **4 passed**; the index plan additionally passes with a bound source-kind parameter. Whole-repository lint/type checks and actionlint passed. `make migration-check` reports the intended head, policy OK, and no schema drift. Full unit and PostgreSQL regression reruns were started separately; current-head GitHub CI/review gates are checked before merge.

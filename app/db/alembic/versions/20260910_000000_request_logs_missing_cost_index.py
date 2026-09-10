@@ -13,7 +13,8 @@ depends_on = None
 _NAME = "idx_logs_missing_cost"
 _PREDICATE = (
     "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
-    "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL)"
+    "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+    "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
 )
 
 

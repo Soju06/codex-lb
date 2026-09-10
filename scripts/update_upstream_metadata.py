@@ -17,6 +17,7 @@ from app.core.types import JsonValue  # noqa: E402
 from app.core.usage.pricing_catalog import (  # noqa: E402
     BUNDLE_PATH,
     LITELLM_URL,
+    MAX_CATALOG_BYTES,
     MODELS_DEV_URL,
     decode_snapshot,
     encode_snapshot,
@@ -29,7 +30,10 @@ from app.core.usage.pricing_catalog import (  # noqa: E402
 def fetch(url: str) -> JsonValue:
     request = Request(url, headers={"User-Agent": "codex-lb", "Accept": "application/json"})
     with urlopen(request, timeout=30) as response:
-        return json.load(response)
+        body = response.read(MAX_CATALOG_BYTES + 1)
+        if len(body) > MAX_CATALOG_BYTES:
+            raise ValueError("Pricing response too large")
+        return json.loads(body)
 
 
 async def main() -> None:

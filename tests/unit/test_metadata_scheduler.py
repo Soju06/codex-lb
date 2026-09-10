@@ -105,3 +105,37 @@ async def test_compatible_partial_refresh_does_not_restart_backfill_cursor(setup
     scheduler = module.MetadataRefreshScheduler(_cursor=123)
     await scheduler._refresh()
     assert scheduler._cursor == 123
+
+
+@pytest.mark.parametrize("failed_operation", ["refresh", "backfill"])
+async def test_unexpected_failure_backs_off_only_the_failed_operation(setup, monkeypatch, failed_operation):
+    current = 0.0
+    ticks = iter([5.0, 300.0])
+    scheduler = module.MetadataRefreshScheduler()
+    fetch = AsyncMock(return_value={"gpt-test": ModelPrice(3, 9)})
+    backfill = AsyncMock(return_value=True)
+    if failed_operation == "refresh":
+        fetch.side_effect = RuntimeError("unexpected catalog failure")
+    else:
+        backfill.side_effect = RuntimeError("database unavailable")
+
+    async def run_if_leader(callback):
+        return await callback()
+
+    async def advance_tick(awaitable, *, timeout):
+        nonlocal current
+        awaitable.close()
+        try:
+            current = next(ticks)
+        except StopIteration:
+            scheduler._stop.set()
+        raise TimeoutError
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: current))
+    monkeypatch.setattr(module, "fetch_catalogs", fetch)
+    monkeypatch.setattr(scheduler, "_backfill", backfill)
+    monkeypatch.setattr(module, "get_leader_election", lambda: SimpleNamespace(run_if_leader=run_if_leader))
+    monkeypatch.setattr(module.asyncio, "wait_for", advance_tick)
+    await scheduler._run_loop()
+    assert fetch.await_count == (2 if failed_operation == "refresh" else 1)
+    assert backfill.await_count == (2 if failed_operation == "backfill" else 3)

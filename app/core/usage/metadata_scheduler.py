@@ -28,6 +28,7 @@ from app.modules.request_logs.cost_backfill import backfill_missing_costs
 
 logger = logging.getLogger(__name__)
 _REFRESH_SECONDS = 3600
+_FAILURE_RETRY_SECONDS = 300
 
 
 @dataclass
@@ -79,7 +80,7 @@ class MetadataRefreshScheduler:
             logger.info("Refreshed OpenAI pricing metadata: models=%d", len(prices))
             self._refresh_at = time.monotonic() + _REFRESH_SECONDS
         except (OSError, ValueError):
-            self._refresh_at = time.monotonic() + 300
+            self._refresh_at = time.monotonic() + _FAILURE_RETRY_SECONDS
             logger.warning("Metadata refresh failed; retaining last-good prices", exc_info=True)
 
     async def _backfill(self) -> bool:
@@ -95,13 +96,18 @@ class MetadataRefreshScheduler:
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
-            try:
-                if time.monotonic() >= self._refresh_at:
+            if time.monotonic() >= self._refresh_at:
+                try:
                     await self._refresh()
-                if time.monotonic() >= self._backfill_at:
+                except Exception:
+                    self._refresh_at = time.monotonic() + _FAILURE_RETRY_SECONDS
+                    logger.exception("Upstream metadata refresh failed")
+            if time.monotonic() >= self._backfill_at:
+                try:
                     await get_leader_election().run_if_leader(self._backfill)
-            except Exception:
-                logger.exception("Upstream metadata tick failed")
+                except Exception:
+                    self._backfill_at = time.monotonic() + _FAILURE_RETRY_SECONDS
+                    logger.exception("Missing-cost backfill failed")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
             except TimeoutError:

@@ -160,3 +160,41 @@ def test_bundled_snapshot_covers_astra_without_network():
     prices = catalog.decode_snapshot(json.loads(catalog.BUNDLE_PATH.read_text()))
     assert "gpt-6-astra" in prices
     assert get_pricing_for_model("gpt-6-astra") == ("gpt-6-astra", prices["gpt-6-astra"])
+
+
+@pytest.mark.parametrize("tier", ["priority", "flex"])
+def test_litellm_tier_only_long_context_rates_are_used(tier):
+    entry = {
+        "litellm_provider": "openai",
+        "mode": "chat",
+        "input_cost_per_token": 1e-5,
+        "output_cost_per_token": 5e-5,
+        "cache_read_input_token_cost": 1e-6,
+        f"input_cost_per_token_{tier}": 2e-5,
+        f"output_cost_per_token_{tier}": 1e-4,
+        f"cache_read_input_token_cost_{tier}": 2e-6,
+        f"input_cost_per_token_above_272k_tokens_{tier}": 4e-5,
+        f"output_cost_per_token_above_272k_tokens_{tier}": 1.5e-4,
+        f"cache_read_input_token_cost_above_272k_tokens_{tier}": 4e-6,
+    }
+    price = catalog.parse_litellm({"gpt-test": entry})["gpt-test"]
+    assert price.long_context_input_per_1m is None
+    assert calculate_cost_from_usage(UsageTokens(300000, 1000, 100000), price, service_tier=tier) == 8.55
+    assert calculate_cost_from_usage(UsageTokens(272000, 1000, 100000), price, service_tier=tier) == pytest.approx(3.74)
+    assert calculate_cost_from_usage(UsageTokens(300000, 1000, 100000), price) == pytest.approx(2.15)
+    # Another tier's long-context group cannot trigger guessed multipliers for this tier.
+    other = "flex" if tier == "priority" else "priority"
+    ordinary = replace(price, **{f"{other}_input_per_1m": 2, f"{other}_output_per_1m": 4})
+    assert calculate_cost_from_usage(UsageTokens(300000, 1000, 100000), ordinary, service_tier=other) == pytest.approx(
+        0.604
+    )
+
+
+@pytest.mark.parametrize("prefix", ["long_context_", "priority_long_context_", "flex_long_context_"])
+@pytest.mark.parametrize("threshold", [None, 0])
+def test_snapshot_rejects_long_context_rates_without_positive_threshold(prefix, threshold):
+    values = {"input_per_1m": 10, "output_per_1m": 50, prefix + "input_per_1m": 20, prefix + "output_per_1m": 100}
+    if threshold is not None:
+        values["long_context_threshold_tokens"] = threshold
+    with pytest.raises(ValueError, match="Missing context threshold"):
+        catalog.decode_snapshot({"schema_version": 1, "models": {"gpt-test": values}})

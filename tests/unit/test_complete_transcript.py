@@ -1193,7 +1193,13 @@ async def test_complete_transcript_prefers_snapshot_when_parent_chain_is_missing
         ),
         event_spool_complete=True,
         transcript_version=1,
-        response_output_items_json="[]",
+        # A complete replay snapshot already contains the terminal output in
+        # ``response_replay_input_json``.  Keep a deliberately oversized raw
+        # output value here to ensure the synthetic turn does not carry or
+        # parse it again.
+        response_output_items_json=json.dumps(
+            [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "x" * 20_000}]}]
+        ),
         response_output_items_complete=True,
         response_replay_input_json=json.dumps(
             [
@@ -1223,6 +1229,7 @@ async def test_complete_transcript_prefers_snapshot_when_parent_chain_is_missing
     assert len(turns) == 1
     assert turns[0].replay_input_includes_response_output is True
     assert turns[0].represented_turn_count == 3
+    assert turns[0].response_output_items_json == "[]"
     assert (
         await DurableBridgeRepository(cast(AsyncSession, _Session())).get_complete_transcript(
             response_id="resp_snapshot",

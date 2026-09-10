@@ -149,14 +149,13 @@ class RoutingAvailabilityCache:
     async def refresh_from_db(self) -> None:
         """Rebuild the snapshot from committed account statuses.
 
-        Local overlay marks whose committed status became routable again are dropped —
-        this is what lets a reactivation or re-authentication served by another replica
-        clear this replica's marker without a restart. Only marks that already existed
-        when this refresh started are eligible to be dropped: a mark added while the
-        SELECT is in flight may not be reflected in the rows it read (the status commit
-        can land after the read), so filtering it against that snapshot would silently
-        lose the mark. Such marks are preserved and re-evaluated by the next refresh,
-        which the mark's own queued ``account_routing`` bump guarantees.
+        Local overlay marks remain authoritative until an explicit clear or a
+        committed non-blocking REAUTH_REQUIRED state is observed. A local mark
+        can be created for a revoked token while the durable status write is
+        intentionally deferred until API-key settlement; dropping it merely
+        because the in-flight snapshot still says ACTIVE would let a concurrent
+        request route to the revoked account again. Reactivation and OAuth
+        re-authentication explicitly clear the overlay.
 
         Database errors propagate to the caller: when invoked as an
         ``account_routing`` invalidation callback the poller then leaves the
@@ -164,7 +163,6 @@ class RoutingAvailabilityCache:
         a transient failure cannot make a replica permanently miss a pause,
         deletion, or deactivation.
         """
-        marks_before_refresh = frozenset(self._local_marks)
         factory = self._session_factory or SessionLocal
         session = factory()
         try:
@@ -178,9 +176,9 @@ class RoutingAvailabilityCache:
         self._local_marks = {
             account_id
             for account_id in self._local_marks
-            if account_id not in marks_before_refresh
-            or (status := snapshot.get(account_id)) is None
+            if (status := snapshot.get(account_id)) is None
             or status[0] in _ROUTING_UNAVAILABLE_STATUSES
+            or status[0] == AccountStatus.ACTIVE
             or (status[0] == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(status[1]))
         }
 

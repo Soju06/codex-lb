@@ -150,7 +150,11 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    is_account_routing_unavailable,
+    mark_account_routing_unavailable,
+)
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
     all_accounts_require_reauthentication,
@@ -626,6 +630,9 @@ class LoadBalancer:
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
+            )
+            excluded_ids.update(
+                account.id for account in selection_inputs.accounts if is_account_routing_unavailable(account.id)
             )
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even

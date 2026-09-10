@@ -2096,8 +2096,9 @@ class _StreamingRetryMixin:
                         selected_account_model_replacement = account.id == account_model_replacement_account_id
                         if isinstance(exc, RefreshError):
                             if exc.is_permanent:
-                                last_permanent_refresh_error = exc
-                                last_permanent_refresh_error_account_id = account.id
+                                if exc.code == "token_revoked":
+                                    last_permanent_refresh_error = exc
+                                    last_permanent_refresh_error_account_id = account.id
                                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
                                 # Keep the warning account routable for later
                                 # requests, but do not immediately reselect it in
@@ -3046,8 +3047,9 @@ class _StreamingRetryMixin:
                         except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
                             if isinstance(refresh_exc, RefreshError):
                                 if refresh_exc.is_permanent:
-                                    last_permanent_refresh_error = refresh_exc
-                                    last_permanent_refresh_error_account_id = account.id
+                                    if refresh_exc.code == "token_revoked":
+                                        last_permanent_refresh_error = refresh_exc
+                                        last_permanent_refresh_error_account_id = account.id
                                     await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                                     # Keep the warning account routable for later
                                     # requests, but exclude it from this request's
@@ -3636,8 +3638,9 @@ class _StreamingRetryMixin:
                     return
                 except RefreshError as exc:
                     if exc.is_permanent:
-                        last_permanent_refresh_error = exc
-                        last_permanent_refresh_error_account_id = account.id
+                        if exc.code == "token_revoked":
+                            last_permanent_refresh_error = exc
+                            last_permanent_refresh_error_account_id = account.id
                         await proxy._load_balancer.mark_permanent_failure(account, exc.code)
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None

@@ -251,6 +251,19 @@ async def test_reauth_status_clears_legacy_local_routing_marker(db_setup, poller
 
 
 @pytest.mark.asyncio
+async def test_active_snapshot_does_not_clear_revoked_token_routing_mark(db_setup) -> None:
+    account_id = "acct-bus-revoked-settlement"
+    await _insert_account(account_id)
+    routing_cache = RoutingAvailabilityCache(SessionLocal)
+    await routing_cache.refresh_from_db()
+
+    routing_cache.mark_unavailable(account_id)
+    await routing_cache.refresh_from_db()
+
+    assert routing_cache.is_unavailable(account_id) is True
+
+
+@pytest.mark.asyncio
 async def test_reauth_reason_controls_peer_routing_availability(db_setup, poller_slot) -> None:
     account_id = "acct-bus-reauth-reason"
     await _insert_account(account_id)

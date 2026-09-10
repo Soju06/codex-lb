@@ -2570,7 +2570,24 @@ class _HTTPBridgeRequestSubmitMixin:
         # behind that read runs a DB query under a process-global lock; one
         # stalled query would then hold this session's prewarm lock and stall
         # every later turn on it (issues #1971 and #1972).
-        dashboard_settings = await _service_get_settings_cache().get()
+        settings_cache = _service_get_settings_cache()
+        try:
+            dashboard_settings = await settings_cache.get()
+        except Exception:  # noqa: BLE001 - a prewarm must never fail a servable request
+            # The same fallback the request entry point's dashboard-overrides
+            # middleware applies to this row: prefer the last one this replica
+            # loaded. With no row at all the prewarm is skipped rather than run
+            # without a snapshot, which would put the read back under the lock.
+            dashboard_settings = settings_cache.cached_row()
+            logger.warning(
+                "HTTP bridge prewarm settings snapshot unavailable; %s",
+                "using the last loaded dashboard values" if dashboard_settings is not None else "skipping the prewarm",
+                exc_info=True,
+            )
+            if dashboard_settings is None:
+                request_state.prewarm_status = "skipped"
+                _record_http_bridge_prewarm_outcome(outcome="skipped")
+                return
         async with prewarm_lock:
             if session.prewarmed:
                 request_state.prewarm_status = "skipped"

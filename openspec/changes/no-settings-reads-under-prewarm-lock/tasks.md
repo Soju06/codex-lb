@@ -14,6 +14,8 @@
   reconnect.
 - [x] 2.3 Prove the reconnect completes on a caller-supplied snapshot without
   awaiting the settings cache.
+- [x] 2.4 Prove an unreadable settings row falls back to the last loaded one,
+  and with no row at all skips the prewarm instead of failing the request.
 
 ## 3. Implementation
 
@@ -21,6 +23,8 @@
   into the admission gate and the reconnect.
 - [x] 3.2 Keep both new parameters optional so the unchanged callers keep
   reading the cache exactly as before.
+- [x] 3.3 Apply the request entry point's snapshot-failure fallback to the
+  pre-lock read so the move cannot add a failure mode.
 
 ## 4. Verification
 

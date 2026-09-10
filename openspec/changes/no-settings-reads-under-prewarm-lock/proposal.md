@@ -21,11 +21,16 @@ invariant can be the true one: no settings read at all while the lock is held.
 - Give both helpers an optional snapshot parameter that defaults to today's
   behaviour (read the cache), so every other caller is unaffected.
 - Upgrade the deployment-installation prewarm wording from "MUST NOT add a
-  settings read under that lock" to "MUST NOT read settings while that lock is
-  held", with a scenario covering a full prewarm body.
+  settings read under that lock" to "the prewarm's own helpers MUST NOT read
+  the dashboard row for themselves while that lock is held", naming the
+  residual work the timeout recovery still reaches (account selection, token
+  refresh, upstream route resolution) as out of scope.
+- Apply the request entry point's snapshot-failure fallback to that pre-lock
+  read (last loaded row, else skip the prewarm) so moving the read cannot fail
+  a request the bridge can otherwise serve.
 - Assert the invariant directly: a prewarm that builds its warm-up, takes
-  admission and sends upstream records exactly one settings read, before the
-  lock, and opens no database session.
+  admission, sends upstream and completes records exactly one settings read,
+  attributed to the pre-lock snapshot, and opens no database session.
 
 No dashboard value changes meaning; only where it is read changes.
 
@@ -39,6 +44,15 @@ None.
 
 - `deployment-installation`: The Codex prewarm switch requirement now forbids
   any settings read while the prewarm lock is held, not just newly added ones.
+
+## Out of scope
+
+The prewarm timeout path reconnects while holding the lock, and the reconnect
+reaches account selection, token refresh and upstream route resolution, each
+of which has its own settings read or database session. Threading the snapshot
+through those would be a much larger change (route resolution has its own
+cache), so this change removes the two reads the prewarm's own helpers take
+and states the invariant at exactly that scope.
 
 ## Impact
 

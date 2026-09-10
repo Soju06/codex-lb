@@ -24,7 +24,8 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
-from app.core.clients.http import lease_http_session
+from app.core.clients.http import _safe_json, lease_http_session
+from app.core.clients.oauth import _extract_error_code, _extract_error_message
 from app.core.config.settings import AUTH_BASE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPE, get_settings
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
@@ -344,15 +345,6 @@ def get_token_refresh_timeout_override() -> float | None:
     return _TOKEN_REFRESH_TIMEOUT_OVERRIDE.get()
 
 
-async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
-    try:
-        data = await resp.json(content_type=None)
-    except Exception:
-        text = await resp.text()
-        return {"error": {"message": text.strip()}}
-    return data if isinstance(data, dict) else {"error": {"message": str(data)}}
-
-
 async def _safe_codex_json(resp: object) -> JsonObject:
     json_method = getattr(resp, "json", None)
     try:
@@ -393,23 +385,3 @@ def _effective_token_refresh_timeout(configured_timeout_seconds: float) -> float
     if override is None:
         return configured_timeout_seconds
     return max(0.001, min(configured_timeout_seconds, override))
-
-
-def _extract_error_code(payload: OAuthTokenPayload) -> str | None:
-    error = payload.error
-    if isinstance(error, dict):
-        code = error.get("code") or error.get("error")
-        return code if isinstance(code, str) else None
-    if isinstance(error, str):
-        return error
-    return payload.error_code or payload.code
-
-
-def _extract_error_message(payload: OAuthTokenPayload) -> str | None:
-    error = payload.error
-    if isinstance(error, dict):
-        message = error.get("message") or error.get("error_description")
-        return message if isinstance(message, str) else None
-    if isinstance(error, str):
-        return payload.error_description or error
-    return payload.message

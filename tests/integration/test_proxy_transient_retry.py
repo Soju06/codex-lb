@@ -18,19 +18,22 @@ from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
+from sqlalchemy import select
 
 import app.modules.proxy.account_cache as account_cache_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clock import RealScheduler
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ApiKeyUsageReservation
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage import updater as usage_updater_module
@@ -749,6 +752,230 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
         exhausted_account = await session.get(Account, account_a_id)
         assert exhausted_account is not None
         assert exhausted_account.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_stream_code_less_429_retries_same_account_then_succeeds(async_client, monkeypatch):
+    """Code-less 429 (upstream burst) on an owner-bound payload backs off and retries the owner.
+
+    Contrast with the coded-429 test above: the account is never marked
+    RATE_LIMITED and the request never crosses accounts (``reasoning`` input
+    items bind the dispatched payload to the first account).
+    """
+    account_a_id = await _import_account(async_client, "acc_stream_burst_a", "streambursta@example.com")
+    await _import_account(async_client, "acc_stream_burst_b", "streamburstb@example.com")
+
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise ProxyResponseError(
+                429,
+                {"error": {"message": "Rate limit exceeded"}},
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_stream_burst_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"type": "reasoning", "id": "rs_stream_burst", "encrypted_content": "owner-bound"}],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    completed = [e for e in events if e.get("type") == "response.completed"]
+    failed = [e for e in events if e.get("type") == "response.failed"]
+    assert len(completed) == 1
+    assert len(failed) == 0
+    assert seen_account_ids == ["acc_stream_burst_a", "acc_stream_burst_a"]
+    assert 1.0 in slept
+
+    async with SessionLocal() as session:
+        burst_account = await session.get(Account, account_a_id)
+        assert burst_account is not None
+        assert burst_account.status == AccountStatus.ACTIVE
+
+
+def _record_burst_backoff_sleeps(monkeypatch) -> list[float]:
+    """Intercept the bounded burst backoff through the scheduler seam it actually uses.
+
+    The wait runs through ``RealScheduler.sleep`` (``scheduler_for(proxy)``), so
+    patching that seam observes exactly the backoff schedule. Patching the
+    process-wide ``asyncio.sleep`` instead would also reach the lifespan
+    ``run_event_loop_lag_monitor`` task, whose ``asyncio.sleep(1.0)`` loop then
+    spins without yielding for the rest of the test and floods the recording.
+    The fake still yields once so the loop keeps turning.
+    """
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    def fake_sleep(self, delay: float, result: None = None):
+        if delay > 0:
+            slept.append(delay)
+        return real_sleep(0, result)
+
+    monkeypatch.setattr(RealScheduler, "sleep", fake_sleep)
+    return slept
+
+
+_NATIVE_CODEX_HEADERS = {"originator": "codex_cli_rs"}
+_BURST_OWNER_BOUND_PAYLOAD = {
+    "model": "gpt-5.1",
+    "instructions": "hi",
+    "input": [{"type": "reasoning", "id": "rs_stream_burst_native", "encrypted_content": "owner-bound"}],
+    "stream": True,
+}
+
+
+def _install_always_burst_upstream(monkeypatch, *, retry_after_seconds=None, retry_after_header=None):
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        raise ProxyResponseError(
+            429,
+            {"error": {"message": "Rate limit exceeded"}},
+            failure_phase="status",
+            retry_after_seconds=retry_after_seconds,
+            retry_after_header=retry_after_header,
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    return seen_account_ids, slept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["/backend-api/codex/responses", "/backend-api/codex/responses/", "/v1/responses", "/v1/responses/"]
+)
+async def test_native_codex_stream_code_less_429_exhaustion_surfaces_http_429_with_retry_after(
+    async_client, monkeypatch, caplog, path
+):
+    """Codex CLI (native headers, propagate_http_errors, no SDK contract): the bounded same-account
+    backoff must hold the HTTP headers -- no keepalive frame commits a 200 -- so the exhausted
+    burst is still a real HTTP 429 carrying ``Retry-After: 5``."""
+    await _import_account(async_client, "acc_stream_burst_native_a", "streamburstnativea@example.com")
+    await _import_account(async_client, "acc_stream_burst_native_b", "streamburstnativeb@example.com")
+    seen_account_ids, slept = _install_always_burst_upstream(monkeypatch)
+    caplog.set_level("INFO", logger="app.modules.proxy.service")
+
+    async with async_client.stream(
+        "POST", path, json=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS, follow_redirects=True
+    ) as resp:
+        body = json.loads(await resp.aread())
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "5"
+
+    assert body == {"error": {"message": "Rate limit exceeded"}}
+    # Never crossed accounts; three backoffs then the original rejection.
+    assert len(seen_account_ids) == 4
+    assert len(set(seen_account_ids)) == 1
+    assert slept == [1.0, 2.0, 4.0]
+    assert caplog.text.count("action=retry_same_account") == 3
+    assert "failure_class=retryable_transient action=surface" in caplog.text
+    assert "action=failover_next" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_code_less_429_exhaustion_preserves_upstream_retry_after(async_client, monkeypatch):
+    await _import_account(async_client, "acc_stream_burst_native_ra", "streamburstnativera@example.com")
+    _seen, slept = _install_always_burst_upstream(monkeypatch, retry_after_seconds=3, retry_after_header="3")
+
+    async with async_client.stream(
+        "POST", "/backend-api/codex/responses", json=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS
+    ) as resp:
+        await resp.aread()
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "3"
+
+    # Retry-After floors the schedule: 3, 3, then the exponential 4.
+    assert slept == [3.0, 3.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_keyed_native_burst_exhaustion_closes_real_reservation_before_health(
+    async_client, app_instance, monkeypatch
+):
+    await _import_account(async_client, "acc_burst_real_reservation", "burst-reservation@example.test")
+    configured = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert configured.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "burst-reservation",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000}],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    service = get_proxy_service_for_app(app_instance)
+    original_health = service._handle_stream_error
+    statuses_at_health: list[str] = []
+
+    async def health(account, error, code, http_status=None, **kwargs):
+        if http_status == 429:
+            async with SessionLocal() as session:
+                statuses = list(
+                    await session.scalars(
+                        select(ApiKeyUsageReservation.status).where(ApiKeyUsageReservation.api_key_id == key_id)
+                    )
+                )
+            assert statuses and all(status in {"settled", "released"} for status in statuses)
+            statuses_at_health.extend(statuses)
+        return await original_health(account, error, code, http_status=http_status, **kwargs)
+
+    monkeypatch.setattr(service, "_handle_stream_error", health)
+    attempts, sleeps = _install_always_burst_upstream(monkeypatch)
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json=_BURST_OWNER_BOUND_PAYLOAD,
+        headers={**_NATIVE_CODEX_HEADERS, "Authorization": f"Bearer {created.json()['key']}"},
+    )
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "5"
+    assert response.json() == {"error": {"message": "Rate limit exceeded"}}
+    assert attempts == ["acc_burst_real_reservation"] * 4
+    assert sleeps == [1.0, 2.0, 4.0]
+    assert await service.drain_persistence_tasks(timeout_seconds=5)
+    assert len(statuses_at_health) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_code_less_429_retry_success_emits_no_capacity_keepalive(async_client, monkeypatch):
+    """The held-header wait must not leak a ``waiting_for_account_capacity`` keepalive into the stream."""
+    await _import_account(async_client, "acc_stream_burst_native_ok", "streamburstnativeok@example.com")
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise ProxyResponseError(429, {"error": {"message": "Rate limit exceeded"}}, failure_phase="status")
+        yield _success_sse_event("resp_stream_burst_native_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST", "/backend-api/codex/responses", json=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert [e["type"] for e in events if e.get("type") == "response.completed"] == ["response.completed"]
+    assert all(e.get("status") != "waiting_for_account_capacity" for e in events)
+    assert seen_account_ids == ["acc_stream_burst_native_ok", "acc_stream_burst_native_ok"]
+    assert 1.0 in slept
 
 
 @pytest.mark.asyncio

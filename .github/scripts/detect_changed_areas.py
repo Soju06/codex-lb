@@ -34,6 +34,7 @@ FILTERS = {
         ".github/workflows/ci.yml",
         "docs/reference/settings.md",
         ".env.example",
+        ".github/simplicity-budgets.toml",
     ],
     "rust": [
         "Cargo.toml",

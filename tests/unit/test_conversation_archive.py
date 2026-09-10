@@ -16,7 +16,6 @@ from typing import cast
 
 from app.core import conversation_archive
 from app.core.utils.request_id import reset_request_id, set_request_id
-from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.conversation_archive import service as conversation_archive_service
 
 
@@ -375,30 +374,6 @@ def test_archive_stop_writer_drains_queue_before_sentinel(monkeypatch):
     assert events == ["queue.join", "queue.put_sentinel", "thread.join"]
 
 
-def test_archive_file_listing_runs_sync(monkeypatch):
-    called: list[object] = []
-    modified_at = datetime.fromisoformat("2026-05-16T00:00:00+00:00")
-    archive_file = conversation_archive_service.ConversationArchiveFile(
-        name="2026-05-16T00.jsonl.gz",
-        date="2026-05-16T00",
-        size_bytes=123,
-        compressed=True,
-        modified_at=modified_at,
-    )
-
-    monkeypatch.setattr(
-        conversation_archive_api.service,
-        "list_archive_files",
-        lambda: called.append("service") or [archive_file],
-    )
-
-    [response] = conversation_archive_api.list_conversation_archive_files()
-
-    assert called == ["service"]
-    assert response.name == "2026-05-16T00.jsonl.gz"
-    assert response.modified_at == modified_at
-
-
 def test_archive_appends_complete_gzip_members(monkeypatch, tmp_path):
     monkeypatch.setattr(
         conversation_archive,
@@ -692,12 +667,6 @@ def test_archive_service_reads_gzip_and_legacy_jsonl(monkeypatch, tmp_path):
             + "\n"
         )
 
-    files = conversation_archive_service.list_archive_files()
-    assert [file.name for file in files] == ["2026-04-29T10.jsonl.gz", "2026-04-28.jsonl"]
-    assert [file.date for file in files] == ["2026-04-29T10", "2026-04-28"]
-    assert files[0].compressed is True
-    assert files[1].compressed is False
-
     page = conversation_archive_service.read_archive_records(
         filename="2026-04-29T10.jsonl.gz",
         limit=10,
@@ -891,8 +860,9 @@ def test_archive_service_expands_user_home(monkeypatch, tmp_path):
         lambda: _ArchiveSettings(enabled=True, directory=Path("~/archive")),
     )
 
-    [file] = conversation_archive_service.list_archive_files()
-    assert file.name == archive_path.name
+    page = conversation_archive_service.read_archive_records(filename=archive_path.name, limit=10, offset=0)
+    assert page.total == 1
+    assert page.records[0]["_archive_file"] == archive_path.name
 
 
 def test_archive_service_keeps_readable_records_before_corrupt_gzip_tail(monkeypatch, tmp_path):

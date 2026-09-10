@@ -726,6 +726,8 @@ class _RefreshFailoverProxy(Protocol):
         http_status: int | None = None,
         *,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+        retry_after_seconds: float | None = None,
+        burst_cooldown_recorded: bool = False,
     ) -> Any: ...
 
 
@@ -1243,7 +1245,6 @@ class _WebSocketRequestState:
     websocket_stream_lease: AccountLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     thread_affinity_last_touch_at: float = field(default_factory=time.monotonic)
-    suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
@@ -1965,6 +1966,29 @@ def _selection_api_key_fair_share_threshold_pct(
     return _api_key_fair_share_threshold_pct_from_settings(settings)
 
 
+def opportunistic_admission_account_scope(settings: object, api_key: ApiKeyData | None) -> set[str] | None:
+    """Account ids an opportunistic admission check may consider; ``None`` is the whole pool.
+
+    The API key's account-assignment scope applies first. Single-account
+    routing then narrows the scope to the selected account, or to nothing when
+    no account is selected or the selected one lies outside the key's scope.
+    This is the exact scope ``ProxyService.check_opportunistic_admission`` has
+    always applied, hoisted so read-only callers (the pool-exhaustion probe)
+    share one definition with the admission gate.
+    """
+    scoped_account_ids = (
+        set(api_key.assigned_account_ids) if api_key is not None and api_key.account_assignment_scope_enabled else None
+    )
+    if getattr(settings, "routing_strategy", None) != "single_account":
+        return scoped_account_ids
+    selected_account_id = (getattr(settings, "single_account_id", None) or "").strip()
+    if not selected_account_id:
+        return set()
+    if scoped_account_ids is None or selected_account_id in scoped_account_ids:
+        return {selected_account_id}
+    return set()
+
+
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
     if not isinstance(payload, dict):
         return None
@@ -2068,6 +2092,24 @@ def websocket_connect_transport_failure_code(
         connect_error.code if connect_error else None,
         connect_error.type if connect_error else None,
     )
+
+
+UPSTREAM_STREAM_TRANSPORTS = frozenset({"auto", "http", "websocket"})
+_UPSTREAM_STREAM_TRANSPORT_DEFAULT = "auto"
+
+
+def configured_upstream_stream_transport(dashboard_settings: Any) -> str:
+    """Return the operator-configured upstream stream transport.
+
+    The dashboard row is the only source. The legacy ``"default"`` sentinel
+    (which used to defer to the removed ``CODEX_LB_UPSTREAM_STREAM_TRANSPORT``
+    env var) and any unknown value resolve to ``"auto"`` so a settings-cache
+    snapshot taken before the data migration ran behaves like the migrated row.
+    """
+    configured = getattr(dashboard_settings, "upstream_stream_transport", None)
+    if configured in UPSTREAM_STREAM_TRANSPORTS:
+        return cast(str, configured)
+    return _UPSTREAM_STREAM_TRANSPORT_DEFAULT
 
 
 def upstream_websocket_transport_recently_failed() -> bool:

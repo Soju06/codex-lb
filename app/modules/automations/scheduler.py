@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.automations.repository import AutomationsRepository
@@ -21,18 +19,6 @@ logger = logging.getLogger(__name__)
 # scheduler keeps ``interval_seconds`` as a constructor field so tests can
 # exercise the loop with a short interval.
 _INTERVAL_SECONDS = 30
-
-
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 @dataclass(slots=True)

@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Literal, Protocol, TypeVar, cast
+from typing import Literal
 
 from app.core import startup as startup_module
 from app.core.config.settings import Settings, get_settings
@@ -19,6 +17,7 @@ from app.core.metrics.prometheus import (
     http_bridge_spool_cleanup_duration_seconds,
     http_bridge_spool_cleanup_runs_total,
 )
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
 from app.db.session import SessionLocal, get_background_session
@@ -178,18 +177,6 @@ def _next_cleanup_delay_seconds(
 
 def _merge_backlog_signal(previous: bool, attempted: bool | None) -> bool:
     return previous if attempted is None else attempted
-
-
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 def _abandoned_bridge_retention_seconds(

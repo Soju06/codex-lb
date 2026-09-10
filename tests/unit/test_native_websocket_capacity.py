@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 from pathlib import Path
 
 import pytest
 
 import app.core.clients.native_egress as native
 from app.core.clients.native_buffer import BufferBudget, BufferFull, ByteQueue, event_size
+from app.core.types import JsonValue
 from tests.unit.test_native_egress import _write_helper
 
 
@@ -27,7 +29,12 @@ for line in sys.stdin:
     if kind == "websocket_connect":
         emit("websocket_open", status=101, headers=[])
     elif kind == "websocket_send_text":
-        if cmd["text"] in ("burst", "flood"):
+        if cmd["text"] == "interpreted-burst":
+            for index in range(128):
+                payload = {"type": "response.text.delta", "delta": str(index)}
+                emit("websocket_responses_text", text=json.dumps(payload),
+                     event_type=payload["type"], payload=payload)
+        elif cmd["text"] in ("burst", "flood"):
             for index in range(128):
                 emit("websocket_text", text=str(index) + ("x" * 512 if cmd["text"] == "flood" else ""))
             emit("websocket_text", text='{"type":"response.completed"}')
@@ -77,6 +84,46 @@ async def test_concurrent_bursts_keep_acknowledgements_and_completion(tmp_path: 
         await client.aclose()
     assert not client._cancel_tasks
     assert client._websocket_budget.used == 0
+
+
+def test_interpreted_payload_allocations_count_toward_shared_budget() -> None:
+    payload: dict[str, JsonValue] = {"type": "response.text.delta", "delta": ["chunk" for _ in range(512)]}
+    message = native.NativeWebSocketMessage(
+        kind="text",
+        text=json.dumps(payload),
+        responses_interpreted=True,
+        event_type="response.text.delta",
+        payload=payload,
+    )
+    size = native._websocket_message_size(message)
+    assert size >= event_size(payload) + event_size(message.text)
+    connection = BufferBudget(size + 64)
+    shared = BufferBudget(size + 64)
+    queue = ByteQueue[native.NativeWebSocketMessage | BaseException](connection, shared, native._websocket_message_size)
+    queue.put_nowait(message)
+    assert shared.used == size + 64
+    with pytest.raises(BufferFull):
+        queue.put_nowait(message)
+    queue.put_nowait(RuntimeError("terminal"))
+    assert queue.get_nowait() is message
+    assert isinstance(queue.get_nowait(), RuntimeError)
+    assert shared.used == connection.used == 0
+
+
+@pytest.mark.asyncio
+async def test_interpreted_burst_preserves_metadata_beyond_former_count_limit(tmp_path: Path) -> None:
+    client = _capacity_helper(tmp_path)
+    try:
+        socket = await _connect(client)
+        await socket.send_text("interpreted-burst")
+        for index in range(128):
+            message = await socket.receive()
+            assert message.responses_interpreted is True
+            assert message.event_type == "response.text.delta"
+            assert message.payload == {"type": "response.text.delta", "delta": str(index)}
+        assert client._websocket_budget.used == 0
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio

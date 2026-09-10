@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +9,6 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
-from app.core.config.settings import get_settings
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import DashboardSettings
@@ -28,15 +28,23 @@ class SettingsRepository:
         row = DashboardSettings(
             id=_SETTINGS_ID,
             sticky_threads_enabled=True,
-            upstream_stream_transport="default",
+            upstream_stream_transport="auto",
             prohibit_fast_mode=False,
-            http_downstream_transport_policy=get_settings().http_downstream_transport_policy,
-            proxy_account_response_create_limit=get_settings().proxy_account_response_create_limit,
-            proxy_account_stream_limit=get_settings().proxy_account_stream_limit,
-            proxy_account_stream_recovery_reserve=get_settings().proxy_account_stream_recovery_reserve,
-            proxy_api_key_fair_share_congestion_threshold_pct=(
-                get_settings().proxy_api_key_fair_share_congestion_threshold_pct
-            ),
+            # Account-capacity overrides are tri-state: NULL inherits the
+            # process environment value at read time. The first-boot seed must
+            # stay NULL — copying the env value here would freeze it as a
+            # dashboard override while the UI keeps labelling the (possibly
+            # changed) env value as the inherited baseline.
+            proxy_account_response_create_limit=None,
+            proxy_account_stream_limit=None,
+            proxy_account_stream_recovery_reserve=None,
+            proxy_api_key_fair_share_congestion_threshold_pct=None,
+            # C2-2 routing/overload: same tri-state rule, seeded NULL.
+            proxy_overload_isolation_seconds=None,
+            proxy_account_error_rate_weighting_enabled=None,
+            proxy_account_inflight_penalty_pct=None,
+            proxy_account_lease_token_weight=None,
+            proxy_account_lease_ttl_seconds=None,
             upstream_proxy_routing_enabled=False,
             upstream_proxy_default_pool_id=None,
             prefer_earlier_reset_accounts=True,
@@ -48,9 +56,9 @@ class SettingsRepository:
             relative_availability_power=2.0,
             relative_availability_top_k=5,
             single_account_id=None,
-            openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
+            subscription_overflow_source_id=None,
+            subscription_overflow_drain_until=None,
             dashboard_session_ttl_seconds=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
-            warmup_model=get_settings().warmup_model,
             import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
@@ -78,6 +86,10 @@ class SettingsRepository:
             limit_warmup_staggered_idle_enabled=False,
             request_log_retention_days=None,
             usage_history_retention_days=None,
+            # C2-3 resilience toggles: NULL = inherit the env alias / default.
+            soft_drain_enabled=None,
+            deterministic_failover_enabled=None,
+            circuit_breaker_enabled=None,
         )
         self._session.add(row)
         try:
@@ -106,6 +118,18 @@ class SettingsRepository:
         clear_proxy_account_stream_recovery_reserve: bool = False,
         proxy_api_key_fair_share_congestion_threshold_pct: int | None = None,
         clear_proxy_api_key_fair_share_congestion_threshold_pct: bool = False,
+        # C2-2 routing/overload
+        proxy_overload_isolation_seconds: int | None = None,
+        clear_proxy_overload_isolation_seconds: bool = False,
+        proxy_account_error_rate_weighting_enabled: bool | None = None,
+        clear_proxy_account_error_rate_weighting_enabled: bool = False,
+        proxy_account_inflight_penalty_pct: float | None = None,
+        clear_proxy_account_inflight_penalty_pct: bool = False,
+        proxy_account_lease_token_weight: float | None = None,
+        clear_proxy_account_lease_token_weight: bool = False,
+        proxy_account_lease_ttl_seconds: float | None = None,
+        clear_proxy_account_lease_ttl_seconds: bool = False,
+        # end C2-2 routing/overload
         upstream_proxy_routing_enabled: bool | None = None,
         upstream_proxy_default_pool_id: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
@@ -117,6 +141,10 @@ class SettingsRepository:
         relative_availability_power: float | None = None,
         relative_availability_top_k: int | None = None,
         single_account_id: str | None = None,
+        subscription_overflow_source_id: str | None = None,
+        clear_subscription_overflow_source: bool = False,
+        subscription_overflow_drain_until: datetime | None = None,
+        set_subscription_overflow_drain_until: bool = False,
         openai_cache_affinity_max_age_seconds: int | None = None,
         dashboard_session_ttl_seconds: int | None = None,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
@@ -146,6 +174,30 @@ class SettingsRepository:
         usage_history_retention_days: int | None = None,
         clear_request_log_retention: bool = False,
         clear_usage_history_retention: bool = False,
+        # C2-3 resilience toggles (tri-state like the retention overrides)
+        soft_drain_enabled: bool | None = None,
+        clear_soft_drain_enabled: bool = False,
+        deterministic_failover_enabled: bool | None = None,
+        clear_deterministic_failover_enabled: bool = False,
+        circuit_breaker_enabled: bool | None = None,
+        clear_circuit_breaker_enabled: bool = False,
+        # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
+        # inherit, neither = untouched).
+        upstream_connect_timeout_seconds: float | None = None,
+        clear_upstream_connect_timeout_seconds: bool = False,
+        proxy_request_budget_seconds: float | None = None,
+        clear_proxy_request_budget_seconds: bool = False,
+        compact_request_budget_seconds: float | None = None,
+        clear_compact_request_budget_seconds: bool = False,
+        transcription_request_budget_seconds: float | None = None,
+        clear_transcription_request_budget_seconds: bool = False,
+        stream_idle_timeout_seconds: float | None = None,
+        clear_stream_idle_timeout_seconds: bool = False,
+        proxy_downstream_websocket_idle_timeout_seconds: float | None = None,
+        clear_proxy_downstream_websocket_idle_timeout_seconds: bool = False,
+        sse_keepalive_interval_seconds: float | None = None,
+        clear_sse_keepalive_interval_seconds: bool = False,
+        # end C2-1 timeouts
         expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -187,6 +239,28 @@ class SettingsRepository:
             settings.proxy_api_key_fair_share_congestion_threshold_pct = (
                 proxy_api_key_fair_share_congestion_threshold_pct
             )
+        # C2-2 routing/overload
+        if clear_proxy_overload_isolation_seconds:
+            settings.proxy_overload_isolation_seconds = None
+        elif proxy_overload_isolation_seconds is not None:
+            settings.proxy_overload_isolation_seconds = proxy_overload_isolation_seconds
+        if clear_proxy_account_error_rate_weighting_enabled:
+            settings.proxy_account_error_rate_weighting_enabled = None
+        elif proxy_account_error_rate_weighting_enabled is not None:
+            settings.proxy_account_error_rate_weighting_enabled = proxy_account_error_rate_weighting_enabled
+        if clear_proxy_account_inflight_penalty_pct:
+            settings.proxy_account_inflight_penalty_pct = None
+        elif proxy_account_inflight_penalty_pct is not None:
+            settings.proxy_account_inflight_penalty_pct = proxy_account_inflight_penalty_pct
+        if clear_proxy_account_lease_token_weight:
+            settings.proxy_account_lease_token_weight = None
+        elif proxy_account_lease_token_weight is not None:
+            settings.proxy_account_lease_token_weight = proxy_account_lease_token_weight
+        if clear_proxy_account_lease_ttl_seconds:
+            settings.proxy_account_lease_ttl_seconds = None
+        elif proxy_account_lease_ttl_seconds is not None:
+            settings.proxy_account_lease_ttl_seconds = proxy_account_lease_ttl_seconds
+        # end C2-2 routing/overload
         if upstream_proxy_routing_enabled is not None:
             settings.upstream_proxy_routing_enabled = upstream_proxy_routing_enabled
         settings.upstream_proxy_default_pool_id = upstream_proxy_default_pool_id or None
@@ -208,6 +282,15 @@ class SettingsRepository:
             settings.relative_availability_top_k = relative_availability_top_k
         if single_account_id is not None or routing_strategy == "single_account":
             settings.single_account_id = single_account_id
+        # Independent of ``single_account_id``: its NULL write is coupled to the
+        # routing strategy, whereas the overflow designation clears through an
+        # explicit flag and never touches (or is touched by) routing_strategy.
+        if clear_subscription_overflow_source:
+            settings.subscription_overflow_source_id = None
+        elif subscription_overflow_source_id is not None:
+            settings.subscription_overflow_source_id = subscription_overflow_source_id
+        if set_subscription_overflow_drain_until:
+            settings.subscription_overflow_drain_until = subscription_overflow_drain_until
         if openai_cache_affinity_max_age_seconds is not None:
             settings.openai_cache_affinity_max_age_seconds = openai_cache_affinity_max_age_seconds
         if dashboard_session_ttl_seconds is not None:
@@ -263,7 +346,7 @@ class SettingsRepository:
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
         # Retention overrides are tri-state: a clear flag resets the column to
-        # NULL (inherit the deprecated env alias); a non-None value stores an
+        # NULL (not configured = retention disabled); a non-None value stores an
         # override; neither leaves the stored value untouched.
         if clear_request_log_retention:
             settings.request_log_retention_days = None
@@ -273,6 +356,47 @@ class SettingsRepository:
             settings.usage_history_retention_days = None
         elif usage_history_retention_days is not None:
             settings.usage_history_retention_days = usage_history_retention_days
+        # C2-3 resilience toggles: clear flag resets to NULL (inherit the env
+        # alias / code default); a non-None value is dashboard-owned.
+        if clear_soft_drain_enabled:
+            settings.soft_drain_enabled = None
+        elif soft_drain_enabled is not None:
+            settings.soft_drain_enabled = soft_drain_enabled
+        if clear_deterministic_failover_enabled:
+            settings.deterministic_failover_enabled = None
+        elif deterministic_failover_enabled is not None:
+            settings.deterministic_failover_enabled = deterministic_failover_enabled
+        if clear_circuit_breaker_enabled:
+            settings.circuit_breaker_enabled = None
+        elif circuit_breaker_enabled is not None:
+            settings.circuit_breaker_enabled = circuit_breaker_enabled
+        # C2-1 timeouts
+        for column_name, value, clear in (
+            (
+                "upstream_connect_timeout_seconds",
+                upstream_connect_timeout_seconds,
+                clear_upstream_connect_timeout_seconds,
+            ),
+            ("proxy_request_budget_seconds", proxy_request_budget_seconds, clear_proxy_request_budget_seconds),
+            ("compact_request_budget_seconds", compact_request_budget_seconds, clear_compact_request_budget_seconds),
+            (
+                "transcription_request_budget_seconds",
+                transcription_request_budget_seconds,
+                clear_transcription_request_budget_seconds,
+            ),
+            ("stream_idle_timeout_seconds", stream_idle_timeout_seconds, clear_stream_idle_timeout_seconds),
+            (
+                "proxy_downstream_websocket_idle_timeout_seconds",
+                proxy_downstream_websocket_idle_timeout_seconds,
+                clear_proxy_downstream_websocket_idle_timeout_seconds,
+            ),
+            ("sse_keepalive_interval_seconds", sse_keepalive_interval_seconds, clear_sse_keepalive_interval_seconds),
+        ):
+            if clear:
+                setattr(settings, column_name, None)
+            elif value is not None:
+                setattr(settings, column_name, value)
+        # end C2-1 timeouts
         # Force the optimistic-version CAS to run even when the payload makes no
         # net change. `version_id_col` only raises `StaleDataError` when the
         # flush emits an ORM UPDATE; a full-row save that assigns values all
@@ -292,6 +416,22 @@ class SettingsRepository:
             on_committed=get_upstream_route_cache().clear if upstream_route_inputs_changed else None,
         )
         return settings
+
+    async def clear_subscription_overflow_source_if_matches(self, source_id: str, *, drain_until: datetime) -> bool:
+        """Turn overflow off and arm the drain deadline when ``source_id`` is designated.
+
+        No commit: the caller (the model-source delete route) commits the clear
+        together with the source delete so a designated-but-deleted source can
+        never persist. ``DashboardSettings.version`` is the version_id_col, so a
+        concurrent settings writer still surfaces as ``StaleDataError`` at that
+        commit.
+        """
+        settings = await self.get_or_create()
+        if settings.subscription_overflow_source_id != source_id:
+            return False
+        settings.subscription_overflow_source_id = None
+        settings.subscription_overflow_drain_until = drain_until
+        return True
 
     async def commit_refresh(
         self, settings: DashboardSettings, *, on_committed: Callable[[], None] | None = None

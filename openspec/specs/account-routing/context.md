@@ -118,3 +118,9 @@ During a later mixed-version rollout, old replicas can still execute the old
 early-recovery policy. Schema compatibility is not proof that every replica has
 the new evidence gate; verify all serving images after rollout. See [spec.md](spec.md)
 and the `treat-usage-limit-as-quota-exhaustion` change for the precise scenarios.
+
+## Code-less burst 429 admission signal (2026-09-10)
+
+A code-less upstream HTTP 429 indicates short-lived account saturation, not confirmed quota exhaustion. A separate local burst deadline steers fresh movable traffic away for 5–30 seconds (upstream Retry-After is bounded), without changing persisted account status, normal cooldown, or the overload-isolation window. For example, fresh traffic prefers B while A is bursting, but an established sticky/file/response owner on A is retained. A single eligible account remains usable.
+
+The burst signal is recorded immediately even for keyed streams; account-health penalties still use their existing settlement ordering, and deferred writes do not restart a completed burst cooldown. Restarting a replica clears the advisory signal; other replicas may have different evidence. No operator setting or schema change is introduced. Coded rate-limit and quota errors retain their existing handling. See [spec.md](spec.md).

@@ -12,9 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import usage as usage_core
 from app.core.clients.proxy import stream_responses
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, QuotaPlannerDecision
@@ -583,6 +585,9 @@ class QuotaWarmupService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         upstream_account_id = account.chatgpt_account_id
         usage = WarmupUsage(input_tokens=0, output_tokens=0, cached_input_tokens=0, reasoning_tokens=None)
+        # C2-3 resilience toggles: background probe, no request snapshot to
+        # inherit; take one here so the breaker gate follows the dashboard.
+        bind_resilience_toggles(await get_settings_cache().get())
         async for event_block in stream_responses(
             payload,
             headers,

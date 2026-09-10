@@ -16,6 +16,14 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
 ## Constraints
 
+- Public-contract SSE filtering uses the `response.*` and `error` families, so
+  diagnostics such as `responsesapi.websocket_timing` cannot interrupt strict
+  client event deserializers. For example, a timing diagnostic between a text
+  delta and `response.completed` is removed while both standard events remain.
+  Native Codex requests retain vendor events; OpenAI-shaped backend requests
+  follow public filtering. This does not normalize string-valued
+  `response.instructions` or establish full IntelliJ compatibility (Refs #1934).
+
 - Upstream limitations determine available modalities, tool output, and overflow handling.
 - `store=true` is rejected; responses are not persisted.
 - `include` values must be on the documented allowlist.
@@ -331,3 +339,9 @@ for the hard-owner and cross-account turn-state requirements.
 - Post-deploy: correlate retry-circuit `opened`, `half_open`, and `reset` events with bridge `pending` and `response_events_seen` diagnostics. An idle `pending=0` retirement must not precede an immediate two-failure cooldown.
 - Post-deploy: monitor `previous_response_not_found` on `/backend-api/codex/responses`; recurring spikes show repeated continuity failures, which may come from malformed client identifiers, server-side invalidation, or connection lifecycle. Clients should perform the documented full-context retry without `previous_response_id`. Investigate socket-lifecycle remediation only when a separate close-reason, reconnect, or transport diagnostic correlates with the failures.
 - Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`
+
+## Rebuilt HTTP framing sanitation (2026-09-10)
+
+When JSON is decoded and rebuilt for upstream HTTP, inbound hop-by-hop fields and every Connection-nominated header are dropped before native client identity is classified. Mandatory selected credentials/account and JSON negotiation headers are then regenerated. For example, `Connection: authorization, x-client-hop` cannot forward `x-client-hop` or suppress the selected upstream Authorization. A Connection-nominated originator or User-Agent cannot manufacture native identity. Non-nominated native identity and continuity retain their existing behavior.
+
+The shared HTTP builder covers canonical backend and v1 compaction egress while preserving synthesized subscription hints. The existing compact trailing-slash URLs remain HTTP 405 with the OpenAI-compatible error envelope and no upstream dispatch; this backport does not add aliases. Responses streaming canonical/trailing-slash routes retain their existing routing behavior and final 429 propagation. Source: upstream 5be82ef4; no transport dependency or database migration is imported. See [spec.md](spec.md).

@@ -597,7 +597,7 @@ HTTPRoute namespace according to the selected Gateway implementation.
 
 For application-specific Gateway setup, see the
 [Kubernetes deployment guide](../../../docs/deployment/kubernetes.md#application-specific-gateway)
-and the [owning OpenSpec change](../../../openspec/changes/create-application-gateway/).
+and the owning OpenSpec capability, [`deployment-networking`](../../../openspec/specs/deployment-networking/spec.md).
 
 ### nginx annotations and responses sticky routing
 
@@ -622,7 +622,7 @@ Advanced snippet-based keys via `ingress.responses.nginx.configurationSnippet` a
 helm upgrade codex-lb oci://ghcr.io/soju06/charts/codex-lb <your values...>
 ```
 
-**Upgrade warning:** this release adds a render-time timing guard. Existing
+**Upgrade warning:** the chart enforces a render-time timing guard. Existing
 values files, `--set` overrides, or values retained by
 `helm upgrade --reuse-values` with
 `terminationGracePeriodSeconds < config.shutdownDrainTimeoutSeconds + 32`

@@ -106,9 +106,10 @@ async def _enable_guest_access(client: AsyncClient) -> dict[str, object]:
     assert read_settings.status_code == 200
     current = read_settings.json()
     assert isinstance(current, dict)
-    current["guestAccessEnabled"] = True
 
-    response = await client.put("/api/settings", json=current)
+    # Minimal patch: echoing the GET body back would freeze every inheritable
+    # effective value (account caps, timeouts) as an explicit dashboard value.
+    response = await client.put("/api/settings", json={"guestAccessEnabled": True})
     assert response.status_code == 200
     payload = response.json()
     assert isinstance(payload, dict)
@@ -127,17 +128,9 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_update.status_code == 403
     assert blocked_update.json()["error"]["code"] == "read_only_access"
 
-    blocked_export = await client.post("/api/accounts/missing/export")
-    assert blocked_export.status_code == 403
-    assert blocked_export.json()["error"]["code"] == "read_only_access"
-
     blocked_auth_export = await client.post("/api/accounts/missing/export/auth")
     assert blocked_auth_export.status_code == 403
     assert blocked_auth_export.json()["error"]["code"] == "read_only_access"
-
-    blocked_opencode_export = await client.post("/api/accounts/missing/export/opencode-auth")
-    assert blocked_opencode_export.status_code == 403
-    assert blocked_opencode_export.json()["error"]["code"] == "read_only_access"
 
     blocked_alias = await client.put("/api/accounts/missing/alias", json={"alias": "Guest Alias"})
     assert blocked_alias.status_code == 403
@@ -200,10 +193,6 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
 
 
 async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
-    blocked_archive = await client.get("/api/conversation-archive/files")
-    assert blocked_archive.status_code == 403
-    assert blocked_archive.json()["error"]["code"] == "admin_access_required"
-
     blocked_archive_records = await client.get(
         "/api/conversation-archive/records",
         params={"requestId": "guest-hidden"},
@@ -216,10 +205,6 @@ async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_conversation_archive_routes_remain_available_to_admin(async_client):
-    files = await async_client.get("/api/conversation-archive/files")
-    assert files.status_code == 200
-    assert isinstance(files.json(), list)
-
     records = await async_client.get(
         "/api/conversation-archive/records",
         params={"requestId": "admin-fixture"},
@@ -305,6 +290,7 @@ async def test_proxy_family_consensus_controls_local_proxy_and_dashboard_access(
 ) -> None:
     monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.0.0.2")
+    get_settings.cache_clear()
     _set_dashboard_auth_env(
         monkeypatch,
         mode=DashboardAuthMode.STANDARD,
@@ -377,6 +363,7 @@ async def test_proxy_unauthenticated_client_cidr_rejects_projected_client_when_r
     monkeypatch,
 ):
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    get_settings.cache_clear()
     _set_proxy_unauthenticated_client_cidrs_env(
         monkeypatch,
         cidrs="192.168.65.1/32",
@@ -753,9 +740,7 @@ async def test_trusted_header_mode_rejects_guest_login_without_proxy_header(asyn
     proxy_headers = {"Remote-User": "admin@example.com"}
     read_settings = await async_client.get("/api/settings", headers=proxy_headers)
     assert read_settings.status_code == 200
-    current = read_settings.json()
-    current["guestAccessEnabled"] = True
-    enabled_settings = await async_client.put("/api/settings", json=current, headers=proxy_headers)
+    enabled_settings = await async_client.put("/api/settings", json={"guestAccessEnabled": True}, headers=proxy_headers)
     assert enabled_settings.status_code == 200
     assert enabled_settings.json()["guestPasswordConfigured"] is False
 
@@ -802,11 +787,9 @@ async def test_trusted_header_mode_blocks_passwordless_guest_without_proxy_heade
 
             read_settings = await local_client.get("/api/settings", headers=proxy_headers)
             assert read_settings.status_code == 200
-            current = read_settings.json()
-            current["guestAccessEnabled"] = True
             enabled_settings = await local_client.put(
                 "/api/settings",
-                json=current,
+                json={"guestAccessEnabled": True},
                 headers=proxy_headers,
             )
             assert enabled_settings.status_code == 200
@@ -853,11 +836,9 @@ async def test_trusted_header_mode_blocks_passwordless_guest_login_on_proxied_lo
 
             read_settings = await local_client.get("/api/settings", headers=proxy_headers)
             assert read_settings.status_code == 200
-            current = read_settings.json()
-            current["guestAccessEnabled"] = True
             enabled_settings = await local_client.put(
                 "/api/settings",
-                json=current,
+                json={"guestAccessEnabled": True},
                 headers=proxy_headers,
             )
             assert enabled_settings.status_code == 200

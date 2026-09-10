@@ -181,3 +181,41 @@ async def test_settings_audit_changed_fields_multi_update(async_client) -> None:
         "sticky_reallocation_budget_threshold_pct",
         "sticky_reallocation_primary_budget_threshold_pct",
     }, f"unexpected changed_fields set: {changed!r}"
+
+
+async def _create_responses_model_source(async_client, name: str) -> str:
+    response = await async_client.post(
+        "/api/model-sources/",
+        json={
+            "name": name,
+            "baseUrl": "http://127.0.0.1:9/v1",
+            "supportsChatCompletions": True,
+            "supportsResponses": True,
+            "models": [{"model": "gpt-5.1", "supportsStreaming": True}],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_settings_audit_records_subscription_overflow_designation_and_drain(async_client) -> None:
+    """The overflow designation cannot ride the parametrized table above: its value
+    must be a real Responses-capable source id, and clearing it also arms the
+    read-only drain deadline, which must be reported as its own changed field."""
+    source_id = await _create_responses_model_source(async_client, "overflow-audit")
+
+    designated = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": source_id})
+    assert designated.status_code == 200
+    designated_log = await _wait_for_settings_changed_audit_log()
+    assert designated_log.details is not None
+    assert json.loads(designated_log.details)["changed_fields"] == ["subscription_overflow_source_id"]
+
+    cleared = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": None})
+    assert cleared.status_code == 200
+    cleared_log = await _wait_for_settings_changed_audit_log(after_id=designated_log.id)
+    assert cleared_log.details is not None
+    assert json.loads(cleared_log.details)["changed_fields"] == [
+        "subscription_overflow_source_id",
+        "subscription_overflow_drain_until",
+    ]

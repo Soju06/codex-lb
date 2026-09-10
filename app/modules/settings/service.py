@@ -1,14 +1,29 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
 
-from app.core.config.settings import get_settings
+from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
+
+# Re-exported: the resolver lives in ``app.core.config.inheritable`` so hot
+# paths in ``app.core`` share it without importing this module.
+from app.core.config.inheritable import InheritableValue as InheritableValue
+from app.core.config.inheritable import SettingScalar as SettingScalar
+from app.core.config.inheritable import SettingSource as SettingSource
+from app.core.config.inheritable import resolve_inheritable as resolve_inheritable
+from app.core.config.settings import Settings, get_settings
+from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
+from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
-    canonicalize_additional_quota_key,
-    get_additional_quota_definition,
+    normalize_additional_quota_key,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +40,14 @@ class DashboardSettingsData:
     proxy_account_stream_recovery_reserve_override: int | None
     proxy_api_key_fair_share_congestion_threshold_pct: int
     proxy_api_key_fair_share_congestion_threshold_pct_override: int | None
+    # C2-2 routing/overload: effective values; the dashboard-stored value and
+    # the fallbacks are reported through ``provenance``.
+    proxy_overload_isolation_seconds: int
+    proxy_account_error_rate_weighting_enabled: bool
+    proxy_account_inflight_penalty_pct: float
+    proxy_account_lease_token_weight: float
+    proxy_account_lease_ttl_seconds: float
+    # end C2-2 routing/overload
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -36,6 +59,8 @@ class DashboardSettingsData:
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
+    subscription_overflow_source_id: str | None
+    subscription_overflow_drain_until: datetime | None
     openai_cache_affinity_max_age_seconds: int
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
@@ -67,7 +92,25 @@ class DashboardSettingsData:
     usage_history_retention_days: int
     request_log_retention_override_days: int | None
     usage_history_retention_override_days: int | None
+    # C2-3 resilience toggles: effective values (dashboard column, else the
+    # deprecated env alias, else the code default); provenance carries the source.
+    soft_drain_enabled: bool
+    deterministic_failover_enabled: bool
+    circuit_breaker_enabled: bool
     version: int
+    # C2-1 timeouts: effective values (dashboard column, else environment,
+    # else code default); the column values are exposed through ``provenance``.
+    upstream_connect_timeout_seconds: float
+    proxy_request_budget_seconds: float
+    compact_request_budget_seconds: float
+    transcription_request_budget_seconds: float
+    stream_idle_timeout_seconds: float
+    proxy_downstream_websocket_idle_timeout_seconds: float
+    sse_keepalive_interval_seconds: float
+    # end C2-1 timeouts
+    # Effective value, source and fallbacks of every inheritable setting, keyed
+    # by setting name; the settings API exposes it as ``provenance``.
+    provenance: Mapping[str, InheritableValue[Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +127,18 @@ class DashboardSettingsUpdateData:
     clear_proxy_account_stream_recovery_reserve: bool
     proxy_api_key_fair_share_congestion_threshold_pct: int | None
     clear_proxy_api_key_fair_share_congestion_threshold_pct: bool
+    # C2-2 routing/overload (tri-state: value = store, clear flag = inherit)
+    proxy_overload_isolation_seconds: int | None
+    clear_proxy_overload_isolation_seconds: bool
+    proxy_account_error_rate_weighting_enabled: bool | None
+    clear_proxy_account_error_rate_weighting_enabled: bool
+    proxy_account_inflight_penalty_pct: float | None
+    clear_proxy_account_inflight_penalty_pct: bool
+    proxy_account_lease_token_weight: float | None
+    clear_proxy_account_lease_token_weight: bool
+    proxy_account_lease_ttl_seconds: float | None
+    clear_proxy_account_lease_ttl_seconds: bool
+    # end C2-2 routing/overload
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -95,6 +150,12 @@ class DashboardSettingsUpdateData:
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
+    # Tri-state designation: value = designate, clear flag = off, neither =
+    # untouched. The drain deadline is written only when its set flag is on.
+    subscription_overflow_source_id: str | None
+    clear_subscription_overflow_source: bool
+    subscription_overflow_drain_until: datetime | None
+    set_subscription_overflow_drain_until: bool
     openai_cache_affinity_max_age_seconds: int
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
@@ -121,11 +182,36 @@ class DashboardSettingsUpdateData:
     guest_access_enabled: bool
     limit_warmup_staggered_idle_enabled: bool
     # Tri-state retention overrides: value set = store, clear flag = reset to
-    # NULL (inherit the deprecated env alias), neither = leave untouched.
+    # NULL (not configured = retention disabled), neither = leave untouched.
     request_log_retention_override_days: int | None
     usage_history_retention_override_days: int | None
     clear_request_log_retention_override: bool
     clear_usage_history_retention_override: bool
+    # C2-3 resilience toggles: tri-state (value = store, clear flag = back to
+    # NULL so the env alias / default applies again, neither = untouched).
+    soft_drain_enabled: bool | None = None
+    clear_soft_drain_enabled: bool = False
+    deterministic_failover_enabled: bool | None = None
+    clear_deterministic_failover_enabled: bool = False
+    circuit_breaker_enabled: bool | None = None
+    clear_circuit_breaker_enabled: bool = False
+    # C2-1 timeouts (tri-state like the caps: value = store, clear = NULL,
+    # neither = untouched).
+    upstream_connect_timeout_seconds: float | None = None
+    clear_upstream_connect_timeout_seconds: bool = False
+    proxy_request_budget_seconds: float | None = None
+    clear_proxy_request_budget_seconds: bool = False
+    compact_request_budget_seconds: float | None = None
+    clear_compact_request_budget_seconds: bool = False
+    transcription_request_budget_seconds: float | None = None
+    clear_transcription_request_budget_seconds: bool = False
+    stream_idle_timeout_seconds: float | None = None
+    clear_stream_idle_timeout_seconds: bool = False
+    proxy_downstream_websocket_idle_timeout_seconds: float | None = None
+    clear_proxy_downstream_websocket_idle_timeout_seconds: bool = False
+    sse_keepalive_interval_seconds: float | None = None
+    clear_sse_keepalive_interval_seconds: bool = False
+    # end C2-1 timeouts
 
 
 class SettingsService:
@@ -134,75 +220,7 @@ class SettingsService:
 
     async def get_settings(self) -> DashboardSettingsData:
         row = await self._repository.get_or_create()
-        return DashboardSettingsData(
-            sticky_threads_enabled=row.sticky_threads_enabled,
-            upstream_stream_transport=row.upstream_stream_transport,
-            prohibit_fast_mode=row.prohibit_fast_mode,
-            http_downstream_transport_policy=row.http_downstream_transport_policy,
-            proxy_account_response_create_limit=_effective_response_create_limit(
-                row.proxy_account_response_create_limit
-            ),
-            proxy_account_response_create_limit_override=row.proxy_account_response_create_limit,
-            proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
-            proxy_account_stream_limit_override=row.proxy_account_stream_limit,
-            proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
-                row.proxy_account_stream_recovery_reserve
-            ),
-            proxy_account_stream_recovery_reserve_override=row.proxy_account_stream_recovery_reserve,
-            proxy_api_key_fair_share_congestion_threshold_pct=_effective_api_key_fair_share_threshold_pct(
-                row.proxy_api_key_fair_share_congestion_threshold_pct
-            ),
-            proxy_api_key_fair_share_congestion_threshold_pct_override=(
-                row.proxy_api_key_fair_share_congestion_threshold_pct
-            ),
-            upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
-            upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
-            prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
-            prefer_earlier_reset_window=row.prefer_earlier_reset_window,
-            show_reset_credit_badges=row.show_reset_credit_badges,
-            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
-            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
-            routing_strategy=row.routing_strategy,
-            relative_availability_power=row.relative_availability_power,
-            relative_availability_top_k=row.relative_availability_top_k,
-            single_account_id=row.single_account_id,
-            openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
-            dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
-            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
-                row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
-            ),
-            http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
-            sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
-            sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
-            sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
-            additional_quota_routing_policies=_parse_additional_quota_routing_policies(
-                row.additional_quota_routing_policies_json
-            ),
-            warmup_model=row.warmup_model,
-            import_without_overwrite=row.import_without_overwrite,
-            totp_required_on_login=row.totp_required_on_login,
-            totp_configured=row.totp_secret_encrypted is not None,
-            api_key_auth_enabled=row.api_key_auth_enabled,
-            hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
-            limit_warmup_enabled=row.limit_warmup_enabled,
-            limit_warmup_windows=row.limit_warmup_windows,
-            limit_warmup_model=row.limit_warmup_model,
-            limit_warmup_prompt=row.limit_warmup_prompt,
-            limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
-            limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
-            limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
-            limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
-            weekly_pace_working_days=row.weekly_pace_working_days,
-            weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
-            guest_access_enabled=row.guest_access_enabled,
-            guest_password_configured=row.guest_password_hash is not None,
-            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
-            request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
-            usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
-            request_log_retention_override_days=row.request_log_retention_days,
-            usage_history_retention_override_days=row.usage_history_retention_days,
-            version=row.version,
-        )
+        return _settings_data(row)
 
     async def update_settings(
         self,
@@ -231,6 +249,18 @@ class SettingsService:
             clear_proxy_api_key_fair_share_congestion_threshold_pct=(
                 payload.clear_proxy_api_key_fair_share_congestion_threshold_pct
             ),
+            # C2-2 routing/overload
+            proxy_overload_isolation_seconds=payload.proxy_overload_isolation_seconds,
+            clear_proxy_overload_isolation_seconds=payload.clear_proxy_overload_isolation_seconds,
+            proxy_account_error_rate_weighting_enabled=payload.proxy_account_error_rate_weighting_enabled,
+            clear_proxy_account_error_rate_weighting_enabled=payload.clear_proxy_account_error_rate_weighting_enabled,
+            proxy_account_inflight_penalty_pct=payload.proxy_account_inflight_penalty_pct,
+            clear_proxy_account_inflight_penalty_pct=payload.clear_proxy_account_inflight_penalty_pct,
+            proxy_account_lease_token_weight=payload.proxy_account_lease_token_weight,
+            clear_proxy_account_lease_token_weight=payload.clear_proxy_account_lease_token_weight,
+            proxy_account_lease_ttl_seconds=payload.proxy_account_lease_ttl_seconds,
+            clear_proxy_account_lease_ttl_seconds=payload.clear_proxy_account_lease_ttl_seconds,
+            # end C2-2 routing/overload
             upstream_proxy_routing_enabled=payload.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
@@ -242,6 +272,10 @@ class SettingsService:
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
             single_account_id=payload.single_account_id,
+            subscription_overflow_source_id=payload.subscription_overflow_source_id,
+            clear_subscription_overflow_source=payload.clear_subscription_overflow_source,
+            subscription_overflow_drain_until=payload.subscription_overflow_drain_until,
+            set_subscription_overflow_drain_until=payload.set_subscription_overflow_drain_until,
             openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=payload.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
@@ -275,113 +309,202 @@ class SettingsService:
             usage_history_retention_days=payload.usage_history_retention_override_days,
             clear_request_log_retention=payload.clear_request_log_retention_override,
             clear_usage_history_retention=payload.clear_usage_history_retention_override,
+            # C2-3 resilience toggles
+            soft_drain_enabled=payload.soft_drain_enabled,
+            clear_soft_drain_enabled=payload.clear_soft_drain_enabled,
+            deterministic_failover_enabled=payload.deterministic_failover_enabled,
+            clear_deterministic_failover_enabled=payload.clear_deterministic_failover_enabled,
+            circuit_breaker_enabled=payload.circuit_breaker_enabled,
+            clear_circuit_breaker_enabled=payload.clear_circuit_breaker_enabled,
+            # C2-1 timeouts
+            upstream_connect_timeout_seconds=payload.upstream_connect_timeout_seconds,
+            clear_upstream_connect_timeout_seconds=payload.clear_upstream_connect_timeout_seconds,
+            proxy_request_budget_seconds=payload.proxy_request_budget_seconds,
+            clear_proxy_request_budget_seconds=payload.clear_proxy_request_budget_seconds,
+            compact_request_budget_seconds=payload.compact_request_budget_seconds,
+            clear_compact_request_budget_seconds=payload.clear_compact_request_budget_seconds,
+            transcription_request_budget_seconds=payload.transcription_request_budget_seconds,
+            clear_transcription_request_budget_seconds=payload.clear_transcription_request_budget_seconds,
+            stream_idle_timeout_seconds=payload.stream_idle_timeout_seconds,
+            clear_stream_idle_timeout_seconds=payload.clear_stream_idle_timeout_seconds,
+            proxy_downstream_websocket_idle_timeout_seconds=payload.proxy_downstream_websocket_idle_timeout_seconds,
+            clear_proxy_downstream_websocket_idle_timeout_seconds=(
+                payload.clear_proxy_downstream_websocket_idle_timeout_seconds
+            ),
+            sse_keepalive_interval_seconds=payload.sse_keepalive_interval_seconds,
+            clear_sse_keepalive_interval_seconds=payload.clear_sse_keepalive_interval_seconds,
+            # end C2-1 timeouts
         )
-        return DashboardSettingsData(
-            sticky_threads_enabled=row.sticky_threads_enabled,
-            upstream_stream_transport=row.upstream_stream_transport,
-            prohibit_fast_mode=row.prohibit_fast_mode,
-            http_downstream_transport_policy=row.http_downstream_transport_policy,
-            proxy_account_response_create_limit=_effective_response_create_limit(
-                row.proxy_account_response_create_limit
-            ),
-            proxy_account_response_create_limit_override=row.proxy_account_response_create_limit,
-            proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
-            proxy_account_stream_limit_override=row.proxy_account_stream_limit,
-            proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
-                row.proxy_account_stream_recovery_reserve
-            ),
-            proxy_account_stream_recovery_reserve_override=row.proxy_account_stream_recovery_reserve,
-            proxy_api_key_fair_share_congestion_threshold_pct=_effective_api_key_fair_share_threshold_pct(
-                row.proxy_api_key_fair_share_congestion_threshold_pct
-            ),
-            proxy_api_key_fair_share_congestion_threshold_pct_override=(
-                row.proxy_api_key_fair_share_congestion_threshold_pct
-            ),
-            upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
-            upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
-            prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
-            prefer_earlier_reset_window=row.prefer_earlier_reset_window,
-            show_reset_credit_badges=row.show_reset_credit_badges,
-            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
-            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
-            routing_strategy=row.routing_strategy,
-            relative_availability_power=row.relative_availability_power,
-            relative_availability_top_k=row.relative_availability_top_k,
-            single_account_id=row.single_account_id,
-            openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
-            dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
-            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
-                row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
-            ),
-            http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
-            sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
-            sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
-            sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
-            additional_quota_routing_policies=_parse_additional_quota_routing_policies(
-                row.additional_quota_routing_policies_json
-            ),
-            warmup_model=row.warmup_model,
-            import_without_overwrite=row.import_without_overwrite,
-            totp_required_on_login=row.totp_required_on_login,
-            totp_configured=row.totp_secret_encrypted is not None,
-            api_key_auth_enabled=row.api_key_auth_enabled,
-            hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
-            limit_warmup_enabled=row.limit_warmup_enabled,
-            limit_warmup_windows=row.limit_warmup_windows,
-            limit_warmup_model=row.limit_warmup_model,
-            limit_warmup_prompt=row.limit_warmup_prompt,
-            limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
-            limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
-            limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
-            limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
-            weekly_pace_working_days=row.weekly_pace_working_days,
-            weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
-            guest_access_enabled=row.guest_access_enabled,
-            guest_password_configured=row.guest_password_hash is not None,
-            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
-            request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
-            usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
-            request_log_retention_override_days=row.request_log_retention_days,
-            usage_history_retention_override_days=row.usage_history_retention_days,
-            version=row.version,
-        )
+        return _settings_data(row)
 
 
 _ROUTING_POLICIES = frozenset({"inherit", "normal", "burn_first", "preserve"})
 
-
-def _effective_response_create_limit(value: int | None) -> int:
-    return get_settings().proxy_account_response_create_limit if value is None else value
-
-
-def _effective_stream_limit(value: int | None) -> int:
-    return get_settings().proxy_account_stream_limit if value is None else value
-
-
-def _effective_stream_recovery_reserve(value: int | None) -> int:
-    return get_settings().proxy_account_stream_recovery_reserve if value is None else value
-
-
-def _effective_api_key_fair_share_threshold_pct(value: int | None) -> int:
-    return get_settings().proxy_api_key_fair_share_congestion_threshold_pct if value is None else value
-
-
-def _effective_request_log_retention(value: int | None) -> int:
-    # Dashboard value (non-NULL) wins; the deprecated env alias applies while unset.
-    return get_settings().request_log_retention_days if value is None else value
-
-
-def _effective_usage_history_retention(value: int | None) -> int:
-    return get_settings().usage_history_retention_days if value is None else value
+# Inheritable settings with an environment fallback: the ``dashboard_settings``
+# column, the ``Settings`` field and the provenance key share one name.
+_ENVIRONMENT_INHERITABLE_SETTINGS = (
+    "proxy_account_response_create_limit",
+    "proxy_account_stream_limit",
+    "proxy_account_stream_recovery_reserve",
+    "proxy_api_key_fair_share_congestion_threshold_pct",
+    *DASHBOARD_TIMEOUT_SETTINGS,  # C2-1 timeouts
+    # C2-2 routing/overload
+    "proxy_overload_isolation_seconds",
+    "proxy_account_error_rate_weighting_enabled",
+    "proxy_account_inflight_penalty_pct",
+    "proxy_account_lease_token_weight",
+    "proxy_account_lease_ttl_seconds",
+    # end C2-2 routing/overload
+)
+# Retention has no environment fallback: NULL = never set from the dashboard =
+# disabled; 0 = explicitly disabled.
+_RETENTION_DISABLED_DAYS = 0
 
 
-def _normalize_additional_quota_key(raw_quota_key: str) -> str | None:
-    canonical_key = canonicalize_additional_quota_key(quota_key=raw_quota_key, limit_name=raw_quota_key)
-    if canonical_key is None:
-        return None
-    if get_additional_quota_definition(canonical_key) is None:
-        return None
-    return canonical_key
+def _resolve_environment_inheritable(row: DashboardSettings, name: str) -> InheritableValue[Any]:
+    default = Settings.model_fields[name].default
+    # ``Settings`` always carries every field; startup-settings fakes in tests
+    # may carry only the fields they exercise, so fall back to the code default.
+    return resolve_inheritable(getattr(row, name), getattr(get_settings(), name, default), default)
+
+
+def _resolve_environment_toggle(row: DashboardSettings, name: str) -> InheritableValue[bool]:
+    # C2-3 resilience toggles: same precedence as the integer caps, typed bool.
+    default = bool(Settings.model_fields[name].default)
+    return resolve_inheritable(getattr(row, name), bool(getattr(get_settings(), name, default)), default)
+
+
+def warn_environment_shadowed_by_dashboard(row: DashboardSettings, settings: Settings | None = None) -> list[str]:
+    """Log one startup WARN naming env vars that are set but ignored because the dashboard owns the value.
+
+    Only settings whose environment variable is explicitly set (``model_fields_set``)
+    AND whose dashboard column is non-NULL are reported, so an operator who
+    edits the variable learns why nothing changed. Returns the names for tests.
+    """
+    environment = settings if settings is not None else get_settings()
+    shadowed = [
+        name
+        for name in _ENVIRONMENT_INHERITABLE_SETTINGS
+        if name in environment.model_fields_set and getattr(row, name, None) is not None
+    ]
+    if shadowed:
+        logger.warning(
+            "environment value(s) ignored because the dashboard owns the setting: %s "
+            "(Settings -> Advanced; clear the dashboard value to inherit the environment again)",
+            ", ".join(f"CODEX_LB_{name.upper()}" for name in shadowed),
+        )
+    return shadowed
+
+
+def _resolve_inheritable_settings(
+    row: DashboardSettings,
+) -> dict[str, InheritableValue[Any]]:
+    resolved: dict[str, InheritableValue[Any]] = {
+        name: _resolve_environment_inheritable(row, name) for name in _ENVIRONMENT_INHERITABLE_SETTINGS
+    }
+    resolved["request_log_retention_days"] = resolve_inheritable(
+        row.request_log_retention_days, None, _RETENTION_DISABLED_DAYS
+    )
+    resolved["usage_history_retention_days"] = resolve_inheritable(
+        row.usage_history_retention_days, None, _RETENTION_DISABLED_DAYS
+    )
+    for name in RESILIENCE_TOGGLE_SETTINGS:  # C2-3 resilience toggles
+        resolved[name] = _resolve_environment_toggle(row, name)
+    return resolved
+
+
+def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
+    resolved = _resolve_inheritable_settings(row)
+    return DashboardSettingsData(
+        sticky_threads_enabled=row.sticky_threads_enabled,
+        upstream_stream_transport=row.upstream_stream_transport,
+        prohibit_fast_mode=row.prohibit_fast_mode,
+        http_downstream_transport_policy=row.http_downstream_transport_policy,
+        proxy_account_response_create_limit=resolved["proxy_account_response_create_limit"].value,
+        proxy_account_response_create_limit_override=row.proxy_account_response_create_limit,
+        proxy_account_stream_limit=resolved["proxy_account_stream_limit"].value,
+        proxy_account_stream_limit_override=row.proxy_account_stream_limit,
+        proxy_account_stream_recovery_reserve=resolved["proxy_account_stream_recovery_reserve"].value,
+        proxy_account_stream_recovery_reserve_override=row.proxy_account_stream_recovery_reserve,
+        proxy_api_key_fair_share_congestion_threshold_pct=(
+            resolved["proxy_api_key_fair_share_congestion_threshold_pct"].value
+        ),
+        proxy_api_key_fair_share_congestion_threshold_pct_override=(
+            row.proxy_api_key_fair_share_congestion_threshold_pct
+        ),
+        # C2-2 routing/overload
+        proxy_overload_isolation_seconds=resolved["proxy_overload_isolation_seconds"].value,
+        proxy_account_error_rate_weighting_enabled=resolved["proxy_account_error_rate_weighting_enabled"].value,
+        proxy_account_inflight_penalty_pct=resolved["proxy_account_inflight_penalty_pct"].value,
+        proxy_account_lease_token_weight=resolved["proxy_account_lease_token_weight"].value,
+        proxy_account_lease_ttl_seconds=resolved["proxy_account_lease_ttl_seconds"].value,
+        # end C2-2 routing/overload
+        upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
+        upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
+        prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
+        prefer_earlier_reset_window=row.prefer_earlier_reset_window,
+        show_reset_credit_badges=row.show_reset_credit_badges,
+        auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
+        show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
+        routing_strategy=row.routing_strategy,
+        relative_availability_power=row.relative_availability_power,
+        relative_availability_top_k=row.relative_availability_top_k,
+        single_account_id=row.single_account_id,
+        subscription_overflow_source_id=row.subscription_overflow_source_id,
+        subscription_overflow_drain_until=row.subscription_overflow_drain_until,
+        openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
+        dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
+            row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
+        ),
+        http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
+        sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
+        sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
+        sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
+        additional_quota_routing_policies=_parse_additional_quota_routing_policies(
+            row.additional_quota_routing_policies_json
+        ),
+        warmup_model=row.warmup_model,
+        import_without_overwrite=row.import_without_overwrite,
+        totp_required_on_login=row.totp_required_on_login,
+        totp_configured=row.totp_secret_encrypted is not None,
+        api_key_auth_enabled=row.api_key_auth_enabled,
+        hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
+        limit_warmup_enabled=row.limit_warmup_enabled,
+        limit_warmup_windows=row.limit_warmup_windows,
+        limit_warmup_model=row.limit_warmup_model,
+        limit_warmup_prompt=row.limit_warmup_prompt,
+        limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
+        limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
+        limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
+        limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
+        weekly_pace_working_days=row.weekly_pace_working_days,
+        weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
+        guest_access_enabled=row.guest_access_enabled,
+        guest_password_configured=row.guest_password_hash is not None,
+        limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+        request_log_retention_days=resolved["request_log_retention_days"].value,
+        usage_history_retention_days=resolved["usage_history_retention_days"].value,
+        request_log_retention_override_days=row.request_log_retention_days,
+        usage_history_retention_override_days=row.usage_history_retention_days,
+        # C2-3 resilience toggles
+        soft_drain_enabled=bool(resolved["soft_drain_enabled"].value),
+        deterministic_failover_enabled=bool(resolved["deterministic_failover_enabled"].value),
+        circuit_breaker_enabled=bool(resolved["circuit_breaker_enabled"].value),
+        version=row.version,
+        # C2-1 timeouts
+        upstream_connect_timeout_seconds=float(resolved["upstream_connect_timeout_seconds"].value),
+        proxy_request_budget_seconds=float(resolved["proxy_request_budget_seconds"].value),
+        compact_request_budget_seconds=float(resolved["compact_request_budget_seconds"].value),
+        transcription_request_budget_seconds=float(resolved["transcription_request_budget_seconds"].value),
+        stream_idle_timeout_seconds=float(resolved["stream_idle_timeout_seconds"].value),
+        proxy_downstream_websocket_idle_timeout_seconds=float(
+            resolved["proxy_downstream_websocket_idle_timeout_seconds"].value
+        ),
+        sse_keepalive_interval_seconds=float(resolved["sse_keepalive_interval_seconds"].value),
+        # end C2-1 timeouts
+        provenance=resolved,
+    )
 
 
 def _parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
@@ -397,7 +520,7 @@ def _parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
     for quota_key, policy in parsed.items():
         if not isinstance(quota_key, str) or not isinstance(policy, str):
             continue
-        normalized_quota_key = _normalize_additional_quota_key(quota_key)
+        normalized_quota_key = normalize_additional_quota_key(quota_key)
         policy = policy.strip().lower()
         if normalized_quota_key and policy in _ROUTING_POLICIES:
             policies[normalized_quota_key] = policy
@@ -409,7 +532,7 @@ def _dump_additional_quota_routing_policies(policies: dict[str, str]) -> str:
     for quota_key, policy in policies.items():
         if not isinstance(quota_key, str) or not isinstance(policy, str):
             continue
-        normalized_quota_key = _normalize_additional_quota_key(quota_key)
+        normalized_quota_key = normalize_additional_quota_key(quota_key)
         normalized_policy = policy.strip().lower()
         if normalized_quota_key is not None and normalized_policy in _ROUTING_POLICIES:
             normalized[normalized_quota_key] = normalized_policy

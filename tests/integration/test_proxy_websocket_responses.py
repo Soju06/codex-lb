@@ -4660,6 +4660,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
         "model": "gpt-5.4",
         "input": "first",
         "promptCacheKey": "thread_a",
+        "service_tier": "priority",
         "stream": True,
     }
     second_request = {
@@ -4696,6 +4697,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
+                "service_tier": "priority",
                 "store": False,
                 "include": [],
                 "prompt_cache_key": "thread_a",

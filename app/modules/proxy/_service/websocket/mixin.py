@@ -89,6 +89,7 @@ from app.core.resilience.network_recovery import (
     ProcessNetworkRecovery,
     process_network_error_code,
 )
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
@@ -764,13 +765,34 @@ class _ParsedUpstreamWebSocketFrame:
     event: OpenAIEvent | None
 
 
-def _parse_upstream_websocket_text_frame(text: str) -> _ParsedUpstreamWebSocketFrame:
+def _parse_upstream_websocket_text_frame(
+    text: str,
+    *,
+    message: Any | None = None,
+) -> _ParsedUpstreamWebSocketFrame:
     """Decode an upstream websocket text frame exactly once.
 
     The payload is json-decoded a single time, the event type is classified
     from the parsed dict, and pydantic validation runs only for lifecycle
     frames (the only events whose validated model fields the proxy consumes).
+    Native Responses frames supply the already-decoded payload alongside their
+    trusted classification, so this path reuses that object and avoids a
+    second JSON decode. Public error conversion still runs in this policy layer.
     """
+    native_payload = getattr(message, "payload", None)
+    native_event_type = getattr(message, "event_type", None)
+    if (
+        getattr(message, "responses_interpreted", False)
+        and isinstance(native_payload, dict)
+        and (native_event_type is None or isinstance(native_event_type, str))
+    ):
+        event = parse_sse_event_payload(native_payload) if native_event_type in _LIFECYCLE_EVENT_TYPES else None
+        return _ParsedUpstreamWebSocketFrame(
+            payload=native_payload,
+            event_type=native_event_type,
+            event=event,
+        )
+
     try:
         raw_payload = json.loads(text)
     except json.JSONDecodeError:
@@ -796,7 +818,11 @@ async def _websocket_archive_request_id_for_message(
     # Archive attribution only needs the payload dict (response ids and error
     # fields are read from it directly), so reuse the caller's parsed frame
     # when provided and never re-validate non-lifecycle deltas.
-    frame = parsed_frame if parsed_frame is not None else _parse_upstream_websocket_text_frame(message.text)
+    frame = (
+        parsed_frame
+        if parsed_frame is not None
+        else _parse_upstream_websocket_text_frame(message.text, message=message)
+    )
     async with pending_lock:
         request_state = _websocket_archive_request_state_for_payload(
             pending_requests,
@@ -1020,7 +1046,7 @@ async def _process_and_forward_upstream_websocket_text(
     codex_session_affinity: bool,
     clock: Clock | None = None,
 ) -> bool:
-    parsed_frame = _parse_upstream_websocket_text_frame(text)
+    parsed_frame = _parse_upstream_websocket_text_frame(text, message=message)
     archive_request_id = await _websocket_archive_request_id_for_message(
         message,
         pending_requests=pending_requests,
@@ -1429,6 +1455,9 @@ class _WebSocketMixin:
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         runtime_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
+        # C2-3 resilience toggles: bound for this connection's task; every
+        # upstream connect rebinds from a fresh snapshot.
+        bind_resilience_toggles(settings, startup_settings=runtime_settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         openai_cache_affinity_max_age_seconds = settings.openai_cache_affinity_max_age_seconds
@@ -3563,6 +3592,12 @@ class _WebSocketMixin:
                 request_state.conversation_id,
             ) = _request_log_client_fields(headers)
         base_settings = _facade().get_settings()
+        # C2-3 resilience toggles: fresh dashboard snapshot per upstream connect
+        # (before any runtime lock), bound for the client's breaker gate.
+        resilience = bind_resilience_toggles(
+            await _facade().get_settings_cache().get(),
+            startup_settings=base_settings,
+        )
         deadline = _websocket_connect_deadline(
             request_state,
             _facade()._stream_request_budget_seconds(
@@ -3808,7 +3843,7 @@ class _WebSocketMixin:
                         request_state=request_state,
                         attempt=attempt + 1,
                         max_attempts=max_attempts,
-                        deterministic_failover_enabled=getattr(base_settings, "deterministic_failover_enabled", True),
+                        deterministic_failover_enabled=resilience.deterministic_failover_enabled,
                         require_preferred_account=require_preferred_account,
                     )
                 if action == "failover_next":
@@ -4752,6 +4787,14 @@ class _WebSocketMixin:
                 optional_kwargs={
                     "route": route,
                     "allow_direct_egress": route is None,
+                    # This opener already selected a subscription account.
+                    # Preconnect without a model has no hint; reused sockets
+                    # retain their original handshake, as in the Codex CLI.
+                    "routing_hint": (
+                        (request_state.model, request_state.requested_service_tier)
+                        if request_state is not None and request_state.model is not None
+                        else None
+                    ),
                 },
             )
             if request_state is not None:

@@ -10,6 +10,7 @@ import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section"
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
 import { ModelSourcesSettings } from "@/features/model-sources/components/model-sources-settings";
+import { useModelSources } from "@/features/model-sources/hooks/use-model-sources";
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
@@ -20,8 +21,10 @@ import { GuestAccessSettings } from "@/features/settings/components/guest-access
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
+import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
+import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream-timeout-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
@@ -34,6 +37,16 @@ import { getErrorMessageOrNull } from "@/utils/errors";
 const TotpSettings = lazy(() =>
   import("@/features/settings/components/totp-settings").then((m) => ({ default: m.TotpSettings })),
 );
+
+// C2-2 routing/overload: a layer move (dashboard <-> inherited) without a
+// value change must still reset the routing form's drafts.
+const ROUTING_OVERLOAD_PROVENANCE_KEYS = [
+  "proxy_overload_isolation_seconds",
+  "proxy_account_error_rate_weighting_enabled",
+  "proxy_account_inflight_penalty_pct",
+  "proxy_account_lease_token_weight",
+  "proxy_account_lease_ttl_seconds",
+] as const;
 
 const FIREWALL_LAYOUT_QUERY_KEYS = [
   ["accounts", "list"],
@@ -49,6 +62,7 @@ export function SettingsPage() {
   const { settingsQuery, updateSettingsMutation } = useSettings();
   const [initialRetryError, setInitialRetryError] = useState<string | null>(null);
   const { accountsQuery } = useAccounts();
+  const { modelSourcesQuery } = useModelSources();
   const {
     upstreamProxyQuery,
     createEndpointMutation,
@@ -205,13 +219,23 @@ export function SettingsPage() {
                    settings.proxyAccountStreamRecoveryReserveOverride,
                    settings.proxyApiKeyFairShareCongestionThresholdPct,
                    settings.proxyApiKeyFairShareCongestionThresholdPctOverride,
+                   settings.proxyOverloadIsolationSeconds,
+                   settings.proxyAccountErrorRateWeightingEnabled,
+                   settings.proxyAccountInflightPenaltyPct,
+                   settings.proxyAccountLeaseTokenWeight,
+                   settings.proxyAccountLeaseTtlSeconds,
+                   ...ROUTING_OVERLOAD_PROVENANCE_KEYS.map((name) => settings.provenance?.[name]?.source ?? ""),
                 ].join(":")}
                 settings={settings}
                 accounts={accountsQuery.data ?? []}
                 accountsLoading={accountsQuery.isLoading}
+                modelSources={modelSourcesQuery.data?.sources ?? []}
+                modelSourcesLoading={modelSourcesQuery.isLoading}
+                modelSourcesError={modelSourcesQuery.error !== null}
                 busy={controlsDisabled}
                 onSave={handleSave}
               />
+              <ResilienceSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               {upstreamProxyQuery.data ? (
                 <UpstreamProxySettings
                   admin={upstreamProxyQuery.data}
@@ -235,6 +259,21 @@ export function SettingsPage() {
                   settings.usageHistoryRetentionOverrideDays,
                   settings.requestLogRetentionDays,
                   settings.usageHistoryRetentionDays,
+                ].join(":")}
+                settings={settings}
+                busy={controlsDisabled}
+                onSave={handleSave}
+              />
+              <UpstreamTimeoutSettings
+                key={[
+                  settings.version,
+                  settings.upstreamConnectTimeoutSeconds,
+                  settings.proxyRequestBudgetSeconds,
+                  settings.compactRequestBudgetSeconds,
+                  settings.transcriptionRequestBudgetSeconds,
+                  settings.streamIdleTimeoutSeconds,
+                  settings.proxyDownstreamWebsocketIdleTimeoutSeconds,
+                  settings.sseKeepaliveIntervalSeconds,
                 ].join(":")}
                 settings={settings}
                 busy={controlsDisabled}

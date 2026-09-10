@@ -23,6 +23,7 @@ from sqlalchemy import select, update
 
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage as _FakeUpstreamMessage
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
 from app.core.utils.request_id import (
@@ -213,7 +214,6 @@ def _make_app_settings(
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         stream_idle_timeout_seconds=300.0,
         openai_prompt_cache_key_derivation_enabled=True,
     )
@@ -291,24 +291,6 @@ def _install_bridge_settings_with_limits(
             prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
         ),
     )
-
-
-class _FakeUpstreamMessage:
-    def __init__(
-        self,
-        kind: str,
-        *,
-        text: str | None = None,
-        close_code: int | None = None,
-        error: str | None = None,
-        error_code: str | None = None,
-    ) -> None:
-        self.kind = kind
-        self.text = text
-        self.close_code = close_code
-        self.error = error
-        self.error_code = error_code
-        self.data = None
 
 
 class _FakeBridgeUpstreamWebSocket:
@@ -1670,6 +1652,85 @@ class _PrewarmingBridgeUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
         )
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_routing_hint_is_first_handshake_only(async_client, monkeypatch):
+    from app.core.clients import proxy_websocket as websocket_client
+    from app.core.clients.native_egress import NativeWebSocketMessage, NativeWebSocketRequest
+
+    # Given real bridge selection, request preparation and client header building.
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(async_client, "acc_hint_reuse", "hint-reuse@example.com")
+    account = await _get_account(account_id)
+    upstream = _FakeBridgeUpstreamWebSocket("resp_hint_reuse")
+    handshakes: list[NativeWebSocketRequest] = []
+
+    async def select_account(self, deadline, **kwargs):
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def ensure_fresh(self, target, *, force=False, timeout_seconds):
+        return target
+
+    async def receive_native():
+        message = await upstream.receive()
+        return NativeWebSocketMessage(kind=message.kind, text=message.text)
+
+    async def close_native(code=1000, reason=""):
+        await upstream.close()
+
+    native_socket = Mock()
+    native_socket.send_text = upstream.send_text
+    native_socket.receive = receive_native
+    native_socket.close = close_native
+    native_socket.response_header = upstream.response_header
+
+    async def connect_native(request: NativeWebSocketRequest):
+        handshakes.append(request)
+        return native_socket
+
+    native_client = Mock()
+    native_client.websocket = connect_native
+    monkeypatch.setattr(websocket_client, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+
+    # When an anchored second turn changes tier on the existing connection.
+    with anyio.fail_after(_TEST_SYNC_TIMEOUT_SECONDS):
+        first = await _collect_sse_events(
+            async_client,
+            "/v1/responses",
+            json_body={
+                "model": "gpt-5.4",
+                "input": "first",
+                "prompt_cache_key": "routing-hint-reuse",
+                "service_tier": "priority",
+                "stream": True,
+            },
+            headers={"X-Codex-Routing-Hint": "model=spoof;tier=flex"},
+        )
+        first_response_id = next(event["response"]["id"] for event in first if event["type"] == "response.completed")
+        second = await _collect_sse_events(
+            async_client,
+            "/v1/responses",
+            json_body={
+                "model": "gpt-5.4",
+                "input": "second",
+                "prompt_cache_key": "routing-hint-reuse",
+                "previous_response_id": first_response_id,
+                "stream": True,
+            },
+        )
+
+    # Then the first header remains; second-frame tier absence never reconnects.
+    assert any(event["type"] == "response.completed" for event in second)
+    assert len(handshakes) == 1
+    assert handshakes[0].headers.get("x-codex-routing-hint") == "model=gpt-5.4;tier=priority"
+    frames = [json.loads(text) for text in upstream.sent_text]
+    assert len(frames) == 2
+    assert frames[0]["service_tier"] == "priority"
+    assert "service_tier" not in frames[1]
+    assert frames[1]["previous_response_id"] == first_response_id
+
+
 class _TurnStateBridgeUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     def __init__(self, turn_state: str) -> None:
         super().__init__()
@@ -1726,6 +1787,7 @@ async def test_v1_responses_http_bridge_fails_over_confirmed_proxy_connect_befor
     second_account = await _get_account(second_account_id)
     upstream = _FakeBridgeUpstreamWebSocket()
     connect_calls: list[str | None] = []
+    routing_hints: list[tuple[str, str | None] | None] = []
     selection_exclusions: list[set[str]] = []
     backed_off_accounts: list[str] = []
     handle_stream_error = AsyncMock()
@@ -1747,7 +1809,8 @@ async def test_v1_responses_http_bridge_fails_over_confirmed_proxy_connect_befor
         account_id_header,
         **kwargs,
     ):
-        del headers, access_token, kwargs
+        del headers, access_token
+        routing_hints.append(kwargs.get("routing_hint"))
         connect_calls.append(account_id_header)
         if len(connect_calls) == 1:
             raise proxy_module.ProxyResponseError(
@@ -1778,6 +1841,7 @@ async def test_v1_responses_http_bridge_fails_over_confirmed_proxy_connect_befor
             "instructions": "Return exactly OK.",
             "input": "hello",
             "prompt_cache_key": "http-bridge-proxy-connect-failover-key",
+            "service_tier": "priority",
             "stream": True,
         },
     )
@@ -1786,6 +1850,7 @@ async def test_v1_responses_http_bridge_fails_over_confirmed_proxy_connect_befor
     assert len(connect_calls) == 2
     assert selection_exclusions == [set(), {first_account.id}]
     assert backed_off_accounts == [first_account.id]
+    assert routing_hints == [("gpt-5.4", "priority"), ("gpt-5.4", "priority")]
     assert len(upstream.sent_text) == 1
     handle_stream_error.assert_not_awaited()
 

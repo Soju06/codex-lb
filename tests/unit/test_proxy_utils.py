@@ -12902,6 +12902,7 @@ async def test_compact_responses_without_trigger_canonicalization_hits_upstream_
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
         compact_request_budget_seconds = 7200.0
+        stream_idle_timeout_seconds = 7200.0
         trace_channels = frozenset()
 
     monkeypatch.setattr(

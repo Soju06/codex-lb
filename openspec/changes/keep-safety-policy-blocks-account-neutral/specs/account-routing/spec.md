@@ -15,13 +15,18 @@ with no matching tool output — MUST qualify. An upstream safety-policy
 rejection with code `misalignment_policy_violation`, HTTP status 400 when a
 status is known, and a message beginning `This request was blocked by our
 safety systems.` MUST also qualify. A different code, a known non-400 status,
-or an unrelated message MUST keep its existing account-health handling. An
-account-scoped `invalid_request_error`, including the model-entitlement
+or an unrelated message MUST keep its existing account-health handling. The
+proxy MUST also leave account health untouched for the model-entitlement
 rejection `The '<model>' model is not supported when using Codex with a
-ChatGPT account.`, MUST NOT qualify and MUST keep its existing account-health
-handling. Skipping the penalty MUST be logged so the decision is observable,
-and MUST NOT change the failure classification, the failover decision, or the
-status and body returned to the client.
+ChatGPT account.`: that rejection is scoped to the named model and is not
+evidence about the account's ability to serve the models it is entitled to.
+Because upstream delivers that rejection on the streaming path with neither
+an error `code` nor an error `type`, which normalizes to the `upstream_error`
+fallback, the proxy MUST decide it from the message and the 400 status alone
+and MUST NOT require a particular normalized error code. Skipping the penalty
+MUST be logged so the decision is observable, and MUST NOT change the failure
+classification, the failover decision, or the status and body returned to the
+client.
 
 #### Scenario: Missing-tool-output rejection leaves account health untouched
 
@@ -37,10 +42,37 @@ status and body returned to the client.
 - **THEN** no serving account enters error backoff because of that payload
 - **AND** a session hard-pinned to one of those accounts is not failed with a saturated-hard-affinity selection error caused by that payload
 
+#### Scenario: Model-entitlement rejection leaves account health untouched
+
+- **GIVEN** account A is selected for a model it is not entitled to use
+- **WHEN** upstream returns HTTP 400 stating the model is not supported when using Codex with a ChatGPT account, with the error code normalized to `upstream_error` or to `invalid_request_error`
+- **THEN** the proxy does not increment account A's transient error count and does not mark it rate-limited, quota-exceeded, or permanently failed
+- **AND** the skip is logged
+
+#### Scenario: Model-entitlement rejection still fails over
+
+- **GIVEN** account A returned the model-entitlement rejection for the requested model
+- **WHEN** the proxy classifies that failure
+- **THEN** the classification and failover decision are unchanged, so an account with a different entitlement is still attempted
+- **AND** the status and body returned to the client when every attempt is exhausted are unchanged
+
+#### Scenario: A model no source can serve cannot poison subscription accounts
+
+- **GIVEN** a model that resolves to no enabled model source and therefore reaches subscription account selection
+- **WHEN** a client polls that model repeatedly and every subscription account returns the model-entitlement rejection
+- **THEN** no serving account enters error backoff because of those rejections
+- **AND** unrelated traffic hard-pinned to those accounts is not denied with a continuity-owner-unavailable or no-available-accounts selection error caused by them
+
 #### Scenario: Model-entitlement rejection still penalizes the account
 
-- **GIVEN** account A cannot use the requested model
-- **WHEN** upstream returns HTTP 400 `invalid_request_error` stating the model is not supported for a ChatGPT account
+- **GIVEN** account A is selected for a request
+- **WHEN** upstream fails with a non-400 status whose message matches the model-entitlement rejection
+- **THEN** the proxy records the account-health penalty for account A as before, because only a genuine HTTP 400 qualifies as the model-scoped rejection
+
+#### Scenario: A genuine upstream failure still penalizes the account
+
+- **GIVEN** account A is selected for a request
+- **WHEN** upstream fails with an `upstream_error` whose message is not the model-entitlement rejection
 - **THEN** the proxy records the account-health penalty for account A as before
 
 #### Scenario: Safety-policy rejection leaves account health untouched

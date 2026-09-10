@@ -11,6 +11,8 @@ import {
   type PasswordRemoveRequest,
   type PasswordSetupRequest,
   StatusResponseSchema,
+  type StepUpRequest,
+  StepUpResponseSchema,
   TotpSetupConfirmRequestSchema,
   TotpSetupStartResponseSchema,
   TotpVerifyRequestSchema,
@@ -87,6 +89,14 @@ export function disableTotp(payload: unknown) {
   const validated = TotpVerifyRequestSchema.parse(payload);
   return post(`${AUTH_BASE_PATH}/totp/disable`, StatusResponseSchema, {
     body: validated,
+  });
+}
+
+/** Re-verify the signed-in account for a sensitive change; the server picks the factors from the account. */
+export function stepUp(payload: StepUpRequest) {
+  return post(`${AUTH_BASE_PATH}/step-up`, StepUpResponseSchema, {
+    body: payload,
+    suppressUnauthorizedHandler: true,
   });
 }
 

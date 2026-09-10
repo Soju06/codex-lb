@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import pytest
 from fastapi.responses import JSONResponse
@@ -228,7 +228,13 @@ async def test_login_password_uses_configured_dashboard_session_ttl_for_cookie()
 
     assert "Max-Age=7200" in response.headers["set-cookie"]
     store.create_user_session.assert_called_once_with(
-        "user-1", 0, password_verified=True, totp_verified=False, ttl_seconds=7200, auth_method="password"
+        "user-1",
+        0,
+        password_verified=True,
+        totp_verified=False,
+        ttl_seconds=7200,
+        auth_method="password",
+        step_up_verified_at=ANY,
     )
     ip_limiter.check_and_increment.assert_awaited_once()
     ip_limiter.clear_for_key.assert_awaited_once()

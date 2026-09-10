@@ -28,11 +28,13 @@ from app.core.auth.dashboard_session_ttl import (
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
 from app.core.auth.dependencies import (
     ensure_dashboard_permission,
+    recorded_step_up,
     require_dashboard_permission,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
 from app.core.auth.external_identity import ExternalResolution, resolve_trusted_header_request
+from app.core.auth.step_up import STEP_UP_COOKIE, STEP_UP_UNAVAILABLE_MESSAGE, step_up_expires_at
 from app.core.bootstrap import (
     ensure_auto_bootstrap_token,
     get_bootstrap_validation_status,
@@ -50,6 +52,7 @@ from app.core.exceptions import (
     DashboardRateLimitError,
     DashboardValidationError,
 )
+from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
 from app.core.request_locality import is_local_request
 from app.db.models import DashboardUser
 from app.dependencies import (
@@ -69,12 +72,15 @@ from app.modules.dashboard_auth.schemas import (
     PasswordLoginRequest,
     PasswordRemoveRequest,
     PasswordSetupRequest,
+    StepUpRequest,
+    StepUpResponse,
     TotpSetupConfirmRequest,
     TotpSetupStartResponse,
     TotpVerifyRequest,
 )
 from app.modules.dashboard_auth.service import (
     DASHBOARD_SESSION_COOKIE,
+    DashboardSessionState,
     GuestAccessDisabledError,
     InvalidCredentialsError,
     OtherUsersExistError,
@@ -83,6 +89,7 @@ from app.modules.dashboard_auth.service import (
     PasswordSessionRequiredError,
     ResolvedUserSession,
     SessionDescription,
+    StepUpUnavailableError,
     TotpAlreadyConfiguredError,
     TotpEnrollmentRequiredError,
     TotpInvalidCodeError,
@@ -98,10 +105,13 @@ from app.modules.dashboard_auth.service import (
     get_invite_lookup_rate_limiter,
     get_login_failed_audit_rate_limiter,
     get_password_rate_limiter,
+    get_step_up_cookie_store,
     get_totp_rate_limiter,
     hash_password,
     log_login_failed,
+    session_clock,
     session_user,
+    step_up_state,
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
 from app.modules.dashboard_users.api import mapped_user_errors
@@ -139,6 +149,7 @@ async def _create_user_session(
     totp_verified: bool,
     auth_method: str,
     max_ttl_seconds: int | None = None,
+    step_up_verified_at: int | None = None,
 ) -> tuple[str, int]:
     settings = await get_settings_cache().get()
     ttl_seconds = _session_ttl_seconds(request, user, settings.dashboard_session_ttl_seconds)
@@ -151,6 +162,7 @@ async def _create_user_session(
         totp_verified=totp_verified,
         ttl_seconds=ttl_seconds,
         auth_method=auth_method,
+        step_up_verified_at=step_up_verified_at,
     )
     return session_id, ttl_seconds
 
@@ -232,7 +244,7 @@ async def _decorate_session_response(
                 }
             )
         return await _trusted_header_session_response(
-            response, resolution, context=context, password_session_active=fully_authorized
+            response, resolution, request=request, context=context, password_session_active=fully_authorized
         )
 
     # Disabled auth: the implicit admin holds every permission.
@@ -256,6 +268,7 @@ async def _trusted_header_session_response(
     response: DashboardAuthSessionResponse,
     resolution: ExternalResolution,
     *,
+    request: Request,
     context: DashboardAuthContext,
     password_session_active: bool,
 ) -> DashboardAuthSessionResponse:
@@ -263,6 +276,7 @@ async def _trusted_header_session_response(
 
     ``password_session_active`` reports whether a fallback password cookie also
     rode along, so the settings page keeps gating password management on it.
+    The account's step-up rides in the step-up cookie (no session cookie exists).
     """
 
     user = resolution.user
@@ -301,6 +315,7 @@ async def _trusted_header_session_response(
             "totp_enrollment_required": False,
             "access_summary": await context.service.access_summary() if manages_users else None,
             "assignable_role_ids": assignable_role_ids() if manages_users else [],
+            "step_up": step_up_state(user, verified_at=recorded_step_up(request, user)),
         }
     )
 
@@ -335,6 +350,49 @@ async def _require_password_session(request: Request, context: DashboardAuthCont
         return await context.service.require_password_session(request.cookies.get(DASHBOARD_SESSION_COOKIE))
     except PasswordSessionRequiredError as exc:
         raise DashboardAuthError("Authentication is required") from exc
+
+
+async def _resolve_account_session(request: Request, context: DashboardAuthContext) -> ResolvedUserSession:
+    """The signed-in account for the TOTP routes: the trusted-header account when the header is present,
+    else the password session — the same precedence as the session dependency, so the account that
+    enrols is the account the dashboard acts as.
+
+    A trusted-header account has no session cookie; it gets a stand-in state
+    (``password_verified=False``, ``auth_method=trusted_header``) so the same
+    routes can enrol its TOTP secret — the only step-up method such an account
+    can have without a local password.
+    """
+
+    header_account = await _header_account_session(request)
+    if header_account is not None:
+        return header_account
+    try:
+        return await context.service.require_password_session(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+    except PasswordSessionRequiredError as exc:
+        raise DashboardAuthError(str(exc)) from exc
+
+
+async def _header_account_session(request: Request) -> ResolvedUserSession | None:
+    request_auth = get_dashboard_request_auth(request)
+    if request_auth is None or request_auth.mode != DashboardAuthMode.TRUSTED_HEADER:
+        return None
+    resolution = await resolve_trusted_header_request(request, request_auth)
+    if resolution is None or resolution.user is None:
+        return None
+    now = session_clock()
+    state = DashboardSessionState(
+        expires_at=now,
+        issued_at=now,
+        kind="user",
+        user_id=resolution.user.id,
+        session_generation=resolution.user.session_generation,
+        auth_method=DashboardAuthMode.TRUSTED_HEADER.value,
+    )
+    return ResolvedUserSession(user=resolution.user, state=state)
+
+
+def _is_header_account(resolved: ResolvedUserSession) -> bool:
+    return not resolved.state.password_verified
 
 
 async def _require_management_session(
@@ -492,8 +550,14 @@ async def _issue_user_session_response(
     totp_verified: bool,
     auth_method: str,
 ) -> JSONResponse:
+    # Every caller just verified a password. That is a complete step-up only
+    # for an account without a TOTP secret; otherwise ``/totp/verify`` mints it.
     session_id, session_ttl_seconds = await _create_user_session(
-        request, user, totp_verified=totp_verified, auth_method=auth_method
+        request,
+        user,
+        totp_verified=totp_verified,
+        auth_method=auth_method,
+        step_up_verified_at=session_clock() if user.totp_secret_encrypted is None else None,
     )
     response = await _decorate_session_response(
         await context.service.describe_session(session_id), request=request, context=context
@@ -649,6 +713,7 @@ async def change_password(
         totp_verified=resolved.state.totp_verified,
         auth_method=resolved.state.auth_method or "password",
         max_ttl_seconds=remaining,
+        step_up_verified_at=resolved.state.step_up_verified_at,
     )
     response = JSONResponse(status_code=200, content={"status": "ok"})
     _set_session_cookie(response, session_id, request, max_age_seconds=session_ttl_seconds)
@@ -858,10 +923,10 @@ async def start_totp_setup(
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> TotpSetupStartResponse:
     _ensure_password_management_enabled(request)
-    await _require_password_session(request, context)
+    resolved = await _resolve_account_session(request, context)
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     try:
-        return await context.service.start_totp_setup(session_id=session_id)
+        return await context.service.start_totp_setup(session_id=session_id, resolved=resolved)
     except PasswordSessionRequiredError as exc:
         raise DashboardAuthError(str(exc)) from exc
     except TotpAlreadyConfiguredError as exc:
@@ -875,7 +940,7 @@ async def confirm_totp_setup(
     context: DashboardAuthContext = Depends(get_dashboard_auth_context),
 ) -> JSONResponse:
     _ensure_password_management_enabled(request)
-    await _require_password_session(request, context)
+    resolved = await _resolve_account_session(request, context)
 
     limiter = get_totp_rate_limiter()
     rate_key = _session_client_key(request, prefix="totp_setup_confirm")
@@ -891,6 +956,7 @@ async def confirm_totp_setup(
             secret=payload.secret,
             code=payload.code,
             actor_ip=_client_host(request),
+            resolved=resolved,
         )
     except PasswordSessionRequiredError as exc:
         raise DashboardAuthError(str(exc)) from exc
@@ -916,14 +982,14 @@ async def verify_totp(
     limiter = get_totp_rate_limiter()
     rate_key = _session_client_key(request, prefix="totp_verify")
     current_session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
-    try:
-        resolved = await context.service.require_password_session(current_session_id)
-    except PasswordSessionRequiredError as exc:
-        raise DashboardAuthError(str(exc)) from exc
+    resolved = await _resolve_account_session(request, context)
     try:
         await limiter.check_and_increment(rate_key, context.session)
     except DashboardRateLimitError as exc:
         raise _rate_limit_error(exc, code="totp_rate_limited") from exc
+    if _is_header_account(resolved):
+        # No session cookie to upgrade: a valid code is a step-up for the header account.
+        return await _step_up_header_account(request, context, resolved.user, limiter, rate_key, code=payload.code)
     try:
         configured_ttl_seconds = (await get_settings_cache().get()).dashboard_session_ttl_seconds
         session_ttl_seconds = _session_ttl_seconds(request, resolved.user, configured_ttl_seconds)
@@ -960,21 +1026,25 @@ async def disable_totp(
     limiter = get_totp_rate_limiter()
     rate_key = _session_client_key(request, prefix="totp_disable")
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
-    try:
-        await context.service.ensure_totp_verified_session(session_id)
-    except PasswordSessionRequiredError as exc:
-        raise DashboardAuthError(str(exc)) from exc
-    except TotpEnrollmentRequiredError as exc:
-        raise _enrollment_required(exc) from exc
+    # A header account has no TOTP-verified cookie; its valid code is the verification.
+    header_account = await _header_account_session(request)
+    if header_account is None:
+        try:
+            await context.service.ensure_totp_verified_session(session_id)
+        except PasswordSessionRequiredError as exc:
+            raise DashboardAuthError(str(exc)) from exc
+        except TotpEnrollmentRequiredError as exc:
+            raise _enrollment_required(exc) from exc
     try:
         await limiter.check_and_increment(rate_key, context.session)
     except DashboardRateLimitError as exc:
         raise _rate_limit_error(exc, code="totp_rate_limited") from exc
     try:
-        await context.service.disable_totp(
+        user = await context.service.disable_totp(
             session_id=session_id,
             code=payload.code,
             actor_ip=_client_host(request),
+            resolved=header_account,
         )
     except PasswordSessionRequiredError as exc:
         raise DashboardAuthError(str(exc)) from exc
@@ -985,7 +1055,119 @@ async def disable_totp(
 
     await limiter.clear_for_key(rate_key, context.session)
     await _invalidate_auth_caches()
-    return JSONResponse(status_code=200, content={"status": "ok"})
+    # Disabling is allowed even when TOTP was the account's only step-up
+    # method; the client is told so it can point at enrolling again.
+    return JSONResponse(status_code=200, content={"status": "ok", "stepUpAvailable": user.password_hash is not None})
+
+
+@router.post("/step-up", response_model=StepUpResponse)
+async def step_up(
+    request: Request,
+    payload: StepUpRequest = Body(...),
+    context: DashboardAuthContext = Depends(get_dashboard_auth_context),
+) -> JSONResponse:
+    """Re-verify the signed-in account for sensitive changes (PLAN §5 H5).
+
+    Password accounts present their password (and their TOTP code when they
+    have a secret); provider-only accounts present their TOTP code. Success
+    stamps ``su`` into a re-issued session cookie, or — for a trusted-header
+    account, which has no session cookie — into the short-lived step-up cookie.
+    """
+
+    principal = await validate_dashboard_session(request)
+    if principal.user_id is None:
+        raise DashboardAuthError("A user account session is required", code="user_account_required")
+    user = await context.repository.get_user_by_id(principal.user_id)
+    if user is None:
+        raise DashboardAuthError("Authentication is required")
+    limiter = get_password_rate_limiter()
+    rate_key = _session_client_key(request, prefix="step_up")
+    try:
+        await limiter.check_and_increment(rate_key, context.session)
+    except DashboardRateLimitError as exc:
+        raise _rate_limit_error(exc, code="step_up_rate_limited") from exc
+    try:
+        await context.service.verify_step_up(
+            user,
+            password=payload.password,
+            code=payload.code,
+            actor_ip=_client_host(request),
+            auth_method=principal.auth_method,
+        )
+    except StepUpUnavailableError as exc:
+        raise DashboardPermissionError(STEP_UP_UNAVAILABLE_MESSAGE, code="step_up_unavailable") from exc
+    except InvalidCredentialsError as exc:
+        raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
+    await limiter.clear_for_key(rate_key, context.session)
+    await get_dashboard_users_cache().invalidate()
+
+    verified_at = session_clock()
+    response = _step_up_response(verified_at)
+    state = get_dashboard_session_store().get(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+    if state is not None and state.is_user and state.user_id == user.id and state.password_verified:
+        # Keep the session exactly as it was (method, TOTP step, remaining life); only ``su`` changes.
+        session_id, session_ttl_seconds = await _create_user_session(
+            request,
+            user,
+            totp_verified=state.totp_verified,
+            auth_method=state.auth_method or "password",
+            max_ttl_seconds=max(1, state.expires_at - verified_at),
+            step_up_verified_at=verified_at,
+        )
+        _set_session_cookie(response, session_id, request, max_age_seconds=session_ttl_seconds)
+    else:
+        _set_step_up_cookie(response, user, request, verified_at=verified_at)
+    return response
+
+
+async def _step_up_header_account(
+    request: Request,
+    context: DashboardAuthContext,
+    user: DashboardUser,
+    limiter: DatabaseRateLimiter,
+    rate_key: str,
+    *,
+    code: str,
+) -> JSONResponse:
+    """``/totp/verify`` for a trusted-header account: the code proves the account and mints the step-up cookie."""
+
+    try:
+        await context.service.verify_step_up(
+            user,
+            password=None,
+            code=code,
+            actor_ip=_client_host(request),
+            auth_method=DashboardAuthMode.TRUSTED_HEADER.value,
+        )
+    except (InvalidCredentialsError, StepUpUnavailableError) as exc:
+        raise DashboardBadRequestError("Invalid TOTP code", code="invalid_totp_code") from exc
+    await limiter.clear_for_key(rate_key, context.session)
+    verified_at = session_clock()
+    response = await _decorate_session_response(
+        await context.service.describe_session(None), request=request, context=context
+    )
+    json_response = JSONResponse(status_code=200, content=response.model_dump(by_alias=True))
+    _set_step_up_cookie(json_response, user, request, verified_at=verified_at)
+    return json_response
+
+
+def _step_up_response(verified_at: int) -> JSONResponse:
+    body = StepUpResponse(verified_at=verified_at, expires_at=step_up_expires_at(verified_at))
+    return JSONResponse(status_code=200, content=body.model_dump(by_alias=True))
+
+
+def _set_step_up_cookie(response: JSONResponse, user: DashboardUser, request: Request, *, verified_at: int) -> None:
+    response.set_cookie(
+        key=STEP_UP_COOKIE,
+        value=get_step_up_cookie_store().create(
+            user.id, session_generation=user.session_generation, verified_at=verified_at
+        ),
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        max_age=step_up_expires_at(verified_at) - verified_at,
+        path="/",
+    )
 
 
 @router.post("/logout")

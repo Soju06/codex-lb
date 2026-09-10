@@ -91,6 +91,16 @@ export const AccessSummarySchema = z.object({
   localLoginPolicy: z.string().default("enabled"),
 });
 
+// Step-up (re-verification for sensitive changes): when the account last
+// re-verified, and which factors `/step-up` will ask for. Empty `methods`
+// means the account must enrol two-factor or set a password first.
+export const StepUpMethodSchema = z.enum(["password", "totp"]);
+export const StepUpStateSchema = z.object({
+  verifiedAt: z.number().int().nullable().default(null),
+  expiresAt: z.number().int().nullable().default(null),
+  methods: z.array(StepUpMethodSchema).default([]),
+});
+
 export const AuthSessionSchema = z.object({
   authenticated: z.boolean(),
   passwordRequired: z.boolean(),
@@ -121,6 +131,7 @@ export const AuthSessionSchema = z.object({
     .transform((value) => value ?? LoginHintSchema.parse({})),
   accessSummary: AccessSummarySchema.nullable().default(null),
   assignableRoleIds: z.array(z.string()).default([]),
+  stepUp: StepUpStateSchema.nullable().default(null),
 });
 
 // Mirrors the backend username rule (case-folded on the server).
@@ -193,6 +204,16 @@ export const StatusResponseSchema = z.object({
   status: z.string(),
 });
 
+export const StepUpRequestSchema = z.object({
+  password: z.string().min(1).optional(),
+  code: z.string().length(6, "settings.totp.validation.codeLength").optional(),
+});
+
+export const StepUpResponseSchema = z.object({
+  verifiedAt: z.number().int(),
+  expiresAt: z.number().int(),
+});
+
 export type AuthSession = z.infer<typeof AuthSessionSchema>;
 export type AuthSessionUser = z.infer<typeof AuthSessionUserSchema>;
 export type LoginHint = z.infer<typeof LoginHintSchema>;
@@ -215,6 +236,8 @@ export type TotpVerifyRequest = z.infer<typeof TotpVerifyRequestSchema>;
 export type TotpSetupConfirmRequest = z.infer<typeof TotpSetupConfirmRequestSchema>;
 export type TotpSetupStartResponse = z.infer<typeof TotpSetupStartResponseSchema>;
 export type StatusResponse = z.infer<typeof StatusResponseSchema>;
+export type StepUpState = z.infer<typeof StepUpStateSchema>;
+export type StepUpRequest = z.infer<typeof StepUpRequestSchema>;
 
 export function getFirstZodIssueMessage(error: unknown): string | null {
   if (!(error instanceof z.ZodError)) {

@@ -23,6 +23,7 @@ import {
   type LoginHint,
   type Permission,
   type PermissionScope,
+  type StepUpState,
 } from "@/features/auth/schemas";
 
 let isAdminLoginInProgress = false;
@@ -51,6 +52,8 @@ type AuthState = {
   accessSummary: AccessSummary | null;
   /** Role ids this account may hand out (`assignable_role_ids`); empty without `users:manage`. */
   assignableRoleIds: string[];
+  /** Recent re-verification and the factors the account can re-verify with; `null` without an account. */
+  stepUp: StepUpState | null;
   tier: DisclosureTier;
   adminLoginRequested: boolean;
   loading: boolean;
@@ -85,6 +88,7 @@ const LEAST_PRIVILEGE_ACCESS: Pick<
   | "user"
   | "accessSummary"
   | "assignableRoleIds"
+  | "stepUp"
   | "tier"
   | "mustChangePassword"
   | "totpEnrollmentRequired"
@@ -95,6 +99,7 @@ const LEAST_PRIVILEGE_ACCESS: Pick<
   user: null,
   accessSummary: null,
   assignableRoleIds: [],
+  stepUp: null,
   tier: "individual",
   mustChangePassword: false,
   totpEnrollmentRequired: false,
@@ -142,6 +147,7 @@ function applySession(set: (next: Partial<AuthState>) => void, session: AuthSess
     loginHint: session.login ?? DEFAULT_LOGIN_HINT,
     accessSummary: session.accessSummary ?? null,
     assignableRoleIds: session.assignableRoleIds,
+    stepUp: session.stepUp ?? null,
     tier: resolveDisclosureTier(session.accessSummary ?? null, session.user ?? null),
     adminLoginRequested: false,
     initialized: true,

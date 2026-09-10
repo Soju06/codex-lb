@@ -18,6 +18,7 @@ from app.core.audit.service import AuditActor, AuditService, AuditTarget
 from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole, Permission
 from app.core.auth.dependencies import (
     ensure_dashboard_permission,
+    ensure_step_up,
     require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
@@ -1069,6 +1070,7 @@ async def update_settings(
     }
     if security_changes:
         ensure_dashboard_permission(principal, Permission.SECURITY_WRITE)
+        await ensure_step_up(request, principal, Permission.SECURITY_WRITE)
     if payload.expected_version is not None and payload.expected_version != current.version:
         raise DashboardSettingsConflictError(
             "Settings were modified since this form was loaded; reload and retry",

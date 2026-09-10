@@ -2185,6 +2185,15 @@ export const handlers = [
     return HttpResponse.json({ status: "ok" });
   }),
 
+  http.post("/api/dashboard-auth/step-up", () => {
+    const verifiedAt = Math.floor(Date.now() / 1000);
+    state.authSession = createDashboardAuthSession({
+      ...state.authSession,
+      stepUp: { verifiedAt, expiresAt: verifiedAt + 300, methods: state.authSession.stepUp?.methods ?? ["password"] },
+    });
+    return HttpResponse.json({ verifiedAt, expiresAt: verifiedAt + 300 });
+  }),
+
   http.post("/api/dashboard-auth/logout", () => {
     state.authSession = createDashboardAuthSession({
       ...state.authSession,

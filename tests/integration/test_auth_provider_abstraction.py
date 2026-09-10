@@ -13,6 +13,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pyotp
 import pytest
 from alembic import command
 from anyio import to_thread
@@ -72,6 +73,20 @@ def _as(subject: str) -> dict[str, str]:
 
 def _error(response) -> str:
     return response.json()["error"]["code"]
+
+
+async def _stepped_up(client: AsyncClient, headers: dict[str, str]) -> None:
+    """Sensitive mutations need a recent step-up (H5); a header account without a password enrols TOTP for it."""
+
+    start = await client.post("/api/dashboard-auth/totp/setup/start", json={}, headers=headers)
+    assert start.status_code == 200, start.text
+    code = pyotp.TOTP(start.json()["secret"]).now()
+    confirm = await client.post(
+        "/api/dashboard-auth/totp/setup/confirm", json={"secret": start.json()["secret"], "code": code}, headers=headers
+    )
+    assert confirm.status_code == 200, confirm.text
+    stepped = await client.post("/api/dashboard-auth/step-up", json={"code": code}, headers=headers)
+    assert stepped.status_code == 200, stepped.text
 
 
 async def _rows(action: str) -> list[AuditLog]:
@@ -306,6 +321,7 @@ async def test_sso_only_account_is_linked_on_first_request(async_client: AsyncCl
     _trusted_header_mode(monkeypatch)
     admin = _as("alice@example.com")
     assert (await async_client.get(SESSION, headers=admin)).json()["user"]["role"]["slug"] == "admin"
+    await _stepped_up(async_client, admin)
 
     created = await async_client.post(
         USERS,
@@ -394,6 +410,7 @@ async def test_link_by_email_is_off_by_default_and_links_when_on(
     _trusted_header_mode(monkeypatch)
     admin = _as("root@example.com")
     assert (await async_client.get(SESSION, headers=admin)).status_code == 200
+    await _stepped_up(async_client, admin)
     created = await async_client.post(
         USERS, json={"username": "carol", "email": "Carol@Example.com", "roleId": OPERATOR_ROLE}, headers=admin
     )
@@ -443,6 +460,7 @@ async def test_provider_api_lists_and_edits_the_resolver_knobs(async_client: Asy
     _trusted_header_mode(monkeypatch)
     admin = _as("alice")
     assert (await async_client.get(SESSION, headers=admin)).status_code == 200
+    await _stepped_up(async_client, admin)
     alice = await _user_by_username("alice")
     assert alice is not None
 
@@ -516,6 +534,7 @@ async def test_provider_role_handout_is_bounded_by_the_callers_grants(async_clie
         )
         await session.commit()
     await _seed_legacy_account("sec-officer", "sec@example.com", manager_id)
+    await _stepped_up(async_client, _as("sec@example.com"))
 
     too_wide = await async_client.patch(
         f"{PROVIDERS}/{TRUSTED_HEADER_PROVIDER_ID}",
@@ -629,6 +648,7 @@ async def test_admin_is_reserved_for_the_break_glass_account(
     _trusted_header_mode(monkeypatch)
     admin = _as("alice")
     assert (await async_client.get(SESSION, headers=admin)).status_code == 200
+    await _stepped_up(async_client, admin)
 
     reserved = await async_client.post(USERS, json={"username": "Admin", "roleId": VIEWER_ROLE}, headers=admin)
     assert reserved.status_code == 422 and "reserved" in reserved.json()["error"]["message"]
@@ -662,6 +682,7 @@ async def test_sso_only_invites_have_no_link_anywhere(async_client: AsyncClient,
     _trusted_header_mode(monkeypatch)
     admin = _as("alice")
     assert (await async_client.get(SESSION, headers=admin)).status_code == 200
+    await _stepped_up(async_client, admin)
     created = await async_client.post(
         USERS,
         json={
@@ -704,6 +725,7 @@ async def test_sso_only_accounts_wait_without_expiring(async_client: AsyncClient
     _trusted_header_mode(monkeypatch)
     admin = _as("alice")
     assert (await async_client.get(SESSION, headers=admin)).status_code == 200
+    await _stepped_up(async_client, admin)
     created = await async_client.post(
         USERS,
         json={

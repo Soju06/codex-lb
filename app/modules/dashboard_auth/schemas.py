@@ -7,6 +7,7 @@ from pydantic import Field
 
 from app.core.auth.dashboard_access import DashboardPermission, DashboardRole
 from app.core.auth.dashboard_mode import DashboardAuthMode
+from app.core.auth.step_up import StepUpMethod
 from app.modules.shared.schemas import DashboardModel
 
 
@@ -65,6 +66,19 @@ class DashboardAccessSummary(DashboardModel):
     local_login_policy: Literal["enabled"]
 
 
+class DashboardStepUpState(DashboardModel):
+    """Whether the account has recently re-verified for sensitive changes, and how it can.
+
+    ``methods`` lists every factor the account must present to ``/step-up``
+    (``password`` and/or ``totp``); empty means it cannot step up until it
+    enrols two-factor or sets a local password.
+    """
+
+    verified_at: int | None = None
+    expires_at: int | None = None
+    methods: list[StepUpMethod] = Field(default_factory=list)
+
+
 class DashboardAuthSessionResponse(DashboardModel):
     authenticated: bool
     password_required: bool
@@ -93,6 +107,8 @@ class DashboardAuthSessionResponse(DashboardModel):
     login: DashboardLoginHint | None = None
     access_summary: DashboardAccessSummary | None = None
     assignable_role_ids: list[str] = Field(default_factory=list)
+    #: Present for signed-in accounts only; principals without an account have nothing to re-verify.
+    step_up: DashboardStepUpState | None = None
 
 
 class DashboardMeResponse(DashboardModel):
@@ -119,6 +135,18 @@ class TotpSetupConfirmRequest(DashboardModel):
 
 class TotpVerifyRequest(DashboardModel):
     code: str
+
+
+class StepUpRequest(DashboardModel):
+    """The factors offered to ``POST /api/dashboard-auth/step-up``; which are needed depends on the account."""
+
+    password: str | None = None
+    code: str | None = Field(default=None, max_length=16)
+
+
+class StepUpResponse(DashboardModel):
+    verified_at: int
+    expires_at: int
 
 
 class PasswordSetupRequest(DashboardModel):

@@ -70,6 +70,7 @@ class DashboardErrorDetail(TypedDict):
     code: str
     message: str
     param: NotRequired[str]
+    details: NotRequired[dict[str, JsonValue]]
 
 
 class DashboardErrorEnvelope(TypedDict):
@@ -134,10 +135,18 @@ def openai_error(
     return {"error": detail}
 
 
-def dashboard_error(code: str, message: str, *, param: str | None = None) -> DashboardErrorEnvelope:
+def dashboard_error(
+    code: str,
+    message: str,
+    *,
+    param: str | None = None,
+    details: Mapping[str, JsonValue] | None = None,
+) -> DashboardErrorEnvelope:
     detail: DashboardErrorDetail = {"code": code, "message": message}
     if param is not None:
         detail["param"] = param
+    if details:
+        detail["details"] = dict(details)
     return {"error": detail}
 
 

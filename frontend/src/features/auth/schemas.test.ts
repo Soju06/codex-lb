@@ -47,6 +47,7 @@ describe("AuthSessionSchema", () => {
       accessSummary: null,
       assignableRoleIds: [],
       localPasswordConfigured: false,
+      stepUp: null,
     });
   });
 

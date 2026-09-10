@@ -25,12 +25,16 @@ export type AccessMySignInTabProps = {
  * to any fully signed-in account (a Viewer included): they follow
  * `passwordManagementEnabled && passwordSessionActive`; the password card also
  * renders for the implicit admin holding `write`, who has no password yet.
+ * A reverse-proxy account has no password session and still needs both: its
+ * TOTP secret is how it confirms sensitive changes.
  */
 export function AccessMySignInTab({ settings, busy, onSave, onRefresh }: AccessMySignInTabProps) {
   const canWrite = useAuthStore((state) => state.canWrite);
   const canWriteSecurity = usePermission("security:write");
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
-  const personal = useAuthStore((state) => state.passwordManagementEnabled && state.passwordSessionActive);
+  const personal = useAuthStore(
+    (state) => state.passwordManagementEnabled && (state.passwordSessionActive || state.user !== null),
+  );
 
   return (
     <div className="space-y-4">

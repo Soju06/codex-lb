@@ -24,7 +24,7 @@ from fastapi.routing import APIRoute
 from httpx import AsyncClient
 
 import app.core.auth.dependencies as auth_dependencies
-from app.core.auth.dashboard_access import Permission, Scope
+from app.core.auth.dashboard_access import STEP_UP_PERMISSIONS, Permission, Scope
 from app.core.auth.dependencies import DashboardPermissionDependency, PermissionRequirement
 from app.core.middleware.dashboard_csrf import CROSS_SITE_REQUEST_REJECTED_CODE
 
@@ -113,6 +113,33 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("PATCH", "/api/auth-providers/{provider_id}"): PermissionRequirement(Permission.SECURITY_WRITE),
     **DASHBOARD_AUTH_GATED,
 }
+
+#: Mutations that additionally require a recent step-up (PLAN §5 H5): every
+#: non-safe route whose permission requirement is a ``STEP_UP_PERMISSIONS``
+#: member. ``PUT /api/settings`` joins them only when the body changes a
+#: security field (handler-level, covered by ``test_step_up_auth.py``).
+STEP_UP_GATED: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/accounts/{account_id}/export"),
+        ("POST", "/api/accounts/{account_id}/export/auth"),
+        ("POST", "/api/accounts/{account_id}/export/opencode-auth"),
+        ("POST", "/api/firewall/ips"),
+        ("DELETE", "/api/firewall/ips/{ip_address}"),
+        ("POST", "/api/settings/upstream-proxy/endpoints"),
+        ("POST", "/api/dashboard-users"),
+        ("PATCH", "/api/dashboard-users/{user_id}"),
+        ("DELETE", "/api/dashboard-users/{user_id}"),
+        ("POST", "/api/dashboard-users/{user_id}/invite"),
+        ("DELETE", "/api/dashboard-users/{user_id}/invite"),
+        ("POST", "/api/dashboard-users/{user_id}/reset-totp"),
+        ("POST", "/api/dashboard-users/{user_id}/revoke-sessions"),
+        ("POST", "/api/dashboard-users/{user_id}/reactivate-keys"),
+        ("PATCH", "/api/auth-providers/{provider_id}"),
+        ("POST", "/api/dashboard-auth/guest/password"),
+        ("DELETE", "/api/dashboard-auth/guest/password"),
+        ("POST", "/api/dashboard-auth/guest/logout-all"),
+    }
+)
 
 #: Permissions that never authorize a mutation on their own — every ``*:read``
 #: permission, derived structurally so a new read permission cannot slip through.
@@ -209,6 +236,20 @@ def test_sensitive_routes_declare_their_permission(app_instance: FastAPI) -> Non
         if expected not in actual[(method, path)]
     }
     assert mismatched == {}, f"routes whose permission requirement changed: {mismatched}"
+
+
+def test_step_up_gated_mutations_are_exactly_the_declared_set(app_instance: FastAPI) -> None:
+    """The permission dependency requires a fresh step-up for every mutation guarded by a
+    ``STEP_UP_PERMISSIONS`` member; this pins which routes that is, so a new sensitive
+    route (or one that drops its permission) shows up here."""
+
+    actual = {
+        (method, path)
+        for method, path, route in _dashboard_routes(app_instance)
+        if method not in SAFE_METHODS
+        and any(r.permission in STEP_UP_PERMISSIONS for r in _route_auth(route).requirements)
+    }
+    assert actual == STEP_UP_GATED
 
 
 def test_read_only_permission_set_matches_vocabulary() -> None:

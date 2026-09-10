@@ -70,7 +70,12 @@ export function SettingsPage() {
   // need `security:write`; an Operator sees them read-only instead of a 403.
   const canWriteSecurity = usePermission("security:write");
   // A fully signed-in account without `write` (a Viewer) still owns its password and two-factor.
-  const personalSignIn = useAuthStore((state) => state.passwordManagementEnabled && state.passwordSessionActive);
+  // Any signed-in account reaches its own password/two-factor controls: a
+  // reverse-proxy account has no password session and still needs to enrol a
+  // second factor, which is how it confirms sensitive changes.
+  const personalSignIn = useAuthStore(
+    (state) => state.passwordManagementEnabled && (state.passwordSessionActive || state.user !== null),
+  );
   // API keys, upstream-proxy administration, and sticky sessions are write-only
   // reads on the backend (403 for guests), so they are not mounted or fetched
   // without write access. `enabled: false` only stops fetching; cached data from

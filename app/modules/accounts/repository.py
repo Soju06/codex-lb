@@ -726,7 +726,54 @@ class AccountsRepository:
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
         blocked_at: int | None | object = _UNSET,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
     ) -> bool:
+        generation = await self._write_status(
+            account_id,
+            status,
+            deactivation_reason,
+            reset_at,
+            blocked_at,
+            rejected_model=rejected_model,
+            rejected_service_tier=rejected_service_tier,
+        )
+        return generation is not None
+
+    async def record_rejection(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        blocked_at: int | None | object = _UNSET,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
+    ) -> int | None:
+        """Persist a rejection and return the generation assigned by that write."""
+        return await self._write_status(
+            account_id,
+            status,
+            deactivation_reason,
+            reset_at,
+            blocked_at,
+            rejected_model=rejected_model,
+            rejected_service_tier=rejected_service_tier,
+        )
+
+    async def _write_status(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        blocked_at: int | None | object = _UNSET,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
+    ) -> int | None:
         async with sqlite_writer_section():
             previous_status = await self._session.scalar(
                 select(Account.status).where(Account.id == account_id).with_for_update()
@@ -735,6 +782,9 @@ class AccountsRepository:
                 "status": status,
                 "deactivation_reason": deactivation_reason,
                 "reset_at": reset_at,
+                "block_generation": Account.block_generation + 1,
+                "rejected_model": rejected_model,
+                "rejected_service_tier": rejected_service_tier,
             }
             if blocked_at is not _UNSET:
                 values["blocked_at"] = blocked_at
@@ -749,16 +799,16 @@ class AccountsRepository:
                 # (which clears the marker) may resurrect the row.
                 .where(Account.delete_requested_at.is_(None))
                 .values(**values)
-                .returning(Account.id)
+                .returning(Account.block_generation)
             )
-            updated_id = result.scalar_one_or_none()
-            if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
+            generation = result.scalar_one_or_none()
+            if generation is not None and self._hard_sticky_outage_started(previous_status, status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status == AccountStatus.DEACTIVATED:
+            if generation is not None and status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
-            return updated_id is not None
+            return generation
 
     async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
         async with sqlite_writer_section():
@@ -788,12 +838,16 @@ class AccountsRepository:
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_block_generation: int | None = None,
     ) -> bool:
         async with sqlite_writer_section():
             values: dict[str, object | None] = {
                 "status": status,
                 "deactivation_reason": deactivation_reason,
                 "reset_at": reset_at,
+                "block_generation": Account.block_generation + 1,
+                "rejected_model": None,
+                "rejected_service_tier": None,
             }
             if blocked_at is not _UNSET:
                 values["blocked_at"] = blocked_at
@@ -820,6 +874,8 @@ class AccountsRepository:
                     stmt = stmt.where(Account.blocked_at.is_(None))
                 else:
                     stmt = stmt.where(Account.blocked_at == expected_blocked_at)
+            if expected_block_generation is not None:
+                stmt = stmt.where(Account.block_generation == expected_block_generation)
             if expected_refresh_token_encrypted is not None:
                 # Guards permanent refresh-failure downgrades: a concurrent
                 # re-auth/import rotates the token ciphertext without touching
@@ -1082,6 +1138,9 @@ class AccountsRepository:
                     seat_user_id = None
             values: dict[str, Any] = {
                 "status": AccountStatus.DEACTIVATED,
+                "block_generation": Account.block_generation + 1,
+                "rejected_model": None,
+                "rejected_service_tier": None,
                 "deactivation_reason": ACCOUNT_PENDING_DELETION_REASON,
                 "reset_at": None,
                 "blocked_at": None,
@@ -1579,6 +1638,9 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.refresh_token_encrypted = source.refresh_token_encrypted
     target.id_token_encrypted = source.id_token_encrypted
     target.last_refresh = source.last_refresh
+    target.block_generation = Account.block_generation + 1
+    target.rejected_model = None
+    target.rejected_service_tier = None
     target.status = source.status
     target.deactivation_reason = source.deactivation_reason
     target.reset_at = source.reset_at

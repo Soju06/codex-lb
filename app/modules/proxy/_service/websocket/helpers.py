@@ -680,10 +680,18 @@ async def _record_or_defer_websocket_accepted_replay_health(
     error: UpstreamError = {"message": error_message or "Upstream error"}
     if request_state.api_key_reservation is not None:
         request_state.deferred_keyed_stream_health.append(
-            _DeferredKeyedStreamHealthPenalty(account=account, error=error, code=error_code)
+            _DeferredKeyedStreamHealthPenalty(
+                account=account,
+                error=error,
+                code=error_code,
+                rejected_model=request_state.model,
+                rejected_service_tier=request_state.service_tier,
+            )
         )
         return
-    await proxy._handle_stream_error(account, error, error_code)
+    await proxy._handle_stream_error(
+        account, error, error_code, rejected_model=request_state.model, rejected_service_tier=request_state.service_tier
+    )
 
 
 def _prepare_websocket_request_state_for_account_switch(

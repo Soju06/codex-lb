@@ -338,6 +338,8 @@ class _StreamingRetryMixin:
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
+        rejected_model = payload.model
+        rejected_service_tier = payload.service_tier
         scheduler = scheduler_for(proxy)
         clock = clock_for(proxy)
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
@@ -587,6 +589,8 @@ class _StreamingRetryMixin:
                             http_status=http_status,
                             **_retry_after_kwargs(retry_after_seconds),
                             **({"burst_cooldown_recorded": True} if burst_cooldown_recorded else {}),
+                            rejected_model=rejected_model,
+                            rejected_service_tier=rejected_service_tier,
                         )
                         if retry_count > 1:
                             await proxy._load_balancer.record_errors(account, retry_count - 1)
@@ -724,6 +728,8 @@ class _StreamingRetryMixin:
                 failed_code,
                 http_status=http_status,
                 **_retry_after_kwargs(retry_after_seconds),
+                rejected_model=rejected_model,
+                rejected_service_tier=rejected_service_tier,
             )
             if transient_retry_count > 1:
                 await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
@@ -810,6 +816,8 @@ class _StreamingRetryMixin:
                         account,
                         _stream_settlement_error_payload(current_settlement),
                         current_settlement.error_code or "upstream_error",
+                        rejected_model=rejected_model,
+                        rejected_service_tier=rejected_service_tier,
                     )
                 elif current_settlement.record_success:
                     await proxy._load_balancer.record_success(account)
@@ -2376,6 +2384,8 @@ class _StreamingRetryMixin:
                                         account,
                                         _stream_settlement_error_payload(settlement),
                                         settlement.error_code or "upstream_error",
+                                        rejected_model=rejected_model,
+                                        rejected_service_tier=rejected_service_tier,
                                     )
                                 return
                             if isinstance(tex, ProxyResponseError) and tex.status_code != 500:
@@ -2655,6 +2665,8 @@ class _StreamingRetryMixin:
                                     code,
                                     http_status=tex.status_code,
                                     **_retry_after_kwargs(tex.retry_after_seconds),
+                                    rejected_model=rejected_model,
+                                    rejected_service_tier=rejected_service_tier,
                                 )
                                 setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
                                 if burst:
@@ -2748,6 +2760,8 @@ class _StreamingRetryMixin:
                                     account,
                                     _stream_settlement_error_payload(settlement),
                                     settlement.error_code or "upstream_error",
+                                    rejected_model=rejected_model,
+                                    rejected_service_tier=rejected_service_tier,
                                 )
                             elif settled and settlement.record_success:
                                 await proxy._load_balancer.record_success(account)
@@ -2816,6 +2830,8 @@ class _StreamingRetryMixin:
                                 account,
                                 _stream_settlement_error_payload(settlement),
                                 settlement.error_code or "upstream_error",
+                                rejected_model=rejected_model,
+                                rejected_service_tier=rejected_service_tier,
                             )
                     return
                 except ProxyResponseError as exc:
@@ -3154,6 +3170,8 @@ class _StreamingRetryMixin:
                                         _stream_settlement_error_payload(settlement),
                                         settlement.error_code or "upstream_error",
                                         http_status=retry_exc.status_code,
+                                        rejected_model=rejected_model,
+                                        rejected_service_tier=rejected_service_tier,
                                     )
                                 return
                             error = _parse_openai_error(retry_exc.payload)
@@ -3373,6 +3391,8 @@ class _StreamingRetryMixin:
                                     current_error_code,
                                     http_status=retry_exc.status_code,
                                     **_retry_after_kwargs(retry_exc.retry_after_seconds),
+                                    rejected_model=rejected_model,
+                                    rejected_service_tier=rejected_service_tier,
                                 )
                                 setattr(retry_exc, _STREAM_HEALTH_RECORDED_ATTR, True)
                             if burst:
@@ -3408,6 +3428,8 @@ class _StreamingRetryMixin:
                                     account,
                                     _stream_settlement_error_payload(settlement),
                                     settlement.error_code or "upstream_error",
+                                    rejected_model=rejected_model,
+                                    rejected_service_tier=rejected_service_tier,
                                 )
                             elif health_write_allowed and settlement.record_success:
                                 await proxy._load_balancer.record_success(account)
@@ -3461,6 +3483,8 @@ class _StreamingRetryMixin:
                             account,
                             _upstream_error_from_openai(error),
                             error_code,
+                            rejected_model=rejected_model,
+                            rejected_service_tier=rejected_service_tier,
                         )
                     if propagate_http_errors:
                         raise

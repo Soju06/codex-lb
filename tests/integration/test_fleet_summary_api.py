@@ -13,6 +13,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, RequestKind, RequestLog, StickySession, StickySessionKind
 from app.db.session import SessionLocal
+from app.modules.accounts.probe_recovery import ProbeOutcome
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -346,9 +347,9 @@ async def test_force_probe_advances_usage_freshness_without_changing_oauth_refre
         last_refresh=oauth_refreshed_at,
     )
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):
-        del self, access_token, chatgpt_account_id, model
-        return 200
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, service_tier=None):
+        del self, access_token, chatgpt_account_id, model, service_tier
+        return ProbeOutcome(200, completed=True)
 
     async def _force_refresh_with_new_snapshot(self, account):
         await self._usage_repo.add_account_snapshot(

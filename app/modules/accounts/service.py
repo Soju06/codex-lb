@@ -42,6 +42,8 @@ from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.deletion import request_account_deletion_run
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
+from app.modules.accounts.probe_recovery import ProbeHold, ProbeOutcome, completed_probe_response
+from app.modules.accounts.probe_repository import AccountProbeRepository
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
@@ -684,10 +686,28 @@ class AccountsService:
             normalized = None
         return await self._repo.update_alias(account_id, normalized)
 
-    async def probe_account(
+    async def probe_account(self, account_id: str, model: str | None = None) -> AccountProbeResponse | None:
+        account = await self._get_visible_account(account_id)
+        if account is None:
+            return None
+        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
+            raise AccountNotProbableError(f"Account is {account.status.value} and cannot be probed")
+        probes = AccountProbeRepository(self._repo.session)
+        token = str(uuid4())
+        if not await probes.claim(account_id, token):
+            raise AccountNotProbableError("Account already has a probe in progress or changed state")
+        try:
+            return await self._probe_account(account_id, model, probes=probes, claim_token=token)
+        finally:
+            await probes.release(account_id, token)
+
+    async def _probe_account(
         self,
         account_id: str,
         model: str | None = None,
+        *,
+        probes: AccountProbeRepository,
+        claim_token: str,
     ) -> AccountProbeResponse | None:
         """Send a minimal upstream ``responses.create`` pinned to one account.
 
@@ -710,13 +730,29 @@ class AccountsService:
         if self._auth_manager is not None:
             probe_account = await self._auth_manager.ensure_fresh(account, force=False)
 
+        current = await self._repo.get_by_id_fresh(account_id)
+        if current is None or current.delete_requested_at is not None:
+            return None
+        if current.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
+            raise AccountNotProbableError(f"Account is {current.status.value} and cannot be probed")
+        probe_account = current
+        hold = ProbeHold.capture(current)
         access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
-        probe_model = model or DEFAULT_PROBE_MODEL
-        probe_status = await self._send_probe_request(
+        probe_model = model or hold.model or DEFAULT_PROBE_MODEL
+        probe_tier = hold.service_tier if hold.model == probe_model else None
+        if not await probes.renew(account_id, claim_token):
+            raise AccountNotProbableError("Account probe admission expired or account changed state")
+        outcome = await self._send_probe_request(
             access_token=access_token,
             chatgpt_account_id=probe_account.chatgpt_account_id,
             model=probe_model,
+            service_tier=probe_tier,
         )
+        recovered = False
+        if outcome.completed and hold.matches(probe_model, probe_tier):
+            recovered = await probes.recover(account_id, claim_token, hold)
+            if recovered:
+                await propagate_account_routing_change()
 
         usage_refresh_fetch_succeeded: bool | None = None
         if self._usage_repo and self._usage_updater:
@@ -728,13 +764,15 @@ class AccountsService:
             # cached accounts, not only attempts that wrote usage rows.
             get_account_selection_cache().invalidate()
 
-        refreshed = await self._repo.get_by_id(account_id) or account
+        refreshed = await self._repo.get_by_id_fresh(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)
 
         response = AccountProbeResponse(
             status="probed",
             account_id=account_id,
-            probe_status_code=probe_status,
+            probe_status_code=outcome.http_status,
+            probe_completed=outcome.completed,
+            hold_recovered=recovered,
             primary_used_percent_before=primary_before,
             primary_used_percent_after=primary_after,
             secondary_used_percent_before=secondary_before,
@@ -761,7 +799,8 @@ class AccountsService:
         access_token: str,
         chatgpt_account_id: str | None,
         model: str,
-    ) -> int:
+        service_tier: str | None = None,
+    ) -> ProbeOutcome:
         settings = get_settings()
         base = settings.upstream_base_url.rstrip("/")
         if "/backend-api" not in base:
@@ -787,23 +826,25 @@ class AccountsService:
             "stream": True,
             "store": False,
         }
+        if service_tier is not None:
+            body["service_tier"] = service_tier
         timeout = aiohttp.ClientTimeout(
             total=PROBE_REQUEST_TIMEOUT_SECONDS,
             sock_connect=PROBE_CONNECT_TIMEOUT_SECONDS,
         )
+        http_status = PROBE_NETWORK_FAILURE_STATUS
         try:
             async with lease_http_session() as session:
                 async with session.post(url, headers=headers, json=body, timeout=timeout) as resp:
-                    # Initiating the request is enough to wake the upstream
-                    # rate-limiter; we do not consume the SSE body.
-                    return resp.status
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    http_status = resp.status
+                    return await completed_probe_response(resp)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             logger.warning(
                 "Probe upstream request failed account=%s error=%s",
                 chatgpt_account_id,
                 exc,
             )
-            return PROBE_NETWORK_FAILURE_STATUS
+            return ProbeOutcome(http_status)
 
 
 def _opencode_auth_export_filename(account: Account) -> str:

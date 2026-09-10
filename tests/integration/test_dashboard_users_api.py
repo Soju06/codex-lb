@@ -17,6 +17,7 @@ from typing import Any
 import pyotp
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from anyio import to_thread
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select, text
@@ -1088,6 +1089,9 @@ async def test_invites_migration_upgrades_and_downgrades(tmp_path) -> None:
             tables = {row[0] for row in await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
         assert "dashboard_user_invites" not in tables
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-        assert result.current_revision == _HEAD_REVISION == _TARGET_REVISION
+        script = ScriptDirectory.from_config(config)
+        assert script.get_heads() == [_HEAD_REVISION]
+        assert result.current_revision == _HEAD_REVISION
+        assert _TARGET_REVISION in {revision.revision for revision in script.iterate_revisions(_HEAD_REVISION, "base")}
     finally:
         await engine.dispose()

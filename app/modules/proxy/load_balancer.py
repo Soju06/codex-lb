@@ -29,14 +29,11 @@ from app.core.balancer import (
     TrafficClass,
     evaluate_health_tier,
     handle_permanent_failure,
-    handle_quota_exceeded,
-    handle_rate_limit,
     plausible_rate_limit_reset_at,
 )
 from app.core.balancer import (
     select_account as select_account,
 )
-from app.core.balancer.types import UpstreamError
 from app.core.clock import REAL_CLOCK, Clock
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
@@ -99,6 +96,7 @@ from app.modules.proxy._load_balancer.opportunistic_admission import (
     detached_runtime_snapshot,
     run_opportunistic_admission,
 )
+from app.modules.proxy._load_balancer.rejection import mark_quota_exceeded, mark_rate_limit
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
@@ -1700,25 +1698,8 @@ class LoadBalancer:
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)
     _restore_sticky_mutation = staticmethod(_restore_sticky_mutation)
 
-    async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
-        lock = await self._get_account_lock(account.id)
-        async with lock:
-            state = self._state_for(account)
-            handle_rate_limit(state, error)
-            self._sync_runtime_state(account, state)
-            async with self._repo_factory() as repos:
-                await self._persist_state(repos.accounts, account, state)
-            self._selection_inputs_cache.invalidate()
-
-    async def mark_quota_exceeded(self, account: Account, error: UpstreamError) -> None:
-        lock = await self._get_account_lock(account.id)
-        async with lock:
-            state = self._state_for(account)
-            handle_quota_exceeded(state, error)
-            self._sync_runtime_state(account, state)
-            async with self._repo_factory() as repos:
-                await self._persist_state(repos.accounts, account, state)
-            self._selection_inputs_cache.invalidate()
+    mark_rate_limit = mark_rate_limit
+    mark_quota_exceeded = mark_quota_exceeded
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
         """Downgrade *account* to its permanent-failure status.
@@ -1928,6 +1909,7 @@ class LoadBalancer:
 
     def _state_for(self, account: Account) -> AccountState:
         runtime = self._runtime.setdefault(account.id, RuntimeState())
+        _reconcile_recovered_generation(account, runtime)
         routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
         return AccountState(
             account_id=account.id,
@@ -1965,6 +1947,10 @@ class LoadBalancer:
             return False
 
         dirty = False
+        generation = account.block_generation or 0
+        if generation > runtime.block_generation:
+            runtime.block_generation = generation
+            dirty = True
         if runtime.reset_at != state.reset_at:
             runtime.reset_at = state.reset_at
             dirty = True
@@ -2016,6 +2002,10 @@ class LoadBalancer:
         accounts_repo: AccountsRepository,
         account: Account,
         state: AccountState,
+        *,
+        force_rejection: bool = False,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
     ) -> None:
         reset_at_int = int(state.reset_at) if state.reset_at else None
         blocked_at_int = int(state.blocked_at) if state.blocked_at else None
@@ -2024,14 +2014,30 @@ class LoadBalancer:
         reset_changed = account.reset_at != reset_at_int
         blocked_changed = account.blocked_at != blocked_at_int
 
-        if status_changed or reason_changed or reset_changed or blocked_changed:
-            await accounts_repo.update_status(
-                account.id,
-                state.status,
-                state.deactivation_reason,
-                reset_at_int,
-                blocked_at=blocked_at_int,
-            )
+        if force_rejection or status_changed or reason_changed or reset_changed or blocked_changed:
+            if force_rejection:
+                generation = await accounts_repo.record_rejection(
+                    account.id,
+                    state.status,
+                    state.deactivation_reason,
+                    reset_at_int,
+                    blocked_at=blocked_at_int,
+                    rejected_model=rejected_model,
+                    rejected_service_tier=rejected_service_tier,
+                )
+                if generation is None:
+                    return
+                account.block_generation = generation
+                runtime = self._runtime.setdefault(account.id, RuntimeState())
+                runtime.block_generation = max(runtime.block_generation, generation)
+            else:
+                await accounts_repo.update_status(
+                    account.id,
+                    state.status,
+                    state.deactivation_reason,
+                    reset_at_int,
+                    blocked_at=blocked_at_int,
+                )
             account.status = state.status
             account.deactivation_reason = state.deactivation_reason
             account.reset_at = reset_at_int
@@ -2247,6 +2253,16 @@ def _parse_additional_quota_routing_policies(raw_policies: str) -> dict[str, str
     return policies
 
 
+def _reconcile_recovered_generation(account: Account, runtime: RuntimeState) -> None:
+    generation = account.block_generation or 0
+    if generation > runtime.block_generation:
+        if account.status == AccountStatus.ACTIVE and account.blocked_at is None and account.reset_at is None:
+            runtime.blocked_at = None
+            runtime.reset_at = None
+            runtime.cooldown_until = None
+        runtime.block_generation = generation
+
+
 def _state_from_account(
     *,
     account: Account,
@@ -2259,6 +2275,7 @@ def _state_from_account(
     soft_drain_enabled: bool | None = None,
 ) -> AccountState:
     now = REAL_CLOCK.time() if now is None else now
+    _reconcile_recovered_generation(account, runtime)
     tunables = routing_tunables or effective_routing_tunables()
     routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
     normalized_usage = _normalize_usage_inputs(

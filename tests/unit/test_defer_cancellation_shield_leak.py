@@ -248,11 +248,17 @@ async def test_keyed_health_drain_keeps_apply_task_callbacks_bounded():
     release = asyncio.Event()
     apply_task_holder: dict[str, asyncio.Task[None] | None] = {"task": None}
 
-    async def slow_penalty(*_args: object) -> None:
+    async def slow_penalty(*_args: object, **_kwargs: object) -> None:
         apply_task_holder["task"] = cast("asyncio.Task[None] | None", asyncio.current_task())
         await release.wait()
 
-    penalty = SimpleNamespace(account=SimpleNamespace(id="acc"), error=RuntimeError("x"), code="c")
+    penalty = SimpleNamespace(
+        account=SimpleNamespace(id="acc"),
+        error=RuntimeError("x"),
+        code="c",
+        rejected_model=None,
+        rejected_service_tier=None,
+    )
     request_state = SimpleNamespace(deferred_keyed_stream_health=[penalty])
     fake_self = SimpleNamespace(_handle_stream_error=slow_penalty)
 
@@ -287,10 +293,16 @@ async def test_keyed_health_drain_surfaces_level_cancellation_after_cleanup():
 
     from app.modules.proxy._service import api_key_usage as aku
 
-    async def quick_penalty(*_args: object) -> None:
+    async def quick_penalty(*_args: object, **_kwargs: object) -> None:
         await asyncio.sleep(0)
 
-    penalty = SimpleNamespace(account=SimpleNamespace(id="acc"), error=RuntimeError("x"), code="c")
+    penalty = SimpleNamespace(
+        account=SimpleNamespace(id="acc"),
+        error=RuntimeError("x"),
+        code="c",
+        rejected_model=None,
+        rejected_service_tier=None,
+    )
     request_state = SimpleNamespace(deferred_keyed_stream_health=[penalty])
     fake_self = SimpleNamespace(_handle_stream_error=quick_penalty)
 

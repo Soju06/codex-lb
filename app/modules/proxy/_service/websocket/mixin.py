@@ -4653,7 +4653,12 @@ class _WebSocketMixin:
             # ownership fails closed on the original sanitized failure.
             failure_class = "retryable_transient"
         else:
-            classified = await proxy._handle_websocket_connect_error(account, exc)
+            classified = await proxy._handle_websocket_connect_error(
+                account,
+                exc,
+                rejected_model=request_state.model,
+                rejected_service_tier=request_state.service_tier,
+            )
             failure_class = classified["failure_class"] if isinstance(classified, dict) else "non_retryable"
         candidates_remaining = max_attempts - attempt
         if confirmed_pre_dispatch:
@@ -5077,7 +5082,14 @@ class _WebSocketMixin:
         )
         return owner_record.account_id
 
-    async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> ClassifiedFailure:
+    async def _handle_websocket_connect_error(
+        self,
+        account: Account,
+        exc: ProxyResponseError,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
+    ) -> ClassifiedFailure:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         error = _parse_openai_error(exc.payload)
@@ -5087,6 +5099,8 @@ class _WebSocketMixin:
             _upstream_error_from_openai(error),
             error_code,
             http_status=exc.status_code,
+            rejected_model=rejected_model,
+            rejected_service_tier=rejected_service_tier,
         )
 
     async def _relay_upstream_websocket_messages(
@@ -5935,6 +5949,8 @@ class _WebSocketMixin:
                 account,
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                 retry_error_code,
+                rejected_model=request_state.model,
+                rejected_service_tier=request_state.service_tier,
             )
             event, payload, event_type, downstream_text = _rewrite_websocket_previous_response_owner_unavailable_event(
                 request_state=request_state,
@@ -5947,6 +5963,8 @@ class _WebSocketMixin:
                     account,
                     {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                     retry_error_code,
+                    rejected_model=request_state.model,
+                    rejected_service_tier=request_state.service_tier,
                 )
                 event, payload, event_type, downstream_text = (
                     _rewrite_websocket_previous_response_owner_unavailable_event(
@@ -6093,6 +6111,8 @@ class _WebSocketMixin:
                         account,
                         {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
                         retry_error_code,
+                        rejected_model=request_state.model,
+                        rejected_service_tier=request_state.service_tier,
                     )
             if retry_error_code is not None:
                 return downstream_text
@@ -6690,6 +6710,8 @@ class _WebSocketMixin:
                         account,
                         _stream_settlement_error_payload(settlement),
                         settlement.error_code or "upstream_error",
+                        rejected_model=request_state.model,
+                        rejected_service_tier=request_state.service_tier,
                     )
                 except Exception:
                     _facade().logger.warning(
@@ -6974,6 +6996,8 @@ class _WebSocketMixin:
 
         penalty_code: str | None = None
         penalty_message: str | None = None
+        penalty_model: str | None = None
+        penalty_service_tier: str | None = None
         if penalize_account:
             for request_state in remaining:
                 request_error_code = request_state.error_code_override or error_code
@@ -6989,6 +7013,12 @@ class _WebSocketMixin:
                 ):
                     penalty_code = request_error_code
                     penalty_message = request_error_message
+                    if request_state.error_code_override or all(
+                        (pending.model, pending.service_tier) == (request_state.model, request_state.service_tier)
+                        for pending in remaining
+                    ):
+                        penalty_model = request_state.model
+                        penalty_service_tier = request_state.service_tier
                     break
 
         reservation_release_succeeded = True
@@ -7204,6 +7234,8 @@ class _WebSocketMixin:
                         account,
                         {"message": penalty_message or error_message},
                         penalty_code,
+                        rejected_model=penalty_model,
+                        rejected_service_tier=penalty_service_tier,
                     )
                 except Exception:
                     _facade().logger.warning(

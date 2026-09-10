@@ -1,0 +1,1 @@
+A valid pending invite must remain pending with the same hash, expiry and creator after the join. The invite migration adds an empty table when absent; the join itself only changes Alembic stamps. Earlier published merges remain byte-identical.

@@ -152,6 +152,11 @@ class Account(Base):
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    block_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    rejected_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    rejected_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    probe_claim_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    probe_claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     limit_warmup_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

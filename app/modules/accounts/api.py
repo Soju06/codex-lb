@@ -312,12 +312,16 @@ async def probe_account(
         ) from exc
     if result is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
-    probe_succeeded = 200 <= result.probe_status_code < 300
+    probe_succeeded = result.probe_completed
     if not probe_succeeded or result.usage_refresh_ready_for_probe_settlement():
         try:
             await get_proxy_service_for_app(request.app).record_account_probe_result(
                 account_id=result.account_id,
-                http_status=result.probe_status_code,
+                http_status=(
+                    result.probe_status_code
+                    if result.probe_completed or not 200 <= result.probe_status_code < 300
+                    else 0
+                ),
             )
         except Exception:
             logger.exception(

@@ -10,6 +10,8 @@ from sqlalchemy.exc import OperationalError
 
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.probe_recovery import ProbeOutcome
+from app.modules.accounts.probe_repository import AccountProbeRepository
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import (
     DEFAULT_PROBE_MODEL,
@@ -20,6 +22,14 @@ from app.modules.accounts.service import (
 from app.modules.usage.updater import AccountRefreshResult
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def isolated_probe_claim(monkeypatch):
+    monkeypatch.setattr(AccountProbeRepository, "claim", AsyncMock(return_value=True))
+    monkeypatch.setattr(AccountProbeRepository, "renew", AsyncMock(return_value=True))
+    monkeypatch.setattr(AccountProbeRepository, "release", AsyncMock())
+    monkeypatch.setattr(AccountProbeRepository, "recover", AsyncMock(return_value=False))
 
 
 _ACCOUNT_ID = "acc_test"
@@ -56,6 +66,7 @@ def _build_service(
 ) -> AccountsService:
     repo = AsyncMock()
     repo.get_by_id.return_value = account
+    repo.get_by_id_fresh.return_value = account
 
     usage_repo = AsyncMock()
     primary_entry = _make_usage_row(primary_pct) if primary_pct is not None else None
@@ -108,9 +119,9 @@ async def test_probe_account_allows_reauth_required_account(monkeypatch):
     service = _build_service(account=account)
     captured_kwargs: dict[str, object] = {}
 
-    async def _fake_probe(**kwargs: object) -> int:
+    async def _fake_probe(**kwargs: object) -> ProbeOutcome:
         captured_kwargs.update(kwargs)
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
 
@@ -132,7 +143,7 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
 
     async def _fake_probe(**kwargs):
         captured_kwargs.update(kwargs)
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
 
@@ -171,7 +182,7 @@ async def test_probe_account_reports_failed_usage_refresh(monkeypatch):
 
     async def _fake_probe(**kwargs):
         del kwargs
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
 
@@ -195,7 +206,7 @@ async def test_probe_account_invalidates_selection_cache_after_failed_refresh_at
 
     async def _fake_probe(**kwargs):
         del kwargs
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
 
@@ -219,12 +230,13 @@ async def test_probe_account_refreshes_token_before_sending_probe(monkeypatch):
         secondary_pct=80.0,
         auth_manager=auth_manager,
     )
+    monkeypatch.setattr(service._repo, "get_by_id_fresh", AsyncMock(return_value=fresh_account))
 
     captured_kwargs: dict[str, Any] = {}
 
     async def _fake_probe(**kwargs):
         captured_kwargs.update(kwargs)
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
 
@@ -243,7 +255,7 @@ async def test_probe_account_uses_default_model_when_omitted(monkeypatch):
 
     async def _fake_probe(**kwargs):
         captured_kwargs.update(kwargs)
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
 
@@ -259,7 +271,7 @@ async def test_probe_account_never_logs_access_token(monkeypatch, caplog):
 
     async def _fake_probe(**kwargs):
         # Simulate an upstream-side success without revealing the token.
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
 
@@ -275,7 +287,7 @@ async def test_probe_account_surfaces_network_failure_status(monkeypatch):
     service = _build_service(account=account, primary_pct=0.0, secondary_pct=0.0)
 
     async def _fake_probe(**kwargs):
-        return 0  # PROBE_NETWORK_FAILURE_STATUS sentinel
+        return ProbeOutcome(0)  # PROBE_NETWORK_FAILURE_STATUS sentinel
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
 
@@ -344,7 +356,7 @@ async def test_send_probe_request_uses_shared_http_client(monkeypatch):
         model="gpt-5.5-test",
     )
 
-    assert status == 204
+    assert status == ProbeOutcome(204)
     assert captured["leased"] is True
     assert captured["released"] is True
     assert captured["url"].endswith("/backend-api/codex/responses")

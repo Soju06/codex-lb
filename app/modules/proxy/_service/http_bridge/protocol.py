@@ -151,7 +151,14 @@ class _HTTPBridgeServiceProtocol(Protocol):
     async def _acquire_request_state_response_create_admission(self, *args: Any, **kwargs: Any) -> None: ...
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None: ...
     async def _handle_stream_error(
-        self, account: Account, error: Any, code: str, http_status: int | None = None
+        self,
+        account: Account,
+        error: Any,
+        code: str,
+        http_status: int | None = None,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
     ) -> Any: ...
 
     _write_request_log: Any

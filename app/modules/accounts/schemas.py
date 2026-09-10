@@ -216,6 +216,8 @@ class AccountProbeResponse(DashboardModel):
     status: str
     account_id: str
     probe_status_code: int
+    probe_completed: bool = False
+    hold_recovered: bool = False
     primary_used_percent_before: float | None = None
     primary_used_percent_after: float | None = None
     secondary_used_percent_before: float | None = None

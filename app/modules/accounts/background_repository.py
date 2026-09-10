@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import NotRequired, TypedDict
 
 from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.repository import AccountsRepository
 
 _UNSET = object()
+
+
+class _StatusExpectation(TypedDict):
+    expected_status: AccountStatus
+    expected_deactivation_reason: str | None
+    expected_reset_at: int | None
+    expected_refresh_token_encrypted: bytes | None
+    expected_block_generation: int | None
+    expected_blocked_at: NotRequired[int | None | object]
 
 
 class BackgroundAccountsRepository:
@@ -55,14 +65,16 @@ class BackgroundAccountsRepository:
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_block_generation: int | None = None,
     ) -> bool:
         async with get_background_session() as session:
             repo = AccountsRepository(session)
-            kwargs = {
+            kwargs: _StatusExpectation = {
                 "expected_status": expected_status,
                 "expected_deactivation_reason": expected_deactivation_reason,
                 "expected_reset_at": expected_reset_at,
                 "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
+                "expected_block_generation": expected_block_generation,
             }
             if expected_blocked_at is not _UNSET:
                 kwargs["expected_blocked_at"] = expected_blocked_at

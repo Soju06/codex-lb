@@ -74,7 +74,14 @@ class _ApiKeyUsageServiceProtocol(Protocol):
     _load_balancer: Any
 
     async def _handle_stream_error(
-        self, account: Account, error: Any, code: str, http_status: int | None = None
+        self,
+        account: Account,
+        error: Any,
+        code: str,
+        http_status: int | None = None,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
     ) -> Any: ...
 
 
@@ -237,7 +244,13 @@ class _ApiKeyUsageMixin:
             while penalties:
                 penalty = penalties.pop(0)
                 apply_task = scheduler_for(self).create_task(
-                    proxy._handle_stream_error(penalty.account, penalty.error, penalty.code)
+                    proxy._handle_stream_error(
+                        penalty.account,
+                        penalty.error,
+                        penalty.code,
+                        rejected_model=penalty.rejected_model,
+                        rejected_service_tier=penalty.rejected_service_tier,
+                    )
                 )
                 while True:
                     try:

@@ -89,13 +89,17 @@ class _DecisionHarness(ws_mixin._WebSocketMixin):
     def __init__(self) -> None:
         self.penalty_calls: list[tuple[str, ProxyResponseError]] = []
 
-    async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> ClassifiedFailure:
+    async def _handle_websocket_connect_error(
+        self, account: Account, exc: ProxyResponseError, **_scope: object
+    ) -> ClassifiedFailure:
         self.penalty_calls.append((account.id, exc))
         return cast(ClassifiedFailure, {"failure_class": "retryable_transient"})
 
 
 def _request_state() -> Any:
-    return SimpleNamespace(request_log_id="req-transport-fallback", request_id="req-transport-fallback")
+    return SimpleNamespace(
+        request_log_id="req-transport-fallback", request_id="req-transport-fallback", model="gpt-5.1", service_tier=None
+    )
 
 
 def _account() -> Any:

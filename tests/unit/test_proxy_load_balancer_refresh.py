@@ -109,10 +109,16 @@ class StubAccountsRepository(AccountsRepository):
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
         blocked_at: int | None | object = _UNSET,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
     ) -> bool:
         account = self._find_account(account_id)
         if account is None:
             return False
+        account.block_generation = (account.block_generation or 0) + 1
+        account.rejected_model = rejected_model
+        account.rejected_service_tier = rejected_service_tier
         account.status = status
         account.deactivation_reason = deactivation_reason
         account.reset_at = reset_at
@@ -129,6 +135,29 @@ class StubAccountsRepository(AccountsRepository):
         )
         return True
 
+    async def record_rejection(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        blocked_at: int | None | object = _UNSET,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
+    ) -> int | None:
+        updated = await self.update_status(
+            account_id,
+            status,
+            deactivation_reason,
+            reset_at,
+            blocked_at,
+            rejected_model=rejected_model,
+            rejected_service_tier=rejected_service_tier,
+        )
+        account = self._find_account(account_id)
+        return account.block_generation if updated and account is not None else None
+
     async def update_status_if_current(
         self,
         account_id: str,
@@ -142,12 +171,14 @@ class StubAccountsRepository(AccountsRepository):
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_block_generation: int | None = None,
     ) -> bool:
         account = self._find_account(account_id)
         if account is None:
             return False
         if (
             account.status != expected_status
+            or (expected_block_generation is not None and account.block_generation != expected_block_generation)
             or account.deactivation_reason != expected_deactivation_reason
             or account.reset_at != expected_reset_at
             or (expected_blocked_at is not _UNSET and account.blocked_at != expected_blocked_at)
@@ -1629,6 +1660,9 @@ async def test_mark_quota_exceeded_keeps_selection_blocked_until_persisted(monke
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
         blocked_at: int | None | object = _UNSET,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
     ) -> bool:
         persist_started.set()
         await release_persist.wait()
@@ -1639,6 +1673,8 @@ async def test_mark_quota_exceeded_keeps_selection_blocked_until_persisted(monke
             deactivation_reason,
             reset_at,
             blocked_at,
+            rejected_model=rejected_model,
+            rejected_service_tier=rejected_service_tier,
         )
 
     monkeypatch.setattr(accounts_repo, "update_status", blocking_update_status)

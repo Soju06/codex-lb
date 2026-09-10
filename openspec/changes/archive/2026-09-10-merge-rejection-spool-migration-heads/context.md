@@ -1,0 +1,1 @@
+The public CLI fails because parallel rejection and spool-retention migrations have no join. This repair preserves both histories with a no-op merge. Account recovery policy and live deployment remain outside scope. See design.md for parent-specific upgrade and merge-only downgrade behavior.

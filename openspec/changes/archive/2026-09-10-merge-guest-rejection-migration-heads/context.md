@@ -1,0 +1,1 @@
+This join responds to a later main migration, not a defect in either existing parent. A fresh CLI upgrade fails until the histories converge. Both original joins remain intact; changing either parent would rewrite history. See design.md for examples and downgrade behavior. Live deployment remains outside this repair.

@@ -10,6 +10,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.usage.models import UsagePayload
 from app.modules.accounts import api as accounts_api
+from app.modules.accounts.probe_recovery import ProbeOutcome
 from app.modules.accounts.schemas import AccountProbeResponse
 from app.modules.accounts.service import AccountsService
 from app.modules.usage.updater import AccountRefreshResult, UsageUpdater
@@ -96,12 +97,12 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
     captured: dict = {}
     record_probe_result = AsyncMock()
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, service_tier=None):
         captured["model"] = model
         captured["chatgpt_account_id"] = chatgpt_account_id
         # Do not capture the access token — only assert it was non-empty.
         captured["had_token"] = bool(access_token)
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     async def _force_refresh_fetches_without_writing(self, account, *, ignore_refresh_disabled=False):  # noqa: ARG001
         return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
@@ -142,11 +143,11 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_probe_active_account_returns_snapshot_when_advisory_settlement_fails(async_client, monkeypatch):
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, service_tier=None):
         del access_token
         del chatgpt_account_id
         del model
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     async def _force_refresh_fetches_without_writing(self, account, *, ignore_refresh_disabled=False):  # noqa: ARG001
         return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
@@ -186,6 +187,7 @@ async def test_probe_success_skips_advisory_settlement_when_usage_refresh_fails(
             status="probed",
             account_id=account_id,
             probe_status_code=200,
+            probe_completed=True,
             account_status_before="rate_limited",
             account_status_after="rate_limited",
         )
@@ -235,8 +237,8 @@ async def test_probe_failure_still_records_advisory_settlement_after_usage_refre
 
 @pytest.mark.asyncio
 async def test_force_probe_persists_free_to_plus_plan_upgrade(async_client, monkeypatch):
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
-        return 200
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, service_tier=None):  # noqa: ARG001
+        return ProbeOutcome(200, completed=True)
 
     async def _fake_fetch_usage(**_kwargs):
         return UsagePayload.model_validate({"plan_type": "plus"})
@@ -266,8 +268,8 @@ async def test_force_probe_confirms_paid_to_free_plan_downgrade(async_client, mo
     a workspace-less account must surface as ``free`` on /api/accounts once a
     second probe confirms it, instead of keeping a stale paid label forever."""
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
-        return 200
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, service_tier=None):  # noqa: ARG001
+        return ProbeOutcome(200, completed=True)
 
     async def _fake_fetch_usage(**_kwargs):
         return UsagePayload.model_validate({"plan_type": "free"})
@@ -302,8 +304,8 @@ async def test_force_probe_keeps_paid_plan_for_unrecognized_payload_plan(async_c
     """The confirmation path is scoped to ``free``: an unrecognized plan value
     must never rewrite a stored paid plan, however often it repeats."""
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
-        return 200
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, service_tier=None):  # noqa: ARG001
+        return ProbeOutcome(200, completed=True)
 
     async def _fake_fetch_usage(**_kwargs):
         return UsagePayload.model_validate({"plan_type": "mystery"})
@@ -342,8 +344,8 @@ async def test_pending_downgrade_evidence_is_persisted_for_all_replicas(async_cl
     from app.db.models import AccountPlanDowngradeObservation
     from app.db.session import get_background_session
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
-        return 200
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, service_tier=None):  # noqa: ARG001
+        return ProbeOutcome(200, completed=True)
 
     async def _fake_fetch_usage(**_kwargs):
         return UsagePayload.model_validate({"plan_type": "free"})
@@ -409,8 +411,8 @@ async def test_reimport_clears_pending_downgrade_evidence(async_client, monkeypa
     from app.db.models import AccountPlanDowngradeObservation
     from app.db.session import get_background_session
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
-        return 200
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, service_tier=None):  # noqa: ARG001
+        return ProbeOutcome(200, completed=True)
 
     async def _fake_fetch_usage(**_kwargs):
         return UsagePayload.model_validate({"plan_type": "free"})
@@ -473,9 +475,9 @@ async def test_reimport_clears_pending_downgrade_evidence(async_client, monkeypa
 async def test_probe_uses_default_model_when_body_omitted(async_client, monkeypatch):
     captured: dict = {}
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, service_tier=None):  # noqa: ARG001
         captured["model"] = model
-        return 200
+        return ProbeOutcome(200, completed=True)
 
     monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
 

@@ -705,6 +705,8 @@ class _RefreshFailoverProxy(Protocol):
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
         retry_after_seconds: float | None = None,
         burst_cooldown_recorded: bool = False,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
     ) -> Any: ...
 
 
@@ -940,6 +942,8 @@ class _DeferredKeyedStreamHealthPenalty:
     account: Account
     error: UpstreamError
     code: str
+    rejected_model: str | None = None
+    rejected_service_tier: str | None = None
 
 
 @dataclass(eq=False, slots=True)

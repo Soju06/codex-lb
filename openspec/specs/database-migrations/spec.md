@@ -511,3 +511,88 @@ remain for operator recovery.
 - **THEN** recovery MUST fail before deleting sidecars, writing output, or
   moving the source
 
+### Requirement: Rejection evidence schema bootstrap
+Schema bootstrap SHALL add missing rejection-generation and probe-claim columns without overwriting existing values or failing when those columns already exist.
+
+#### Scenario: Bootstrap an existing rejection schema
+- **GIVEN** an unversioned or legacy-stamped account schema with some or all rejection-generation and probe-claim columns
+- **WHEN** startup upgrades the schema
+- **THEN** the upgrade SHALL complete with all required columns
+- **AND** existing rejection evidence SHALL remain unchanged
+
+### Requirement: Rejection and spool retention histories converge
+
+The migration graph MUST join `20260910_010000_add_account_rejection_generation` and `20260910_010000_dashboard_spool_retention` with a new merge revision. Both parent files MUST remain unchanged. The merge upgrade and downgrade MUST perform no application schema or data operations.
+
+#### Scenario: Upgrade from either populated parent
+
+- **GIVEN** a populated database at either parent or both parents
+- **WHEN** `codex-lb-db upgrade head` runs
+- **THEN** it MUST finish at one head after applying any missing parent
+- **AND** existing data MUST remain unchanged except for defaults required by the missing parent
+- **AND** `codex-lb-db check` MUST report no schema drift or migration policy violations
+
+#### Scenario: Downgrade only the merge
+
+- **GIVEN** a populated database at the merge revision
+- **WHEN** Alembic downgrades to either immediate parent
+- **THEN** both parent revision stamps, schemas and application data MUST remain intact
+- **AND** upgrading to `head` again MUST restore the single merge stamp
+
+### Requirement: Guest and rejection migration histories converge
+
+The migration graph MUST join `20260910_160000_merge_rejection_spool_heads` and `20260908_000000_add_guest_session_generation` through a new merge revision. Existing migration files MUST remain unchanged. The new merge upgrade and downgrade MUST perform no application schema or data operations.
+
+#### Scenario: Upgrade from either populated parent
+
+- **GIVEN** a populated database at either parent or both parent stamps
+- **WHEN** `codex-lb-db upgrade head` runs
+- **THEN** it MUST apply the missing parent history and finish at one head
+- **AND** it MUST preserve existing application data except defaults required by the missing history
+- **AND** `codex-lb-db check` MUST report no migration policy violations or schema drift
+
+#### Scenario: Downgrade only the guest and rejection join
+
+- **GIVEN** a populated database at the new merge
+- **WHEN** Alembic downgrades to either immediate parent
+- **THEN** both parent stamps, schemas and application data MUST remain intact
+- **AND** upgrading to head again MUST restore one stamp without losing rejection evidence, spool retention or guest-session generation
+
+### Requirement: Dashboard-user and rejection migration histories converge
+
+The migration graph MUST join `20260910_180000_merge_guest_rejection_heads` and `20260909_030000_add_audit_actor_columns` through a new merge revision. All published migration files MUST remain unchanged. The merge upgrade and downgrade MUST perform no application schema or data operations.
+
+#### Scenario: Upgrade either populated history
+
+- **GIVEN** a populated database at either immediate parent or both parent stamps
+- **WHEN** `codex-lb-db upgrade head` runs
+- **THEN** it MUST apply missing history and finish at one head
+- **AND** it MUST preserve existing role rows and grants, users, identities, user and guest session generations, rejection evidence, audit rows and spool retention except changes already required by missing historical migrations
+- **AND** legacy credential backfill and re-projection MUST retain their existing semantics
+- **AND** `codex-lb-db check` MUST report no migration policy violation or schema drift
+
+#### Scenario: Undo only the join
+
+- **GIVEN** a populated database at the new merge
+- **WHEN** Alembic downgrades to either immediate parent
+- **THEN** both parent stamps and all application schemas and rows MUST remain intact
+- **AND** public upgrade head MUST restore one stamp without changing those schemas or rows
+
+### Requirement: Invite and rejection migration histories converge
+
+The migration graph MUST join `20260910_200000_merge_dashboard_users_rejection_heads` and `20260909_040000_add_dashboard_user_invites` through a new merge revision. All published migration files MUST remain unchanged. The merge upgrade and downgrade MUST perform no application schema or data operations.
+
+#### Scenario: Upgrade populated invite or rejection history
+
+- **GIVEN** a populated database at either immediate parent or both parent stamps
+- **WHEN** `codex-lb-db upgrade head` runs
+- **THEN** it MUST apply only the missing history and finish at one head
+- **AND** existing invites, roles/grants, users/identities, credentials, session generations, API-key ownership, audit rows and rejection/retention evidence MUST remain intact except defaults required by missing historical migrations
+- **AND** `codex-lb-db check` MUST report no policy violation or schema drift
+
+#### Scenario: Undo only the invite join
+
+- **GIVEN** a populated database at the new merge
+- **WHEN** Alembic downgrades to either immediate parent
+- **THEN** both parent stamps and all application rows/schemas MUST remain intact
+- **AND** public reupgrade/check MUST restore one stamp without changing those rows/schemas

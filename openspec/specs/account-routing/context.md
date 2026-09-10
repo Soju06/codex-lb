@@ -168,9 +168,9 @@ recovery.
 ## Operational notes
 
 The dashboard Force Probe action can accelerate validation on the replica that
-handles the operator request. Only an accepted 2xx probe contributes to local
-recovery; operators should inspect `probe_status_code` when an account remains
-unused. Non-2xx results, persistent quota exhaustion, and high usage correctly
+handles the operator request. Only a valid completed probe contributes to local
+recovery; operators should inspect `probeStatusCode`, `probeCompleted`, and
+`holdRecovered` when an account remains unused. Non-2xx results, persistent quota exhaustion, and high usage correctly
 keep the account out of healthy routing. Successful settlement reloads standard
 usage and applies the same weekly/monthly and zero-primary-capacity normalization
 as ordinary selection, so plan-specific windows cannot be omitted, mistaken for
@@ -178,3 +178,23 @@ short windows, or evaluated for a quota the plan does not have.
 Settlement is discarded if newer replica-local runtime activity arrives while
 that snapshot is loading, preventing an older probe success from clearing a
 later failure.
+
+## Verified persisted-hold recovery
+
+The new proof is a completed request for the held model and service tier. Usage percentages remain advisory under the existing recovery rules. For example, a held Astra/default request can be recovered by a completed Astra/default probe; a Spark probe cannot clear it.
+
+Generation fencing is necessary because two rejections can share blocked_at and reset_at down to the same stored second. Status writers conservatively advance the generation and discard scope unless they carry explicit rejected-request provenance. Migration leaves historical scope unknown. No inference from asynchronously written request logs is used.
+
+The provider request is bounded to 30 seconds. A 60-second per-account database claim is renewed immediately before dispatch and checked at recovery. Competing probes receive 409, cancellation releases the claim, and expiry permits recovery from a crashed caller. Sessions remain request-owned.
+
+Scope metadata describes the execution that can prove recovery, not a new model-scoped upstream penalty policy. Account-wide hold and ownership rules remain intact. All rejection writers must run the new version before operators rely on generation fencing in a multi-replica deployment.
+
+The response separately reports HTTP status, completed execution and whether the guarded hold update landed. A later rejection can therefore leave accountStatusAfter limited even when an earlier guarded recovery did land. No credits are consumed or identity replaced by this endpoint.
+
+## Recovery before failure recording
+
+A replica can receive a recovered account row before its next selection. For example, an ordinary transient error can arrive just after an operator probe clears the old hold. Generation reconciliation runs before either selection or failure recording constructs runtime state. This prevents the error path from persisting the previous hold again while retaining transient-error accounting. Older recovered snapshots cannot clear newer rejection evidence. See [the recovery requirements](spec.md#requirement-completed-operator-probe-recovery).
+
+## WebSocket rejection scope
+
+Handshake classification forwards the request model and tier to the shared health writer. Terminal batch cleanup captures scope before awaiting settlement and logs. A request-specific error identifies its request; otherwise all pending requests must share one model and tier. Mixed shared failures retain unknown scope, so a probe for one of those requests cannot clear another scope's hold. For example, a priority-model handshake rejected with 429 retains enough evidence for a completed matching operator probe to clear the unchanged hold. Transport-neutral errors and failed settlement still follow their existing exclusions. See [completed operator probe recovery](spec.md#requirement-completed-operator-probe-recovery).

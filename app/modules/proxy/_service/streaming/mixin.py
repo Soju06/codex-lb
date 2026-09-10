@@ -270,6 +270,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.health import OwnerRecoveryHealth
 from app.modules.proxy._service.streaming.helpers import (
     _classify_terminal_stream_error_frame,
     _mark_downstream_stream_cancelled,
@@ -539,15 +540,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                 surface="stream",
             )
 
-        async def _record_or_defer_owner_recovery_health(error: UpstreamError, code: str | None) -> None:
-            if code is None:
-                return
-            if api_key_reservation is None:
-                await proxy._handle_stream_error(account, error, code)
-                return
-            settlement.error_code = code
-            settlement.account_health_error = True
-            settlement.settlement_order_required = True
+        _record_or_defer_owner_recovery_health = OwnerRecoveryHealth(
+            proxy, account, payload, settlement, keyed=api_key_reservation is not None
+        )
 
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None

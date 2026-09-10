@@ -1096,6 +1096,8 @@ async def _handle_stream_error(
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     retry_after_seconds: float | None = None,
     burst_cooldown_recorded: bool = False,
+    rejected_model: str | None = None,
+    rejected_service_tier: str | None = None,
 ) -> ClassifiedFailure:
     """Write account health for a stream failure and return its classification.
 
@@ -1143,11 +1145,21 @@ async def _handle_stream_error(
         )
         return classified
     if classified["failure_class"] == "rate_limit":
-        await proxy._load_balancer.mark_rate_limit(account, error)
+        await proxy._load_balancer.mark_rate_limit(
+            account,
+            error,
+            rejected_model=rejected_model,
+            rejected_service_tier=rejected_service_tier,
+        )
         if code == USAGE_LIMIT_REACHED:
             _request_usage_refresh(proxy, account.id)
     elif classified["failure_class"] == "quota":
-        await proxy._load_balancer.mark_quota_exceeded(account, error)
+        await proxy._load_balancer.mark_quota_exceeded(
+            account,
+            error,
+            rejected_model=rejected_model,
+            rejected_service_tier=rejected_service_tier,
+        )
     elif code in PERMANENT_FAILURE_CODES:
         await proxy._load_balancer.mark_permanent_failure(account, code)
     else:

@@ -1,0 +1,1 @@
+The repair preserves the existing policy. Example: guest generation 9, custom role grants and user session generation 12 survive joining with rejection generation 7 and its probe claim. No schema/data operation belongs in the merge revision.

@@ -15,9 +15,8 @@ from sqlalchemy import text
 TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="codex-lb-tests-"))
 TEST_DB_PATH = TEST_DB_DIR / "codex-lb.db"
 
-os.environ["CODEX_LB_DATABASE_URL"] = os.environ.get(
-    "CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}"
-)
+os.environ.setdefault("CODEX_LB_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}")
+os.environ["CODEX_LB_DATABASE_URL"] = os.environ["CODEX_LB_TEST_DATABASE_URL"]
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
 # The HTTP responses session bridge is a request-path feature with a T4 env
 # kill switch (see app/core/config/tiers.py). The suite runs on the raw

@@ -2628,10 +2628,22 @@ class _HTTPBridgeUpstreamEventsMixin:
         """
         if request_state is not None and request_state.api_key_reservation is not None:
             request_state.deferred_keyed_stream_health.append(
-                _DeferredKeyedStreamHealthPenalty(account=account, error=error, code=code)
+                _DeferredKeyedStreamHealthPenalty(
+                    account=account,
+                    error=error,
+                    code=code,
+                    rejected_model=request_state.model,
+                    rejected_service_tier=request_state.service_tier,
+                )
             )
         else:
-            await self._handle_stream_error(account, error, code)
+            await self._handle_stream_error(
+                account,
+                error,
+                code,
+                rejected_model=request_state.model if request_state is not None else None,
+                rejected_service_tier=request_state.service_tier if request_state is not None else None,
+            )
         if request_state is not None:
             setattr(request_state, "account_health_error_handled", True)
 

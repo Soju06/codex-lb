@@ -72,3 +72,29 @@ branch. See the [repair context](../../changes/merge-overflow-transport-migratio
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
+
+## Rejection evidence during bootstrap
+
+An unversioned or legacy-stamped database can already contain rejection-generation columns. The rejection migration inspects existing columns and adds only missing columns, preserving recorded generations and scope. For example, generation 7 and its rejected model survive an upgrade that adds missing probe-claim columns. This follows the existing schema-bootstrap convention; stamping fixtures at head would hide the failing startup path. See [the bootstrap contract](spec.md#requirement-rejection-evidence-schema-bootstrap).
+
+## Rejection and spool-retention migration join
+
+Parallel rejection-generation and spool-retention histories meet at `20260910_160000_merge_rejection_spool_heads`. Without the join, the normal `upgrade head` CLI reports multiple heads. Both parent files remain unchanged. The join only updates Alembic stamps; account recovery and spool-retention policies stay with their existing implementations.
+
+A database with saved spool retention gains rejection fields using the original migration defaults. A database with rejection evidence retains its generation, scope and probe claim while gaining nullable retention. Downgrading only the merge retains both parent stamps and schemas. See the convergence requirement in [spec.md](spec.md).
+
+## Guest and rejection history join
+
+Guest-session revocation later branched from spool retention, creating a second head beside the published rejection/spool join. `20260910_180000_merge_guest_rejection_heads` joins those histories without changing any existing migration. The normal upgrade CLI applies whichever history is missing.
+
+For example, saved guest generation 9 survives while rejection fields receive their original defaults. Existing rejection scope, probe claims, credentials and spool retention survive while guest generation starts at zero. Downgrading only this join retains both parent stamps and schemas. The earlier join's downgrade is tested from its own parent states, where the later guest sibling is absent. Guest-access and account-recovery policy remain unchanged by the join. See the convergence requirement in [spec.md](spec.md).
+
+## Dashboard-user and rejection history join
+
+Dashboard roles, users, credential re-projection and audit attribution extend the guest history alongside the published rejection/guest join. `20260910_200000_merge_dashboard_users_rejection_heads` joins that audit head with the published merge. It does not repeat credential projection or alter authorization/recovery policy.
+
+For example, a current user password that differs from stale legacy settings remains authoritative after the join. Existing custom role grants, user and guest session generations, owned API keys, audit attribution, rejection evidence and retention survive. A database missing the dashboard history receives only its existing historical backfills and defaults. Merge-only downgrade retains both populated histories. See the convergence requirement in [spec.md](spec.md).
+
+## Invite and rejection history join
+
+The invite-table revision extends the audit history beside the published dashboard-user/rejection merge. `20260910_220000_merge_invites_rejection_heads` joins those histories without editing either parent. A database missing the invite history gains an empty invite table; existing invitations retain their token hash, expiry, consumption/revocation state and creator snapshot. User credentials, grants, generations, owned API keys, audit rows and rejection evidence remain unchanged by the join. Downgrading only this merge retains both histories. Historical `200000` roundtrip coverage stays at its own revision to avoid dropping the later invite table. See [spec.md](spec.md).

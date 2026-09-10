@@ -165,6 +165,9 @@ class _CompactServiceProtocol(Protocol):
         error: Any,
         code: str,
         http_status: int | None = None,
+        *,
+        rejected_model: str | None = None,
+        rejected_service_tier: str | None = None,
     ) -> Any: ...
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None: ...
@@ -763,6 +766,8 @@ class _CompactMixin:
         forwarded_request: bool = False,
         forwarded_file_owner_account_id: str | None = None,
     ) -> CompactResponsePayload:
+        rejected_model = payload.model
+        rejected_service_tier = _service_tier_from_compact_payload(payload)
         proxy = cast(_CompactServiceProtocol, self)
         _maybe_log_proxy_request_payload("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
@@ -963,6 +968,8 @@ class _CompactMixin:
                         failed_error,
                         failed_code,
                         http_status=failed_status,
+                        rejected_model=rejected_model,
+                        rejected_service_tier=rejected_service_tier,
                     )
                 except Exception:
                     logger.warning(
@@ -1111,6 +1118,8 @@ class _CompactMixin:
                 failed_error,
                 failed_code,
                 http_status=failed_status,
+                rejected_model=rejected_model,
+                rejected_service_tier=rejected_service_tier,
             )
 
         try:
@@ -2003,6 +2012,8 @@ class _CompactMixin:
                                 _upstream_error_from_openai(error),
                                 code,
                                 http_status=exc.status_code,
+                                rejected_model=rejected_model,
+                                rejected_service_tier=rejected_service_tier,
                             )
                             if (
                                 affinity.selection_key is not None
@@ -2095,6 +2106,8 @@ class _CompactMixin:
                             _upstream_error_from_openai(error),
                             code,
                             http_status=exc.status_code,
+                            rejected_model=rejected_model,
+                            rejected_service_tier=rejected_service_tier,
                         )
                         raise
                 if transient_exhausted:

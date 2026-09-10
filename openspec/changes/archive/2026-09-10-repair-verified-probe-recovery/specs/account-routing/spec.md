@@ -1,0 +1,40 @@
+## MODIFIED Requirements
+
+### Requirement: Completed operator probe recovery
+
+The existing account probe endpoint MUST clear a persisted rate-limit or quota hold only after a valid `response.completed` for the held account and recorded rejected model and service tier. HTTP success without completed execution MUST NOT authorize recovery. Unknown historical rejection scope MUST NOT authorize recovery, including when a default probe model succeeds.
+
+Every persisted rejection MUST advance a durable monotonic block generation, including repeated rejections with identical integer-second block timestamps. Recovery MUST compare the generation captured before dispatch, account status, block markers and credential identity. A newer rejection, pause, deletion or reauthentication MUST win. Concurrent probes for the same hold MUST share a bounded admission. Probe failure, timeout, cancellation, malformed stream and incomplete execution MUST NOT authorize completed-probe recovery. Existing ordinary usage and deadline recovery remain independent.
+
+Recovery MUST preserve routing policy, model eligibility, file ownership, registered continuation ownership and existing account affinity. Ordinary quota refresh and deadline recovery rules MUST remain unchanged. No automatic provider probe SHALL be introduced.
+
+#### Scenario: Successful recovery after restart
+
+- **GIVEN** a held account with recorded rejected scope and no replica-local block state
+- **WHEN** an operator probe completes successfully for that same scope and its generation remains current
+- **THEN** the persisted hold is cleared and fresh eligible requests can select the account
+- **AND** established owner bindings remain unchanged
+
+#### Scenario: Same-second rejection wins
+
+- **GIVEN** an operator probe captured a hold generation
+- **WHEN** a newer upstream rejection persists with the same reset and block timestamps before probe settlement
+- **THEN** its advanced generation prevents recovery
+
+#### Scenario: Historical hold remains protected
+
+- **GIVEN** a hold migrated without trustworthy rejected scope
+- **WHEN** a probe completes for any model
+- **THEN** completed-probe recovery does not clear that hold
+
+#### Scenario: Incomplete provider response
+
+- **GIVEN** a held account whose scope matches the probe
+- **WHEN** upstream returns HTTP 200 followed by failure, incomplete execution or EOF without completion
+- **THEN** the persisted hold remains unchanged
+
+#### Scenario: Transient error arrives before recovered replica selection
+- **GIVEN** a replica retains an older hold and the persisted account has a newer recovered generation
+- **WHEN** a transient error is recorded before that replica next selects an account
+- **THEN** the recovered hold MUST NOT be restored or retained
+- **AND** ordinary transient-error accounting MUST still apply

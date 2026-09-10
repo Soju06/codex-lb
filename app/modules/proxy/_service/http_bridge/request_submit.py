@@ -2563,6 +2563,14 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.prewarm_status = "skipped"
             _record_http_bridge_prewarm_outcome(outcome="skipped")
             return
+        # The two settings readers the locked body reaches -- the admission
+        # gate's account caps/tunables and the reconnect the timeout path takes
+        # -- get this one row instead of reading it themselves, so nothing
+        # awaits the settings cache while ``prewarm_lock`` is held. A refresh
+        # behind that read runs a DB query under a process-global lock; one
+        # stalled query would then hold this session's prewarm lock and stall
+        # every later turn on it (issues #1971 and #1972).
+        dashboard_settings = await _service_get_settings_cache().get()
         async with prewarm_lock:
             if session.prewarmed:
                 request_state.prewarm_status = "skipped"
@@ -2605,6 +2613,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     account_id=session.account.id,
                     surface="http_bridge_prewarm",
                     bridge_session=session,
+                    dashboard_settings=dashboard_settings,
                 )
                 gate_acquired = True
                 async with session.lifecycle_lock:
@@ -2677,6 +2686,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                     kind=session.key.affinity_kind,
                                     key=session.key.affinity_key,
                                 ),
+                                dashboard_settings=dashboard_settings,
                             )
                         except Exception:
                             session.closed = True

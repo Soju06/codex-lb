@@ -49979,12 +49979,15 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
         account_id: str | None = None,
         surface: str = "websocket",
         bridge_session: proxy_service._HTTPBridgeSession | None = None,
+        dashboard_settings: Any | None = None,
     ) -> None:
         admission_observations.append(
             {
                 "request_id": state.request_id,
                 "account_id": account_id,
                 "surface": surface,
+                # The prewarm resolves this before its lock and threads it in.
+                "dashboard_settings_supplied": dashboard_settings is not None,
             }
         )
         await original_acquire_admission(
@@ -49994,6 +49997,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
             account_id=account_id,
             surface=surface,
             bridge_session=bridge_session,
+            dashboard_settings=dashboard_settings,
         )
 
     async def fake_reconnect_http_bridge_session(
@@ -50003,6 +50007,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
         restart_reader: bool = False,
         require_same_account: bool = False,
         require_preferred_account: bool = False,
+        dashboard_settings: Any | None = None,
     ) -> None:
         del require_same_account, require_preferred_account
         reconnect_observations.append(
@@ -50010,6 +50015,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
                 "pending_request_ids": [state.request_id for state in reconnect_session.pending_requests],
                 "request_id": request_state.request_id,
                 "restart_reader": restart_reader,
+                "dashboard_settings_supplied": dashboard_settings is not None,
             }
         )
         reconnect_session.upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -50039,12 +50045,16 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
             "request_id": prewarm_admission["request_id"],
             "account_id": "acc_prewarm_timeout",
             "surface": "http_bridge_prewarm",
+            "dashboard_settings_supplied": True,
         }
     ]
     assert cast(str, prewarm_admission["request_id"]).startswith("http_prewarm_")
     observation = reconnect_observations[0]
     assert observation["request_id"] == "req_prewarm_timeout"
     assert observation["restart_reader"] is True
+    # Both helpers run under ``prewarm_lock`` and are handed the snapshot the
+    # prewarm resolved before taking it, so neither reads settings there.
+    assert observation["dashboard_settings_supplied"] is True
     pending_request_ids = cast(list[str], observation["pending_request_ids"])
     assert len(pending_request_ids) == 1
     assert pending_request_ids[0].startswith("http_prewarm_")

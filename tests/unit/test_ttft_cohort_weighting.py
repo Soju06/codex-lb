@@ -14,6 +14,7 @@ import pytest
 from app.core.balancer.logic import AccountState, _select_capacity_weighted, select_account
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind
+from app.modules.proxy._load_balancer import latency_cohort as latency_cohort_module
 from app.modules.proxy._load_balancer.latency_cohort import apply_latency_cohort_weights, last_cohort_weight
 from app.modules.proxy._load_balancer.opportunistic_admission import (
     _observe_selection_states,
@@ -94,6 +95,7 @@ def _record(balancer: Any, account_id: str | None = "acc", **overrides: Any) -> 
         "latency_first_token_ms": 1_700,
         "input_tokens": 4_000,
         "reasoning_effort": None,
+        "latency_upstream_send_ms": 0,
         "queued_wait_ms": 0,
     }
     kwargs.update(overrides)
@@ -109,7 +111,9 @@ def test_record_ttft_sample_filters_ineligible_rows() -> None:
     _record(
         balancer, input_tokens=TTFT_SAMPLE_MAX_INPUT_TOKENS + 5_000, cached_input_tokens=TTFT_SAMPLE_MAX_INPUT_TOKENS
     )
-    assert [ttft for _, ttft in balancer._runtime["acc"].ttft_samples] == [1_700] * 4
+    # The sample starts at the upstream send: 3 s of bridge pre-send work is not the account's.
+    _record(balancer, latency_first_token_ms=4_700, latency_upstream_send_ms=3_000)
+    assert [ttft for _, ttft in balancer._runtime["acc"].ttft_samples] == [1_700] * 5
 
     ineligible_rows: tuple[dict[str, Any], ...] = (
         {"status": "error"},
@@ -126,10 +130,14 @@ def test_record_ttft_sample_filters_ineligible_rows() -> None:
         {"queued_wait_ms": 5},
         # A retried send / capacity wait leaves the failed attempt inside the TTFT.
         {"retried": True},
+        # No send anchor (fail closed), or a send stamped after the first token.
+        {"latency_upstream_send_ms": None},
+        {"latency_upstream_send_ms": -1},
+        {"latency_upstream_send_ms": 1_701},
     )
     for ineligible in ineligible_rows:
         _record(balancer, **ineligible)
-    assert len(balancer._runtime["acc"].ttft_samples) == 4
+    assert len(balancer._runtime["acc"].ttft_samples) == 5
 
     _record(balancer, account_id=None)
     _record(balancer, account_id="")
@@ -349,7 +357,8 @@ def test_build_states_uses_the_full_runtime_for_the_fleet_reference() -> None:
 @pytest.mark.asyncio
 async def test_write_request_log_records_only_eligible_rows() -> None:
     scheduler = _RecordingVirtualScheduler(VirtualClock(epoch_value=_NOW))
-    service = _service(scheduler, _RequestLogsRepo())
+    request_logs = _RequestLogsRepo()
+    service = _service(scheduler, request_logs)
     common: dict[str, Any] = {
         "account_id": "acc-log",
         "api_key": None,
@@ -358,7 +367,12 @@ async def test_write_request_log_records_only_eligible_rows() -> None:
         "latency_first_token_ms": 1_700,
         "input_tokens": 3_000,
         "reasoning_effort": "low",
+        "latency_upstream_send_ms": 0,
     }
+
+    def row(**overrides: Any) -> dict[str, Any]:
+        return {**common, **overrides}
+
     await service._write_request_log(request_id="ok", status="success", **common)
     await service._write_request_log(request_id="failed", status="error", **common)
     await service._write_request_log(request_id="warm", status="success", request_kind="warmup", **common)
@@ -377,9 +391,17 @@ async def test_write_request_log_records_only_eligible_rows() -> None:
         "latency_first_token_ms": 1_650,
     }
     await service._write_request_log(request_id="cached", status="success", **cached)
+    # Bridge rows: the sample runs from the ``response.create`` send, so the
+    # pre-send local work inside the row's TTFT is dropped; a row without a send
+    # anchor is not sampled at all.
+    await service._write_request_log(
+        request_id="bridge", status="success", **row(latency_first_token_ms=4_700, latency_upstream_send_ms=3_000)
+    )
+    await service._write_request_log(request_id="unanchored", status="success", **row(latency_upstream_send_ms=None))
     await scheduler.drain()
     runtime = service._load_balancer._runtime["acc-log"]
-    assert runtime.ttft_samples == [(_NOW, 1_700), (_NOW, 1_650)]
+    assert runtime.ttft_samples == [(_NOW, 1_700), (_NOW, 1_650), (_NOW, 1_700)]
+    assert [persisted["latency_first_token_ms"] for persisted in request_logs.rows[-2:]] == [4_700, 1_700]
 
 
 def test_detached_runtime_snapshot_copies_ttft_samples() -> None:
@@ -425,6 +447,16 @@ def test_transition_log_is_gated_and_carries_no_account_identifiers(caplog: pyte
         )
     lifted = [record for record in caplog.records if "latency_cohort_weight_change" in record.getMessage()]
     assert len(lifted) == 1 and "multiplier=1.00" in lifted[0].getMessage()
+
+
+def test_transition_gate_logs_a_move_of_exactly_the_configured_delta(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 0.125 is exactly representable, so the boundary is a real equality, not a rounding artefact.
+    monkeypatch.setattr(latency_cohort_module, "_LOG_DELTA", 0.125)
+    assert latency_cohort_module._transition(0.75, 0.625) is True
+    assert latency_cohort_module._transition(0.75, 0.875) is True
+    assert latency_cohort_module._transition(0.75, 0.7) is False
+    # Crossing 1.0 is always a transition, however small the move.
+    assert latency_cohort_module._transition(1.0, 0.99) is True
 
 
 def test_snapshot_build_does_not_repeat_the_transition_log(caplog: pytest.LogCaptureFixture) -> None:

@@ -6406,6 +6406,15 @@ class _WebSocketMixin:
         upstream_terminal_at = request_state.upstream_terminal_at
         if upstream_terminal_at is None:
             upstream_terminal_at = clock_for(proxy).monotonic()
+        # First-token clock start: the TTFT cohort sample is measured from the
+        # ``response.create`` send, so bridge pre-send work (session lookup,
+        # reconnect, prewarm, image inlining, slimming) that ``started_at``
+        # precedes is never attributed to the account. A turn without a send
+        # stamp cannot anchor a sample and the funnel drops it.
+        upstream_sent_at = request_state.response_create_sent_at
+        latency_upstream_send_ms = (
+            None if upstream_sent_at is None else max(0, int((upstream_sent_at - request_state.started_at) * 1000))
+        )
         if request_state.latency_first_token_ms is None:
             ttft_visible_at = _finalize_ttft_reasoning_deltas(
                 request_state.ttft_reasoning_deltas, now=clock_for(proxy).monotonic()
@@ -6580,6 +6589,7 @@ class _WebSocketMixin:
                     latency_first_upstream_event_ms=request_state.latency_first_upstream_event_ms,
                     latency_response_create_gate_wait_ms=request_state.latency_response_create_gate_wait_ms,
                     latency_bridge_queue_wait_ms=request_state.latency_bridge_queue_wait_ms,
+                    latency_upstream_send_ms=latency_upstream_send_ms,
                     latency_upstream_terminal_ms=max(0, int((upstream_terminal_at - request_state.started_at) * 1000)),
                     # TTFT is measured from started_at, so a retried send, a
                     # transparent direct-WebSocket replay (replay_count; the

@@ -47,8 +47,8 @@ When enabled and several accounts are otherwise eligible, selection is restricte
 
 The `Capacity weighted` and `Relative availability` strategies also discount accounts that are slower than their siblings, down to half of their normal weight, using two replica-local signals measured from the last hour of successful, unqueued, single-attempt turns:
 
-- **First-token latency** per account, on small, low-effort turns: an account more than 15% above the fleet median is discounted.
-- **Output throughput** (tokens per second from the first token to the upstream's terminal event -- local settlement time is not generation time) per account **and per model**, on turns with at least 200 output tokens: an account more than 15% below the fleet median *for the model being requested* is discounted for that model only, so an account that streams slowly on one model keeps its full weight on the others.
+- **First-token latency** per account (measured from the upstream send, so the proxy's own pre-send work is not the account's), on small, low-effort turns: an account more than 15% above the fleet median is discounted.
+- **Output throughput** (tokens per second from the first token to the upstream's terminal event as it was parsed -- downstream delivery and local settlement time are not generation time) per account **and per model**, on turns with at least 200 output tokens: an account more than 15% below the fleet median *for the model being requested* is discounted for that model only, so an account that streams slowly on one model keeps its full weight on the others.
 
 Each signal needs at least eight samples on at least three accounts (per model, for throughput) before it acts and is neutral when the whole fleet is equally slow. When both apply, the smaller multiplier is used, never their product. The weight never excludes an account and never moves an established sticky session; there is nothing to configure.
 

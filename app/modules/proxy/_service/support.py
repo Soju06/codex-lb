@@ -872,6 +872,12 @@ class _StreamSettlement:
     downstream_text_visible: bool = False
     response_id: str | None = None
     usage_settlement_transferred: bool = False
+    # Monotonic instant the upstream terminal frame (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed by
+    # ``_stream_once``, before it is yielded downstream. The throughput cohort
+    # sample ends its generation span here; the row's ``latency_ms`` keeps
+    # measuring to the generator's close (downstream flush, upstream EOF).
+    upstream_terminal_at: float | None = None
 
     def reset(self) -> None:
         fresh = type(self)()

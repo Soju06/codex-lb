@@ -88,6 +88,7 @@ def _eligible(
     input_tokens: int | None,
     cached_input_tokens: int | None,
     reasoning_effort: str | None,
+    latency_upstream_send_ms: int | None,
     queued_wait_ms: int,
     retried: bool,
 ) -> bool:
@@ -97,7 +98,8 @@ def _eligible(
         and request_kind == TTFT_SAMPLE_REQUEST_KIND
         and not retried
         and latency_first_token_ms is not None
-        and latency_first_token_ms >= 0
+        and latency_upstream_send_ms is not None
+        and 0 <= latency_upstream_send_ms <= latency_first_token_ms
         and input_tokens is not None
         and input_tokens - (cached_input_tokens or 0) < TTFT_SAMPLE_MAX_INPUT_TOKENS
         and reasoning_effort in TTFT_SAMPLE_EFFORTS
@@ -115,11 +117,20 @@ def record_ttft_sample(
     input_tokens: int | None,
     cached_input_tokens: int | None = None,
     reasoning_effort: str | None,
+    latency_upstream_send_ms: int | None,
     queued_wait_ms: int,
     retried: bool = False,
 ) -> None:
     """Record one eligible first-token latency for ``account_id`` at the balancer clock.
 
+    The sample is ``latency_first_token_ms - latency_upstream_send_ms``: the
+    row's first-token latency runs from the request start, and on the bridge
+    path the start precedes session lookup, reconnect, prewarm, image inlining
+    and payload slimming, so the account is only charged from its
+    ``response.create`` send. ``latency_upstream_send_ms`` is the start-to-send
+    offset (``0`` when the caller's clock already starts at the send, as the
+    HTTP stream's attempt clock does); a row without one (``None``) or with a
+    send after its first token has no usable anchor and is never sampled.
     ``retried`` marks a row whose first-token latency spans more than one
     upstream send or an account-capacity wait (bridge retries, transparent
     direct-WebSocket replays after a dropped upstream, retries after a
@@ -148,18 +159,19 @@ def record_ttft_sample(
         input_tokens=input_tokens,
         cached_input_tokens=cached_input_tokens,
         reasoning_effort=reasoning_effort,
+        latency_upstream_send_ms=latency_upstream_send_ms,
         queued_wait_ms=queued_wait_ms,
         retried=retried,
     ):
         return
-    if account_id is None or latency_first_token_ms is None:  # narrowed by ``_eligible``
-        return
+    if account_id is None or latency_first_token_ms is None or latency_upstream_send_ms is None:
+        return  # narrowed by ``_eligible``
     now = float(clock.time())
     runtime = runtime_map.setdefault(account_id, RuntimeState())
     samples = runtime.ttft_samples
     if samples is None:
         samples = runtime.ttft_samples = []
-    samples.append((now, int(latency_first_token_ms)))
+    samples.append((now, int(latency_first_token_ms - latency_upstream_send_ms)))
     _prune(samples, now)
 
 

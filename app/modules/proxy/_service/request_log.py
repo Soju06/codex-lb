@@ -203,11 +203,18 @@ class _RequestLogMixin:
         # (bridge retry or direct WebSocket replay) or an account-capacity
         # wait. Not persisted; it only keeps the row out of the latency cohort samples.
         upstream_retried: bool = False,
-        # Start-to-upstream-terminal latency for transports whose ``latency_ms``
-        # keeps running through settlement and cleanup (WebSocket / bridge
-        # finalizer). Not persisted; it is the end of the throughput sample's
-        # span. ``None`` means ``latency_ms`` already stops at the terminal
-        # (the HTTP stream writes its row before settling).
+        # Start-to-upstream-send latency: how much of ``latency_first_token_ms``
+        # is local pre-send work (bridge session lookup / reconnect / slimming,
+        # WebSocket owner binding). Not persisted; the TTFT cohort sample is
+        # ``latency_first_token_ms - latency_upstream_send_ms``, so the account
+        # is only charged from its ``response.create`` send. ``None`` means the
+        # row has no send anchor and it is never TTFT-sampled (fail closed).
+        latency_upstream_send_ms: int | None = None,
+        # Start-to-upstream-terminal latency stamped when the terminal frame was
+        # parsed, before downstream delivery, terminal bookkeeping, settlement
+        # and cleanup. Not persisted; it is the end of the throughput sample's
+        # span. ``None`` (no terminal frame was parsed) falls back to
+        # ``latency_ms``; such rows are error rows and are not sampled.
         latency_upstream_terminal_ms: int | None = None,
     ) -> None:
         task = scheduler_for(self).create_task(
@@ -324,6 +331,7 @@ class _RequestLogMixin:
             input_tokens=input_tokens,
             cached_input_tokens=cached_input_tokens,
             reasoning_effort=reasoning_effort,
+            latency_upstream_send_ms=latency_upstream_send_ms,
             queued_wait_ms=queued_wait_ms,
             retried=upstream_retried,
         )

@@ -149,9 +149,10 @@ def record_tps_sample(
     ``ttft_cohort.record_ttft_sample``: a retried send or a capacity wait
     leaves a failed attempt inside ``latency_ms``, and a queued row's span is
     not the upstream's. ``latency_ms`` MUST end at the upstream terminal event,
-    not at the end of local settlement/cleanup (the request-log funnel passes
-    the finalizer's ``latency_upstream_terminal_ms`` for WebSocket and bridge
-    rows; the HTTP stream's row latency already stops there). The throughput is
+    not at the end of downstream delivery or local settlement/cleanup: the
+    request-log funnel passes the ``latency_upstream_terminal_ms`` each path
+    stamps when it parses the terminal frame (HTTP stream settlement, bridge
+    reader, WebSocket reader) in place of the row's latency. The throughput is
     ``output_tokens`` over the generation span
     ``latency_ms - latency_first_token_ms``; rows without a
     model, with the ``unknown`` placeholder, without a first token, with a

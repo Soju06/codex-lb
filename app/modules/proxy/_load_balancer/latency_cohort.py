@@ -38,7 +38,7 @@ from app.modules.proxy._load_balancer.types import RuntimeState
 
 logger = logging.getLogger(__name__)
 
-# Transition log gate: a multiplier move smaller than this is not logged.
+# Transition log gate: a multiplier move smaller than this is not logged (a move of exactly this much is).
 _LOG_DELTA = 0.1
 
 
@@ -70,7 +70,7 @@ def last_cohort_weight(runtime: RuntimeState, model: str | None) -> float:
 
 
 def _transition(previous: float, current: float) -> bool:
-    return (previous < 1.0) != (current < 1.0) or abs(current - previous) > _LOG_DELTA
+    return (previous < 1.0) != (current < 1.0) or abs(current - previous) >= _LOG_DELTA
 
 
 def _store_tps_weight(runtime: RuntimeState, model: str | None, multiplier: float) -> None:

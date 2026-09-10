@@ -74,7 +74,7 @@ export function ModelSourceCreateDialog({
         <Form {...form}>
           <form onSubmit={form.handleSubmit(handleSubmit)} className="flex min-h-0 flex-1 flex-col">
             <div
-              className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-4"
+              className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-6 pb-4"
               data-testid="model-source-create-scroll-region"
             >
               <ModelSourceFormFields

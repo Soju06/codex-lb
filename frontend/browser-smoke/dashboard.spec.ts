@@ -461,3 +461,49 @@ test("the model source dialogs stay inside supported viewports", async ({ page }
     await expect(dialog).toBeHidden();
   }
 });
+
+test("the model source edit dialog keeps Save visible in compact viewports", async ({ page, request }) => {
+  const created = await request.post("/api/model-sources/", {
+    data: {
+      name: "Viewport regression source",
+      baseUrl: "http://127.0.0.1:9/v1",
+      models: [{
+        model: "viewport-regression-model",
+        rawMetadataJson: JSON.stringify({ supports_reasoning: true, reasoning_efforts: ["low", "high"] }),
+      }],
+    },
+  });
+  expect(created.ok()).toBe(true);
+  const source = await created.json() as { id: string };
+  try {
+    await page.goto("/settings", { waitUntil: "domcontentloaded" });
+    await acceptTelemetryConsentIfShown(page);
+    await page.getByRole("button", { name: "Show advanced settings" }).click();
+    for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 1440, height: 900 }]) {
+      await page.setViewportSize(size);
+      await page.getByRole("button", { name: "Edit Viewport regression source model source", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Edit model source" });
+      const save = dialog.getByRole("button", { name: "Save", exact: true });
+      const title = dialog.getByRole("heading", { name: "Edit model source" });
+      const close = dialog.getByRole("button", { name: "Close" });
+      const scroll = dialog.getByTestId("model-source-edit-scroll-region");
+      await expect(scroll).toHaveCount(1);
+      await expect(scroll).toHaveCSS("overflow-y", "auto");
+      for (const control of [dialog, title, close, save]) await expect(control).toBeInViewport({ ratio: 1 });
+      // Assert rendered spacing, so a missing utility fails this browser path.
+      await expect.poll(() => scroll.evaluate((el) => {
+        const first = el.children[0].getBoundingClientRect();
+        const second = el.children[1].getBoundingClientRect();
+        return second.top - first.bottom;
+      })).toBeGreaterThanOrEqual(15);
+      await expect.poll(() => scroll.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(0);
+      await scroll.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+      await expect.poll(() => scroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1);
+      for (const control of [title, close, save]) await expect(control).toBeInViewport({ ratio: 1 });
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+    }
+  } finally {
+    expect((await request.delete(`/api/model-sources/${source.id}`)).ok()).toBe(true);
+  }
+});

@@ -1378,7 +1378,7 @@
   "settings.routing.limitWarmup.shared.promptLabel": "Prompt",
   "settings.routing.limitWarmup.resetConfirmed.badge": "After reset",
   "settings.routing.limitWarmup.resetConfirmed.title": "Reset-confirmed warm-up",
-  "settings.routing.limitWarmup.resetConfirmed.description": "Fires when an exhausted account's quota resets. Accounts at or above this usage before reset qualify.",
+  "settings.routing.limitWarmup.resetConfirmed.description": "Runs after a confirmed quota reset. Accounts at or above this usage before reset qualify; 0% qualifies every reset.",
   "settings.routing.limitWarmup.resetConfirmed.thresholdLabel": "Min usage %",
   "settings.routing.limitWarmup.resetConfirmed.thresholdAria": "Min usage percent",
   "settings.routing.limitWarmup.staggeredIdle.badge": "Proactive",

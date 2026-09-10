@@ -81,7 +81,7 @@ class SettingsRepository:
             limit_warmup_model="auto",
             limit_warmup_prompt="Say OK.",
             limit_warmup_cooldown_seconds=3600,
-            limit_warmup_exhausted_threshold_percent=99.0,
+            limit_warmup_exhausted_threshold_percent=0.0,
             limit_warmup_idle_threshold_percent=1.0,
             limit_warmup_min_available_percent=100.0,
             weekly_pace_working_days="0,1,2,3,4,5,6",

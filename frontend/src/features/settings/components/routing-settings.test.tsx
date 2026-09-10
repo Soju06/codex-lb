@@ -767,6 +767,53 @@ describe("RoutingSettings", () => {
     });
   });
 
+  it("rejects an empty warm-up exhausted threshold", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          limitWarmupEnabled: true,
+          limitWarmupExhaustedThresholdPercent: 50,
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("Min usage percent"));
+
+    expect(screen.getByRole("button", { name: "Save warm-up settings" })).toBeDisabled();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("saves an explicit zero warm-up exhausted threshold", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          limitWarmupEnabled: true,
+          limitWarmupExhaustedThresholdPercent: 50,
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("Min usage percent"));
+    await user.type(screen.getByLabelText("Min usage percent"), "0");
+    await user.click(screen.getByRole("button", { name: "Save warm-up settings" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      limitWarmupEnabled: true,
+      limitWarmupExhaustedThresholdPercent: 0,
+    });
+  });
+
   it("rejects invalid warm-up exhausted thresholds", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
@@ -779,7 +826,7 @@ describe("RoutingSettings", () => {
     );
 
     await user.clear(screen.getByLabelText("Min usage percent"));
-    await user.type(screen.getByLabelText("Min usage percent"), "100.1");
+    await user.type(screen.getByLabelText("Min usage percent"), "0");
 
     expect(screen.getByRole("button", { name: "Save warm-up settings" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();

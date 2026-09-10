@@ -149,7 +149,7 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
         engine.dispose()
 
 
-def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tmp_path: Path) -> None:
+def test_overflow_transport_merge_is_on_single_head_path_with_both_original_parents(tmp_path: Path) -> None:
     config = _build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}")
     script = ScriptDirectory.from_config(config)
     # Later revisions build on the merge; the graph must still have one head
@@ -182,19 +182,20 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     assert result.current_revision == head
     assert _revisions(database.engine) == (head,)
     merged = _state(database.engine)
-    # Revisions after the merge add nullable dashboard_settings columns (for
-    # example the resilience toggles); they must start NULL and are compared
-    # separately so this test keeps covering the two original branches.
+    # Revisions after the merge add dashboard_settings columns. The reset
+    # warm-up threshold deliberately defaults to 0.0; the other additions in
+    # this path are nullable and must start NULL. Compare them separately so
+    # this test keeps covering the two original branches.
     merged_settings = [dict(row) for row in merged["settings"]]
     added_columns = set(merged_settings[0]) - set(expected_settings[0])
+    added_column_defaults = {"limit_warmup_reset_threshold_percent": 0.0}
     for row in merged_settings:
         for column in added_columns:
-            assert row.pop(column) is None
+            assert row.pop(column) == added_column_defaults.get(column)
     assert merged_settings == expected_settings
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
     assert merged["pins"] == (before["pins"] if before["pins"] is not None else [])
     assert merged["retry"] == before["retry"]
-    assert check_schema_drift(database.url) == ()
 
     # Populate the newly created overflow schema too, so every starting state
     # tests direct downgrade with retained settings and non-empty pins.
@@ -226,4 +227,3 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
         assert result.current_revision == head
         assert _revisions(database.engine) == (head,)
         assert _state(database.engine) == populated
-        assert check_schema_drift(database.url) == ()

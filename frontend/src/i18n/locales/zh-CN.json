@@ -1378,7 +1378,7 @@
   "settings.routing.limitWarmup.shared.promptLabel": "Prompt",
   "settings.routing.limitWarmup.resetConfirmed.badge": "重置后",
   "settings.routing.limitWarmup.resetConfirmed.title": "重置确认预热",
-  "settings.routing.limitWarmup.resetConfirmed.description": "当已耗尽的账户配额重置时触发。重置前使用量达到或超过此值的账户符合条件。",
+  "settings.routing.limitWarmup.resetConfirmed.description": "确认配额重置后触发。重置前使用量达到或超过此值的账户符合条件；设置为 0% 即每次重置都符合条件。",
   "settings.routing.limitWarmup.resetConfirmed.thresholdLabel": "最低使用量 %",
   "settings.routing.limitWarmup.resetConfirmed.thresholdAria": "最低使用量百分比",
   "settings.routing.limitWarmup.staggeredIdle.badge": "主动",

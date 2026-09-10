@@ -394,8 +394,9 @@ export function RoutingSettings({
   const limitWarmupCooldownValid = Number.isInteger(parsedLimitWarmupCooldown) && parsedLimitWarmupCooldown >= 60;
   const parsedLimitWarmupExhaustedThreshold = Number(draft.limitWarmupExhaustedThreshold);
   const limitWarmupExhaustedThresholdValid =
+    draft.limitWarmupExhaustedThreshold.trim() !== "" &&
     Number.isFinite(parsedLimitWarmupExhaustedThreshold) &&
-    parsedLimitWarmupExhaustedThreshold > 0 &&
+    parsedLimitWarmupExhaustedThreshold >= 0 &&
     parsedLimitWarmupExhaustedThreshold <= 100;
   const parsedLimitWarmupIdleThreshold = Number(draft.limitWarmupIdleThreshold);
   const limitWarmupIdleThresholdValid =
@@ -1455,7 +1456,7 @@ export function RoutingSettings({
                       <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">{t("settings.routing.limitWarmup.resetConfirmed.thresholdLabel")}</span>
                       <Input
                         type="number"
-                        min={1}
+                        min={0}
                         max={100}
                         step={0.1}
                         inputMode="decimal"

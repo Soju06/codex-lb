@@ -50,7 +50,7 @@ describe("DashboardSettingsSchema", () => {
       limitWarmupModel: "auto",
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 3600,
-      limitWarmupExhaustedThresholdPercent: 99,
+      limitWarmupExhaustedThresholdPercent: 0,
       limitWarmupIdleThresholdPercent: 1,
       limitWarmupMinAvailablePercent: 100,
       limitWarmupStaggeredIdleEnabled: true,
@@ -134,7 +134,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.limitWarmupModel).toBe("auto");
     expect(parsed.limitWarmupPrompt).toBe("Say OK.");
     expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
-    expect(parsed.limitWarmupExhaustedThresholdPercent).toBe(99);
+    expect(parsed.limitWarmupExhaustedThresholdPercent).toBe(0);
     expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4,5,6");
     expect(parsed.weeklyPaceSmoothingMinutes).toBe(30);
@@ -448,7 +448,13 @@ describe("SettingsUpdateRequestSchema", () => {
         preferEarlierResetAccounts: true,
         limitWarmupExhaustedThresholdPercent: 0,
       }).success,
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      DashboardSettingsSchema.safeParse({
+        ...createDashboardSettings(),
+        limitWarmupExhaustedThresholdPercent: 0,
+      }).success,
+    ).toBe(true);
     expect(
       SettingsUpdateRequestSchema.safeParse({
         stickyThreadsEnabled: false,

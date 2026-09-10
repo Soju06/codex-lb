@@ -1311,7 +1311,7 @@
   "settings.routing.limitWarmup.modelAria": "Warm-up model",
   "settings.routing.limitWarmup.promptAria": "Warm-up prompt",
   "settings.routing.limitWarmup.resetConfirmed.badge": "After reset",
-  "settings.routing.limitWarmup.resetConfirmed.description": "소진된 Account의 quota가 reset될 때 실행됩니다. reset 전 사용량이 이 값 이상인 Account가 대상입니다.",
+  "settings.routing.limitWarmup.resetConfirmed.description": "quota reset이 확인되면 실행됩니다. reset 전 사용량이 이 값 이상인 Account가 대상이며, 0%로 설정하면 모든 reset이 대상입니다.",
   "settings.routing.limitWarmup.resetConfirmed.thresholdAria": "최소 사용량 percent",
   "settings.routing.limitWarmup.resetConfirmed.thresholdLabel": "최소 사용량 %",
   "settings.routing.limitWarmup.resetConfirmed.title": "Reset-confirmed warm-up",

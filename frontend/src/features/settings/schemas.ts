@@ -157,10 +157,10 @@ export const DashboardSettingsSchema = z
     limitWarmupCooldownSeconds: z.number().int().min(60).optional().default(3600),
     limitWarmupExhaustedThresholdPercent: z
       .number()
-      .positive()
+      .nonnegative()
       .max(100)
       .optional()
-      .default(99),
+      .default(0),
     limitWarmupIdleThresholdPercent: z
       .number()
       .positive()
@@ -296,7 +296,7 @@ export const SettingsUpdateRequestSchema = z
     limitWarmupModel: LimitWarmupModelSchema.optional(),
     limitWarmupPrompt: LimitWarmupPromptSchema.optional(),
     limitWarmupCooldownSeconds: z.number().int().min(60).optional(),
-    limitWarmupExhaustedThresholdPercent: z.number().positive().max(100).optional(),
+    limitWarmupExhaustedThresholdPercent: z.number().nonnegative().max(100).optional(),
     limitWarmupIdleThresholdPercent: z.number().positive().max(100).optional(),
     limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
     weeklyPaceWorkingDays: WeeklyPaceWorkingDaysValueSchema.optional(),

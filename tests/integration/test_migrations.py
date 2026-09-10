@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
 from anyio import to_thread
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
@@ -96,6 +100,69 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
 
     rerun = await run_startup_migrations(_DATABASE_URL)
     assert rerun.current_revision == _HEAD_REVISION
+
+
+def test_staged_limit_warmup_reset_threshold_is_nullable_unbackfilled_and_reversible(tmp_path: Path):
+    db_path = tmp_path / "staged_limit_warmup_threshold.db"
+    config = Config()
+    config.set_main_option(
+        "script_location",
+        str((Path(__file__).resolve().parents[2] / "app/db/alembic").resolve()),
+    )
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+
+    previous_revision = "20260909_120000_dashboard_conversation_archive"
+    command.upgrade(config, previous_revision)
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = sa.inspect(engine)
+        assert "limit_warmup_reset_threshold_percent" not in {
+            str(column["name"]) for column in inspector.get_columns("dashboard_settings")
+        }
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id = 1")
+                ).scalar_one()
+                == 99.0
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = sa.inspect(engine)
+        columns = {str(column["name"]): column for column in inspector.get_columns("dashboard_settings")}
+        assert columns["limit_warmup_reset_threshold_percent"]["nullable"] is True
+        assert columns["limit_warmup_reset_threshold_percent"]["default"] is None
+        with engine.connect() as connection:
+            values = connection.execute(
+                text(
+                    "SELECT limit_warmup_reset_threshold_percent, "
+                    "limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id = 1"
+                )
+            ).one()
+        assert values == (None, 99.0)
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, previous_revision)
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = sa.inspect(engine)
+        columns = {str(column["name"]) for column in inspector.get_columns("dashboard_settings")}
+        assert "limit_warmup_reset_threshold_percent" not in columns
+        assert "limit_warmup_exhausted_threshold_percent" in columns
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id = 1")
+                ).scalar_one()
+                == 99.0
+            )
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -515,14 +582,20 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "limit_warmup_prompt" in dashboard_columns
             assert "limit_warmup_cooldown_seconds" in dashboard_columns
             assert "limit_warmup_exhausted_threshold_percent" in dashboard_columns
+            assert "limit_warmup_reset_threshold_percent" in dashboard_columns
             assert "limit_warmup_idle_threshold_percent" in dashboard_columns
             assert "limit_warmup_min_available_percent" in dashboard_columns
-            exhausted_threshold = (
+            legacy_threshold, active_threshold = (
                 await session.execute(
-                    text("SELECT limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id=1")
+                    text(
+                        "SELECT limit_warmup_exhausted_threshold_percent, "
+                        "limit_warmup_reset_threshold_percent "
+                        "FROM dashboard_settings WHERE id=1"
+                    )
                 )
-            ).scalar_one()
-            assert exhausted_threshold == 99.0
+            ).one()
+            assert legacy_threshold == 99.0
+            assert active_threshold == 0.0
             idle_threshold = (
                 await session.execute(
                     text("SELECT limit_warmup_idle_threshold_percent FROM dashboard_settings WHERE id=1")
@@ -853,6 +926,302 @@ async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_
             ).one()
             assert row[0] in (True, 1)
             assert row[1] in (True, 1)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initial_threshold", "initial_version", "was_updated", "expected_threshold"),
+    [
+        (99.0, 1, False, 0.0),
+        (99.0, 1, True, 0.0),
+        (99.0, 2, False, 0.0),
+        (50.0, 2, False, 0.0),
+    ],
+)
+async def test_limit_warmup_threshold_migration_adds_active_column_without_mutating_legacy(
+    tmp_path,
+    initial_threshold: float,
+    initial_version: int,
+    was_updated: bool,
+    expected_threshold: float,
+):
+    db_filename = f"limit-warmup-threshold-{initial_threshold}-v{initial_version}-u{was_updated}.sqlite"
+    db_url = f"sqlite+aiosqlite:///{tmp_path / db_filename}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET limit_warmup_exhausted_threshold_percent = :initial_threshold,
+                        version = :initial_version
+                    WHERE id = 1
+                    """
+                ),
+                {
+                    "initial_threshold": initial_threshold,
+                    "initial_version": initial_version,
+                },
+            )
+            if was_updated:
+                await session.execute(
+                    text(
+                        """
+                        UPDATE dashboard_settings
+                        SET updated_at = '2099-01-01 00:00:00'
+                        WHERE id = 1
+                        """
+                    )
+                )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            legacy_value, active_value = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT limit_warmup_exhausted_threshold_percent,
+                               limit_warmup_reset_threshold_percent
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).one()
+            assert legacy_value == initial_threshold
+            assert active_value == expected_threshold
+
+            columns = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).all()
+            legacy_column = next(row for row in columns if row[1] == "limit_warmup_exhausted_threshold_percent")
+            active_column = next(row for row in columns if row[1] == "limit_warmup_reset_threshold_percent")
+            assert legacy_column[4] in ("99.0", "99")
+            assert active_column[4] in ("0.0", "0")
+
+        from alembic import command
+
+        from app.db.migrate import _build_alembic_config
+
+        compatibility_revision = "20260909_130000_stage_limit_warmup_zero_compat"
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), compatibility_revision))
+
+        async with session_factory() as session:
+            legacy_value = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT limit_warmup_exhausted_threshold_percent
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).scalar_one()
+            assert legacy_value == initial_threshold
+
+            columns = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).all()
+            column_names = {row[1] for row in columns}
+            legacy_column = next(row for row in columns if row[1] == "limit_warmup_exhausted_threshold_percent")
+            assert "limit_warmup_reset_threshold_percent" in column_names
+            assert legacy_column[4] in ("99.0", "99")
+            active_column = next(row for row in columns if row[1] == "limit_warmup_reset_threshold_percent")
+            assert active_column[3] == 0
+            assert active_column[4] is None
+
+        await to_thread.run_sync(lambda: command.upgrade(_build_alembic_config(db_url), "head"))
+
+        async with session_factory() as session:
+            legacy_value, active_value = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT limit_warmup_exhausted_threshold_percent,
+                               limit_warmup_reset_threshold_percent
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).one()
+            assert legacy_value == initial_threshold
+            assert active_value == expected_threshold
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("updated_legacy_threshold", [75.0, 99.0])
+async def test_limit_warmup_threshold_migration_does_not_sync_legacy_writes(
+    tmp_path,
+    updated_legacy_threshold: float,
+):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / f'limit-warmup-legacy-write-{updated_legacy_threshold}.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET limit_warmup_exhausted_threshold_percent = 50.0,
+                        version = 2
+                    WHERE id = 1
+                    """
+                )
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET limit_warmup_exhausted_threshold_percent = :updated_threshold,
+                        version = version + 1
+                    WHERE id = 1
+                    """
+                ),
+                {"updated_threshold": updated_legacy_threshold},
+            )
+            await session.commit()
+
+            active_threshold = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT limit_warmup_reset_threshold_percent
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).scalar_one()
+
+        assert active_threshold == 0.0
+
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET limit_warmup_exhausted_threshold_percent = 99.0,
+                        limit_warmup_reset_threshold_percent = 0.0,
+                        version = version + 1
+                    WHERE id = 1
+                    """
+                )
+            )
+            await session.commit()
+
+            dual_write_values = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT limit_warmup_exhausted_threshold_percent,
+                               limit_warmup_reset_threshold_percent
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).one()
+
+        assert dual_write_values == (99.0, 0.0)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("active_threshold", "expected_legacy_threshold"),
+    [(0.0, 50.0), (37.5, 50.0)],
+)
+async def test_limit_warmup_threshold_downgrade_restores_compatibility_shape(
+    tmp_path,
+    active_threshold: float,
+    expected_legacy_threshold: float,
+):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / f'limit-warmup-downgrade-{active_threshold}.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    compatibility_revision = "20260909_130000_stage_limit_warmup_zero_compat"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET limit_warmup_exhausted_threshold_percent = 50.0,
+                        version = 2
+                    WHERE id = 1
+                    """
+                )
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET limit_warmup_reset_threshold_percent = :active_threshold
+                    WHERE id = 1
+                    """
+                ),
+                {"active_threshold": active_threshold},
+            )
+            await session.commit()
+
+        from alembic import command
+
+        from app.db.migrate import _build_alembic_config
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), compatibility_revision))
+
+        async with session_factory() as session:
+            legacy_threshold = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT limit_warmup_exhausted_threshold_percent
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).scalar_one()
+
+        assert legacy_threshold == expected_legacy_threshold
+
+        async with session_factory() as session:
+            active_threshold_after_downgrade = (
+                await session.execute(
+                    text("SELECT limit_warmup_reset_threshold_percent FROM dashboard_settings WHERE id = 1")
+                )
+            ).scalar_one()
+        assert active_threshold_after_downgrade == active_threshold
     finally:
         await engine.dispose()
 

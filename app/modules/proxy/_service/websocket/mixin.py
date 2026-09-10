@@ -701,11 +701,10 @@ def _archive_received_websocket_message(
 def _websocket_archive_request_state_for_payload(
     pending_requests: deque[_WebSocketRequestState],
     *,
-    event: OpenAIEvent | None,
+    response_id: str | None,
     payload: dict[str, JsonValue] | None,
     event_type: str | None,
 ) -> _WebSocketRequestState | None:
-    response_id = _websocket_response_id(event, payload)
     if event_type == "response.created":
         if response_id is not None:
             existing = _find_websocket_request_state_by_response_id(pending_requests, response_id)
@@ -766,6 +765,8 @@ class _ParsedUpstreamWebSocketFrame:
     payload: dict[str, JsonValue] | None
     event_type: str | None
     event: OpenAIEvent | None
+    response_id: str | None
+    sequence_number: int | None
 
 
 def _parse_upstream_websocket_text_frame(
@@ -789,21 +790,26 @@ def _parse_upstream_websocket_text_frame(
         and isinstance(native_payload, dict)
         and (native_event_type is None or isinstance(native_event_type, str))
     ):
-        event = parse_sse_event_payload(native_payload) if native_event_type in _LIFECYCLE_EVENT_TYPES else None
-        return _ParsedUpstreamWebSocketFrame(
-            payload=native_payload,
-            event_type=native_event_type,
-            event=event,
-        )
-
-    try:
-        raw_payload = json.loads(text)
-    except json.JSONDecodeError:
-        raw_payload = None
-    payload = cast(dict[str, JsonValue], raw_payload) if isinstance(raw_payload, dict) else None
-    event_type = classify_event_type(payload)
+        payload = native_payload
+        event_type = native_event_type
+        routing = getattr(message, "routing", None)
+    else:
+        try:
+            raw_payload = json.loads(text)
+        except json.JSONDecodeError:
+            raw_payload = None
+        payload = cast(dict[str, JsonValue], raw_payload) if isinstance(raw_payload, dict) else None
+        event_type = classify_event_type(payload)
+        routing = None
     event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
-    return _ParsedUpstreamWebSocketFrame(payload=payload, event_type=event_type, event=event)
+    sequence = routing.sequence_number if routing is not None else payload.get("sequence_number") if payload else None
+    return _ParsedUpstreamWebSocketFrame(
+        payload=payload,
+        event_type=event_type,
+        event=event,
+        response_id=_websocket_response_id(event, payload, routing=routing),
+        sequence_number=sequence if isinstance(sequence, int) and not isinstance(sequence, bool) else None,
+    )
 
 
 async def _websocket_archive_request_id_for_message(
@@ -829,7 +835,7 @@ async def _websocket_archive_request_id_for_message(
     async with pending_lock:
         request_state = _websocket_archive_request_state_for_payload(
             pending_requests,
-            event=frame.event,
+            response_id=frame.response_id,
             payload=frame.payload,
             event_type=frame.event_type,
         )
@@ -5450,7 +5456,7 @@ class _WebSocketMixin:
         payload = parsed_frame.payload
         event_type = parsed_frame.event_type
         event = parsed_frame.event
-        response_id = _websocket_response_id(event, payload)
+        response_id = parsed_frame.response_id
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
             isinstance(payload, dict)
@@ -5527,12 +5533,11 @@ class _WebSocketMixin:
                 replay_created_will_be_suppressed = (
                     event_type == "response.created" and request_state.suppress_next_created_downstream
                 )
-                sequence_number = payload.get("sequence_number") if payload is not None else None
+                sequence_number = parsed_frame.sequence_number
                 if (
                     request_state.replay_downstream_response_id is not None
                     and request_state.last_downstream_sequence_number is not None
-                    and isinstance(sequence_number, int)
-                    and not isinstance(sequence_number, bool)
+                    and sequence_number is not None
                     and sequence_number <= request_state.last_downstream_sequence_number
                     and not replay_created_will_be_suppressed
                 ):
@@ -5595,8 +5600,8 @@ class _WebSocketMixin:
                     if rewritten_payload is not payload:
                         payload = rewritten_payload
                         text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-                    sequence_number = payload.get("sequence_number")
-                    if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
+                    sequence_number = parsed_frame.sequence_number
+                    if sequence_number is not None:
                         upstream_control.downstream_sequence_request_state = request_state
                         upstream_control.downstream_sequence_number = sequence_number
             if (

@@ -1,7 +1,7 @@
 """Add dashboard_settings.guest_session_generation for guest session revocation.
 
 Revision ID: 20260908_000000_add_guest_session_generation
-Revises: 20260830_000000_add_quota_warmup_claim_expiry
+Revises: 20260910_010000_dashboard_spool_retention
 Create Date: 2026-09-08
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260908_000000_add_guest_session_generation"
-down_revision = "20260910_000000_request_logs_missing_cost_index"
+down_revision = "20260910_010000_dashboard_spool_retention"
 branch_labels = None
 depends_on = None
 

@@ -3022,7 +3022,7 @@ async def test_guest_session_generation_migration_upgrade_and_downgrade(tmp_path
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'guest-generation.sqlite'}"
-    parent_revision = "20260910_000000_request_logs_missing_cost_index"
+    parent_revision = "20260910_010000_dashboard_spool_retention"
     target_revision = "20260908_000000_add_guest_session_generation"
 
     async def _dashboard_columns(engine) -> set[str]:

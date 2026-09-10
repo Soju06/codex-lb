@@ -2,7 +2,7 @@
 
 ### Requirement: Anonymous upstream output frames belong to the created response
 
-When more than one request is pending on a single upstream WebSocket (an HTTP bridge session or a direct WebSocket session) and an upstream `response.*` frame other than `response.failed` or `response.incomplete` arrives without a response id, the proxy MUST deliver that frame to the pending request whose response upstream has already created (its response id is known), when exactly one such request exists, regardless of whether that request is still visible or is draining after downstream cancellation. The proxy MUST NOT deliver such a frame to a sibling request that is still waiting for its own `response.created`. Anonymous `error`, `response.failed` and `response.incomplete` frames and vendor telemetry frames that are not `response.*` events (for example `codex.rate_limits`) MUST keep their existing ownership rules, including targeting the request whose `response.create` is still unacknowledged. When two or more pending requests already have a response id, an anonymous output frame MUST remain unmatched and be recorded as unmatched upstream liveness rather than attributed by guess.
+When more than one request is pending on a single upstream WebSocket (an HTTP bridge session or a direct WebSocket session) and an upstream `response.*` frame other than `response.failed` or `response.incomplete` arrives without a response id, the proxy MUST deliver that frame to the pending request whose response upstream has already created (its response id is known), when exactly one such request exists, regardless of whether that request is still visible or is draining after downstream cancellation. The proxy MUST NOT deliver such a frame to a sibling request that is still waiting for its own `response.created`. Anonymous `error`, `response.failed` and `response.incomplete` frames and vendor telemetry frames that are not `response.*` events (for example `codex.rate_limits`) MUST keep their existing ownership rules, including targeting the request whose `response.create` is still unacknowledged. When no pending request, or more than one pending request, already has a response id, the pre-existing ownership rules apply unchanged.
 
 #### Scenario: Pipelined sibling does not receive the created response's output
 
@@ -42,8 +42,8 @@ When more than one request is pending on a single upstream WebSocket (an HTTP br
 - **WHEN** upstream emits a `codex.rate_limits` frame without a response id
 - **THEN** the frame is attributed to request B
 
-#### Scenario: Two created responses leave an anonymous frame unmatched
+#### Scenario: Two visible created responses leave an anonymous frame unmatched
 
-- **GIVEN** two pending requests on one upstream socket both have a response id
+- **GIVEN** exactly two requests are pending on one upstream socket, both visible and both with a response id
 - **WHEN** upstream emits an anonymous output frame
-- **THEN** the frame matches no request and is recorded as unmatched upstream liveness
+- **THEN** the frame matches no request and is recorded as unmatched upstream liveness, as before this change

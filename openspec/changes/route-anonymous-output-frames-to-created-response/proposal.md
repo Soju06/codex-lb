@@ -7,7 +7,7 @@ Two independent Responses requests that share one HTTP bridge session (the same 
 ## What Changes
 
 - `_match_websocket_request_state_for_anonymous_event` receives the frame's `event_type` from the HTTP bridge reader and the direct WebSocket reader. For an anonymous `response.*` frame that is not `response.failed` or `response.incomplete` (response output) the matcher first returns the single pending request that already has a response id, whether that request is visible or draining. Anonymous `error`, `response.failed` and `response.incomplete` frames and vendor telemetry frames such as `codex.rate_limits` keep the existing pre-created ownership rules, and every other branch (previous-response continuity errors, draining preferences, single-request sessions) is unchanged.
-- When two pending requests both already have a response id, an anonymous frame stays unmatched exactly as before (recorded as unmatched upstream liveness); the proxy does not guess.
+- When no pending request, or more than one, already has a response id, the pre-existing matching rules apply unchanged. Two visible created requests with nothing else pending still leave the frame unmatched (unmatched upstream liveness); arrangements with a further waiting or draining request keep the base branch's visible/draining/unresolved preferences. Fail-closed handling for every overlapping-created arrangement would be a separate behaviour decision and is not part of this change.
 - No new setting, no schema change, no change to lane forking or gate release.
 
 ## Capabilities

@@ -57,6 +57,7 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Client Setup: client-setup.md
+  - Desktop Pooled Usage: desktop-pooled-usage.md
   - Live Voice: live-voice.md
   - Conversations: conversations.md
   - Usage Reporting: usage-reporting.md

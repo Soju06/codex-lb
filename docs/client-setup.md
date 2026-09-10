@@ -31,6 +31,10 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
+### Codex Desktop pooled usage
+
+The provider URL above routes inference. Desktop's native usage poll still goes to the signed-in ChatGPT account. To keep that login and show the eligible LB pool, use the optional [Desktop pooled usage relay](desktop-pooled-usage.md). Its setup, compatibility limits and rollback are defined by the [Desktop pooled usage specification](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/desktop-pooled-usage).
+
 ### Opting into the 872k context window
 
 GPT-5.6 ships a 272,000-token default input budget with an 872,000-token

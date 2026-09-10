@@ -26,6 +26,7 @@ from app.modules.dashboard_auth.service import (
     DashboardAuthService,
     get_dashboard_session_store,
 )
+from app.modules.desktop_usage.service import DesktopUsageService
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
@@ -85,6 +86,11 @@ class DashboardAuthContext:
 @dataclass(slots=True)
 class ProxyContext:
     service: ProxyService
+
+
+@dataclass(slots=True)
+class DesktopUsageContext:
+    service: DesktopUsageService
 
 
 @dataclass(slots=True)
@@ -245,6 +251,10 @@ def get_dashboard_auth_context(
 def get_proxy_context(request: Request) -> ProxyContext:
     service = get_proxy_service_for_app(request.app)
     return ProxyContext(service=service)
+
+
+def get_desktop_usage_context() -> DesktopUsageContext:
+    return DesktopUsageContext(service=DesktopUsageService(_proxy_repo_context))
 
 
 def get_proxy_service_for_app(app: FastAPI) -> ProxyService:

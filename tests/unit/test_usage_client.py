@@ -15,18 +15,19 @@ from app.core.clients.native_egress import (
     NativeEgressUnavailable,
 )
 from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit, fetch_usage
+from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 pytestmark = pytest.mark.unit
 
 
 class StubResponse:
-    def __init__(self, status: int, payload: dict | None, text: str) -> None:
+    def __init__(self, status: int, payload: dict[str, JsonValue] | None, text: str) -> None:
         self.status = status
         self._payload = payload
         self._text = text
 
-    async def json(self, content_type: str | None = None) -> dict:
+    async def json(self, content_type: str | None = None) -> dict[str, JsonValue]:
         if self._payload is None:
             raise ValueError("no json")
         return self._payload
@@ -106,11 +107,11 @@ class StubRetryClient:
 
 
 class StubCodexResponse:
-    def __init__(self, status_code: int = 200, payload: dict | None = None) -> None:
+    def __init__(self, status_code: int = 200, payload: dict[str, JsonValue] | None = None) -> None:
         self.status_code = status_code
         self._payload = payload
 
-    def json(self) -> dict:
+    def json(self) -> dict[str, JsonValue]:
         return self._payload or {
             "plan_type": "plus",
             "rate_limit": {
@@ -186,7 +187,7 @@ class StubNativeClient:
         self.close_calls += 1
 
 
-def _usage_payload() -> dict[str, object]:
+def _usage_payload() -> dict[str, JsonValue]:
     return {
         "plan_type": "plus",
         "rate_limit": {
@@ -599,6 +600,49 @@ async def test_fetch_usage_uses_resolved_codex_route(monkeypatch: pytest.MonkeyP
     assert client.calls[0]["route"] is route
     assert client.calls[0]["method"] == "GET"
     assert client.calls[0]["url"] == "http://usage.test/backend-api/wham/usage"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [False, True])
+async def test_fetch_usage_retains_original_desktop_envelope_without_serializing_it(routed: bool) -> None:
+    original: dict[str, JsonValue] = {
+        "plan_type": "plus",
+        "user_id": "original-user",
+        "account_id": "original-account",
+        "rate_limit": {"allowed": False, "limit_reached": True},
+        "credits": {"has_credits": False, "unlimited": False, "balance": "0", "billing_state": "owned"},
+        "rate_limit_reached_type": {"type": "rate_limit_reached"},
+        "future_account_metadata": {"value": "preserve-me"},
+    }
+    if routed:
+        route = ResolvedUpstreamRoute(
+            mode="account_bound",
+            pool_id="pool_1",
+            endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+        )
+        data = await fetch_usage(
+            access_token="original-token",
+            account_id="original-account",
+            route=route,
+            codex_client=cast(Any, StubCodexClient([StubCodexResponse(200, original)])),
+        )
+    else:
+        state = UsageClientState()
+        data = await fetch_usage(
+            access_token="original-token",
+            account_id="original-account",
+            client=cast(Any, StubRetryClient([StubResponse(200, original, "")], state)),
+            allow_direct_egress=True,
+        )
+        assert state.auth == "Bearer original-token"
+        assert state.account == "original-account"
+    assert data.raw_payload == original
+    assert "original-user" not in repr(data)
+    assert "user_id" not in data.model_dump()
+    assert "billing_state" not in data.model_dump()["credits"]
+    original["user_id"] = "mutated-input"
+    assert data.raw_payload is not None
+    assert data.raw_payload["user_id"] == "original-user"
 
 
 @pytest.mark.asyncio

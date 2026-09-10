@@ -54,7 +54,8 @@ max_items = 5
 # HTTP session bridge tunables; 96 -> 95 drop-bridge-recovery-modes deleted
 # the ambiguous-continuation recovery mode selector (fail-closed is the only
 # behaviour now).
-max = 95
+# 95 -> 96: opt-in Desktop relay topology, off/loopback/container.
+max = 96
 
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and

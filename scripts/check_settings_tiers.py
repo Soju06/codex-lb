@@ -56,7 +56,7 @@ DASHBOARD_SETTINGS_TABLE = "dashboard_settings"
 # dropped) plus a note on what is read. Caps only ever shrink.
 ENV_READ_ALLOWLIST: Mapping[str, tuple[int, str]] = {
     "app/main.py": (1, "PORT (host runs)"),
-    "app/cli.py": (7, "HOST/PORT/SSL_*/UVICORN_* uvicorn launch knobs"),
+    "app/cli.py": (6, "HOST/PORT/SSL_*/UVICORN_* uvicorn launch knobs"),
     "app/core/metrics/prometheus.py": (1, "PROMETHEUS_MULTIPROC_DIR"),
     "app/core/utils/proxy_env.py": (4, "HTTP(S)_PROXY/ALL_PROXY/WS_PROXY/NO_PROXY outbound proxy"),
     "app/core/clients/http.py": (3, "outbound proxy env fallback"),

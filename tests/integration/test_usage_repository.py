@@ -9,7 +9,8 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
-from app.core.utils.time import utcnow
+from app.core.usage import refresh_scheduler as refresh_scheduler_module
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
@@ -42,6 +43,330 @@ def _make_account(account_id: str) -> Account:
 def _dialect_name(session: AsyncSession) -> str:
     bind = session.get_bind()
     return bind.dialect.name if bind is not None else "sqlite"
+
+
+@pytest.mark.asyncio
+async def test_reset_transition_candidate_scans_past_interim_old_deadline_dip(db_setup) -> None:
+    """An interim sub-100 sample with the old deadline must not truncate the scan."""
+    del db_setup
+    account = _make_account("acc_bounded_reset_candidate")
+    now = utcnow()
+    since = now - timedelta(seconds=120)
+    old_reset_at = naive_utc_to_epoch(now) - 30
+    new_reset_at = old_reset_at + 7 * 24 * 60 * 60
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        repo = UsageRepository(session)
+        for offset, used_percent, reset_at in (
+            (-100, 100.0, old_reset_at),
+            (-80, 99.0, old_reset_at),
+            (-50, 100.0, old_reset_at),
+            (10, 0.0, new_reset_at),
+        ):
+            await repo.add_entry(
+                account.id,
+                used_percent,
+                window="secondary",
+                recorded_at=now + timedelta(seconds=offset),
+                reset_at=reset_at,
+                window_minutes=10_080,
+            )
+
+        rows = await repo.reset_transition_candidate(
+            account.id,
+            "secondary",
+            since,
+            expected_reset_at=old_reset_at,
+            reset_at_tolerance_seconds=5,
+            min_reset_jump_seconds=60,
+        )
+
+    assert [(row.used_percent, row.reset_at) for row in rows] == [
+        (100.0, old_reset_at),
+        (0.0, new_reset_at),
+    ]
+    evidence = refresh_scheduler_module._latest_confirmed_reset_transition_after_baseline(
+        rows,
+        expected_reset_at=old_reset_at,
+        reset_at_tolerance_seconds=5,
+    )
+    assert evidence is not None
+    assert (evidence.before.used_percent, evidence.after.used_percent) == (100.0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_reset_transition_candidate_continues_past_temporal_miss(db_setup) -> None:
+    """A reset_at jump outside the observation interval must not hide a later reset."""
+    del db_setup
+    account = _make_account("acc_reset_candidate_temporal_miss")
+    now = utcnow()
+    since = now - timedelta(seconds=180)
+    old_reset_at = naive_utc_to_epoch(now) + 3 * 24 * 60 * 60
+    valid_reset_at = naive_utc_to_epoch(now - timedelta(seconds=20)) + 7 * 24 * 60 * 60
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        repo = UsageRepository(session)
+        for offset, used_percent, reset_at in (
+            (-140, 100.0, old_reset_at),
+            (-120, 90.0, old_reset_at + 60),
+            (-100, 95.0, old_reset_at + 120),
+            (-40, 100.0, old_reset_at),
+            (-20, 0.0, valid_reset_at),
+        ):
+            await repo.add_entry(
+                account.id,
+                used_percent,
+                window="secondary",
+                recorded_at=now + timedelta(seconds=offset),
+                reset_at=reset_at,
+                window_minutes=10_080,
+            )
+
+        rows = await repo.reset_transition_candidate(
+            account.id,
+            "secondary",
+            since,
+            expected_reset_at=old_reset_at,
+            reset_at_tolerance_seconds=5,
+            min_reset_jump_seconds=60,
+        )
+
+    assert [(row.used_percent, row.reset_at) for row in rows] == [
+        (100.0, old_reset_at),
+        (0.0, valid_reset_at),
+    ]
+    evidence = refresh_scheduler_module._latest_confirmed_reset_transition_after_baseline(
+        rows,
+        expected_reset_at=old_reset_at,
+        reset_at_tolerance_seconds=5,
+    )
+    assert evidence is not None
+    assert (evidence.before.used_percent, evidence.after.used_percent) == (100.0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_reset_transition_candidate_returns_newest_qualifying_pair(db_setup) -> None:
+    """A later persisted reset supersedes an earlier already-claimed transition."""
+    del db_setup
+    account = _make_account("acc_reset_candidate_newest")
+    now = utcnow().replace(microsecond=0)
+    first_reset_at = naive_utc_to_epoch(now)
+    second_reset_at = first_reset_at + 7 * 24 * 60 * 60
+    third_reset_at = second_reset_at + 7 * 24 * 60 * 60
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        repo = UsageRepository(session)
+        for recorded_at, used_percent, reset_at in (
+            (now - timedelta(seconds=1), 100.0, first_reset_at),
+            (now + timedelta(seconds=1), 0.0, second_reset_at),
+            (now + timedelta(seconds=7 * 24 * 60 * 60 - 1), 100.0, second_reset_at),
+            (now + timedelta(seconds=7 * 24 * 60 * 60 + 1), 0.0, third_reset_at),
+        ):
+            await repo.add_entry(
+                account.id,
+                used_percent,
+                window="secondary",
+                recorded_at=recorded_at,
+                reset_at=reset_at,
+                window_minutes=10_080,
+            )
+        rows = await repo.reset_transition_candidate(
+            account.id,
+            "secondary",
+            now - timedelta(seconds=2),
+            expected_reset_at=first_reset_at,
+            reset_at_tolerance_seconds=0,
+            min_reset_jump_seconds=60,
+        )
+
+    assert [(row.recorded_at, row.reset_at) for row in rows] == [
+        (now - timedelta(seconds=1), first_reset_at),
+        (now + timedelta(seconds=7 * 24 * 60 * 60 - 1), second_reset_at),
+        (now + timedelta(seconds=7 * 24 * 60 * 60 + 1), third_reset_at),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reset_transition_candidate_rejects_fractional_sqlite_false_transition(db_setup) -> None:
+    """A sample after the reset boundary cannot pass by truncating to seconds."""
+    del db_setup
+    account = _make_account("acc_reset_candidate_fractional")
+    now = utcnow().replace(microsecond=0)
+    reset_at = naive_utc_to_epoch(now)
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite timestamp representation regression")
+        await AccountsRepository(session).upsert(account)
+        repo = UsageRepository(session)
+        await repo.add_entry(
+            account.id,
+            100.0,
+            window="secondary",
+            recorded_at=now + timedelta(microseconds=900_500),
+            reset_at=reset_at,
+            window_minutes=10_080,
+        )
+        await repo.add_entry(
+            account.id,
+            0.0,
+            window="secondary",
+            recorded_at=now + timedelta(seconds=1, microseconds=100),
+            reset_at=reset_at + 7 * 24 * 60 * 60,
+            window_minutes=10_080,
+        )
+        rows = await repo.reset_transition_candidate(
+            account.id,
+            "secondary",
+            now - timedelta(seconds=1),
+            expected_reset_at=reset_at,
+            reset_at_tolerance_seconds=0,
+            min_reset_jump_seconds=60,
+        )
+
+    assert len(rows) == 1
+    assert rows[0].recorded_at == now + timedelta(microseconds=900_500)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("before_offset", "after_offset", "has_transition"),
+    (
+        pytest.param(-1, 1, True, id="before-one-microsecond"),
+        pytest.param(0, 1, True, id="before-exactly-at-reset"),
+        pytest.param(1, 2, False, id="before-one-microsecond-after-reset"),
+        pytest.param(-1, 7 * 24 * 60 * 60 * 1_000_000, False, id="after-exactly-at-new-reset"),
+    ),
+)
+async def test_reset_transition_candidate_preserves_sqlite_microsecond_reset_boundary(
+    db_setup,
+    before_offset: int,
+    after_offset: int,
+    has_transition: bool,
+) -> None:
+    """SQLite must compare reset boundaries with SQLAlchemy's six-digit precision."""
+    del db_setup
+    account = _make_account(f"acc_reset_boundary_{before_offset}_{after_offset}")
+    now = utcnow().replace(microsecond=0)
+    reset_at = naive_utc_to_epoch(now)
+    next_reset_at = reset_at + 7 * 24 * 60 * 60
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite timestamp representation regression")
+        await AccountsRepository(session).upsert(account)
+        repo = UsageRepository(session)
+        await repo.add_entry(
+            account.id,
+            100.0,
+            window="secondary",
+            recorded_at=now + timedelta(microseconds=before_offset),
+            reset_at=reset_at,
+            window_minutes=10_080,
+        )
+        await repo.add_entry(
+            account.id,
+            0.0,
+            window="secondary",
+            recorded_at=now + timedelta(microseconds=after_offset),
+            reset_at=next_reset_at,
+            window_minutes=10_080,
+        )
+        rows = await repo.reset_transition_candidate(
+            account.id,
+            "secondary",
+            now - timedelta(seconds=1),
+            expected_reset_at=reset_at,
+            reset_at_tolerance_seconds=0,
+            min_reset_jump_seconds=60,
+        )
+
+    assert len(rows) == (2 if has_transition else 1)
+
+
+@pytest.mark.asyncio
+async def test_reset_transition_candidate_ignores_fractional_false_pair_before_later_reset(db_setup) -> None:
+    """A false fractional candidate cannot hide the later real adjacent reset."""
+    del db_setup
+    account = _make_account("acc_reset_candidate_fractional_then_real")
+    now = utcnow().replace(microsecond=0)
+    first_reset_at = naive_utc_to_epoch(now)
+    second_reset_at = first_reset_at + 7 * 24 * 60 * 60
+    third_reset_at = second_reset_at + 7 * 24 * 60 * 60
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite timestamp representation regression")
+        await AccountsRepository(session).upsert(account)
+        repo = UsageRepository(session)
+        for recorded_at, used_percent, reset_at in (
+            (now + timedelta(microseconds=900_500), 100.0, first_reset_at),
+            (now + timedelta(seconds=1, microseconds=100), 0.0, second_reset_at),
+            (now + timedelta(days=7, seconds=-1), 100.0, second_reset_at),
+            (now + timedelta(days=7, seconds=1), 0.0, third_reset_at),
+        ):
+            await repo.add_entry(
+                account.id,
+                used_percent,
+                window="secondary",
+                recorded_at=recorded_at,
+                reset_at=reset_at,
+                window_minutes=10_080,
+            )
+        rows = await repo.reset_transition_candidate(
+            account.id,
+            "secondary",
+            now - timedelta(seconds=1),
+            expected_reset_at=first_reset_at,
+            reset_at_tolerance_seconds=0,
+            min_reset_jump_seconds=60,
+        )
+
+    assert [(row.recorded_at, row.reset_at) for row in rows] == [
+        (now + timedelta(microseconds=900_500), first_reset_at),
+        (now + timedelta(days=7, seconds=-1), second_reset_at),
+        (now + timedelta(days=7, seconds=1), third_reset_at),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reset_transition_candidate_keeps_weekly_only_primary_separate_from_five_hour_rows(
+    db_setup,
+) -> None:
+    del db_setup
+    account = _make_account("acc_weekly_only_primary_reset_candidate")
+    now = utcnow()
+    since = now - timedelta(seconds=180)
+    old_weekly_reset_at = naive_utc_to_epoch(now) + 3 * 24 * 60 * 60
+    new_weekly_reset_at = naive_utc_to_epoch(now - timedelta(seconds=60)) + 7 * 24 * 60 * 60
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        repo = UsageRepository(session)
+        for offset, used_percent, reset_at, window_minutes in (
+            (-120, 100.0, old_weekly_reset_at, 10_080),
+            (-90, 10.0, naive_utc_to_epoch(now) + 5 * 60 * 60, 300),
+            (-60, 0.0, new_weekly_reset_at, 10_080),
+        ):
+            await repo.add_entry(
+                account.id,
+                used_percent,
+                window="primary",
+                recorded_at=now + timedelta(seconds=offset),
+                reset_at=reset_at,
+                window_minutes=window_minutes,
+            )
+
+        rows = await repo.reset_transition_candidate(
+            account.id,
+            "primary",
+            since,
+            expected_reset_at=old_weekly_reset_at,
+            reset_at_tolerance_seconds=5,
+            min_reset_jump_seconds=60,
+            expected_window_minutes=10_080,
+        )
+
+    assert [(row.used_percent, row.reset_at, row.window_minutes) for row in rows] == [
+        (100.0, old_weekly_reset_at, 10_080),
+        (0.0, new_weekly_reset_at, 10_080),
+    ]
 
 
 class _TrackedSqliteConnection:

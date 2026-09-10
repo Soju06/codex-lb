@@ -22,6 +22,7 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+_RESET_TRANSITION_INDEX = "20260904_000000_add_usage_reset_transition_index"
 
 
 @dataclass
@@ -207,11 +208,10 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     assert len(populated["pins"]) == 2
     assert populated["settings"][0]["subscription_overflow_source_id"] == "retained-source"
 
-    # Step back to the merge first: revisions after it own their own schema
-    # (and their own drift against the ORM), while the merge itself must stay a
-    # no-op in both directions.
+    # Step back to the merge first: later revisions own their own schema and
+    # drift, while the independent reset-index branch stays stamped.
     command.downgrade(_build_alembic_config(database.url), _MERGE)
-    assert _revisions(database.engine) == (_MERGE,)
+    assert _revisions(database.engine) == tuple(sorted((_MERGE, _RESET_TRANSITION_INDEX)))
     at_merge = _state(database.engine)
     merge_drift = check_schema_drift(database.url)
 
@@ -219,8 +219,9 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
         command.downgrade(_build_alembic_config(database.url), parent)
         # A direct downgrade to either immediate parent executes only the
         # no-op merge downgrade. Alembic records both unmerged parent heads;
-        # it does not execute either parent's schema-removing downgrade.
-        assert _revisions(database.engine) == tuple(sorted(_PARENTS))
+        # it does not execute either parent's schema-removing downgrade, or
+        # disturb the independent reset-index branch.
+        assert _revisions(database.engine) == tuple(sorted((*_PARENTS, _RESET_TRANSITION_INDEX)))
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
 

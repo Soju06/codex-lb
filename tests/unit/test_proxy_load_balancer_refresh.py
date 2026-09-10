@@ -142,7 +142,12 @@ class StubAccountsRepository(AccountsRepository):
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = _UNSET,
+        expected_primary_usage_id: int | None | object = _UNSET,
+        expected_secondary_usage_id: int | None | object = _UNSET,
+        expected_monthly_usage_id: int | None | object = _UNSET,
     ) -> bool:
+        del expected_primary_usage_id, expected_secondary_usage_id, expected_monthly_usage_id
         account = self._find_account(account_id)
         if account is None:
             return False
@@ -151,6 +156,7 @@ class StubAccountsRepository(AccountsRepository):
             or account.deactivation_reason != expected_deactivation_reason
             or account.reset_at != expected_reset_at
             or (expected_blocked_at is not _UNSET and account.blocked_at != expected_blocked_at)
+            or (expected_plan_type is not _UNSET and account.plan_type != expected_plan_type)
             or (
                 expected_refresh_token_encrypted is not None
                 and account.refresh_token_encrypted != expected_refresh_token_encrypted
@@ -1677,6 +1683,7 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
         state_arg: Any,
         *,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = None,
     ) -> bool:
         persist_started.set()
         await release_persist.wait()
@@ -1914,6 +1921,7 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = None,
     ) -> bool:
         # Freeze ONLY the stale selection persist (a non-terminal status). The
         # concurrent terminal mark_permanent_failure now also routes its guarded

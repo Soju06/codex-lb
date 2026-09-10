@@ -694,6 +694,28 @@ async def test_accounts_update_status_if_current_closes_bridge_only_after_match(
 
 
 @pytest.mark.asyncio
+async def test_accounts_update_status_if_current_guards_expected_plan_type(db_setup):
+    del db_setup
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = _make_account("acc_plan_cas", "plan-cas@example.com")
+        await repo.upsert(account)
+
+        assert not await repo.update_status_if_current(
+            account.id,
+            AccountStatus.RATE_LIMITED,
+            expected_status=AccountStatus.ACTIVE,
+            expected_plan_type="team",
+        )
+        assert await repo.update_status_if_current(
+            account.id,
+            AccountStatus.RATE_LIMITED,
+            expected_status=AccountStatus.ACTIVE,
+            expected_plan_type=account.plan_type,
+        )
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_merge_by_chatgpt_identity_reuses_deactivated_row(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

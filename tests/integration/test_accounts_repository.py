@@ -6,6 +6,8 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.service import AccountsService
+from app.modules.usage.repository import UsageRepository
 
 
 def _account(
@@ -57,6 +59,64 @@ async def test_list_accounts_refresh_existing_reloads_identity_map(db_setup):
         refreshed = (await reader_repo.list_accounts(refresh_existing=True))[0]
         assert refreshed is loaded
         assert refreshed.limit_warmup_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_cas_rejects_stale_usage_and_preserves_same_value_operator_reactivation(db_setup) -> None:
+    """A stale recovery cannot undo the operator's identical ACTIVE write."""
+    del db_setup
+    account = _account("acc_recovery_usage_watermark")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = "upstream_429"
+    account.reset_at = 1_800_000_000
+    account.blocked_at = 1_799_999_000
+    async with SessionLocal() as session:
+        accounts = AccountsRepository(session)
+        await accounts.upsert(account)
+        original_primary = await UsageRepository(session).add_entry(
+            account.id,
+            10.0,
+            window="primary",
+            reset_at=account.reset_at,
+        )
+
+    async with SessionLocal() as session:
+        await UsageRepository(session).add_entry(
+            account.id,
+            100.0,
+            window="primary",
+            reset_at=account.reset_at,
+        )
+        accounts = AccountsRepository(session)
+        assert not await accounts.update_status_if_current(
+            account.id,
+            AccountStatus.ACTIVE,
+            None,
+            None,
+            blocked_at=None,
+            expected_status=AccountStatus.RATE_LIMITED,
+            expected_deactivation_reason="upstream_429",
+            expected_reset_at=1_800_000_000,
+            expected_blocked_at=1_799_999_000,
+            expected_refresh_token_encrypted=account.refresh_token_encrypted,
+            expected_plan_type=account.plan_type,
+            expected_primary_usage_id=original_primary.id,
+            expected_secondary_usage_id=None,
+            expected_monthly_usage_id=None,
+        )
+
+        service = AccountsService(accounts)
+        assert await service.reactivate_account(account.id)
+        assert await service.reactivate_account(account.id)
+        reloaded = await accounts.get_by_id(account.id)
+
+    assert reloaded is not None
+    assert (reloaded.status, reloaded.deactivation_reason, reloaded.reset_at, reloaded.blocked_at) == (
+        AccountStatus.ACTIVE,
+        None,
+        None,
+        None,
+    )
 
 
 @pytest.mark.asyncio

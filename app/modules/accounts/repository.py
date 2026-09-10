@@ -788,6 +788,10 @@ class AccountsRepository:
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_plan_type: str | None | object = _UNSET,
+        expected_primary_usage_id: int | None | object = _UNSET,
+        expected_secondary_usage_id: int | None | object = _UNSET,
+        expected_monthly_usage_id: int | None | object = _UNSET,
     ) -> bool:
         async with sqlite_writer_section():
             values: dict[str, object | None] = {
@@ -825,6 +829,22 @@ class AccountsRepository:
                 # re-auth/import rotates the token ciphertext without touching
                 # status/reason/reset, and this write must lose that race.
                 stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
+            if expected_plan_type is not _UNSET:
+                if expected_plan_type is None:
+                    stmt = stmt.where(Account.plan_type.is_(None))
+                else:
+                    stmt = stmt.where(Account.plan_type == expected_plan_type)
+            for window, expected_id in (
+                ("primary", expected_primary_usage_id),
+                ("secondary", expected_secondary_usage_id),
+                ("monthly", expected_monthly_usage_id),
+            ):
+                if expected_id is not _UNSET:
+                    latest_id = self._latest_usage_history_id(account_id, window)
+                    if expected_id is None:
+                        stmt = stmt.where(latest_id.is_(None))
+                    else:
+                        stmt = stmt.where(latest_id == expected_id)
             result = await self._session.execute(stmt)
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):
@@ -834,6 +854,15 @@ class AccountsRepository:
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
             return updated_id is not None
+
+    @staticmethod
+    def _latest_usage_history_id(account_id: str, window: str) -> Any:
+        stmt = select(UsageHistory.id).where(UsageHistory.account_id == account_id)
+        if window == "primary":
+            stmt = stmt.where(func.coalesce(UsageHistory.window, "primary") == "primary")
+        else:
+            stmt = stmt.where(UsageHistory.window == window)
+        return stmt.order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc()).limit(1).scalar_subquery()
 
     @staticmethod
     def _hard_sticky_outage_started(

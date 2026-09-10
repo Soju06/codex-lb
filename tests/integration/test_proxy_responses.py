@@ -161,6 +161,53 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_health_write_failure_keeps_one_terminal(async_client, monkeypatch, caplog):
+    auth_json = _make_auth_json("acc_post_terminal_health", "post-terminal-health@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert imported.status_code == 200
+    health_attempts = []
+
+    async def fake_stream(*args, **kwargs):
+        yield 'data: {"type":"response.created","response":{"id":"resp_health_failure"}}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        raise proxy_client_module.ProxyResponseError(
+            429,
+            {"error": {"code": "usage_limit_reached", "message": "quota exhausted", "type": "rate_limit_error"}},
+        )
+
+    async def fail_health(self, account, error, code, **kwargs):
+        health_attempts.append(code)
+        raise RuntimeError("injected post-terminal health write failure")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fail_health)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.1", "instructions": "hi", "input": "hello", "stream": True},
+    )
+
+    assert response.status_code == 200
+    events = list(_iter_sse_events(response.text.splitlines()))
+    terminals = [
+        event
+        for event in events
+        if event.get("type") in {"response.failed", "response.completed", "response.incomplete", "error"}
+    ]
+    assert len(terminals) == 1
+    assert terminals[0]["response"]["error"]["code"] == "usage_limit_reached"
+    assert health_attempts == ["usage_limit_reached"]
+    health_logs = [
+        record for record in caplog.records if "Failed to write post-terminal stream health" in record.message
+    ]
+    assert len(health_logs) == 1
+    assert health_logs[0].exc_info is not None
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_no_accounts(async_client):
     payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
     request_id = "req_stream_123"

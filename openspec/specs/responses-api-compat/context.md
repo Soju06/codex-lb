@@ -297,3 +297,7 @@ stream. Predispatch failures and cancellation release origin-owned reservations;
 accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
+
+## Health persistence after a terminal response
+
+A failed account-error health write must not replace a Responses terminal that the client already received. For example, a quota failure followed by a database error must retain the original quota terminal and log the health failure. The retry loop contains ordinary post-terminal health exceptions after reservation settlement; it preserves cancellation and pre-terminal retry decisions. Issue #2033 has both a public `/v1/responses` regression and stream-handler coverage for keyed owner continuations. The implementation and excluded pre-terminal setups are recorded in `openspec/changes/archive/2026-09-10-fix-post-terminal-health-failures/context.md`.

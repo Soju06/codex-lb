@@ -2930,3 +2930,33 @@ async def test_request_logs_live_facet_index_migration_repairs_invalid_leftover_
     assert "(model, reasoning_effort)" in indexdefs[index_name]  # rebuilt, not the accepted decoy
     assert "(api_key_id)" in indexdefs[precreated_index_name]  # kept by IF NOT EXISTS
     assert all("WHERE (deleted_at IS NULL)" in indexdef for indexdef in indexdefs.values())
+
+
+async def test_missing_cost_index_upgrade_downgrade_and_query_plan(tmp_path):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'missing-cost.sqlite'}"
+    parent = "20260909_130000_add_request_logs_live_facet_indexes"
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.connect() as conn:
+            plan = (
+                await conn.execute(
+                    text(
+                        "EXPLAIN QUERY PLAN SELECT id FROM request_logs WHERE id > 0 AND cost_usd IS NULL "
+                        "AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+                        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) ORDER BY id LIMIT 200"
+                    )
+                )
+            ).fetchall()
+            assert "idx_logs_missing_cost" in str(plan)
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
+        async with engine.connect() as conn:
+            assert await conn.scalar(text("SELECT count(*) FROM sqlite_master WHERE name='idx_logs_missing_cost'")) == 0
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+    finally:
+        await engine.dispose()

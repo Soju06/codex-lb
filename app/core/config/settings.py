@@ -16,6 +16,7 @@ from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
+from app.core.clients.codex_version_snapshot import CODEX_VERSION
 from app.core.utils.proxy_env import outbound_proxy_env_configured
 
 logger = logging.getLogger(__name__)
@@ -416,7 +417,7 @@ class Settings(BaseSettings):
     # Must stay >= the highest ``minimal_client_version`` in the bootstrap
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
     # receive an upstream catalog without those models.
-    model_registry_client_version: str = "0.153.4"
+    model_registry_client_version: str = CODEX_VERSION
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)

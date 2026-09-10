@@ -1971,7 +1971,7 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
     index_merge = "20260910_030000_merge_recovery_and_request_log_indexes"
     assert script_directory.get_revision(index_merge).down_revision == (
         settings_merge,
-        "20260910_010000_dashboard_spool_retention",
+        "20260908_000000_add_guest_session_generation",
     )
     assert script_directory.get_heads() == [index_merge]
 

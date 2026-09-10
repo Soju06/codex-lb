@@ -2009,7 +2009,7 @@ async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path, empty_reg
             "20260910_030000_merge_recovery_and_request_log_indexes",
             (
                 "20260910_020000_merge_recovery_and_round_three_settings",
-                "20260910_010000_dashboard_spool_retention",
+                "20260908_000000_add_guest_session_generation",
             ),
         ),
     ],

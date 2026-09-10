@@ -16,13 +16,21 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
 ## Constraints
 
+- Public-contract SSE filtering uses the `response.*` and `error` families, so
+  diagnostics such as `responsesapi.websocket_timing` cannot interrupt strict
+  client event deserializers. For example, a timing diagnostic between a text
+  delta and `response.completed` is removed while both standard events remain.
+  Native Codex requests retain vendor events; OpenAI-shaped backend requests
+  follow public filtering. This does not normalize string-valued
+  `response.instructions` or establish full IntelliJ compatibility (Refs #1934).
+
 - Upstream limitations determine available modalities, tool output, and overflow handling.
 - `store=true` is rejected; responses are not persisted.
 - `include` values must be on the documented allowlist.
 - `truncation` is rejected.
 - `previous_response_id` is forwarded when `conversation` is absent, but the `conversation + previous_response_id` conflict remains rejected.
 - HTTP `/v1/responses` and HTTP `/backend-api/codex/responses` now use a server-side upstream websocket session bridge by default so repeated compatible requests can keep upstream response/session continuity without forcing clients onto the public websocket route.
-- Codex-affinity HTTP bridge sessions can optionally use a conservative first-request prewarm (`generate=false`), but that behavior now stays behind an explicit flag so production defaults do not pay an extra upstream request unless operators opt in.
+- Codex-affinity HTTP bridge sessions can optionally use a conservative first-request prewarm (`generate=false`), but that behavior stays behind an explicit switch so production defaults do not pay an extra upstream request unless operators opt in. The switch is the dashboard setting `http_responses_session_bridge_codex_prewarm_enabled` (Settings → Advanced → Session bridge), resolved from the settings-cache snapshot before a session's prewarm lock; its `CODEX_LB_*` environment variable is a deprecated alias that applies only while the dashboard value is unset.
 - When operators configure a multi-instance bridge ring, deterministic owner enforcement now applies only to hard continuity keys such as `x-codex-turn-state` and explicit session headers. Prompt-cache-derived bridge keys remain stable for local reuse, but in gateway-safe mode a non-owner replica may tolerate that locality miss and create or reuse a local session instead of failing with `bridge_instance_mismatch`.
 - Codex-facing websocket routes now advertise `x-codex-turn-state` during websocket accept and honor client-provided turn-state on reconnect so routing can stay sticky at turn granularity even when the public websocket reconnects.
 - HTTP responses routes now also return `x-codex-turn-state` headers so clients that persist response headers can promote later HTTP requests from prompt-cache affinity to stronger Codex-session continuity.
@@ -257,3 +265,35 @@ OpenSpec change first.
 - Post-deploy: correlate retry-circuit `opened`, `half_open`, and `reset` events with bridge `pending` and `response_events_seen` diagnostics. An idle `pending=0` retirement must not precede an immediate two-failure cooldown.
 - Post-deploy: monitor `previous_response_not_found` on `/backend-api/codex/responses`; recurring spikes show repeated continuity failures, which may come from malformed client identifiers, server-side invalidation, or connection lifecycle. Clients should perform the documented full-context retry without `previous_response_id`. Investigate socket-lifecycle remediation only when a separate close-reason, reconnect, or transport diagnostic correlates with the failures.
 - Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`
+
+
+## HTTP continuation promotion
+
+Healthy native HTTP requests use normal policy. The proxy cannot infer every
+client-local WebSocket failure from HTTP alone; it uses its existing 60-second
+upstream-connect failure marker as concrete failure evidence. Operator HTTP
+pins, image and size bypasses remain effective. No new retry/session registry.
+
+History-only locality is soft, scoped by the bridge's full API-key identifier,
+and hashes the complete first user item plus instructions and model. No client
+prompt cache field is overwritten. Identical initial prompts may share an idle
+connection, but neither histories nor response anchors are merged; the complete
+request is sent each time. Existing hard-continuity paths retain their guarded
+incremental replay. Conversation IDs get their own hashed locality and are never
+combined with an injected previous_response_id.
+
+Chat keeps the existing stream conversion/usage/error/cleanup pipeline and uses
+the bridge only after the source-routing branch. Backend stream=false retains
+its native non-streaming upstream contract. No claimed latency percentage:
+connection reuse is measured separately from admission and successful transport.
+
+For example, a Chat client sending `[user(task), assistant(answer), user(next)]`
+without session headers can open a bridge connection. Appending the next
+assistant/user pair reuses that connection while sending the entire new history.
+The same initial task under a different API key selects a separate connection.
+
+Chat binds existing settlement ownership signals while advancing its bridged
+stream. Predispatch failures and cancellation release origin-owned reservations;
+accepted or delivery-ambiguous owner forwards retain their settlement owner.
+Context bindings do not span yields because startup probes and consumers may
+advance the stream from different tasks.

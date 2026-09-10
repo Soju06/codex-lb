@@ -1,0 +1,350 @@
+[
+  {
+    "name": "indexed_replace_and_sort",
+    "blocks": [
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"ten\"}, \"output_index\": 10}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"minus\"}, \"output_index\": -5}\n\n",
+      "data: {\"type\": \"response.output_item.added\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"old\"}, \"output_index\": 2}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"new\"}, \"output_index\": 2}\n\n",
+      "data: {\"type\": \"response.completed\", \"response\": {\"object\": \"response.compact\", \"id\": \"shared\", \"output\": []}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "object": "response.compact",
+        "id": "shared",
+        "output": [
+          {
+            "type": "compaction",
+            "encrypted_content": "minus"
+          },
+          {
+            "type": "compaction",
+            "encrypted_content": "new"
+          },
+          {
+            "type": "compaction",
+            "encrypted_content": "ten"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "unindexed_order",
+    "blocks": [
+      "data: {\"type\": \"response.output_item.added\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"ignored\"}}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"first\"}}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"float\"}, \"output_index\": 1.5}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"string\"}, \"output_index\": \"1\"}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"zero\"}, \"output_index\": 0}\n\n",
+      "data: {\"type\": \"response.completed\", \"response\": {\"object\": \"response.compact\", \"id\": \"shared\", \"output\": []}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "object": "response.compact",
+        "id": "shared",
+        "output": [
+          {
+            "type": "compaction",
+            "encrypted_content": "zero"
+          },
+          {
+            "type": "compaction",
+            "encrypted_content": "first"
+          },
+          {
+            "type": "compaction",
+            "encrypted_content": "float"
+          },
+          {
+            "type": "compaction",
+            "encrypted_content": "string"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "bool_and_large_integer_indices",
+    "blocks": [
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"old\"}, \"output_index\": true}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"one\"}, \"output_index\": 1}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"zero\"}, \"output_index\": false}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"big-negative\"}, \"output_index\": -100000000000000000000000000000000000000000000000000}\n\n",
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"big-positive\"}, \"output_index\": 100000000000000000000000000000000000000000000000000}\n\n",
+      "data: {\"type\": \"response.completed\", \"response\": {\"object\": \"response.compact\", \"id\": \"shared\", \"output\": []}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "object": "response.compact",
+        "id": "shared",
+        "output": [
+          {
+            "type": "compaction",
+            "encrypted_content": "big-negative"
+          },
+          {
+            "type": "compaction",
+            "encrypted_content": "zero"
+          },
+          {
+            "type": "compaction",
+            "encrypted_content": "one"
+          },
+          {
+            "type": "compaction",
+            "encrypted_content": "big-positive"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "terminal_output_wins",
+    "blocks": [
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"ignored\"}, \"output_index\": 0}\n\n",
+      "data: {\"type\": \"response.completed\", \"response\": {\"output\": [{\"keep\": true}], \"unknown\": {\"integer\": 10000000000000000000000000000000000000000000000000000000000000000000000, \"text\": \"\\ud55c\\uae00 \\ud83d\\ude00\"}}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "output": [
+          {
+            "keep": true
+          }
+        ],
+        "unknown": {
+          "integer": 10000000000000000000000000000000000000000000000000000000000000000000000,
+          "text": "한글 😀"
+        }
+      }
+    }
+  },
+  {
+    "name": "unknown_fields_when_assembled",
+    "blocks": [
+      "data: {\"type\": \"response.output_item.done\", \"item\": {\"type\": \"compaction\", \"encrypted_content\": \"item\"}, \"output_index\": 0}\n\n",
+      "data: {\"type\": \"response.completed\", \"response\": {\"output\": null, \"unknown\": {\"integer\": 10000000000000000000000000000000000000000000000000000000000000000000000, \"text\": \"\\ud55c\\uae00 \\ud83d\\ude00\"}}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "output": [
+          {
+            "type": "compaction",
+            "encrypted_content": "item"
+          }
+        ],
+        "unknown": {
+          "integer": 10000000000000000000000000000000000000000000000000000000000000000000000,
+          "text": "한글 😀"
+        }
+      }
+    }
+  },
+  {
+    "name": "no_items_preserves_output_shape",
+    "blocks": [
+      "data: {\"type\": \"response.completed\", \"response\": {\"output\": \"opaque\", \"other\": 42}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "output": "opaque",
+        "other": 42
+      }
+    }
+  },
+  {
+    "name": "empty_output_stays_empty",
+    "blocks": [
+      "data: {\"type\": \"response.completed\", \"response\": {\"object\": \"response.compact\", \"id\": \"shared\", \"output\": []}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "object": "response.compact",
+        "id": "shared",
+        "output": []
+      }
+    }
+  },
+  {
+    "name": "ignore_non_object_items",
+    "blocks": [
+      "data: {\"type\": \"response.output_item.done\", \"output_index\": 0, \"item\": []}\n\n",
+      "data: {\"type\": \"response.completed\", \"response\": {\"object\": \"response.compact\", \"id\": \"shared\", \"output\": []}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "object": "response.compact",
+        "id": "shared",
+        "output": []
+      }
+    }
+  },
+  {
+    "name": "stop_after_completion",
+    "blocks": [
+      "data: {\"type\": \"response.completed\", \"response\": {\"object\": \"response.compact\", \"id\": \"shared\", \"output\": []}}\n\n",
+      "data: {\"type\": \"response.failed\", \"response\": {\"error\": {\"message\": \"late\"}}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "object": "response.compact",
+        "id": "shared",
+        "output": []
+      }
+    }
+  },
+  {
+    "name": "multiline_crlf",
+    "blocks": [
+      ": comment\r\nevent: ignored\r\ndata: {\"type\":\"response.completed\",\r\ndata: \"response\":{\"object\":\"response.compact\"}}\r\n\r\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "object": "response.compact"
+      }
+    }
+  },
+  {
+    "name": "bare_cr",
+    "blocks": [
+      "data:{\"type\":\"response.completed\",\"response\":{}}\r\r"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {}
+    }
+  },
+  {
+    "name": "ignore_invalid_prefix",
+    "blocks": [
+      ": ping\n\n",
+      "data: [DONE]\n\n",
+      "data: invalid\n\n",
+      "data: []\n\n",
+      "data: {\"type\": \"response.completed\", \"response\": {\"object\": \"response.compact\", \"id\": \"shared\", \"output\": []}}\n\n"
+    ],
+    "expected": {
+      "kind": "completed",
+      "response": {
+        "object": "response.compact",
+        "id": "shared",
+        "output": []
+      }
+    }
+  },
+  {
+    "name": "empty",
+    "blocks": [],
+    "expected": {
+      "kind": "invalid",
+      "message": "empty upstream SSE response"
+    }
+  },
+  {
+    "name": "only_invalid",
+    "blocks": [
+      "data: nope\n\n"
+    ],
+    "expected": {
+      "kind": "invalid",
+      "message": "empty upstream SSE response"
+    }
+  },
+  {
+    "name": "missing_completion",
+    "blocks": [
+      "data: {\"type\": \"response.created\"}\n\n"
+    ],
+    "expected": {
+      "kind": "invalid",
+      "message": "upstream SSE ended before response.completed"
+    }
+  },
+  {
+    "name": "object_without_type",
+    "blocks": [
+      "data: {}\n\n"
+    ],
+    "expected": {
+      "kind": "invalid",
+      "message": "upstream SSE ended before response.completed"
+    }
+  },
+  {
+    "name": "bad_completed_response",
+    "blocks": [
+      "data: {\"type\": \"response.completed\", \"response\": []}\n\n"
+    ],
+    "expected": {
+      "kind": "invalid",
+      "message": "response.completed event missing response object"
+    }
+  },
+  {
+    "name": "response.failed",
+    "blocks": [
+      "data: {\"type\": \"response.failed\", \"response\": {\"error\": {\"code\": \"quota_exceeded\", \"message\": \"quota\", \"retry_after_seconds\": 9}}}\n\n"
+    ],
+    "expected": {
+      "kind": "terminal_error",
+      "event": {
+        "type": "response.failed",
+        "response": {
+          "error": {
+            "code": "quota_exceeded",
+            "message": "quota",
+            "retry_after_seconds": 9
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "response.incomplete",
+    "blocks": [
+      "data: {\"type\": \"response.incomplete\", \"response\": {\"error\": {\"code\": \"quota_exceeded\", \"message\": \"quota\", \"retry_after_seconds\": 9}}}\n\n"
+    ],
+    "expected": {
+      "kind": "terminal_error",
+      "event": {
+        "type": "response.incomplete",
+        "response": {
+          "error": {
+            "code": "quota_exceeded",
+            "message": "quota",
+            "retry_after_seconds": 9
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "error",
+    "blocks": [
+      "data: {\"type\": \"error\", \"response\": {\"error\": {\"code\": \"quota_exceeded\", \"message\": \"quota\", \"retry_after_seconds\": 9}}}\n\n"
+    ],
+    "expected": {
+      "kind": "terminal_error",
+      "event": {
+        "type": "error",
+        "response": {
+          "error": {
+            "code": "quota_exceeded",
+            "message": "quota",
+            "retry_after_seconds": 9
+          }
+        }
+      }
+    }
+  }
+]

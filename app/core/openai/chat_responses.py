@@ -131,15 +131,6 @@ class ToolCallIndex:
     next_index: int = 0
     output_index_map: dict[int, int] = field(default_factory=dict)
 
-    def index_for(self, call_id: str | None, name: str | None) -> int:
-        key = _tool_call_key(call_id, name)
-        if key is None:
-            return 0
-        if key not in self.indexes:
-            self.indexes[key] = self.next_index
-            self.next_index += 1
-        return self.indexes[key]
-
     def index_for_output_index(self, output_index: int | None, call_id: str | None, name: str | None) -> int:
         """Resolve tool call index, preferring output_index mapping when available.
 

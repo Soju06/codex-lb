@@ -9,6 +9,8 @@ import anyio
 from app.core.clock import clock_for, scheduler_for
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, proxy_phase_latency_seconds
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy._load_balancer.throughput_cohort import record_tps_sample
+from app.modules.proxy._load_balancer.ttft_cohort import record_ttft_sample
 from app.modules.proxy.affinity import _extract_model_class
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 
@@ -197,6 +199,23 @@ class _RequestLogMixin:
         conversation_id: str | None = None,
         client_ip: str | None = None,
         archive_request_id: str | None = None,
+        # True when the row's latencies span more than one upstream send
+        # (bridge retry or direct WebSocket replay) or an account-capacity
+        # wait. Not persisted; it only keeps the row out of the latency cohort samples.
+        upstream_retried: bool = False,
+        # Start-to-upstream-send latency: how much of ``latency_first_token_ms``
+        # is local pre-send work (bridge session lookup / reconnect / slimming,
+        # WebSocket owner binding). Not persisted; the TTFT cohort sample is
+        # ``latency_first_token_ms - latency_upstream_send_ms``, so the account
+        # is only charged from its ``response.create`` send. ``None`` means the
+        # row has no send anchor and it is never TTFT-sampled (fail closed).
+        latency_upstream_send_ms: int | None = None,
+        # Start-to-upstream-terminal latency stamped when the terminal frame was
+        # parsed, before downstream delivery, terminal bookkeeping, settlement
+        # and cleanup. Not persisted; it is the end of the throughput sample's
+        # span. ``None`` (no terminal frame was parsed) falls back to
+        # ``latency_ms``; such rows are error rows and are not sampled.
+        latency_upstream_terminal_ms: int | None = None,
     ) -> None:
         task = scheduler_for(self).create_task(
             self._persist_request_log(
@@ -297,6 +316,36 @@ class _RequestLogMixin:
             upstream_transport=upstream_transport,
             useragent_group=useragent_group,
             model=model,
+        )
+        # Fleet-relative latency cohort weights (first-token latency per account,
+        # output throughput per account and model): the funnel already carries
+        # every field the eligibility filters need; ineligible rows are dropped there.
+        queued_wait_ms = (latency_response_create_gate_wait_ms or 0) + (latency_bridge_queue_wait_ms or 0)
+        balancer = getattr(self, "_load_balancer", None)
+        record_ttft_sample(
+            balancer,
+            account_id=account_id,
+            status=status,
+            request_kind=request_kind,
+            latency_first_token_ms=latency_first_token_ms,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            reasoning_effort=reasoning_effort,
+            latency_upstream_send_ms=latency_upstream_send_ms,
+            queued_wait_ms=queued_wait_ms,
+            retried=upstream_retried,
+        )
+        record_tps_sample(
+            balancer,
+            account_id=account_id,
+            status=status,
+            request_kind=request_kind,
+            model=model,
+            latency_ms=latency_ms if latency_upstream_terminal_ms is None else latency_upstream_terminal_ms,
+            latency_first_token_ms=latency_first_token_ms,
+            output_tokens=output_tokens,
+            queued_wait_ms=queued_wait_ms,
+            retried=upstream_retried,
         )
 
     async def drain_persistence_tasks(

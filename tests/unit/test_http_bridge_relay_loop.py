@@ -106,7 +106,6 @@ def _relay_settings() -> SimpleNamespace:
         sse_keepalive_interval_seconds=0.0,
         stream_idle_timeout_seconds=60.0,
         http_responses_session_bridge_request_budget_seconds=60.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
     )
 
 

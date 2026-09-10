@@ -1,0 +1,5 @@
+- [x] Capture Python event classification and alias behavior in shared fixtures.
+- [x] Implement the pure Rust event interpreter and fixture parity tests.
+- [x] Negotiate bounded interpreted SSE events and consume them through both HTTP paths.
+- [x] Verify malformed IPC, fallback parity, cancellation, terminal and byte-limit behavior.
+- [x] Measure the changed stream path, sync specs, record verification, and archive.

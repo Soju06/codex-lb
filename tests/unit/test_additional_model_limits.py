@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from app.core.config.settings import get_settings
 from app.modules.proxy.additional_model_limits import (
     get_additional_display_label_for_model,
     get_additional_model_limit,
@@ -83,6 +84,7 @@ def test_registry_normalizes_configured_quota_key(monkeypatch, tmp_path: Path) -
         encoding="utf-8",
     )
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    get_settings.cache_clear()
     clear_additional_quota_registry_cache()
 
     resolved = get_additional_model_limit("gpt-5.3-codex-spark")
@@ -111,6 +113,7 @@ def test_registry_resolves_legacy_quota_key_alias(monkeypatch, tmp_path: Path) -
         encoding="utf-8",
     )
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    get_settings.cache_clear()
     clear_additional_quota_registry_cache()
 
     assert canonicalize_additional_quota_key(quota_key="codex_spark") == "spark_enterprise"
@@ -135,6 +138,7 @@ def test_routing_policy_resolves_legacy_limit_alias(monkeypatch, tmp_path: Path)
         encoding="utf-8",
     )
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    get_settings.cache_clear()
     clear_additional_quota_registry_cache()
 
     assert get_additional_quota_routing_policy("codex_other", overrides=None) == "burn_first"
@@ -159,6 +163,7 @@ def test_registry_reloads_when_config_file_changes(monkeypatch, tmp_path: Path) 
         encoding="utf-8",
     )
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    get_settings.cache_clear()
     clear_additional_quota_registry_cache()
 
     assert canonicalize_additional_quota_key(limit_name="codex_other") == "codex_spark"
@@ -206,6 +211,7 @@ def test_registry_rejects_duplicate_aliases(monkeypatch, tmp_path: Path) -> None
         encoding="utf-8",
     )
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    get_settings.cache_clear()
     clear_additional_quota_registry_cache()
 
     with pytest.raises(ValueError, match="duplicate additional quota alias"):
@@ -228,6 +234,7 @@ def test_reload_additional_quota_registry_returns_status(monkeypatch, tmp_path: 
         encoding="utf-8",
     )
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    get_settings.cache_clear()
 
     status = reload_additional_quota_registry()
 

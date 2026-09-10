@@ -33,18 +33,46 @@ seconds. Reverse proxies purge idle server-side connections with RST, so
 behind one every request leaked its protocol for the whole window. Fixing the
 upgrade handling upstream therefore does not by itself make this module
 retirable; see ``tests/integration/test_http_keepalive_timer.py``.
+
+Third job: stamping a mid-response connection loss into the in-flight
+request's ``scope["state"]`` (``app.core.http_protocol.stamp_disconnect_into_scope``)
+so a streaming response can tell whether a late write was dropped by uvicorn's
+``send`` after the peer went away. Stock ``connection_lost`` only knows
+``self.cycle``, which under HTTP/1.1 pipelining is the *newest parsed* request:
+``on_headers_complete`` replaces it and queues it in ``self.pipeline`` while the
+earlier response is still streaming, so the active response would never see
+the loss (its ``receive()`` also resumed reading, which is how the loss gets
+observed at all). The subclass therefore remembers the cycle whose ASGI task
+is running (``_start_asgi_task``) and stamps every request still open on the
+connection: the active one, the newest parsed one and the queued ones.
 """
 
 from __future__ import annotations
 
 import httptools
-from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
+from uvicorn._types import ASGI3Application
+from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol, RequestResponseCycle
 
-from app.core.http_protocol import combined_upgrade_offer, offers_ignorable_upgrade, without_upgrade_headers
+from app.core.http_protocol import (
+    combined_upgrade_offer,
+    offers_ignorable_upgrade,
+    stamp_disconnect_into_scope,
+    without_upgrade_headers,
+)
 
 
 class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
     """httptools protocol that serves non-WebSocket upgrade offers as HTTP/1.1."""
+
+    # The cycle whose ``run_asgi`` task is running (or ran last). Distinct from
+    # ``self.cycle`` only while pipelined requests are queued behind it.
+    _active_cycle: RequestResponseCycle | None = None
+
+    def _start_asgi_task(self, cycle: RequestResponseCycle, app: ASGI3Application) -> None:
+        # Stock uvicorn routes every cycle start (immediate and dequeued from
+        # ``self.pipeline`` in ``on_response_complete``) through this hook.
+        self._active_cycle = cycle
+        super()._start_asgi_task(cycle, app)
 
     def connection_lost(self, exc: Exception | None) -> None:
         # uvicorn (<= 0.52.4 and master) cancels the keep-alive timer only when
@@ -57,6 +85,14 @@ class UpgradeTolerantHttpToolsProtocol(HttpToolsProtocol):
         # force-closed it).
         super().connection_lost(exc)
         self._unset_keepalive_if_required()
+        # super() marked ``self.cycle`` disconnected, but under pipelining that
+        # is the newest *queued* request, not the response still streaming.
+        # Stamp every request still open on this connection; completed cycles
+        # are skipped by the stamp itself and duplicates are harmless.
+        stamp_disconnect_into_scope(self._active_cycle, exc)
+        stamp_disconnect_into_scope(self.cycle, exc)
+        for cycle, _app in self.pipeline:
+            stamp_disconnect_into_scope(cycle, exc)
 
     def _active_parser(self) -> httptools.HttpRequestParser:
         # The base class only clears ``self.parser`` in connection_lost, after

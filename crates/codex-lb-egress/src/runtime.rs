@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use codex_lb_protocol::{CAPABILITIES, NativeCommand, NativeEvent, PROTOCOL_VERSION};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinSet};
 use tokio_tungstenite::tungstenite::Message;
@@ -13,7 +13,7 @@ use crate::websocket::{
     WebSocketCommand, emit_websocket_error, emit_websocket_setup_error, execute_websocket,
 };
 
-pub(crate) type Output = Arc<Mutex<BufWriter<tokio::io::Stdout>>>;
+pub(crate) use crate::output::{Output, emit};
 type ActiveRequests = Arc<Mutex<HashMap<String, ActiveRequest>>>;
 pub type RequestError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -30,7 +30,7 @@ pub async fn run_stdio() -> Result<(), RequestError> {
         .install_default()
         .map_err(|_| "failed to install aws-lc-rs crypto provider")?;
 
-    let output = Arc::new(Mutex::new(BufWriter::new(tokio::io::stdout())));
+    let output = crate::output::stdout();
     let active: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
     let mut clients = ClientPool::default();
     let mut tasks = JoinSet::new();
@@ -85,7 +85,14 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                             ).await?;
                             continue;
                         }
-                        if request.timeout_ms == 0 || request.connect_timeout_ms == Some(0) {
+                        if request.timeout_ms == Some(0)
+                            || request.connect_timeout_ms == Some(0)
+                            || request.sse.is_some_and(|options| {
+                                options.idle_timeout_ms == 0 || options.max_event_bytes == 0
+                                    || (options.collect_compact && !options.content_type_aware)
+                                    || (options.collect_compact && options.interpret_responses)
+                            })
+                        {
                             emit_error(
                                 &output,
                                 &request.request_id,
@@ -129,18 +136,27 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                         let task_active = active.clone();
                         tasks.spawn(async move {
                             tokio::select! {
+                                // Prefer a completed exchange, and emit its terminal outside
+                                // the cancellable future: stdout flush can yield after the
+                                // parent sees the terminal and closes stdin.
+                                biased;
                                 result = execute_request(request, client, &task_output) => {
-                                    if let Err(error) = result {
-                                        let (message, phase, retryable, tls_verification) =
-                                            classify_error(error.as_ref());
-                                        let _ = emit_error(
-                                            &task_output,
-                                            &request_id,
-                                            message,
-                                            phase,
-                                            retryable,
-                                            tls_verification,
-                                        ).await;
+                                    match result {
+                                        Ok(terminal) => {
+                                            let _ = emit(&task_output, &terminal).await;
+                                        }
+                                        Err(error) => {
+                                            let (message, phase, retryable, tls_verification) =
+                                                classify_error(error.as_ref());
+                                            let _ = emit_error(
+                                                &task_output,
+                                                &request_id,
+                                                message,
+                                                phase,
+                                                retryable,
+                                                tls_verification,
+                                            ).await;
+                                        }
                                     }
                                 }
                                 _ = cancel_rx => {
@@ -363,14 +379,6 @@ async fn emit_error(
     .await
 }
 
-pub(crate) async fn emit(output: &Output, event: &NativeEvent) -> Result<(), std::io::Error> {
-    let mut output = output.lock().await;
-    output.write_all(&serde_json::to_vec(event)?).await?;
-    output.write_all(b"\n").await?;
-    output.flush().await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Once;
@@ -533,6 +541,7 @@ mod tests {
             ping_interval_ms: Some(20_000),
             ping_timeout_ms: Some(120_000),
             proxy_url: None,
+            interpret_responses: false,
         };
         let (mut websocket, response) = connect_native_websocket(&request)
             .await

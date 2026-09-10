@@ -998,10 +998,18 @@ async def mirror_account_soft_delete_into_time_rollups(session: AsyncSession, ac
         return replace(row, account_id=DIMENSION_SENTINEL, is_deleted=True)
 
     await _rekey_account_rows(session, [account_id], _rekey)
+    from app.modules.reports.rollup import rekey_report_accounts
+
+    await rekey_report_accounts(session, [account_id], None)
 
 
 async def mirror_account_hard_delete_into_time_rollups(session: AsyncSession, account_id: str) -> None:
     """Mirror the history-deleting path (raw rows physically removed)."""
+    from app.db.models import RequestReportHourlyRollup
+
+    await session.execute(
+        delete(RequestReportHourlyRollup).where(RequestReportHourlyRollup.account_id == to_dimension(account_id))
+    )
     for model, *_rest in _ROLLUP_TABLES:
         await session.execute(delete(model).where(model.account_id == to_dimension(account_id)))
 
@@ -1015,5 +1023,8 @@ async def merge_time_rollups_into(session: AsyncSession, canonical_account_id: s
     """
     if not duplicate_ids:
         return
+    from app.modules.reports.rollup import rekey_report_accounts
+
+    await rekey_report_accounts(session, duplicate_ids, canonical_account_id)
     canonical_dimension = to_dimension(canonical_account_id)
     await _rekey_account_rows(session, duplicate_ids, lambda row: replace(row, account_id=canonical_dimension))

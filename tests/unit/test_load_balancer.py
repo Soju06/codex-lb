@@ -27,7 +27,9 @@ from app.core.balancer import (
 )
 from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
 from app.core.usage.quota import apply_usage_quota
+from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy.load_balancer import (
     RuntimeState,
     _additional_quota_applies_to_plan,
@@ -39,7 +41,6 @@ from app.modules.proxy.load_balancer import (
     _state_above_sticky_budget_threshold,
     _state_from_account,
     _usage_entry_is_recent_enough,
-    _usage_refresh_interval_seconds,
     background_recovery_state_from_account,
 )
 from tests.simulation.virtual_time import VirtualClock
@@ -1701,7 +1702,7 @@ def test_apply_usage_quota_sets_fallback_reset_from_evaluation_time():
 
 def test_usage_recency_uses_injected_evaluation_time() -> None:
     clock = VirtualClock(epoch_value=2_000_000_000.0)
-    recent_window_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
+    recent_window_seconds = usage_freshness_horizon_seconds()
     recent = datetime.fromtimestamp(clock.time() - recent_window_seconds + 1.0, tz=timezone.utc)
     stale = datetime.fromtimestamp(clock.time() - recent_window_seconds - 1.0, tz=timezone.utc)
 
@@ -1723,6 +1724,27 @@ def test_apply_usage_quota_secondary_exhausted_without_credits_sets_quota_exceed
         credits_unlimited=False,
         credits_balance=0.0,
     )
+    assert status == AccountStatus.QUOTA_EXCEEDED
+    assert used_percent == 100.0
+    assert reset_at == secondary_reset
+
+
+def test_apply_usage_quota_preserves_explicit_quota_when_fresh_secondary_usage_is_still_exhausted():
+    secondary_reset = 1_700_003_600
+    status, used_percent, reset_at = apply_usage_quota(
+        status=AccountStatus.QUOTA_EXCEEDED,
+        primary_used=15.0,
+        primary_reset=None,
+        primary_window_minutes=300,
+        runtime_reset=None,
+        secondary_used=100.0,
+        secondary_reset=secondary_reset,
+        credits_has=False,
+        credits_unlimited=False,
+        credits_balance=0.0,
+        infer_status_from_usage=False,
+    )
+
     assert status == AccountStatus.QUOTA_EXCEEDED
     assert used_percent == 100.0
     assert reset_at == secondary_reset
@@ -3049,6 +3071,57 @@ def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_blo
     assert state.status == AccountStatus.ACTIVE
 
 
+@pytest.mark.parametrize("long_reset_offset", [None, 3600, 0, -1])
+@pytest.mark.parametrize("primary_available", [True, False])
+def test_rate_limit_recovery_ignores_expired_long_window_veto(monkeypatch, long_reset_offset, primary_available):
+    now = 1_700_000_000.0
+    blocked_at = int(now - 300)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+    account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=int(now + 7200), blocked_at=blocked_at)
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=10.0 if primary_available else 100.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 1),
+        ),
+        secondary_entry=_make_test_usage(
+            used_percent=100.0,
+            reset_at=None if long_reset_offset is None else int(now + long_reset_offset),
+            recorded_at=_epoch_to_naive_utc(now - 10),
+        ),
+        runtime=RuntimeState(cooldown_until=now - 1, blocked_at=float(blocked_at)),
+    )
+    can_recover = primary_available and long_reset_offset is not None and long_reset_offset <= 0
+    assert state.status == (AccountStatus.ACTIVE if can_recover else AccountStatus.RATE_LIMITED)
+    assert state.reset_at == (None if can_recover else account.reset_at)
+
+
+@pytest.mark.parametrize("sample_offset", [-310.0, -300.0, -299.4, -250.0, -1.0])
+@pytest.mark.parametrize("long_has_reset", [False, True])
+def test_quota_deadline_replacement_requires_fresh_post_block_exhaustion(monkeypatch, sample_offset, long_has_reset):
+    now = 1_700_000_000.0
+    blocked_at = int(now - 300)
+    fallback = int(now - 1)
+    long_reset = int(now + 7200) if long_has_reset else None
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+    account = _make_test_account(status=AccountStatus.QUOTA_EXCEEDED, reset_at=fallback, blocked_at=blocked_at)
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=_make_test_usage(
+            used_percent=100.0, reset_at=long_reset, recorded_at=_epoch_to_naive_utc(now + sample_offset)
+        ),
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+    assert state.reset_at == (long_reset if sample_offset == -1.0 else fallback)
+    assert state.blocked_at == blocked_at
+
+
 def test_state_from_account_stale_runtime_block_does_not_recover_free_plan_peer_marked_block(monkeypatch):
     # Regression (codex P2): leftover runtime cooldown state from an EARLIER
     # 429 must not count as having observed the CURRENT 429. Here the
@@ -3339,6 +3412,48 @@ def test_state_from_account_clears_quota_exceeded_after_restart_with_persisted_b
     assert state.blocked_at is None
 
 
+def test_state_from_account_keeps_quota_exceeded_after_cooldown_when_secondary_usage_is_exhausted(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    fallback_reset = int(now + 3600)
+    secondary_reset = int(now + 5 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.QUOTA_EXCEEDED,
+        reset_at=fallback_reset,
+        blocked_at=int(blocked),
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=15.0,
+        reset_at=int(now + 300),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=300,
+        credits_has=False,
+        credits_unlimited=False,
+        credits_balance=0.0,
+    )
+    secondary = _make_test_usage(
+        used_percent=100.0,
+        reset_at=secondary_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=secondary,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+    assert state.reset_at == secondary_reset
+    assert state.blocked_at == blocked
+
+
 def test_state_from_account_keeps_quota_exceeded_after_restart_when_persisted_blocked_at_is_recent(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 60.0
@@ -3530,7 +3645,8 @@ def test_state_from_account_rate_limited_checks_primary_freshness(monkeypatch):
     assert state.status == AccountStatus.RATE_LIMITED
 
 
-def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
+@pytest.mark.parametrize("primary_used", [10.0, 100.0])
+def test_state_from_account_rate_limited_requires_available_primary(monkeypatch, primary_used):
     now = 1_700_000_000.0
     blocked = now - 130.0
     future_reset = int(now + 3600)
@@ -3540,7 +3656,7 @@ def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
     account = _make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset)
     fresh_primary = _make_test_usage(
         window="primary",
-        used_percent=10.0,
+        used_percent=primary_used,
         reset_at=future_reset,
         recorded_at=_epoch_to_naive_utc(now - 10),
     )
@@ -3555,7 +3671,43 @@ def test_state_from_account_rate_limited_clears_with_fresh_primary(monkeypatch):
         secondary_entry=None,
         runtime=runtime,
     )
-    assert state.status == AccountStatus.ACTIVE
+    assert state.status == (AccountStatus.ACTIVE if primary_used < 100.0 else AccountStatus.RATE_LIMITED)
+
+
+@pytest.mark.parametrize("primary_reset_offset", [None, -10, 3600])
+@pytest.mark.parametrize("secondary_used", [40.0, 100.0])
+def test_state_from_account_early_recovery_requires_elapsed_primary_and_available_newer_long_window(
+    monkeypatch, primary_reset_offset, secondary_used
+):
+    now = 1_700_000_000.0
+    blocked = now - 130
+    deadline = int(now + 7200)
+    monkeypatch.setattr("time.time", lambda: now)
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=deadline,
+        blocked_at=int(blocked),
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=None if primary_reset_offset is None else int(now + primary_reset_offset),
+        recorded_at=_epoch_to_naive_utc(blocked - 1),
+    )
+    secondary = _make_test_usage(
+        used_percent=secondary_used,
+        reset_at=int(now + 7 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=secondary,
+        runtime=RuntimeState(blocked_at=blocked, cooldown_until=now - 1, reset_at=deadline),
+    )
+    recovered = primary_reset_offset == -10 and secondary_used < 100.0
+    assert state.status == (AccountStatus.ACTIVE if recovered else AccountStatus.RATE_LIMITED)
+    assert state.reset_at == (None if recovered else deadline)
 
 
 def test_background_recovery_state_preserves_rate_limit_cooldown_when_reset_is_in_future(monkeypatch):
@@ -3737,7 +3889,7 @@ def test_state_from_account_does_not_apply_rate_limit_repair_to_quota_exceeded(m
     )
 
     assert state.status == AccountStatus.QUOTA_EXCEEDED
-    assert state.reset_at == float(implausible_reset)
+    assert state.reset_at == implausible_reset
     assert select_account([state], now=now).account is None
 
 
@@ -3767,6 +3919,51 @@ def test_background_recovery_state_recovers_rate_limited_after_reset_elapses(mon
     )
 
     assert state.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.parametrize("plan_type", ["plus", "free"])
+@pytest.mark.parametrize("has_block_marker", [False, True])
+def test_background_recovery_state_ignores_only_unsupported_monthly_exhaustion(
+    monkeypatch, plan_type, has_block_marker
+):
+    now = 1_700_000_000.0
+    blocked = int(now - 7200)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=int(now - 300),
+        blocked_at=blocked if has_block_marker else None,
+        plan_type=plan_type,
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+    monthly = _make_test_usage(
+        window="monthly",
+        used_percent=100.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+        window_minutes=43200,
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=monthly,
+    )
+
+    if usage_core.capacity_for_plan(plan_type, "monthly") is None:
+        assert state.status == AccountStatus.ACTIVE
+        assert state.reset_at is None
+        assert state.blocked_at is None
+    else:
+        assert state.status == AccountStatus.RATE_LIMITED
+        assert state.reset_at == account.reset_at
+        assert state.blocked_at == account.blocked_at
 
 
 def test_background_recovery_state_recovers_monthly_only_rate_limited_after_reset_elapses(monkeypatch):
@@ -6133,3 +6330,52 @@ def test_select_account_fill_first_primary_dominates_over_secondary():
     assert result.account is not None
     # Primary still wins -- only ties break on secondary.
     assert result.account.account_id == "high-secondary"
+
+
+def test_background_recovery_state_from_account_follows_the_dashboard_soft_drain_and_tunables(monkeypatch):
+    """Usage-refresh recovery builds its state from the values the caller resolved from its dashboard row."""
+    import app.modules.proxy.load_balancer as load_balancer_module
+
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    account = _make_test_account(status=AccountStatus.ACTIVE)
+    draining_primary = _make_test_usage(
+        window="primary",
+        used_percent=DRAIN_PRIMARY_THRESHOLD_PCT + 5.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+        window_minutes=300,
+    )
+    captured: list[dict[str, object]] = []
+    original_state_from_account = load_balancer_module._state_from_account
+
+    def recording_state_from_account(**kwargs):
+        captured.append(kwargs)
+        return original_state_from_account(**kwargs)
+
+    monkeypatch.setattr(load_balancer_module, "_state_from_account", recording_state_from_account)
+    dashboard_tunables = RoutingTunables(inflight_penalty_pct=37.5)
+
+    # Environment layer (soft drain defaults on): the account above the fixed threshold drains.
+    assert (
+        background_recovery_state_from_account(
+            account=account,
+            primary_entry=draining_primary,
+            secondary_entry=None,
+        ).health_tier
+        == 1
+    )
+    # The dashboard value the caller resolved wins: soft drain off keeps the account healthy.
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=draining_primary,
+        secondary_entry=None,
+        routing_tunables=dashboard_tunables,
+        soft_drain_enabled=False,
+    )
+    assert state.health_tier == 0
+    assert captured[-1]["soft_drain_enabled"] is False
+    assert captured[-1]["routing_tunables"] is dashboard_tunables
+    assert captured[0]["soft_drain_enabled"] is None
+    assert captured[0]["routing_tunables"] is None

@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
-from app.core.clients.proxy import ProxyResponseError, apply_codex_installation_headers
+from app.core.clients.proxy import MAX_SSE_EVENT_BYTES, ProxyResponseError, apply_codex_installation_headers
 from app.core.clients.proxy_websocket import (
     RealtimeWebSocketProtocol,
     UpstreamWebSocket,
@@ -21,6 +21,7 @@ from app.core.clients.proxy_websocket import (
     normalize_realtime_call_id,
 )
 from app.core.clock import clock_for, scheduler_for
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.upstream_proxy import ResolvedUpstreamRoute
@@ -478,7 +479,7 @@ class _RealtimeLiveMixin:
         clock = clock_for(proxy)
         scheduler = scheduler_for(proxy)
         start = clock.monotonic()
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         upstream_close_timeout_seconds = max(1.0, settings.upstream_connect_timeout_seconds)
         offered_subprotocols = tuple(cast(Sequence[str], websocket.scope.get("subprotocols", ())))
         selection = await proxy._select_account_with_budget_compatible(
@@ -587,7 +588,7 @@ class _RealtimeLiveMixin:
             await _relay_live_websocket(
                 websocket,
                 relay_upstream,
-                max_message_bytes=settings.max_sse_event_bytes,
+                max_message_bytes=MAX_SSE_EVENT_BYTES,
                 close_timeout_seconds=upstream_close_timeout_seconds,
             )
             log_status = "success"

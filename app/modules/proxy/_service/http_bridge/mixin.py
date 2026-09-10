@@ -48,6 +48,7 @@ from app.core.metrics.prometheus import (
 from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import ensure_request_scope_id
 from app.db.models import (
+    DashboardSettings,
     StickySessionKind,
 )
 from app.modules.api_keys.service import (
@@ -98,6 +99,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_owner_unavailable_error,
     _http_bridge_reconnect_connect_failure,
     _http_bridge_reconnect_selection_failure,
+    _http_bridge_reconnect_turn_state,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_session_account_active,
@@ -117,7 +119,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _persist_http_bridge_replacement_account,
     _persistent_http_bridge_affinity,
     _plan_http_bridge_lru_capacity_closes,
-    _preferred_http_bridge_reconnect_turn_state,
     _raise_if_http_bridge_creation_superseded,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
@@ -605,7 +606,6 @@ class _HTTPBridgeMixin(
                             self._promote_http_bridge_session_to_codex_affinity(
                                 alias_session,
                                 turn_state=incoming_turn_state,
-                                settings=settings,
                             )
                             _register_http_bridge_turn_state_aliases_locked(self, alias_session)
                             key = alias_session.key
@@ -635,7 +635,6 @@ class _HTTPBridgeMixin(
                                 self._promote_http_bridge_session_to_codex_affinity(
                                     previous_session,
                                     turn_state=incoming_turn_state,
-                                    settings=settings,
                                 )
                                 previous_session.downstream_turn_state_aliases.add(incoming_turn_state)
                                 for alias in previous_session.downstream_turn_state_aliases:
@@ -1178,7 +1177,6 @@ class _HTTPBridgeMixin(
                                     self._promote_http_bridge_session_to_codex_affinity(
                                         previous_session,
                                         turn_state=incoming_turn_state,
-                                        settings=settings,
                                     )
                                     previous_session.downstream_turn_state_aliases.add(incoming_turn_state)
                                     for alias in previous_session.downstream_turn_state_aliases:
@@ -1366,7 +1364,7 @@ class _HTTPBridgeMixin(
             if continuity_error is not None:
                 raise continuity_error
             if capacity_wait_future is not None:
-                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
+                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds()
                 try:
                     await self._await_http_bridge_registry_wait(capacity_wait_future, timeout=wait_timeout_seconds)
                 except asyncio.CancelledError:
@@ -1394,7 +1392,7 @@ class _HTTPBridgeMixin(
                     pass
                 continue
             if inflight_future is not None and not owns_creation:
-                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
+                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds()
                 try:
                     session = await self._await_http_bridge_registry_wait(inflight_future, timeout=wait_timeout_seconds)
                 except asyncio.CancelledError:
@@ -1685,6 +1683,7 @@ class _HTTPBridgeMixin(
             request_id=f"http_bridge_connect_{uuid4().hex}",
             model=request_model,
             service_tier=request_service_tier,
+            requested_service_tier=request_service_tier,
             reasoning_effort=None,
             api_key_reservation=None,
             started_at=clock_for(self).monotonic(),
@@ -1983,6 +1982,7 @@ class _HTTPBridgeMixin(
         require_preferred_account: bool = False,
         owner_rebind_affinity: _AffinityPolicy | None = None,
         selection_affinity: _AffinityPolicy | None = None,
+        dashboard_settings: DashboardSettings | None = None,
     ) -> None:
         request_state.response_create_sent_at = None
         goal_restart = request_state.affinity_policy.abandon_unavailable_legacy_owner
@@ -2025,7 +2025,15 @@ class _HTTPBridgeMixin(
             now=clock_for(self).monotonic(),
         )
         try:
-            settings = await _service_get_settings_cache().get()
+            # Callers that reconnect while holding a lock resolve this row
+            # before taking it and pass it in. The prewarm timeout recovery is
+            # one: it reconnects under ``prewarm_lock``, and a refresh behind
+            # this read runs a DB query under a process-global lock, so
+            # awaiting it there would suspend the critical section (issues
+            # #1971/#1972).
+            settings = (
+                dashboard_settings if dashboard_settings is not None else await _service_get_settings_cache().get()
+            )
             session.api_key = request_state.api_key
             forced_refresh_account_id = request_state.force_refresh_account_id
             excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
@@ -2267,8 +2275,7 @@ class _HTTPBridgeMixin(
                 if force_refresh and request_state.force_refresh_account_id == account.id:
                     request_state.force_refresh_account_id = None
                 connect_headers = _websocket_safe_headers_with_turn_state(
-                    session.headers,
-                    None if owner_rebind_affinity is not None else _preferred_http_bridge_reconnect_turn_state(session),
+                    session.headers, _http_bridge_reconnect_turn_state(session, account.id, owner_rebind_affinity)
                 )
                 upstream = await open_replacement_upstream(account, connect_headers)
                 _copy_websocket_route_metadata_to_session(session, request_state)
@@ -2286,12 +2293,7 @@ class _HTTPBridgeMixin(
                         timeout_seconds=self._remaining_budget_seconds(deadline),
                     )
                     connect_headers = _websocket_safe_headers_with_turn_state(
-                        session.headers,
-                        (
-                            None
-                            if owner_rebind_affinity is not None
-                            else _preferred_http_bridge_reconnect_turn_state(session)
-                        ),
+                        session.headers, _http_bridge_reconnect_turn_state(session, account.id, owner_rebind_affinity)
                     )
                     upstream = await open_replacement_upstream(account, connect_headers)
                     _copy_websocket_route_metadata_to_session(session, request_state)

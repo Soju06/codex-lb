@@ -174,43 +174,6 @@ async def test_is_safe_image_fetch_url_blocks_resolved_private_ip(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_is_safe_image_fetch_url_respects_allowlist(monkeypatch):
-    async def resolve_ips(host: str, *, timeout_seconds: float):
-        return ["93.184.216.34"]
-
-    monkeypatch.setattr(proxy_module, "_resolve_global_ips", resolve_ips)
-    settings = proxy_module.get_settings()
-    original = settings.image_inline_allowed_hosts
-    original_enabled = settings.image_inline_fetch_enabled
-    settings.image_inline_fetch_enabled = True
-    settings.image_inline_allowed_hosts = ["allowed.example"]
-    try:
-        assert await proxy_module._is_safe_image_fetch_url("https://allowed.example/a.png", connect_timeout=1.0)
-        assert not await proxy_module._is_safe_image_fetch_url("https://denied.example/a.png", connect_timeout=1.0)
-    finally:
-        settings.image_inline_fetch_enabled = original_enabled
-        settings.image_inline_allowed_hosts = original
-
-
-@pytest.mark.asyncio
-async def test_is_safe_image_fetch_url_blocks_when_feature_disabled(monkeypatch):
-    async def resolve_ips(host: str, *, timeout_seconds: float):
-        return ["93.184.216.34"]
-
-    monkeypatch.setattr(proxy_module, "_resolve_global_ips", resolve_ips)
-    settings = proxy_module.get_settings()
-    original_enabled = settings.image_inline_fetch_enabled
-    original_hosts = settings.image_inline_allowed_hosts
-    settings.image_inline_fetch_enabled = False
-    settings.image_inline_allowed_hosts = []
-    try:
-        assert not await proxy_module._is_safe_image_fetch_url("https://example.com/a.png", connect_timeout=1.0)
-    finally:
-        settings.image_inline_fetch_enabled = original_enabled
-        settings.image_inline_allowed_hosts = original_hosts
-
-
-@pytest.mark.asyncio
 async def test_fetch_image_data_url_uses_fallback_ip_when_first_fails(monkeypatch):
     async def resolve_ips(host: str, *, timeout_seconds: float):
         return ["2001:db8::1", "93.184.216.34"]

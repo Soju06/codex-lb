@@ -1,0 +1,127 @@
+{
+  "model": "gpt-5.6-sol",
+  "instructions": "",
+  "input": [
+    {
+      "type": "additional_tools",
+      "role": "developer",
+      "id": "at_019a6b2d3e4f5a6b7c8d9e0f1a2b3c4d",
+      "tools": [
+        {
+          "type": "namespace",
+          "name": "functions",
+          "description": "",
+          "tools": [
+            {
+              "name": "exec",
+              "description": "Execute code in the sandbox and return its output.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "code": {"type": "string", "description": "Code to execute"},
+                  "timeout_ms": {"type": "number", "description": "Timeout in milliseconds"}
+                },
+                "required": ["code"],
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "wait",
+              "description": "Wait for a previously started execution to finish.",
+              "parameters": {
+                "type": "object",
+                "properties": {"call_id": {"type": "string"}},
+                "required": ["call_id"],
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        {
+          "type": "namespace",
+          "name": "web",
+          "description": "Web search",
+          "tools": [
+            {
+              "name": "run",
+              "description": "Run a web search.",
+              "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        {
+          "type": "namespace",
+          "name": "image_gen",
+          "description": "Image generation",
+          "tools": [
+            {
+              "name": "imagegen",
+              "description": "Generate an image from a prompt.",
+              "parameters": {
+                "type": "object",
+                "properties": {"prompt": {"type": "string"}},
+                "required": ["prompt"],
+                "additionalProperties": false
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "id": "msg_019a6b2d3e4f5a6b7c8d9e0f1a2b3c4e",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "You are Codex, based on GPT-5.6. You are running as a coding agent in the Codex CLI on a user's computer."
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "content_item_kinds": ["model.base_instructions"]
+      }
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "<environment_context>\n  <cwd>/workspace/repo</cwd>\n  <approval_policy>on-request</approval_policy>\n  <sandbox_mode>workspace-write</sandbox_mode>\n</environment_context>"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Fix the failing test in tests/unit/test_parser.py."
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": false,
+  "reasoning": {"effort": "medium", "summary": "auto", "context": "all_turns"},
+  "store": false,
+  "stream": true,
+  "include": ["reasoning.encrypted_content"],
+  "prompt_cache_key": "019a6b2d-3e4f-7a6b-8c8d-9e0f1a2b3c4f",
+  "text": {"verbosity": "medium"},
+  "client_metadata": {
+    "x-codex-installation-id": "5d0e4c1a-8b6f-4d2e-9a3c-1f2e3d4c5b6a",
+    "session_id": "019a6b2d-3e4f-7a6b-8c8d-9e0f1a2b3c4f",
+    "thread_id": "019a6b2d-3e4f-7a6b-8c8d-9e0f1a2b3c4f",
+    "x-codex-window-id": "019a6b2d-4f50-7b7c-9d9e-0f1a2b3c4d5e",
+    "turn_id": "019a6b2d-5061-7c8d-8eaf-1a2b3c4d5e6f",
+    "x-codex-turn-metadata": "{\"turn_id\":\"019a6b2d-5061-7c8d-8eaf-1a2b3c4d5e6f\"}"
+  },
+  "stream_options": {"reasoning_summary_delivery": "interleaved"}
+}

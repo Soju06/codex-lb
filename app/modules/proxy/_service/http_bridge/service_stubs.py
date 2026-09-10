@@ -8,14 +8,11 @@ from app.core.auth.refresh import RefreshError
 from app.core.balancer import ResetPreferenceWindow, RoutingStrategy
 from app.core.clients.http import lease_http_session
 from app.core.clients.proxy import (
+    UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
     ProxyResponseError,
     _as_image_fetch_session,
     _inline_input_image_urls,
-    pop_stream_timeout_overrides,
-    push_stream_timeout_overrides,
 )
-from app.core.clients.proxy import stream_responses as core_stream_responses
-from app.core.clients.proxy import thread_goal_request as core_thread_goal_request
 from app.core.clients.proxy_websocket import filter_inbound_websocket_headers
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -30,7 +27,7 @@ T = TypeVar("T")
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
 _PREWARM_RESPONSE_TIMEOUT_SECONDS = 2.0
 _STREAM_KEEPALIVE_MAX_COUNT = 6
-_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = UPSTREAM_RESPONSE_CREATE_MAX_BYTES
 
 
 def _service_module() -> Any:
@@ -104,22 +101,6 @@ def _http_bridge_startup_keepalive_grace_seconds() -> float:
     )
 
 
-def _service_core_stream_responses() -> Any:
-    return _service_global_or("core_stream_responses", core_stream_responses)
-
-
-def _service_core_thread_goal_request() -> Any:
-    return _service_global_or("core_thread_goal_request", core_thread_goal_request)
-
-
-def _service_push_stream_timeout_overrides(**kwargs: float) -> object:
-    return _service_global_or("push_stream_timeout_overrides", push_stream_timeout_overrides)(**kwargs)
-
-
-def _service_pop_stream_timeout_overrides(token: object) -> None:
-    _service_global_or("pop_stream_timeout_overrides", pop_stream_timeout_overrides)(cast(Any, token))
-
-
 def _remaining_budget_seconds(deadline: float) -> float:
     return cast(Callable[[float], float], _service_global("_remaining_budget_seconds"))(deadline)
 
@@ -183,8 +164,8 @@ def _normalize_responses_request_payload_for_bridge(payload: ResponsesRequest) -
     )(payload)
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    return cast(Callable[[Any | None], float], _service_global("_proxy_admission_wait_timeout_seconds"))(settings)
+def _proxy_admission_wait_timeout_seconds() -> float:
+    return cast(Callable[[], float], _service_global("_proxy_admission_wait_timeout_seconds"))()
 
 
 def _maybe_log_proxy_request_payload(kind: str, payload: ResponsesRequest, headers: Mapping[str, str]) -> None:

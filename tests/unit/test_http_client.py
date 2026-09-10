@@ -42,6 +42,8 @@ async def test_init_http_client_uses_separate_http_and_websocket_sessions() -> N
     http_session = MagicMock()
     websocket_session = MagicMock()
     websocket_session.close = AsyncMock()
+    model_source_session = MagicMock()
+    model_source_session.close = AsyncMock()
     retry_client = MagicMock()
     retry_client.close = AsyncMock()
 
@@ -50,7 +52,7 @@ async def test_init_http_client_uses_separate_http_and_websocket_sessions() -> N
         patch("app.core.clients.http.aiohttp.TCPConnector"),
         patch(
             "app.core.clients.http.aiohttp.ClientSession",
-            side_effect=[http_session, websocket_session],
+            side_effect=[http_session, websocket_session, model_source_session],
         ) as client_session_cls,
         patch("app.core.clients.http.RetryClient", return_value=retry_client) as retry_client_cls,
     ):
@@ -59,8 +61,10 @@ async def test_init_http_client_uses_separate_http_and_websocket_sessions() -> N
     assert client.session is http_session
     assert client.websocket_session is websocket_session
     assert client.retry_client is retry_client
+    assert client.model_source_session is model_source_session
     assert client_session_cls.call_args_list[0].kwargs["trust_env"] is True
     assert client_session_cls.call_args_list[1].kwargs["trust_env"] is False
+    assert client_session_cls.call_args_list[2].kwargs["trust_env"] is True
     retry_client_cls.assert_called_once_with(client_session=http_session, raise_for_status=False)
 
     await http_module.close_http_client()
@@ -73,10 +77,13 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
     http_session = MagicMock()
     websocket_session = MagicMock()
     websocket_session.close = AsyncMock()
+    model_source_session = MagicMock()
+    model_source_session.close = AsyncMock()
     retry_client = MagicMock()
     retry_client.close = AsyncMock()
     connector = MagicMock()
     websocket_connector = MagicMock()
+    model_source_connector = MagicMock()
     ssl_context = MagicMock()
 
     with (
@@ -84,11 +91,11 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
         patch("app.core.clients.http._build_ssl_context", return_value=ssl_context) as ssl_context_factory,
         patch(
             "app.core.clients.http.aiohttp.TCPConnector",
-            side_effect=[connector, websocket_connector],
+            side_effect=[connector, websocket_connector, model_source_connector],
         ) as tcp_connector_cls,
         patch(
             "app.core.clients.http.aiohttp.ClientSession",
-            side_effect=[http_session, websocket_session],
+            side_effect=[http_session, websocket_session, model_source_session],
         ) as client_session_cls,
         patch("app.core.clients.http.RetryClient", return_value=retry_client),
     ):
@@ -109,8 +116,13 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
         "ttl_dns_cache": 300,
         "socket_factory": http_module._keepalive_socket_factory,
     }
+    # The model-source pool is sized like the ChatGPT pool but is a separate
+    # connector: a stalled source cannot occupy ChatGPT per-host slots.
+    assert tcp_connector_cls.call_args_list[2].kwargs == tcp_connector_cls.call_args_list[0].kwargs
     assert client_session_cls.call_args_list[0].kwargs["connector"] is connector
     assert client_session_cls.call_args_list[1].kwargs["connector"] is websocket_connector
+    assert client_session_cls.call_args_list[2].kwargs["connector"] is model_source_connector
+    assert client_session_cls.call_args_list[2].kwargs["trust_env"] is True
 
     await http_module.close_http_client()
 
@@ -166,6 +178,8 @@ async def test_init_http_client_uses_proxy_connector_for_socks_url() -> None:
     http_session = MagicMock()
     websocket_session = MagicMock()
     websocket_session.close = AsyncMock()
+    model_source_session = MagicMock()
+    model_source_session.close = AsyncMock()
     retry_client = MagicMock()
     retry_client.close = AsyncMock()
     proxy_connector = MagicMock()
@@ -182,27 +196,34 @@ async def test_init_http_client_uses_proxy_connector_for_socks_url() -> None:
         patch("app.core.clients.http.ProxyConnector") as proxy_connector_cls,
         patch(
             "app.core.clients.http.aiohttp.ClientSession",
-            side_effect=[http_session, websocket_session],
+            side_effect=[http_session, websocket_session, model_source_session],
         ) as client_session_cls,
         patch("app.core.clients.http.RetryClient", return_value=retry_client),
         patch.dict("os.environ", {"socks_proxy": "http://proxy.example.com:1080"}, clear=True),
     ):
         ws_proxy_connector = MagicMock()
-        proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector]
+        ms_proxy_connector = MagicMock()
+        proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector, ms_proxy_connector]
         client = await http_module.init_http_client()
 
     assert client.session is http_session
     assert client.websocket_session is websocket_session
-    assert proxy_connector_cls.from_url.call_count == 2
+    assert proxy_connector_cls.from_url.call_count == 3
     assert [call.args[0] for call in proxy_connector_cls.from_url.call_args_list] == [
+        "socks5://proxy.example.com:1080",
         "socks5://proxy.example.com:1080",
         "socks5://proxy.example.com:1080",
     ]
     assert client_session_cls.call_args_list[0].kwargs["connector"] is proxy_connector
     assert client_session_cls.call_args_list[1].kwargs["connector"] is ws_proxy_connector
-    # trust_env must be False for both sessions when SOCKS proxy is active (avoids double-proxying)
+    assert client_session_cls.call_args_list[2].kwargs["connector"] is ms_proxy_connector
+    # The model-source pool tunnels through the same SOCKS proxy with the pooled limits.
+    assert proxy_connector_cls.from_url.call_args_list[2].kwargs["limit"] == 100
+    assert proxy_connector_cls.from_url.call_args_list[2].kwargs["limit_per_host"] == 50
+    # trust_env must be False for every session when SOCKS proxy is active (avoids double-proxying)
     assert client_session_cls.call_args_list[0].kwargs["trust_env"] is False
     assert client_session_cls.call_args_list[1].kwargs["trust_env"] is False
+    assert client_session_cls.call_args_list[2].kwargs["trust_env"] is False
 
     await http_module.close_http_client()
 
@@ -214,6 +235,8 @@ async def test_init_http_client_uses_settings_proxy_env_for_socks_url() -> None:
     http_session = MagicMock()
     websocket_session = MagicMock()
     websocket_session.close = AsyncMock()
+    model_source_session = MagicMock()
+    model_source_session.close = AsyncMock()
     retry_client = MagicMock()
     retry_client.close = AsyncMock()
     proxy_connector = MagicMock()
@@ -235,16 +258,18 @@ async def test_init_http_client_uses_settings_proxy_env_for_socks_url() -> None:
         patch("app.core.clients.http.ProxyConnector") as proxy_connector_cls,
         patch(
             "app.core.clients.http.aiohttp.ClientSession",
-            side_effect=[http_session, websocket_session],
+            side_effect=[http_session, websocket_session, model_source_session],
         ) as client_session_cls,
         patch("app.core.clients.http.RetryClient", return_value=retry_client),
         patch.dict("os.environ", {}, clear=True),
     ):
         ws_proxy_connector = MagicMock()
-        proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector]
+        ms_proxy_connector = MagicMock()
+        proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector, ms_proxy_connector]
         await http_module.init_http_client()
 
     assert [call.args[0] for call in proxy_connector_cls.from_url.call_args_list] == [
+        "socks5://settings-proxy.example.com:1080",
         "socks5://settings-proxy.example.com:1080",
         "socks5://settings-proxy.example.com:1080",
     ]
@@ -263,6 +288,8 @@ async def test_init_http_client_preserves_socks4a_remote_dns_for_proxy_connector
     http_session = MagicMock()
     websocket_session = MagicMock()
     websocket_session.close = AsyncMock()
+    model_source_session = MagicMock()
+    model_source_session.close = AsyncMock()
     retry_client = MagicMock()
     retry_client.close = AsyncMock()
     proxy_connector = MagicMock()
@@ -279,20 +306,22 @@ async def test_init_http_client_preserves_socks4a_remote_dns_for_proxy_connector
         patch("app.core.clients.http.ProxyConnector") as proxy_connector_cls,
         patch(
             "app.core.clients.http.aiohttp.ClientSession",
-            side_effect=[http_session, websocket_session],
+            side_effect=[http_session, websocket_session, model_source_session],
         ),
         patch("app.core.clients.http.RetryClient", return_value=retry_client),
         patch.dict("os.environ", {"SOCKS_PROXY": "socks4a://proxy.example.com:1080"}, clear=True),
     ):
         ws_proxy_connector = MagicMock()
-        proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector]
+        ms_proxy_connector = MagicMock()
+        proxy_connector_cls.from_url.side_effect = [proxy_connector, ws_proxy_connector, ms_proxy_connector]
         await http_module.init_http_client()
 
     assert [call.args[0] for call in proxy_connector_cls.from_url.call_args_list] == [
         "socks4://proxy.example.com:1080",
         "socks4://proxy.example.com:1080",
+        "socks4://proxy.example.com:1080",
     ]
-    assert [call.kwargs["rdns"] for call in proxy_connector_cls.from_url.call_args_list] == [True, True]
+    assert [call.kwargs["rdns"] for call in proxy_connector_cls.from_url.call_args_list] == [True, True, True]
 
     await http_module.close_http_client()
 
@@ -425,12 +454,16 @@ async def test_refresh_http_client_closes_idle_previous_sessions() -> None:
     first_http_session = MagicMock()
     first_websocket_session = MagicMock()
     first_websocket_session.close = AsyncMock()
+    first_model_source_session = MagicMock()
+    first_model_source_session.close = AsyncMock()
     first_retry_client = MagicMock()
     first_retry_client.close = AsyncMock()
 
     second_http_session = MagicMock()
     second_websocket_session = MagicMock()
     second_websocket_session.close = AsyncMock()
+    second_model_source_session = MagicMock()
+    second_model_source_session.close = AsyncMock()
     second_retry_client = MagicMock()
     second_retry_client.close = AsyncMock()
 
@@ -442,8 +475,10 @@ async def test_refresh_http_client_closes_idle_previous_sessions() -> None:
             side_effect=[
                 first_http_session,
                 first_websocket_session,
+                first_model_source_session,
                 second_http_session,
                 second_websocket_session,
+                second_model_source_session,
             ],
         ),
         patch(
@@ -460,15 +495,21 @@ async def test_refresh_http_client_closes_idle_previous_sessions() -> None:
     await _drain_close_tasks()
 
     first_websocket_session.close.assert_awaited_once()
+
+    first_model_source_session.close.assert_awaited_once()
     first_retry_client.close.assert_awaited_once()
     second_websocket_session.close.assert_not_awaited()
+    second_model_source_session.close.assert_not_awaited()
     second_retry_client.close.assert_not_awaited()
 
     await http_module.close_http_client()
 
     first_websocket_session.close.assert_awaited_once()
+
+    first_model_source_session.close.assert_awaited_once()
     first_retry_client.close.assert_awaited_once()
     second_websocket_session.close.assert_awaited_once()
+    second_model_source_session.close.assert_awaited_once()
     second_retry_client.close.assert_awaited_once()
 
 
@@ -479,12 +520,16 @@ async def test_refresh_http_client_keeps_active_previous_session_open_until_leas
     first_http_session = MagicMock()
     first_websocket_session = MagicMock()
     first_websocket_session.close = AsyncMock()
+    first_model_source_session = MagicMock()
+    first_model_source_session.close = AsyncMock()
     first_retry_client = MagicMock()
     first_retry_client.close = AsyncMock()
 
     second_http_session = MagicMock()
     second_websocket_session = MagicMock()
     second_websocket_session.close = AsyncMock()
+    second_model_source_session = MagicMock()
+    second_model_source_session.close = AsyncMock()
     second_retry_client = MagicMock()
     second_retry_client.close = AsyncMock()
 
@@ -496,8 +541,10 @@ async def test_refresh_http_client_keeps_active_previous_session_open_until_leas
             side_effect=[
                 first_http_session,
                 first_websocket_session,
+                first_model_source_session,
                 second_http_session,
                 second_websocket_session,
+                second_model_source_session,
             ],
         ),
         patch(
@@ -515,21 +562,29 @@ async def test_refresh_http_client_keeps_active_previous_session_open_until_leas
     await _drain_close_tasks()
 
     first_websocket_session.close.assert_not_awaited()
+
+    first_model_source_session.close.assert_not_awaited()
     first_retry_client.close.assert_not_awaited()
     second_websocket_session.close.assert_not_awaited()
+    second_model_source_session.close.assert_not_awaited()
     second_retry_client.close.assert_not_awaited()
 
     await lease.close()
     await _drain_close_tasks()
 
     first_websocket_session.close.assert_awaited_once()
+
+    first_model_source_session.close.assert_awaited_once()
     first_retry_client.close.assert_awaited_once()
     second_websocket_session.close.assert_not_awaited()
+    second_model_source_session.close.assert_not_awaited()
     second_retry_client.close.assert_not_awaited()
 
     await http_module.close_http_client()
 
     second_websocket_session.close.assert_awaited_once()
+
+    second_model_source_session.close.assert_awaited_once()
     second_retry_client.close.assert_awaited_once()
 
 
@@ -606,12 +661,16 @@ async def test_close_http_client_force_closes_active_current_and_retired_session
     first_http_session = MagicMock()
     first_websocket_session = MagicMock()
     first_websocket_session.close = AsyncMock()
+    first_model_source_session = MagicMock()
+    first_model_source_session.close = AsyncMock()
     first_retry_client = MagicMock()
     first_retry_client.close = AsyncMock()
 
     second_http_session = MagicMock()
     second_websocket_session = MagicMock()
     second_websocket_session.close = AsyncMock()
+    second_model_source_session = MagicMock()
+    second_model_source_session.close = AsyncMock()
     second_retry_client = MagicMock()
     second_retry_client.close = AsyncMock()
 
@@ -623,8 +682,10 @@ async def test_close_http_client_force_closes_active_current_and_retired_session
             side_effect=[
                 first_http_session,
                 first_websocket_session,
+                first_model_source_session,
                 second_http_session,
                 second_websocket_session,
+                second_model_source_session,
             ],
         ),
         patch(
@@ -643,8 +704,11 @@ async def test_close_http_client_force_closes_active_current_and_retired_session
     await asyncio.wait_for(http_module.close_http_client(), timeout=1.0)
 
     first_websocket_session.close.assert_awaited_once()
+
+    first_model_source_session.close.assert_awaited_once()
     first_retry_client.close.assert_awaited_once()
     second_websocket_session.close.assert_awaited_once()
+    second_model_source_session.close.assert_awaited_once()
     second_retry_client.close.assert_awaited_once()
 
     await first_lease.close()
@@ -652,8 +716,11 @@ async def test_close_http_client_force_closes_active_current_and_retired_session
     await _drain_close_tasks()
 
     first_websocket_session.close.assert_awaited_once()
+
+    first_model_source_session.close.assert_awaited_once()
     first_retry_client.close.assert_awaited_once()
     second_websocket_session.close.assert_awaited_once()
+    second_model_source_session.close.assert_awaited_once()
     second_retry_client.close.assert_awaited_once()
 
 
@@ -698,5 +765,190 @@ async def test_refresh_http_client_cancellation_keeps_current_generation() -> No
         with pytest.raises(asyncio.CancelledError):
             await http_module.refresh_http_client()
         assert http_module.get_http_client() is initial
+
+    await http_module.close_http_client()
+
+
+def _mock_session() -> MagicMock:
+    session = MagicMock()
+    session.close = AsyncMock()
+    return session
+
+
+@pytest.mark.asyncio
+async def test_lease_model_source_session_yields_the_dedicated_pool() -> None:
+    await http_module.close_http_client()
+
+    http_session = _mock_session()
+    websocket_session = _mock_session()
+    model_source_session = _mock_session()
+    retry_client = MagicMock()
+    retry_client.close = AsyncMock()
+
+    with (
+        patch("app.core.clients.http.get_settings", return_value=_settings()),
+        patch("app.core.clients.http.aiohttp.TCPConnector"),
+        patch(
+            "app.core.clients.http.aiohttp.ClientSession",
+            side_effect=[http_session, websocket_session, model_source_session],
+        ),
+        patch("app.core.clients.http.RetryClient", return_value=retry_client),
+    ):
+        await http_module.init_http_client()
+
+    async with http_module.lease_model_source_session() as leased:
+        assert leased is model_source_session
+        assert leased is not http_session
+    async with http_module.lease_http_session() as shared:
+        assert shared is http_session
+
+    await http_module.close_http_client()
+
+    model_source_session.close.assert_awaited_once()
+    websocket_session.close.assert_awaited_once()
+    retry_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lease_model_source_session_falls_back_to_the_shared_session_when_absent() -> None:
+    await http_module.close_http_client()
+    client = http_module.HttpClient(
+        session=MagicMock(),
+        websocket_session=MagicMock(close=AsyncMock()),
+        retry_client=MagicMock(close=AsyncMock()),
+    )
+    assert client.model_source_session is None
+
+    with patch("app.core.clients.http._build_http_client", AsyncMock(return_value=client)):
+        await http_module.init_http_client()
+
+    async with http_module.lease_model_source_session() as leased:
+        assert leased is client.session
+
+    await http_module.close_http_client()
+
+
+@pytest.mark.asyncio
+async def test_model_source_session_lease_defers_retired_generation_close_until_release() -> None:
+    await http_module.close_http_client()
+
+    first_http_session = _mock_session()
+    first_websocket_session = _mock_session()
+    first_model_source_session = _mock_session()
+    first_retry_client = MagicMock()
+    first_retry_client.close = AsyncMock()
+    second_http_session = _mock_session()
+    second_websocket_session = _mock_session()
+    second_model_source_session = _mock_session()
+    second_retry_client = MagicMock()
+    second_retry_client.close = AsyncMock()
+
+    with (
+        patch("app.core.clients.http.get_settings", return_value=_settings()),
+        patch("app.core.clients.http.aiohttp.TCPConnector"),
+        patch(
+            "app.core.clients.http.aiohttp.ClientSession",
+            side_effect=[
+                first_http_session,
+                first_websocket_session,
+                first_model_source_session,
+                second_http_session,
+                second_websocket_session,
+                second_model_source_session,
+            ],
+        ),
+        patch(
+            "app.core.clients.http.RetryClient",
+            side_effect=[first_retry_client, second_retry_client],
+        ),
+    ):
+        await http_module.init_http_client()
+        lease = http_module.lease_model_source_session()
+        leased = await lease.__aenter__()
+        refreshed = await http_module.refresh_http_client()
+
+    assert leased is first_model_source_session
+    assert refreshed.model_source_session is second_model_source_session
+
+    await _drain_close_tasks()
+    # The retired generation (including its model-source pool) stays open while
+    # the source exchange still holds its lease.
+    first_model_source_session.close.assert_not_awaited()
+    first_retry_client.close.assert_not_awaited()
+
+    async with http_module.lease_model_source_session() as replacement:
+        assert replacement is second_model_source_session
+
+    await lease.__aexit__(None, None, None)
+    await _drain_close_tasks()
+
+    first_model_source_session.close.assert_awaited_once()
+    first_websocket_session.close.assert_awaited_once()
+    first_retry_client.close.assert_awaited_once()
+    second_model_source_session.close.assert_not_awaited()
+
+    await http_module.close_http_client()
+
+    second_model_source_session.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_build_http_client_failure_on_model_source_session_closes_partial_transport() -> None:
+    http_connector = MagicMock()
+    websocket_connector = MagicMock()
+    model_source_connector = MagicMock()
+    model_source_connector.close = AsyncMock()
+    http_session = _mock_session()
+    websocket_session = _mock_session()
+
+    with (
+        patch("app.core.clients.http.get_settings", return_value=_settings()),
+        patch(
+            "app.core.clients.http.aiohttp.TCPConnector",
+            side_effect=[http_connector, websocket_connector, model_source_connector],
+        ),
+        patch(
+            "app.core.clients.http.aiohttp.ClientSession",
+            side_effect=[http_session, websocket_session, RuntimeError("model-source session failed")],
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="model-source session failed"):
+            await http_module._build_http_client()
+
+    model_source_connector.close.assert_awaited_once()
+    websocket_session.close.assert_awaited_once()
+    http_session.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_network_failure_rotation_accepts_the_model_source_session_identity() -> None:
+    await http_module.close_http_client()
+
+    initial = http_module.HttpClient(
+        session=MagicMock(),
+        websocket_session=MagicMock(close=AsyncMock()),
+        retry_client=MagicMock(close=AsyncMock()),
+        model_source_session=MagicMock(close=AsyncMock()),
+    )
+    replacement = http_module.HttpClient(
+        session=MagicMock(),
+        websocket_session=MagicMock(close=AsyncMock()),
+        retry_client=MagicMock(close=AsyncMock()),
+        model_source_session=MagicMock(close=AsyncMock()),
+    )
+
+    with patch(
+        "app.core.clients.http._build_http_client",
+        AsyncMock(side_effect=[initial, replacement]),
+    ):
+        await http_module.init_http_client()
+        rotated = await http_module.refresh_http_client_after_network_failure(
+            failed_session=initial.model_source_session
+        )
+        stale = await http_module.refresh_http_client_after_network_failure(failed_session=initial.model_source_session)
+
+    assert rotated == "rotated"
+    assert stale == "already_rotated"
+    assert http_module.get_http_client() is replacement
 
     await http_module.close_http_client()

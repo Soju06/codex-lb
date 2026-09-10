@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
+from app.core.ingress_limits import MAX_DECOMPRESSED_RESPONSES_BODY_BYTES
 
 if TYPE_CHECKING:
     from app.core.runtime_logging import LogConfig
@@ -74,7 +75,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--ws-max-size",
-        default=os.getenv("UVICORN_WS_MAX_SIZE", str(128 * 1024 * 1024)),
+        default=os.getenv("UVICORN_WS_MAX_SIZE", str(MAX_DECOMPRESSED_RESPONSES_BODY_BYTES)),
         help=(
             "Maximum decompressed size in bytes of a single incoming websocket message. "
             "Codex clients resend the full conversation history (inline screenshots "

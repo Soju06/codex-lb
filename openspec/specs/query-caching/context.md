@@ -49,6 +49,16 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 
 ## Operational Notes
 
+### SQLite request-log facet traversal
+
+SQLite's unfiltered request-log options query separates ordered facet traversal from visibility checks. Putting `deleted_at IS NULL` and the status predicate inside each recursive `MIN(facet)` can make the planner repeatedly scan the live-row index, especially without statistics. Instead, it enumerates indexed candidate values and uses an equality-constrained `EXISTS` to decide whether each candidate has an eligible row. Pair facets retain the leading-column equality while traversing the second column.
+
+For example, models that occur only in deleted rows may be visited as candidates, but cannot become returned options. This leaves work proportional to historical distinct values and the cost of proving eligibility; a large dead-only cohort can still make an absence check expensive. Live-row partial indexes complement the query shape.
+
+The September 2026 endpoint regression measures SQLite VM work across the real HTTP path on a synthetic corpus. It preserves NULL/empty pair values and excludes deleted-only and unsupported-status options. See [the archived diagnosis and verification](../../changes/archive/2026-09-09-sqlite-request-log-facets/context.md) for measurements and their limits.
+
+### Other query operations
+
 - Primary-window usage reads should normalize on `coalesce(window, 'primary')`.
 - Latest usage selection should be backed by a composite latest-row index, not by Python-side deduplication.
 - Default request-log listing should sort by latest-first timestamp and tie-breaker ID.

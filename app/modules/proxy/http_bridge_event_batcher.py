@@ -162,6 +162,8 @@ class HttpBridgeOperationEventBatcher:
             operation_ids = await self._operation_ids_to_flush()
             for operation_id in operation_ids:
                 await self._flush_one(operation_id)
+            if await self._operation_ids_to_flush():
+                self._wake.set()
 
     async def _operation_ids_to_flush(self) -> list[str]:
         async with self._lock:

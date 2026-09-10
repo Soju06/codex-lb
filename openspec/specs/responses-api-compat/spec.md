@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -10831,3 +10833,25 @@ still awaiting I/O.
 - **THEN** the key is quarantined and the probe is planned without the dead anchor
 - **AND** the probe resends full history rather than the dead anchor
 
+### Requirement: Continue eligible transcript backlog persistence
+
+Background HTTP bridge transcript persistence MUST continue processing eligible queued events after a bounded pass without waiting for new events or another flush interval. Each pass MUST give every eligible operation a bounded batch opportunity before revisiting an operation. Terminal persistence, owner fencing, queue limits, failure settlement and shutdown cancellation guarantees MUST remain unchanged.
+
+#### Scenario: Burst exceeds one batch
+
+- **GIVEN** one operation has several batches of nonterminal events queued
+- **WHEN** the background writer successfully persists the first batch and no new events arrive
+- **THEN** it continues persisting the remaining eligible batches without interval waits
+- **AND** it preserves event order and the configured maximum batch size
+
+#### Scenario: Multiple operations have backlog
+
+- **GIVEN** two operations have eligible queued events
+- **WHEN** background persistence drains their backlog
+- **THEN** each pass offers a bounded batch to both operations before revisiting either operation
+
+#### Scenario: Backlog drain is cancelled
+
+- **GIVEN** background persistence is waiting for a writer with more events queued
+- **WHEN** the batcher closes
+- **THEN** it cancels and awaits the flusher without starting another batch

@@ -297,3 +297,7 @@ stream. Predispatch failures and cancellation release origin-owned reservations;
 accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
+
+## Ready transcript backlog
+
+The background spooler continues bounded passes while eligible events remain, giving each operation one batch per pass. For example, 320 events queued before the first pass at batch size 32 require ten writes, without nine extra flush-interval waits. This changes backlog scheduling; paced-event coalescing and terminal persistence retain their existing behavior. Isolated database measurements and limits are recorded in `openspec/changes/archive/2026-09-10-drain-ready-http-bridge-spool/verification.md`.

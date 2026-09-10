@@ -4,6 +4,7 @@ INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_cost_backfill.py \
 	tests/integration/test_atomic_quota_warmup_claims.py \
+	tests/integration/test_live_reset_warmup.py \
 	tests/integration/test_report_rollup.py \
 	tests/integration/test_reports_performance_api.py \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \

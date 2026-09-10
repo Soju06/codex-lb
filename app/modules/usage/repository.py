@@ -908,11 +908,28 @@ class UsageRepository:
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 
+    async def first_reset_observed_at(
+        self, account_id: str, window: str, reset_at: int, *, tolerance_seconds: int
+    ) -> datetime | None:
+        stmt = (
+            select(UsageHistory.recorded_at)
+            .where(
+                UsageHistory.account_id == account_id,
+                _window_clause(window),
+                UsageHistory.reset_at.between(reset_at - tolerance_seconds, reset_at + tolerance_seconds),
+            )
+            .order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())
+            .limit(1)
+        )
+        return await self._session.scalar(stmt)
+
     async def history_since(
         self,
         account_id: str,
         window: str,
         since: datetime,
+        *,
+        include_predecessor: bool = False,
     ) -> list[UsageHistory]:
         stmt = (
             select(UsageHistory)
@@ -924,7 +941,21 @@ class UsageRepository:
             .order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())
         )
         result = await self._session.execute(stmt)
-        return list(result.scalars().all())
+        history = list(result.scalars().all())
+        if include_predecessor:
+            predecessor = await self._session.scalar(
+                select(UsageHistory)
+                .where(
+                    UsageHistory.account_id == account_id,
+                    _window_clause(window),
+                    UsageHistory.recorded_at < since,
+                )
+                .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+                .limit(1)
+            )
+            if predecessor is not None:
+                history.insert(0, predecessor)
+        return history
 
     async def bulk_history_since(
         self,

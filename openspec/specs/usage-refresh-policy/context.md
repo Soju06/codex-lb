@@ -126,3 +126,13 @@ does not count as evidence that the account is healthy.
 
 - [#676 - initial bug report on `/wham/usage` vs. Settings UI divergence](https://github.com/Soju06/codex-lb/issues/676)
 - [#677 - dashboard per-account force-probe action](https://github.com/Soju06/codex-lb/issues/677)
+
+## Reset evidence after live ingestion
+
+[Issue #1975](https://github.com/Soju06/codex-lb/issues/1975) exposed a missed warm-up when live usage recorded a reset before a freshness-skipped poll. The [reset-evidence requirement](spec.md#requirement-persisted-current-reset-evidence-survives-a-skipped-poll) covers that path.
+
+The scheduler locates the first retained observation of the current reset identity and reads that history span plus its predecessor. This survives restart and delayed deadlines without another consumption table. Existing warm-up claims consume pending, succeeded, failed and skipped attempts; a crash after claiming does not authorize another send. Current snapshots govern availability, while the historical pair proves the reset. Other warm-up triggers still require a poll write.
+
+For example, live ingestion can record weekly usage falling from 51% to 0%, then receive more snapshots before the scheduler runs. The earlier pair remains usable even though the latest two rows show the same reset deadline. An expired or superseded identity is not replayed, and a missing predecessor supplies no proof.
+
+The first-reset lookup can scan retained history for the selected account/window, and the following span is not row-capped. Already-claimed windows skip this lookup. This cost avoids discarding evidence at an arbitrary time or row limit; no new setting or migration is required.

@@ -11,7 +11,7 @@ import pytest
 
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
-from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.models import Account, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.proxy.load_balancer import effective_routing_tunables
 
 pytestmark = pytest.mark.unit
@@ -1503,8 +1503,8 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
         def __init__(self, _session: object) -> None:
             pass
 
-        async def get_or_create(self) -> object:
-            return object()
+        async def get_or_create(self) -> DashboardSettings:
+            return DashboardSettings(limit_warmup_enabled=False)
 
     class _Updater:
         async def refresh_accounts(
@@ -1561,8 +1561,12 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
         ("primary", ("acc_a",)),
         ("secondary", ("acc_a",)),
         ("monthly", ("acc_a",)),
+        ("primary", ("acc_a",)),
+        ("secondary", ("acc_a",)),
+        ("monthly", ("acc_a",)),
     ]
-    assert warmup_calls == []
+    assert len(warmup_calls) == 1
+    assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == ["acc_a"]
     assert invalidations == 0
 
     assert await scheduler._refresh_once() == 30.0
@@ -1575,14 +1579,14 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
         ("secondary", ("acc_b",)),
         ("monthly", ("acc_b",)),
     ]
-    assert len(warmup_calls) == 1
-    assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == ["acc_b"]
-    assert [account.id for account in cast("list[Account]", warmup_calls[0]["stagger_accounts"])] == [
+    assert len(warmup_calls) == 2
+    assert [account.id for account in cast("list[Account]", warmup_calls[1]["accounts"])] == ["acc_b"]
+    assert [account.id for account in cast("list[Account]", warmup_calls[1]["stagger_accounts"])] == [
         "acc_a",
         "acc_b",
     ]
-    assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["before_primary"])) == {"acc_b"}
-    assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["after_primary"])) == {"acc_b"}
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[1]["before_primary"])) == {"acc_b"}
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[1]["after_primary"])) == {"acc_b"}
     assert invalidations == 1
     assert open_sessions == 0
 

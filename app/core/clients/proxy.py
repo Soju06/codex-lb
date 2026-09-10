@@ -1388,11 +1388,15 @@ def _effective_compact_connect_timeout(configured_timeout_seconds: float) -> flo
     return max(0.001, min(configured_timeout_seconds, override))
 
 
-def _effective_compact_total_timeout() -> float | None:
-    # Override-only: the dashboard ``compact_request_budget_seconds`` (pushed by
-    # the compact service as a per-request override) is the sole total cap.
+def _effective_compact_total_timeout(configured_timeout_seconds: float | None) -> float | None:
+    # The per-request compact budget bounds the main path. An explicit upstream
+    # cap remains an operator escape hatch and can only shorten that budget.
     override = _COMPACT_TOTAL_TIMEOUT_OVERRIDE.get()
-    return None if override is None else max(0.001, override)
+    if configured_timeout_seconds is None:
+        return None if override is None else max(0.001, override)
+    if override is None:
+        return configured_timeout_seconds
+    return max(0.001, min(configured_timeout_seconds, override))
 
 
 def _effective_transcribe_connect_timeout(configured_timeout_seconds: float) -> float:
@@ -4869,7 +4873,7 @@ class _CompactCommandTransport:
             replace=_replace_header_preserving_position,
         )
         pre_request_started_at = time.monotonic()
-        compact_timeout_seconds = _effective_compact_total_timeout()
+        compact_timeout_seconds = _effective_compact_total_timeout(settings.compact_request_budget_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
         payload_dict = _responses_compact_payload_for_responses_endpoint(self.payload)
         payload_dict["store"] = False

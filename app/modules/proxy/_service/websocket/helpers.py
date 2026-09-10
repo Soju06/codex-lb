@@ -349,6 +349,7 @@ from app.modules.proxy.helpers import (
     _is_account_model_unsupported_error,
     _normalize_error_code,
     _parse_openai_error,
+    is_model_scoped_upstream_rejection,
     is_upstream_model_capacity_error,
     is_upstream_usage_limit_rejection,
 )
@@ -1045,6 +1046,16 @@ def _websocket_precreated_retry_error_code(
         if _websocket_response_id(None, payload) is not None:
             return None
         return _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+    if error_code == "model_not_found" and is_model_scoped_upstream_rejection(
+        error_message,
+        error_code=error_code,
+    ):
+        # The exact code proves the rejection is about the requested model.
+        # The common pre-created gate above has already ruled out acceptance,
+        # output, a second pending turn, and a second replay.
+        if _websocket_response_id(None, payload) is not None:
+            return None
+        return error_code
     if is_upstream_model_capacity_error(error_message):
         if error_code in {
             "rate_limit_exceeded",

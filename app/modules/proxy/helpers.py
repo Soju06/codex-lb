@@ -80,8 +80,12 @@ def is_account_neutral_safety_policy_rejection(
     )
 
 
-def is_model_scoped_upstream_rejection(message: str | None) -> bool:
-    """Match the ChatGPT model-entitlement rejection for *any* requested model.
+def is_model_scoped_upstream_rejection(
+    message: str | None,
+    *,
+    error_code: str | None = None,
+) -> bool:
+    """Match exact upstream rejections that describe a model, not an account.
 
     The rejection names the model, not the account: it reproduces on every
     request for that model and says nothing about whether the serving account
@@ -89,12 +93,12 @@ def is_model_scoped_upstream_rejection(message: str | None) -> bool:
     rejection out of account health while leaving failover alone -- a different
     account may hold a different entitlement.
 
-    Unlike ``_is_account_model_unsupported_error`` this does not require the
-    caller to know the requested model or the normalized error code. Upstream
-    delivers this rejection over the Codex WebSocket with neither ``code`` nor
-    ``type`` populated, which normalizes to the ``upstream_error`` fallback, so
-    a code-gated match misses it on the live stream path.
+    ``model_not_found`` is authoritative even when upstream changes the human
+    message. Code-less legacy WebSocket rejections still use the exact message
+    shape, because those frames normalize to ``upstream_error``.
     """
+    if error_code == "model_not_found":
+        return True
     if message is None:
         return False
     return _MODEL_UNSUPPORTED_MESSAGE_RE.fullmatch(" ".join(message.split())) is not None

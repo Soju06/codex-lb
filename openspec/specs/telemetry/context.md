@@ -100,7 +100,7 @@ The `metrics` object is the versioned snapshot schema:
     "clients_other_ratio": 0.02,
     "models": [
       {
-        "name": "gpt-5.4-codex",
+        "name": "gpt-5.4",
         "share": 0.62,
         "reasoning": {"xhigh": 0.31, "high": 0.48, "medium": 0.21},
         "avg_output_tokens_bucket": "<bucket>"

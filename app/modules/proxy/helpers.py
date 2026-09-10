@@ -118,6 +118,13 @@ def classify_upstream_failure(
     )
 
 
+def is_upstream_burst_rejection(*, failure_class: FailureClass, http_status: int | None) -> bool:
+    """True for a code-less upstream HTTP 429: a per-account burst/concurrency
+    rejection that ``classify_upstream_failure`` files as ``retryable_transient``
+    (coded 429s land in ``rate_limit`` / ``quota`` and are not bursts)."""
+    return http_status == 429 and failure_class == "retryable_transient"
+
+
 def _header_account_id(account_id: str | None) -> str | None:
     if not account_id:
         return None

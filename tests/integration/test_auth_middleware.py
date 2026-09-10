@@ -106,9 +106,10 @@ async def _enable_guest_access(client: AsyncClient) -> dict[str, object]:
     assert read_settings.status_code == 200
     current = read_settings.json()
     assert isinstance(current, dict)
-    current["guestAccessEnabled"] = True
 
-    response = await client.put("/api/settings", json=current)
+    # Minimal patch: echoing the GET body back would freeze every inheritable
+    # effective value (account caps, timeouts) as an explicit dashboard value.
+    response = await client.put("/api/settings", json={"guestAccessEnabled": True})
     assert response.status_code == 200
     payload = response.json()
     assert isinstance(payload, dict)
@@ -200,6 +201,13 @@ async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
     blocked_archive_payload = blocked_archive_records.json()
     assert blocked_archive_payload["error"]["code"] == "admin_access_required"
     assert not {"records", "payload", "headers"} & blocked_archive_payload.keys()
+    # M5 conversation archive: a guest may read the settings page (and the
+    # effective toggle) but not the filesystem path of this replica's shard.
+    guest_settings = await client.get("/api/settings")
+    assert guest_settings.status_code == 200
+    guest_payload = guest_settings.json()
+    assert guest_payload["conversationArchiveDir"] is None
+    assert guest_payload["conversationArchiveEnabled"] is False
 
 
 @pytest.mark.asyncio
@@ -739,9 +747,7 @@ async def test_trusted_header_mode_rejects_guest_login_without_proxy_header(asyn
     proxy_headers = {"Remote-User": "admin@example.com"}
     read_settings = await async_client.get("/api/settings", headers=proxy_headers)
     assert read_settings.status_code == 200
-    current = read_settings.json()
-    current["guestAccessEnabled"] = True
-    enabled_settings = await async_client.put("/api/settings", json=current, headers=proxy_headers)
+    enabled_settings = await async_client.put("/api/settings", json={"guestAccessEnabled": True}, headers=proxy_headers)
     assert enabled_settings.status_code == 200
     assert enabled_settings.json()["guestPasswordConfigured"] is False
 
@@ -788,11 +794,9 @@ async def test_trusted_header_mode_blocks_passwordless_guest_without_proxy_heade
 
             read_settings = await local_client.get("/api/settings", headers=proxy_headers)
             assert read_settings.status_code == 200
-            current = read_settings.json()
-            current["guestAccessEnabled"] = True
             enabled_settings = await local_client.put(
                 "/api/settings",
-                json=current,
+                json={"guestAccessEnabled": True},
                 headers=proxy_headers,
             )
             assert enabled_settings.status_code == 200
@@ -839,11 +843,9 @@ async def test_trusted_header_mode_blocks_passwordless_guest_login_on_proxied_lo
 
             read_settings = await local_client.get("/api/settings", headers=proxy_headers)
             assert read_settings.status_code == 200
-            current = read_settings.json()
-            current["guestAccessEnabled"] = True
             enabled_settings = await local_client.put(
                 "/api/settings",
-                json=current,
+                json={"guestAccessEnabled": True},
                 headers=proxy_headers,
             )
             assert enabled_settings.status_code == 200

@@ -462,7 +462,6 @@ async def test_live_connector_never_archives_frames(monkeypatch: pytest.MonkeyPa
         lambda: SimpleNamespace(
             upstream_connect_timeout_seconds=7.0,
             proxy_downstream_websocket_idle_timeout_seconds=120.0,
-            max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
     )

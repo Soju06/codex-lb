@@ -1,7 +1,7 @@
 # files-upload-protocol Specification
 
 ## Purpose
-TBD - created by archiving change add-backend-api-files-protocol. Update Purpose after archive.
+Governs the native Codex file upload protocol (`POST /backend-api/files` and the finalize/status endpoint) that lets clients upload a large attachment once and reference it by `file_id` in later turns instead of hitting the responses message-size ceiling. File routes must share the proxy's account selection, authentication, and request-log plumbing, and finalize ownership must be durable across replicas so follow-up calls reach the account that registered the upload.
 ## Requirements
 ### Requirement: Native file upload registration endpoint
 

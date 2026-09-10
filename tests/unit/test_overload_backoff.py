@@ -16,6 +16,8 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.proxy._load_balancer.overload_backoff import (
+    BURST_BACKOFF_DEFAULT_SECONDS,
+    BURST_BACKOFF_MAX_SECONDS,
     OVERLOAD_BACKOFF_BASE_SECONDS,
     OVERLOAD_BACKOFF_MAX_SECONDS,
     OVERLOAD_ISOLATION_TRIP_LEVEL,
@@ -28,7 +30,9 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     overload_backoff_active,
     overload_backoff_seconds,
     overload_isolation_active,
+    record_burst_rejection_locked,
     record_overload_rejection_locked,
+    record_upstream_burst_rejection,
     record_upstream_overload,
     sticky_owner_isolation_reroute_pool,
 )
@@ -251,6 +255,8 @@ async def test_handle_stream_error_feeds_the_overload_window_for_overload_codes_
     )
     assert balancer._runtime[account.id].overload_rejections == [clock.time()]
     assert balancer.record_error.await_count == 2
+    # Neither code carried an HTTP 429, so the burst cooldown stays disengaged.
+    assert balancer._runtime[account.id].burst_backoff_until is None
 
 
 @pytest.mark.asyncio
@@ -805,3 +811,286 @@ async def test_budget_pressured_isolated_owner_is_released_with_the_secondary_bu
     assert outcome.selection.account is not None
     assert outcome.selection.account.account_id == "safe"
     assert outcome.mutation is not None and outcome.mutation.account_id == "safe"
+
+
+# --- burst cooldown (code-less upstream HTTP 429) ----------------------------
+
+_BURST_LOGGER = "app.modules.proxy._load_balancer.overload_backoff"
+
+
+def _burst_proxy(clock: VirtualClock) -> tuple[SimpleNamespace, LoadBalancer, AsyncMock, AsyncMock]:
+    """Proxy double over a real balancer; returns ``(proxy, balancer, record_error, mark_rate_limit)``.
+
+    The generic health writes are pinned elsewhere; here they only need to be
+    observable so the test can prove which one the burst path takes.
+    """
+    balancer = LoadBalancer(cast(Any, None), clock=clock)
+    record_error, mark_rate_limit = AsyncMock(), AsyncMock()
+    balancer.record_error = record_error  # type: ignore[method-assign]
+    balancer.mark_rate_limit = mark_rate_limit  # type: ignore[method-assign]
+    return SimpleNamespace(_load_balancer=balancer), balancer, record_error, mark_rate_limit
+
+
+def test_burst_rejection_locked_clamps_retry_after_and_never_shortens() -> None:
+    runtime = RuntimeState()
+    assert record_burst_rejection_locked(runtime, 100.0, retry_after_seconds=None) == BURST_BACKOFF_DEFAULT_SECONDS
+    assert runtime.burst_backoff_until == pytest.approx(100.0 + BURST_BACKOFF_DEFAULT_SECONDS)
+    # Retry-After inside the bounds is honored as-is.
+    assert record_burst_rejection_locked(runtime, 100.0, retry_after_seconds=12) == 12.0
+    assert runtime.burst_backoff_until == pytest.approx(112.0)
+    # A shorter follow-up rejection extends, never shortens.
+    assert record_burst_rejection_locked(runtime, 101.0, retry_after_seconds=1) == BURST_BACKOFF_DEFAULT_SECONDS
+    assert runtime.burst_backoff_until == pytest.approx(112.0)
+    # A huge Retry-After is capped.
+    assert record_burst_rejection_locked(runtime, 101.0, retry_after_seconds=900) == BURST_BACKOFF_MAX_SECONDS
+    assert runtime.burst_backoff_until == pytest.approx(101.0 + BURST_BACKOFF_MAX_SECONDS)
+    # The overload window is a separate mechanism and is never written here.
+    assert runtime.overload_backoff_until is None
+    assert runtime.overload_rejections is None
+    assert runtime.overload_backoff_level == 0
+    assert runtime.cooldown_until is None
+
+
+def test_burst_deadline_activates_backoff_but_not_isolation() -> None:
+    now = 1000.0
+    runtime = RuntimeState(burst_backoff_until=now + 5.0)
+    assert overload_backoff_active(runtime, now)
+    assert overload_backoff_active(runtime, now + 4.9)
+    assert not overload_backoff_active(runtime, now + 5.0)
+    assert not overload_isolation_active(runtime, now)
+    # The soft-owner reroute pool keys on isolation only: a burst keeps the owner.
+    states = [_state("hot"), _state("clean")]
+    assert sticky_owner_isolation_reroute_pool(states, {"hot": runtime}, owner_account_id="hot", now=now) is None
+    # The candidate filter inherits the burst deadline.
+    kept = filter_overload_backoff_candidates(states, {"hot": runtime}, now=now)
+    assert [state.account_id for state in kept] == ["clean"]
+    assert overload_backoff_active(None, now) is False
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_codeless_429_engages_burst_cooldown_only(caplog: pytest.LogCaptureFixture) -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-burst")
+
+    with caplog.at_level(logging.WARNING, logger=_BURST_LOGGER):
+        classified = await streaming_helpers_module._handle_stream_error(
+            proxy,
+            account,
+            {"message": "Rate limit exceeded"},
+            "upstream_error",
+            429,
+        )
+
+    assert classified["failure_class"] == "retryable_transient"
+    runtime = balancer._runtime[account.id]
+    assert runtime.burst_backoff_until == pytest.approx(clock.time() + BURST_BACKOFF_DEFAULT_SECONDS)
+    assert overload_backoff_active(runtime, clock.time())
+    # Only the burst deadline is written: no overload window, no rate-limit cooldown, no status flip.
+    assert runtime.overload_backoff_until is None
+    assert runtime.overload_rejections is None
+    assert runtime.overload_isolated_until is None
+    assert runtime.cooldown_until is None
+    assert account.status == AccountStatus.ACTIVE
+    record_error.assert_awaited_once_with(account)
+    mark_rate_limit.assert_not_awaited()
+    assert (
+        "Account burst backoff engaged account_id=acc-burst backoff_seconds=5.0 "
+        "retry_after_seconds=None http_status=429"
+    ) in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_skips_burst_cooldown_when_already_recorded_at_rejection() -> None:
+    """A keyed stream engages the cooldown at rejection time and defers only the penalty.
+
+    The deferred write runs after usage settlement -- possibly after the stream
+    succeeded -- so it must record the transient error without re-stamping the
+    burst deadline from the later clock.
+    """
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-burst-deferred")
+    rejected_at = clock.time()
+    await record_upstream_burst_rejection(balancer, account, retry_after_seconds=None)
+    clock.advance(40.0)
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        account,
+        {"message": "Rate limit exceeded"},
+        "upstream_error",
+        429,
+        retry_after_seconds=None,
+        burst_cooldown_recorded=True,
+    )
+
+    assert classified["failure_class"] == "retryable_transient"
+    runtime = balancer._runtime[account.id]
+    assert runtime.burst_backoff_until == pytest.approx(rejected_at + BURST_BACKOFF_DEFAULT_SECONDS)
+    assert not overload_backoff_active(runtime, clock.time())
+    record_error.assert_awaited_once_with(account)
+    mark_rate_limit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("retry_after_seconds", "expected_seconds"),
+    [(12, 12.0), (900, BURST_BACKOFF_MAX_SECONDS), (1, BURST_BACKOFF_DEFAULT_SECONDS)],
+)
+async def test_handle_stream_error_burst_cooldown_honors_clamped_retry_after(
+    retry_after_seconds: int, expected_seconds: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-burst-ra")
+
+    with caplog.at_level(logging.WARNING, logger=_BURST_LOGGER):
+        await streaming_helpers_module._handle_stream_error(
+            proxy,
+            account,
+            {"message": "Rate limit exceeded"},
+            "upstream_error",
+            429,
+            retry_after_seconds=retry_after_seconds,
+        )
+
+    assert balancer._runtime[account.id].burst_backoff_until == pytest.approx(clock.time() + expected_seconds)
+    assert f"backoff_seconds={expected_seconds:.1f} retry_after_seconds={retry_after_seconds}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_redacts_burst_log_under_privacy_policy(caplog: pytest.LogCaptureFixture) -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-burst-private")
+
+    with caplog.at_level(logging.WARNING, logger=_BURST_LOGGER):
+        await streaming_helpers_module._handle_stream_error(
+            proxy,
+            account,
+            {"message": "Rate limit exceeded"},
+            "server_error",
+            429,
+            privacy_policy=streaming_helpers_module.CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME,
+        )
+
+    # Keyed on the HTTP status, so a ``server_error`` rewrite still engages.
+    deadline = balancer._runtime[account.id].burst_backoff_until
+    assert deadline == pytest.approx(clock.time() + BURST_BACKOFF_DEFAULT_SECONDS)
+    assert "Account burst backoff engaged account_id=<redacted>" in caplog.text
+    assert "acc-burst-private" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_coded_429_keeps_mark_rate_limit_and_no_burst_cooldown() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-coded-429")
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        account,
+        {"message": "Try again in 1.5s"},
+        "rate_limit_exceeded",
+        429,
+        retry_after_seconds=12,
+    )
+
+    assert classified["failure_class"] == "rate_limit"
+    mark_rate_limit.assert_awaited_once()
+    record_error.assert_not_awaited()
+    assert balancer._runtime.get(account.id) is None or balancer._runtime[account.id].burst_backoff_until is None
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_non_429_upstream_error_records_error_without_burst_cooldown() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-400")
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        account,
+        {"message": "something else went wrong"},
+        "upstream_error",
+        400,
+        retry_after_seconds=12,
+    )
+
+    record_error.assert_awaited_once_with(account)
+    mark_rate_limit.assert_not_awaited()
+    assert balancer._runtime.get(account.id) is None or balancer._runtime[account.id].burst_backoff_until is None
+
+
+@pytest.mark.asyncio
+async def test_record_upstream_burst_rejection_ignores_balancers_without_a_runtime_map() -> None:
+    balancer = SimpleNamespace(record_error=AsyncMock())
+    await record_upstream_burst_rejection(balancer, _make_account("acc-double-burst"), retry_after_seconds=3)
+
+
+@pytest.mark.asyncio
+async def test_select_account_skips_bursting_account_while_a_healthy_sibling_exists() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    hot = _make_account("acc-burst-hot")
+    clean = _make_account("acc-burst-clean")
+    balancer = LoadBalancer(
+        lambda: _repo_factory(_StubAccountsRepository([hot, clean]), _StubUsageRepository({}, {})),
+        clock=clock,
+    )
+    await record_upstream_burst_rejection(balancer, hot)
+
+    # Equal weights: 40 draws all landing on ``clean`` is 2**-40 by chance.
+    for _ in range(40):
+        result = await balancer.select_account(routing_strategy="capacity_weighted")
+        assert result.account is not None
+        assert result.account.id == clean.id
+
+    clock.advance(BURST_BACKOFF_DEFAULT_SECONDS + 0.1)
+    selected: set[str] = set()
+    for _ in range(40):
+        result = await balancer.select_account(routing_strategy="capacity_weighted")
+        assert result.account is not None
+        selected.add(result.account.id)
+    assert hot.id in selected
+
+
+@pytest.mark.asyncio
+async def test_select_account_still_uses_bursting_account_when_it_is_the_only_candidate() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    hot = _make_account("acc-burst-alone")
+    balancer = LoadBalancer(
+        lambda: _repo_factory(_StubAccountsRepository([hot]), _StubUsageRepository({}, {})),
+        clock=clock,
+    )
+    await record_upstream_burst_rejection(balancer, hot, retry_after_seconds=30)
+
+    result = await balancer.select_account(lease_kind="stream", routing_strategy="capacity_weighted")
+
+    assert result.error_code is None, result.error_message
+    assert result.account is not None
+    assert result.account.id == hot.id
+
+
+@pytest.mark.asyncio
+async def test_fresh_sticky_binding_avoids_bursting_account_but_established_owner_is_kept() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = RuntimeState(burst_backoff_until=clock.time() + BURST_BACKOFF_DEFAULT_SECONDS)
+    states = [_state("hot"), _state("clean")]
+
+    # A previously unseen key is a fresh upstream admission: bind away from the bursting account.
+    for _ in range(40):
+        fresh = await _select_sticky(balancer, [_state("hot"), _state("clean")], _sticky_repo(None))
+        assert fresh.account is not None
+        assert fresh.account.account_id == "clean"
+
+    # An established owner is warm-session reuse: a burst never moves it.
+    owned = await _select_sticky(balancer, states, _sticky_repo("hot"))
+    assert owned.account is not None
+    assert owned.account.account_id == "hot"
+
+    # With no alternative the fresh binding still lands on the bursting account.
+    alone = await _select_sticky(balancer, [_state("hot")], _sticky_repo(None))
+    assert alone.account is not None
+    assert alone.account.account_id == "hot"

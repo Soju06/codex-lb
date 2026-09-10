@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 import secrets
 import signal
@@ -10,12 +11,63 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_ROOT = REPOSITORY_ROOT / "frontend"
 STARTUP_TIMEOUT_SECONDS = 90.0
 SHUTDOWN_TIMEOUT_SECONDS = 30.0
+
+# Background loops the app lifespan builds through ``app.main`` seams. The smoke
+# backend replaces every builder with a no-op in-process (mirroring the autouse
+# ``_disable_background_loop_schedulers`` fixture in tests/conftest.py, which
+# pins this tuple) instead of exporting ``CODEX_LB_*_ENABLED=false``: the
+# dashboard under test never needs them, several would leave the process
+# (public GitHub/npm catalog lookups, upstream usage polls), and an env override
+# silently stops working the day the toggle behind it is constantized.
+BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
+    "build_usage_refresh_scheduler",
+    "build_model_refresh_scheduler",
+    "build_sticky_session_cleanup_scheduler",
+    "build_quota_planner_scheduler",
+    "build_auth_guardian_scheduler",
+    "build_automations_scheduler",
+    "build_rate_limit_reset_credits_scheduler",
+    "build_account_usage_rollup_scheduler",
+    "build_data_retention_scheduler",
+    "build_telemetry_scheduler",
+)
+
+
+class _NoopScheduler:
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
+def _disable_background_loops(
+    main_module: ModuleType,
+    *,
+    setter: Callable[[ModuleType, str, Any], None] = setattr,
+) -> None:
+    """Make the app lifespan skip every background loop and the live-usage ingestor.
+
+    The lifespan resolves these names from ``app.main`` globals at startup, so
+    rebinding them here is sufficient. The live-usage ingestor is a queue
+    consumer fed only by proxied responses; the smoke drives the dashboard, so
+    returning ``None`` is equivalent to the disabled path in this fresh
+    backend process: the disabled branch additionally resets the hub publisher
+    to ``None``, which is already its initial value here, and
+    ``stop_live_usage_ingestor(None)`` is a no-op.
+    """
+    for builder_name in BACKGROUND_LOOP_BUILDERS:
+        setter(main_module, builder_name, lambda: _NoopScheduler())
+    setter(main_module, "start_live_usage_ingestor", lambda: None)
 
 
 def _run_backend(listener_fd: int) -> None:
@@ -27,6 +79,10 @@ def _run_backend(listener_fd: int) -> None:
     empty_env_file = Path(os.environ["CODEX_LB_DATA_DIR"]) / ".dashboard-browser-smoke.env"
     settings_module.ENV_FILES = (empty_env_file, empty_env_file)
     settings_module.Settings.model_config["env_file"] = None
+
+    # uvicorn imports the same module object below, so the lifespan sees the
+    # no-op builders bound here.
+    _disable_background_loops(importlib.import_module("app.main"))
 
     import uvicorn
 
@@ -40,19 +96,15 @@ def _smoke_environment(data_dir: Path) -> dict[str, str]:
             "CODEX_LB_DATA_DIR": str(data_dir),
             "CODEX_LB_UPSTREAM_BASE_URL": "http://127.0.0.1:9/backend-api",
             "CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV": "false",
-            "CODEX_LB_USAGE_REFRESH_ENABLED": "false",
-            "CODEX_LB_LIVE_USAGE_INGESTION_ENABLED": "false",
-            "CODEX_LB_MODEL_REGISTRY_ENABLED": "false",
-            "CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED": "false",
+            # The session bridge is a request-path feature with a T4 env kill
+            # switch; the smoke never proxies, so keep it on the raw path.
             "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED": "false",
-            "CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED": "false",
-            "CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED": "false",
-            "CODEX_LB_AUTH_GUARDIAN_ENABLED": "false",
             "CODEX_LB_METRICS_ENABLED": "false",
             "CODEX_LB_OTEL_ENABLED": "false",
-            # Always-on database maintenance loops remain harmless because the
-            # isolated database starts empty; every configurable external loop
-            # is disabled above.
+            # Background loops are disabled in-process by ``_run_backend`` (see
+            # ``_disable_background_loops``), not through env overrides. The
+            # always-on database maintenance loops remain harmless because the
+            # isolated database starts empty.
             # Suppress first-run token logging while keeping standard localhost
             # authentication active. The generated value never leaves this process tree.
             "CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN": secrets.token_urlsafe(32),

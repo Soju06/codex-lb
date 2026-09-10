@@ -16,7 +16,6 @@ from hashlib import sha256
 from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
-from app.core.config.settings import get_settings
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
@@ -665,9 +664,6 @@ def _resolve_prompt_cache_key(
                 payload.prompt_cache_key = stripped
             return stripped, "payload"
     if not openai_cache_affinity:
-        return None, "none"
-    settings = get_settings()
-    if not settings.openai_prompt_cache_key_derivation_enabled:
         return None, "none"
     cache_key = _derive_prompt_cache_key(payload, api_key)
     payload.prompt_cache_key = cache_key

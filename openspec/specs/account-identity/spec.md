@@ -1,7 +1,7 @@
 # account-identity Specification
 
 ## Purpose
-TBD - created by archiving change fix-shared-workspace-account-slots. Update Purpose after archive.
+Defines how codex-lb identifies a stored account when upstream identifiers are not unique. Several workspace members can share one upstream `chatgpt_account_id`, so keying account slots on that identifier alone let one member's login or reauthorization overwrite another member's tokens. This capability keeps each login email on its own slot, makes duplicate consolidation preserve a recoverable canonical identity, and keeps dashboard OAuth polls from acting on stale generations.
 ## Requirements
 ### Requirement: Shared upstream workspace identities preserve account slots
 

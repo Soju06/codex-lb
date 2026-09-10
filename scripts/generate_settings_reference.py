@@ -23,7 +23,8 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from app.core.config.settings import _REMOVED_SETTINGS, Settings
-from app.core.config.tiers import SETTING_TIERS
+from app.core.config.tiers import DASHBOARD_HOMES, SETTING_TIERS
+from app.db.models import DashboardSettings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = REPO_ROOT / "docs" / "reference" / "settings.md"
@@ -233,6 +234,19 @@ def _render_default(name: str, field: FieldInfo) -> str:
     return f"`{default!r}`"
 
 
+_DASHBOARD_COLUMNS = frozenset(column.name for column in DashboardSettings.__table__.columns)
+
+
+def _render_tier_cell(name: str) -> str:
+    tier = SETTING_TIERS.get(name, "unassigned")
+    # A T3 setting with a same-name dashboard_settings column (or a DASHBOARD_HOMES
+    # table) is managed from the dashboard; the env var is only the fallback while
+    # the dashboard holds no value.
+    if tier == "T3" and (name in _DASHBOARD_COLUMNS or name in DASHBOARD_HOMES):
+        return "T3 (dashboard)"
+    return tier
+
+
 def _render_section_table(names: list[str], fields: dict[str, FieldInfo]) -> list[str]:
     with_description = any(fields[name].description for name in names)
     lines: list[str] = []
@@ -245,7 +259,7 @@ def _render_section_table(names: list[str], fields: dict[str, FieldInfo]) -> lis
     for name in names:
         field = fields[name]
         env_var = _render_env_cell(name, field)
-        tier_cell = SETTING_TIERS.get(name, "unassigned")
+        tier_cell = _render_tier_cell(name)
         type_cell = _escape_cell(f"`{_render_type(field.annotation)}`")
         default_cell = _escape_cell(_render_default(name, field))
         row = f"| {env_var} | {tier_cell} | {type_cell} | {default_cell} |"
@@ -290,7 +304,10 @@ def render_settings_reference() -> str:
         "- **T1** instance topology — legitimately differs per replica or deployment; env only.",
         "- **T2** secret — encrypted in the database; env is at most a seed.",
         "- **T3** behaviour tunable / feature flag — the dashboard is the management",
-        "  surface; a T3 setting that is still env-only is migration backlog.",
+        "  surface. `T3 → dashboard` marks a setting that already has a",
+        "  `dashboard_settings` column of the same name: the dashboard value wins and",
+        "  the variable is a deprecated fallback. `T3 (env, migrating)` marks the",
+        "  remaining env-only backlog.",
         "- **T4** incident debug — env allowed, dashboard toggle recommended.",
         "",
         "## `PORT` (special case, no prefix)",

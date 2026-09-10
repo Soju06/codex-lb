@@ -38,7 +38,7 @@ from app.core.balancer import (
 )
 from app.core.balancer.types import UpstreamError
 from app.core.clock import REAL_CLOCK, Clock
-from app.core.config import settings as config_settings
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -58,11 +58,18 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
+from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage.quota import apply_usage_quota
+from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
-from app.modules.proxy._load_balancer.error_rate import error_rate_weight_multiplier, record_outcome_locked
+from app.modules.proxy._load_balancer.error_rate import (
+    ErrorRateWeightingPolicy,
+    error_rate_weight_multiplier,
+    record_outcome_locked,
+)
+from app.modules.proxy._load_balancer.latency_cohort import apply_latency_cohort_weights
 from app.modules.proxy._load_balancer.model_eligibility import (
     _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES,
     CatalogOmissionQuotaAdmission,
@@ -98,6 +105,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     StickySelectionRequest,
     _clone_account,
     _StickySelectionOutcome,
+    prepare_selection_states,
     run_sticky_selection_path,
 )
 from app.modules.proxy._load_balancer.sticky_selection import (
@@ -109,9 +117,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
 from app.modules.proxy._load_balancer.sticky_selection import (
     _filter_recovery_probe_candidates as _filter_recovery_probe_candidates,
 )
-from app.modules.proxy._load_balancer.sticky_selection import (
-    _persist_sticky_mutation as _persist_sticky_mutation,
-)
+from app.modules.proxy._load_balancer.sticky_selection import _persist_sticky_mutation as _persist_sticky_mutation
 from app.modules.proxy._load_balancer.sticky_selection import (
     _probing_result_requires_recovery_reservation as _probing_result_requires_recovery_reservation,
 )
@@ -121,14 +127,17 @@ from app.modules.proxy._load_balancer.sticky_selection import (
 from app.modules.proxy._load_balancer.sticky_selection import (
     _select_account_preferring_budget_safe as _select_account_preferring_budget_safe,
 )
-from app.modules.proxy._load_balancer.sticky_selection import (
-    _select_with_stickiness as _run_select_with_stickiness,
-)
+from app.modules.proxy._load_balancer.sticky_selection import _select_with_stickiness as _run_select_with_stickiness
 from app.modules.proxy._load_balancer.sticky_selection import (
     _state_above_budget_threshold as _state_above_budget_threshold,
 )
 from app.modules.proxy._load_balancer.sticky_selection import (
     _state_above_sticky_budget_threshold as _state_above_sticky_budget_threshold,
+)
+from app.modules.proxy._load_balancer.tunables import (
+    RoutingTunables,
+    account_lease_stale_ttl_seconds,
+    resolve_routing_tunables,
 )
 from app.modules.proxy._load_balancer.types import (
     AccountConcurrencyCaps,
@@ -179,10 +188,6 @@ logger = logging.getLogger(__name__)
 _SIBLING_FETCH_MARGIN_SECONDS = 5.0
 
 _UsageWindowEntry = UsageHistory | AdditionalUsageHistory
-
-_ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS = 60.0
-
-_DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
@@ -249,6 +254,9 @@ class _SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
+    # C2-3 resilience toggles: resolved once per selection from the dashboard
+    # snapshot passed to ``select_account``; None = inherit the env alias.
+    soft_drain_enabled: bool | None = None
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]:
@@ -302,6 +310,19 @@ class LoadBalancer:
         self._account_locks: dict[str, asyncio.Lock] = {}
         self._account_locks_registry_lock = asyncio.Lock()
         self._selection_inputs_cache = get_account_selection_cache()
+        # C2-2 routing/overload: the most recent request-path snapshot; paths
+        # without one (stream error funnel, unkeyed bridge reacquires) reuse it.
+        self._routing_tunables: RoutingTunables | None = None
+
+    def _resolve_routing_tunables(self, routing_tunables: RoutingTunables | None) -> RoutingTunables:
+        if routing_tunables is not None:
+            self._routing_tunables = routing_tunables
+            return routing_tunables
+        return self.current_routing_tunables()
+
+    def current_routing_tunables(self) -> RoutingTunables:
+        """Routing/overload knobs as of the most recent request-path snapshot."""
+        return self._routing_tunables or effective_routing_tunables()
 
     async def release_account_lease(self, lease: AccountLease | None) -> None:
         if lease is None:
@@ -318,6 +339,7 @@ class LoadBalancer:
         concurrency_caps: AccountConcurrencyCaps | None = None,
         api_key_id: str | None = None,
         api_key_stream_fair_share_threshold_pct: int = 0,
+        routing_tunables: RoutingTunables | None = None,
     ) -> AccountLease | None:
         """Acquire a lease pinned to one account, or None on a cap denial.
 
@@ -330,8 +352,9 @@ class LoadBalancer:
         distinguish them from the plain cap denial ``None``.
         """
         caps = concurrency_caps or effective_account_concurrency_caps()
+        tunables = self._resolve_routing_tunables(routing_tunables)
         async with self._runtime_lock:
-            self._reclaim_stale_account_leases_locked()
+            self._reclaim_stale_account_leases_locked(routing_tunables=tunables)
             runtime = self._runtime.setdefault(account_id, RuntimeState())
             if kind == "response_create":
                 cap = caps.response_create_limit
@@ -508,9 +531,10 @@ class LoadBalancer:
     def _reclaim_stale_account_leases_locked(
         self,
         *,
+        routing_tunables: RoutingTunables,
         redact_sensitive_details: bool = False,
     ) -> None:
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         now = self._clock.monotonic()
         for runtime in self._runtime.values():
             if not runtime.leases:
@@ -518,7 +542,8 @@ class LoadBalancer:
             stale = [
                 lease
                 for lease in runtime.leases.values()
-                if now - lease.acquired_at >= _account_lease_stale_ttl_seconds(lease.kind, settings)
+                if now - lease.acquired_at
+                >= account_lease_stale_ttl_seconds(lease.kind, settings, routing_tunables=routing_tunables)
             ]
             for lease in stale:
                 self._release_account_lease_locked(
@@ -527,13 +552,15 @@ class LoadBalancer:
                     redact_sensitive_details=redact_sensitive_details,
                 )
 
-    def _detached_runtime_snapshot(self) -> dict[str, RuntimeState]:
+    def _detached_runtime_snapshot(self, *, routing_tunables: RoutingTunables) -> dict[str, RuntimeState]:
         """Runtime as ordinary selection would see it, for observations that must not touch it."""
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         return detached_runtime_snapshot(
             self._runtime,
             now=self._clock.monotonic(),
-            stale_lease_ttl_seconds=lambda kind: _account_lease_stale_ttl_seconds(kind, settings),
+            stale_lease_ttl_seconds=lambda kind: account_lease_stale_ttl_seconds(
+                kind, settings, routing_tunables=routing_tunables
+            ),
         )
 
     async def select_account(
@@ -577,16 +604,23 @@ class LoadBalancer:
         allow_usage_exhaustion_error: bool = True,
         api_key_id: str | None = None,
         api_key_stream_fair_share_threshold_pct: int = 0,
+        routing_tunables: RoutingTunables | None = None,
+        dashboard_settings: object | None = None,
     ) -> AccountSelection:
         if (required_account_is_ownership_constraint or required_continuity_owner) and required_account_id is None:
             raise ValueError("required account ownership flags require required_account_id")
+        # C2-2 routing/overload: resolved once, threaded through every lock section below.
+        tunables = self._resolve_routing_tunables(routing_tunables)
 
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
         owner_restricted_selection = required_account_is_ownership_constraint or required_continuity_owner
         sticky_selection_may_resolve_owner = sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION
+        # C2-3 resilience toggles: resolved from the caller's dashboard snapshot
+        # (the same one that produced ``concurrency_caps``), never re-read here.
+        resilience = resolve_resilience_toggles(dashboard_settings)
 
-        async def load_selection_inputs() -> _SelectionInputs:
+        async def load_unresolved_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 service_tier=service_tier,
@@ -707,9 +741,14 @@ class LoadBalancer:
                     )
             return selection_inputs
 
+        async def load_selection_inputs() -> _SelectionInputs:
+            # Applied after exclusion/security filtering and on every reload,
+            # so retries and filtered pools keep the dashboard soft-drain value.
+            return replace(await load_unresolved_selection_inputs(), soft_drain_enabled=resilience.soft_drain_enabled)
+
         selection_inputs = await load_selection_inputs()
         caps = concurrency_caps or effective_account_concurrency_caps()
-        circuit_breaker_open = _is_upstream_circuit_breaker_open()
+        circuit_breaker_open = _is_upstream_circuit_breaker_open(resilience.circuit_breaker_enabled)
         if circuit_breaker_open:
             set_degraded("upstream circuit breaker is open")
         elif (
@@ -850,8 +889,10 @@ class LoadBalancer:
                     traffic_class=traffic_class,
                     concurrency_caps=caps,
                     redact_sensitive_details=redact_sensitive_details,
+                    routing_tunables=tunables,
                     api_key_id=api_key_id,
                     api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
+                    model=model,
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
@@ -895,6 +936,7 @@ class LoadBalancer:
             sticky_outcome = await run_sticky_selection_path(
                 self,
                 request=StickySelectionRequest(
+                    routing_tunables=tunables,
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
@@ -926,6 +968,8 @@ class LoadBalancer:
                     redact_sensitive_details=redact_sensitive_details,
                     api_key_id=api_key_id,
                     api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
+                    exclude_account_ids=frozenset(excluded_ids),
+                    model=model,
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
@@ -1401,6 +1445,8 @@ class LoadBalancer:
         stream_reserve_slots: int = 0,
         service_tier: str | None = None,
         observe_only: bool = False,
+        routing_tunables: RoutingTunables | None = None,
+        dashboard_settings: object | None = None,
     ) -> AccountSelection:
         outcome = await run_opportunistic_admission(
             self,
@@ -1418,7 +1464,10 @@ class LoadBalancer:
                 stream_reserve_slots=stream_reserve_slots,
                 record_account_cap_rejection=_record_account_cap_rejection,
                 build_states=_build_states,
+                routing_tunables=self._resolve_routing_tunables(routing_tunables),
                 observe_only=observe_only,
+                # C2-3 resilience toggles: from the caller's dashboard snapshot.
+                soft_drain_enabled=resolve_resilience_toggles(dashboard_settings).soft_drain_enabled,
             ),
         )
         return AccountSelection(
@@ -1565,27 +1614,19 @@ class LoadBalancer:
         *,
         required_account_id: str | None,
         redact_sensitive_details: bool,
+        routing_tunables: RoutingTunables,
+        soft_drain_enabled: bool | None = None,
+        model: str | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]:
-        self._reclaim_stale_account_leases_locked(
+        return prepare_selection_states(
+            self,
+            selection_inputs,
+            build_states=_build_states,
+            required_account_id=required_account_id,
             redact_sensitive_details=redact_sensitive_details,
-        )
-        self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
-        states, account_map = _build_states(
-            accounts=selection_inputs.accounts,
-            latest_primary=selection_inputs.latest_primary,
-            latest_secondary=selection_inputs.latest_secondary,
-            latest_monthly=selection_inputs.latest_monthly,
-            runtime=self._runtime,
-            now=self._clock.time(),
-            routing_policy_override=selection_inputs.routing_policy_override,
-            ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-            encryptor=self._encryptor,
-        )
-        if required_account_id is None:
-            return states, account_map
-        return (
-            [state for state in states if state.account_id == required_account_id],
-            {account_id: account for account_id, account in account_map.items() if account_id == required_account_id},
+            routing_tunables=routing_tunables,
+            soft_drain_enabled=soft_drain_enabled,
+            model=model,
         )
 
     async def _get_account_lock(self, account_id: str) -> asyncio.Lock:
@@ -1625,6 +1666,7 @@ class LoadBalancer:
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
         sticky_refresh_skip_deadline: datetime | None = None,
+        redact_sensitive_details: bool = False,
     ) -> _StickySelectionOutcome:
         return await _run_select_with_stickiness(
             states=states,
@@ -1652,6 +1694,7 @@ class LoadBalancer:
             sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
             overload_backoff_runtime=self._runtime,
             clock=self._clock,
+            redact_sensitive_details=redact_sensitive_details,
         )
 
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)
@@ -1818,7 +1861,11 @@ class LoadBalancer:
                 primary_used=normalized_usage.primary_used,
             )
             routing_policy = _normalize_account_routing_policy(account.routing_policy)
+        # C2-3 resilience toggles: one dashboard snapshot before the lock.
+        resilience = resolve_resilience_toggles(await get_settings_cache().get())
 
+        # C2-2 routing/overload: resolved before the lock, the knobs selection uses.
+        tunables = self.current_routing_tunables()
         async with lock:
             runtime = self._runtime.setdefault(account_id, RuntimeState())
             # Treat settlement as a local CAS: the newer runtime health
@@ -1832,13 +1879,14 @@ class LoadBalancer:
                 primary_entry=primary_entry,
                 secondary_entry=effective_secondary_entry,
                 runtime=replace(runtime),
+                routing_tunables=tunables,
                 now=now,
+                soft_drain_enabled=resilience.soft_drain_enabled,
             )
             account_status = normalized_state.status
             if account_status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED):
                 return
 
-            settings = get_settings()
             was_probe_eligible = runtime.health_tier == HEALTH_TIER_PROBING
             if was_probe_eligible and (runtime.error_count > 0 or runtime.last_error_at is not None):
                 runtime.error_count = 0
@@ -1854,7 +1902,7 @@ class LoadBalancer:
                 routing_policy=routing_policy,
                 runtime=runtime,
                 now=now,
-                soft_drain_enabled=getattr(settings, "soft_drain_enabled", True),
+                soft_drain_enabled=resilience.soft_drain_enabled,
             )
             if runtime.health_tier != HEALTH_TIER_PROBING:
                 return
@@ -1875,7 +1923,7 @@ class LoadBalancer:
                 routing_policy=routing_policy,
                 runtime=runtime,
                 now=now,
-                soft_drain_enabled=getattr(settings, "soft_drain_enabled", True),
+                soft_drain_enabled=resilience.soft_drain_enabled,
             )
 
     def _state_for(self, account: Account) -> AccountState:
@@ -2046,8 +2094,14 @@ def _build_states(
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
     encryptor: TokenEncryptor | None = None,
+    routing_tunables: RoutingTunables | None = None,
+    soft_drain_enabled: bool | None = None,
+    model: str | None = None,
+    log_weight_transitions: bool = True,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     now = REAL_CLOCK.time() if now is None else now
+    # Request and background callers pass their snapshot's values; None (tests, tools) = environment layer.
+    tunables = routing_tunables or effective_routing_tunables()
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
 
@@ -2069,27 +2123,22 @@ def _build_states(
                 if account.status == AccountStatus.REAUTH_REQUIRED and encryptor is not None
                 else None
             ),
+            soft_drain_enabled=soft_drain_enabled,
             now=now,
+            routing_tunables=tunables,
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
         state.ignore_standard_quota = account.id in ignore_standard_quota_account_ids
         states.append(state)
         account_map[account.id] = account
+    apply_latency_cohort_weights(states, runtime, now=now, model=model, log_transitions=log_weight_transitions)
     return states, account_map
 
 
-def _account_lease_stale_ttl_seconds(kind: AccountLeaseKind, settings: object) -> float:
-    ttl_seconds = float(getattr(settings, "proxy_account_lease_ttl_seconds", 900.0))
-    if kind != "stream":
-        return ttl_seconds
-    valid_stream_budget_seconds = max(
-        ttl_seconds,
-        float(getattr(settings, "proxy_request_budget_seconds", ttl_seconds)),
-        float(getattr(settings, "http_responses_stream_request_budget_seconds", ttl_seconds)),
-        float(getattr(settings, "http_responses_session_bridge_request_budget_seconds", ttl_seconds)),
-    )
-    return max(ttl_seconds, valid_stream_budget_seconds + _ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS)
+def effective_routing_tunables(dashboard_settings: object | None = None) -> RoutingTunables:
+    """Routing/overload knobs from a cached dashboard row; ``None`` = environment alone (C2-2)."""
+    return resolve_routing_tunables(dashboard_settings, startup_settings=get_settings())
 
 
 def effective_account_concurrency_caps(dashboard_settings: object | None = None) -> AccountConcurrencyCaps:
@@ -2206,8 +2255,11 @@ def _state_from_account(
     runtime: RuntimeState,
     access_token_expires_at: float | None = None,
     now: float | None = None,
+    routing_tunables: RoutingTunables | None = None,
+    soft_drain_enabled: bool | None = None,
 ) -> AccountState:
     now = REAL_CLOCK.time() if now is None else now
+    tunables = routing_tunables or effective_routing_tunables()
     routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
     normalized_usage = _normalize_usage_inputs(
         account=account,
@@ -2469,7 +2521,9 @@ def _state_from_account(
         else None
     )
 
-    settings = get_settings()
+    if soft_drain_enabled is None:
+        # C2-3 resilience toggles: callers pass the dashboard value; None (tests, tools) = env alias / default.
+        soft_drain_enabled = resolve_resilience_toggles(None, startup_settings=get_settings()).soft_drain_enabled
     new_tier = _sync_runtime_health_tier(
         account_id=account.id,
         status=status,
@@ -2478,20 +2532,19 @@ def _state_from_account(
         routing_policy=routing_policy,
         runtime=runtime,
         now=now,
-        soft_drain_enabled=getattr(settings, "soft_drain_enabled", True),
+        soft_drain_enabled=soft_drain_enabled,
     )
 
-    inflight_pressure_pct = (runtime.inflight_response_creates + runtime.inflight_streams) * getattr(
-        settings, "proxy_account_inflight_penalty_pct", 2.5
-    )
+    inflight_pressure_pct = (
+        runtime.inflight_response_creates + runtime.inflight_streams
+    ) * tunables.inflight_penalty_pct
     leased_token_pressure_pct = 0.0
     long_window_key = "secondary"
     if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
         long_window_key = "monthly"
     capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
     if capacity_credits > 0.0 and runtime.leased_tokens > 0:
-        lease_token_weight = getattr(settings, "proxy_account_lease_token_weight", 1.0)
-        leased_token_pressure_pct = runtime.leased_tokens * lease_token_weight / capacity_credits * 100.0
+        leased_token_pressure_pct = runtime.leased_tokens * tunables.lease_token_weight / capacity_credits * 100.0
     pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
     effective_used_percent = None if used_percent is None else min(100.0, used_percent + pressure_pct)
     effective_secondary_used_percent = None if secondary_used is None else min(100.0, secondary_used + pressure_pct)
@@ -2522,7 +2575,9 @@ def _state_from_account(
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
         routing_policy=routing_policy,
-        selection_weight_multiplier=error_rate_weight_multiplier(runtime, now),
+        selection_weight_multiplier=error_rate_weight_multiplier(
+            runtime, now, policy=ErrorRateWeightingPolicy(enabled=tunables.error_rate_weighting_enabled)
+        ),
     )
 
 
@@ -2661,11 +2716,14 @@ def background_recovery_state_from_account(
     account: Account,
     primary_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
+    routing_tunables: RoutingTunables | None = None,
+    soft_drain_enabled: bool | None = None,
 ) -> AccountState:
     """Evaluate recovery without live runtime state.
 
     Seed a throwaway runtime from the persisted block marker so post-block usage
-    can clear stale reset guards after a balancer restart.
+    can clear stale reset guards after a balancer restart. ``routing_tunables`` and
+    ``soft_drain_enabled`` are the caller's dashboard-snapshot values (health tier follows the dashboard).
     """
 
     runtime = RuntimeState()
@@ -2685,6 +2743,8 @@ def background_recovery_state_from_account(
         secondary_entry=secondary_entry,
         runtime=runtime,
         now=now,
+        routing_tunables=routing_tunables,
+        soft_drain_enabled=soft_drain_enabled,
     )
     if account.status == AccountStatus.RATE_LIMITED:
         freshness_entry = _rate_limited_freshness_entry(
@@ -2828,14 +2888,9 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None, *, now: float) -
     if recorded_at is None:
         return False
     current_time = datetime.fromtimestamp(now, tz=timezone.utc)
-    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
+    interval_seconds = usage_freshness_horizon_seconds()
     recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
     return recorded_time >= current_time - timedelta(seconds=interval_seconds)
-
-
-def _usage_refresh_interval_seconds() -> int:
-    settings = config_settings.get_settings()
-    return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
 def _filter_accounts_for_model(
@@ -2928,13 +2983,12 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
 
 def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
     current_time = now or utcnow()
-    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
-    return current_time - timedelta(seconds=interval_seconds)
+    return current_time - timedelta(seconds=usage_freshness_horizon_seconds())
 
 
-def _is_upstream_circuit_breaker_open() -> bool:
-    settings = get_settings()
-    if not getattr(settings, "circuit_breaker_enabled", False):
+def _is_upstream_circuit_breaker_open(circuit_breaker_enabled: bool) -> bool:
+    # C2-3 resilience toggles: the caller resolved the flag from its snapshot.
+    if not circuit_breaker_enabled:
         return False
     return are_all_account_circuit_breakers_open()
 

@@ -34,6 +34,20 @@ In both stages the account is dropped from a candidate pool only while at
 least one other candidate remains, so the window can never empty the pool.
 The window is not reset by successes -- an account that succeeds on warm
 sessions but rejects fresh admissions is exactly the case this exists for.
+
+**Burst cooldown** (``record_upstream_burst_rejection``): a code-less upstream
+HTTP 429 (a per-account burst/concurrency rejection whose body carries only a
+message, no ``rate_limit_exceeded`` / usage code) is not a quota event -- the
+same account typically succeeds again within seconds -- so it must neither
+flip the persisted status nor touch ``cooldown_until``. It does mean the
+account is momentarily saturated, so a short replica-local deadline
+(``RuntimeState.burst_backoff_until``, honoring upstream ``Retry-After``
+inside ``[BURST_BACKOFF_DEFAULT_SECONDS, BURST_BACKOFF_MAX_SECONDS]``) makes
+``overload_backoff_active`` true and steers fresh selection and fresh sticky
+bindings to a sibling. It is deliberately *not* an isolation trigger:
+established soft sticky owners keep their session through a burst. The
+overload rejection window and ``overload_backoff_until`` are never written by
+the burst path.
 """
 
 from __future__ import annotations
@@ -44,8 +58,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.balancer.logic import AccountState
-from app.core.config.settings import get_settings
 from app.db.models import Account
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._load_balancer.types import RuntimeState
 
 logger = logging.getLogger(__name__)
@@ -77,16 +91,26 @@ OVERLOAD_MAX_LEVEL = 5
 # minutes despite the account already being deprioritized twice.
 OVERLOAD_ISOLATION_TRIP_LEVEL = 3
 
+# Burst cooldown bounds for a code-less upstream HTTP 429. The default covers
+# the observed recovery window (the same account succeeds within a few seconds
+# of the rejection); an upstream ``Retry-After`` raises the deadline up to the
+# cap so a stale or hostile header cannot bench an account for minutes.
+BURST_BACKOFF_DEFAULT_SECONDS = 5.0
+BURST_BACKOFF_MAX_SECONDS = 30.0
+
 
 @dataclass(frozen=True, slots=True)
 class OverloadIsolationPolicy:
-    """Operator knob for the isolation stage (``CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS``)."""
+    """Operator knob for the isolation stage: the dashboard setting
+    ``proxy_overload_isolation_seconds`` (environment fallback
+    ``CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS``), resolved through
+    ``RoutingTunables`` (C2-2 routing/overload)."""
 
     seconds: float = 1800.0
 
     @classmethod
-    def from_settings(cls) -> OverloadIsolationPolicy:
-        return cls(seconds=float(get_settings().proxy_overload_isolation_seconds))
+    def from_tunables(cls, tunables: RoutingTunables) -> OverloadIsolationPolicy:
+        return cls(seconds=float(tunables.overload_isolation_seconds))
 
     @property
     def enabled(self) -> bool:
@@ -103,8 +127,12 @@ def overload_backoff_seconds(level: int) -> float:
 
 
 def overload_backoff_active(runtime: RuntimeState | None, now: float) -> bool:
-    """Whether fresh admissions should avoid the account (soft backoff or isolation)."""
-    return runtime is not None and runtime.overload_backoff_until is not None and now < runtime.overload_backoff_until
+    """Whether fresh admissions should avoid the account (soft backoff, isolation or burst cooldown)."""
+    if runtime is None:
+        return False
+    if runtime.overload_backoff_until is not None and now < runtime.overload_backoff_until:
+        return True
+    return runtime.burst_backoff_until is not None and now < runtime.burst_backoff_until
 
 
 def overload_isolation_active(runtime: RuntimeState | None, now: float) -> bool:
@@ -156,7 +184,13 @@ def record_overload_rejection_locked(
     return deadline
 
 
-async def record_upstream_overload(balancer: Any, account: Account, *, redact_account_id: bool = False) -> None:
+async def record_upstream_overload(
+    balancer: Any,
+    account: Account,
+    *,
+    redact_account_id: bool = False,
+    isolation: OverloadIsolationPolicy | None = None,
+) -> None:
     """Record one upstream overload rejection for ``account`` at the balancer clock.
 
     Observations are taken where account health is written (the
@@ -166,7 +200,10 @@ async def record_upstream_overload(balancer: Any, account: Account, *, redact_ac
     runtime_map = getattr(balancer, "_runtime", None)
     if not isinstance(runtime_map, dict):
         return
-    isolation = OverloadIsolationPolicy.from_settings()
+    if isolation is None:
+        # C2-2 routing/overload: the error funnel carries no request snapshot;
+        # use the balancer's most recent one (no settings read under a lock).
+        isolation = OverloadIsolationPolicy.from_tunables(balancer.current_routing_tunables())
     lock = await balancer._get_account_lock(account.id)
     async with lock:
         now = float(balancer._clock.time())
@@ -192,6 +229,51 @@ async def record_upstream_overload(balancer: Any, account: Account, *, redact_ac
         account_label,
         runtime.overload_backoff_level,
         deadline - now,
+    )
+
+
+def record_burst_rejection_locked(runtime: RuntimeState, now: float, *, retry_after_seconds: float | None) -> float:
+    """Engage (or extend) the burst cooldown observed at ``now``; return the applied seconds.
+
+    ``retry_after_seconds`` (upstream ``Retry-After``) is clamped to
+    ``[BURST_BACKOFF_DEFAULT_SECONDS, BURST_BACKOFF_MAX_SECONDS]``; a missing
+    header applies the default. A rejection while already cooling down
+    extends, never shortens, the deadline. Caller holds the balancer's
+    per-account lock.
+    """
+    requested = BURST_BACKOFF_DEFAULT_SECONDS if retry_after_seconds is None else float(retry_after_seconds)
+    seconds = min(BURST_BACKOFF_MAX_SECONDS, max(BURST_BACKOFF_DEFAULT_SECONDS, requested))
+    runtime.burst_backoff_until = max(runtime.burst_backoff_until or 0.0, now + seconds)
+    return seconds
+
+
+async def record_upstream_burst_rejection(
+    balancer: Any,
+    account: Account,
+    *,
+    retry_after_seconds: float | None = None,
+    redact_account_id: bool = False,
+) -> None:
+    """Record one code-less upstream HTTP 429 burst rejection for ``account``.
+
+    Taken at the ``_handle_stream_error`` funnel like ``record_upstream_overload``.
+    Writes only ``RuntimeState.burst_backoff_until`` (never the overload window,
+    ``cooldown_until`` or the persisted status). No-op when ``balancer`` does not
+    expose the runtime map (test doubles).
+    """
+    runtime_map = getattr(balancer, "_runtime", None)
+    if not isinstance(runtime_map, dict):
+        return
+    lock = await balancer._get_account_lock(account.id)
+    async with lock:
+        now = float(balancer._clock.time())
+        runtime = runtime_map.setdefault(account.id, RuntimeState())
+        applied = record_burst_rejection_locked(runtime, now, retry_after_seconds=retry_after_seconds)
+    logger.warning(
+        "Account burst backoff engaged account_id=%s backoff_seconds=%.1f retry_after_seconds=%s http_status=429",
+        "<redacted>" if redact_account_id else account.id,
+        applied,
+        retry_after_seconds,
     )
 
 

@@ -274,6 +274,10 @@ async def test_active_snapshot_does_not_clear_revoked_token_routing_mark(db_setu
     await routing_cache.refresh_from_db()
     assert routing_cache.is_unavailable(account_id) is False
 
+    await _set_account_status(account_id, AccountStatus.ACTIVE, "Authentication token revoked - re-login required")
+    await routing_cache.refresh_from_db()
+    assert routing_cache.is_unavailable(account_id) is True
+
 
 @pytest.mark.asyncio
 async def test_reauth_reason_controls_peer_routing_availability(db_setup, poller_slot) -> None:

@@ -17269,7 +17269,9 @@ async def test_stream_with_retry_keyed_token_revoked_quarantines_routing_before_
     )
     stream_account_ids: list[str] = []
     effects: list[str] = []
-    mark_routing_unavailable = MagicMock(side_effect=lambda account_id: effects.append(f"route:{account_id}"))
+    quarantine_permanent_failure = AsyncMock(
+        side_effect=lambda account, code: effects.append(f"route:{account.id}:{code}") or True
+    )
 
     async def settle_usage(
         settled_api_key: ApiKeyData | None,
@@ -17314,11 +17316,7 @@ async def test_stream_with_retry_keyed_token_revoked_quarantines_routing_before_
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
-    monkeypatch.setattr(
-        streaming_retry_module,
-        "mark_account_routing_unavailable_pending_persist",
-        mark_routing_unavailable,
-    )
+    monkeypatch.setattr(service._load_balancer, "quarantine_permanent_failure", quarantine_permanent_failure)
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
@@ -17364,7 +17362,7 @@ async def test_stream_with_retry_keyed_token_revoked_quarantines_routing_before_
 
     assert json.loads(chunks[-1].split("data: ", 1)[1])["response"]["id"] == "resp_keyed_token_revoked_ok"
     assert stream_account_ids == [account_a.id, account_b.id]
-    assert effects.index(f"route:{account_a.id}") < effects.index("settle")
+    assert effects.index(f"route:{account_a.id}:token_revoked") < effects.index("settle")
     assert effects.index("settle") < effects.index(f"health:{account_a.id}:token_revoked")
 
 

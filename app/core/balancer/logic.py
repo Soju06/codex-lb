@@ -583,9 +583,7 @@ def select_account(
             or bypass_quota_exceeded
             or (bypass_account_ids is not None and state.account_id in bypass_account_ids)
         )
-        if state.status == AccountStatus.DEACTIVATED:
-            continue
-        if state.status == AccountStatus.PAUSED:
+        if state.blocks_routing or state.status == AccountStatus.PAUSED:
             continue
         if _known_expired_reauth(state, current):
             continue

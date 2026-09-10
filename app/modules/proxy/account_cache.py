@@ -150,9 +150,7 @@ class RoutingAvailabilityCache:
         if entry is None:
             return True
         status, reason = entry
-        return status in _ROUTING_UNAVAILABLE_STATUSES or (
-            status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(reason)
-        )
+        return status in _ROUTING_UNAVAILABLE_STATUSES or reauth_reason_blocks_routing(reason)
 
     def is_locally_unavailable(self, account_id: str) -> bool:
         return account_id in self._local_marks
@@ -192,10 +190,8 @@ class RoutingAvailabilityCache:
             account_id
             for account_id in self._pending_persist_marks
             if (status := snapshot.get(account_id)) is not None
-            and not (
-                status[0] in _ROUTING_UNAVAILABLE_STATUSES
-                or (status[0] == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(status[1]))
-            )
+            and status[0] not in _ROUTING_UNAVAILABLE_STATUSES
+            and not reauth_reason_blocks_routing(status[1])
         }
         self._local_marks = {
             account_id
@@ -204,7 +200,7 @@ class RoutingAvailabilityCache:
             or account_id not in marks_before_refresh
             or (status := snapshot.get(account_id)) is None
             or status[0] in _ROUTING_UNAVAILABLE_STATUSES
-            or (status[0] == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(status[1]))
+            or reauth_reason_blocks_routing(status[1])
         }
 
     def reset(self) -> None:

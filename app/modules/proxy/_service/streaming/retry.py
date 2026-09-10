@@ -729,12 +729,16 @@ class _StreamingRetryMixin:
             ``_settle_stream_usage_before_pending_penalty`` flushes health
             after settlement (same ordering as compact keyed mid-loop health).
             """
-            if failed_code == "token_revoked":
-                # Routing must stop immediately even when keyed-stream health is
-                # queued until reservation settlement. The durable
-                # REAUTH_REQUIRED write remains owned by the post-settlement path.
-                mark_account_routing_unavailable_pending_persist(failed_account.id)
             if api_key is not None and api_key_reservation is not None:
+                if failed_code == "token_revoked":
+                    # Publish a guarded, reason-only quarantine now. The
+                    # REAUTH_REQUIRED health/status write remains owned by the
+                    # post-settlement path.
+                    quarantine = getattr(proxy._load_balancer, "quarantine_permanent_failure", None)
+                    if callable(quarantine):
+                        await quarantine(failed_account, failed_code)
+                    else:
+                        mark_account_routing_unavailable_pending_persist(failed_account.id)
                 classified = classify_upstream_failure(
                     error_code=failed_code,
                     error=failed_error,

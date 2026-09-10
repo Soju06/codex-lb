@@ -1153,7 +1153,13 @@ async def _handle_stream_error(
     elif classified["failure_class"] == "quota":
         await proxy._load_balancer.mark_quota_exceeded(account, error)
     elif code in PERMANENT_FAILURE_CODES:
-        await proxy._load_balancer.mark_permanent_failure(account, code)
+        downgraded = await proxy._load_balancer.mark_permanent_failure(account, code)
+        if code == "token_revoked" and not downgraded:
+            # A concurrent re-auth won the guarded write. Do not leave the
+            # pre-settlement local quarantine wedged on the repaired account.
+            from app.modules.proxy.account_cache import clear_account_routing_unavailable
+
+            clear_account_routing_unavailable(account.id)
     else:
         await proxy._load_balancer.record_error(account)
         _facade().logger.info(

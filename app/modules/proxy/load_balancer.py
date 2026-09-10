@@ -99,6 +99,7 @@ from app.modules.proxy._load_balancer.opportunistic_admission import (
     detached_runtime_snapshot,
     run_opportunistic_admission,
 )
+from app.modules.proxy._load_balancer.quarantine import quarantine_permanent_failure as _quarantine_permanent_failure
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
@@ -1772,6 +1773,9 @@ class LoadBalancer:
                 mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
             return downgraded
+
+    async def quarantine_permanent_failure(self, account: Account, error_code: str) -> bool:
+        return await _quarantine_permanent_failure(self, account, error_code)
 
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)

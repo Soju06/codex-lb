@@ -17314,7 +17314,11 @@ async def test_stream_with_retry_keyed_token_revoked_quarantines_routing_before_
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
-    monkeypatch.setattr(streaming_retry_module, "mark_account_routing_unavailable", mark_routing_unavailable)
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "mark_account_routing_unavailable_pending_persist",
+        mark_routing_unavailable,
+    )
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))

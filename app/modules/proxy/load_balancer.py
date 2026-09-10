@@ -152,7 +152,7 @@ from app.modules.proxy._load_balancer.unbound_selection import (
 )
 from app.modules.proxy.account_cache import (
     get_account_selection_cache,
-    is_account_routing_unavailable,
+    is_account_locally_routing_unavailable,
     mark_account_routing_unavailable,
 )
 from app.modules.proxy.account_eligibility import (
@@ -632,7 +632,9 @@ class LoadBalancer:
                 account_ids=scoped_account_ids,
             )
             excluded_ids.update(
-                account.id for account in selection_inputs.accounts if is_account_routing_unavailable(account.id)
+                account.id
+                for account in selection_inputs.accounts
+                if is_account_locally_routing_unavailable(account.id)
             )
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even

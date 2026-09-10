@@ -117,6 +117,7 @@ class RoutingAvailabilityCache:
         self._session_factory = session_factory
         self._snapshot: dict[str, tuple[AccountStatus, str | None]] | None = None
         self._local_marks: set[str] = set()
+        self._pending_persist_marks: set[str] = set()
 
     @property
     def seeded(self) -> bool:
@@ -126,8 +127,15 @@ class RoutingAvailabilityCache:
         self._local_marks.add(account_id)
         _request_account_routing_bump()
 
+    def mark_unavailable_pending_persist(self, account_id: str) -> None:
+        """Keep a local routing block until its durable status is observed."""
+        self._local_marks.add(account_id)
+        self._pending_persist_marks.add(account_id)
+        _request_account_routing_bump()
+
     def clear_unavailable(self, account_id: str) -> None:
         self._local_marks.discard(account_id)
+        self._pending_persist_marks.discard(account_id)
         if self._snapshot is not None:
             self._snapshot[account_id] = (AccountStatus.ACTIVE, None)
         _request_account_routing_bump()
@@ -146,16 +154,22 @@ class RoutingAvailabilityCache:
             status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(reason)
         )
 
+    def is_locally_unavailable(self, account_id: str) -> bool:
+        return account_id in self._local_marks
+
     async def refresh_from_db(self) -> None:
         """Rebuild the snapshot from committed account statuses.
 
-        Local overlay marks remain authoritative until an explicit clear or a
-        committed non-blocking REAUTH_REQUIRED state is observed. A local mark
-        can be created for a revoked token while the durable status write is
-        intentionally deferred until API-key settlement; dropping it merely
-        because the in-flight snapshot still says ACTIVE would let a concurrent
-        request route to the revoked account again. Reactivation and OAuth
-        re-authentication explicitly clear the overlay.
+        Local overlay marks whose committed status became routable again are dropped —
+        this is what lets a reactivation or re-authentication served by another replica
+        clear this replica's marker without a restart. Only marks that already existed
+        when this refresh started are eligible to be dropped: a mark added while the
+        SELECT is in flight may not be reflected in the rows it read (the status commit
+        can land after the read), so filtering it against that snapshot would silently
+        lose the mark. Such marks are preserved and re-evaluated by the next refresh,
+        which the mark's own queued ``account_routing`` bump guarantees. Marks created
+        while a keyed stream's durable health write is pending remain until a refresh
+        observes the committed blocking status.
 
         Database errors propagate to the caller: when invoked as an
         ``account_routing`` invalidation callback the poller then leaves the
@@ -163,6 +177,7 @@ class RoutingAvailabilityCache:
         a transient failure cannot make a replica permanently miss a pause,
         deletion, or deactivation.
         """
+        marks_before_refresh = frozenset(self._local_marks)
         factory = self._session_factory or SessionLocal
         session = factory()
         try:
@@ -173,12 +188,22 @@ class RoutingAvailabilityCache:
         finally:
             await close_session(session)
         self._snapshot = snapshot
+        self._pending_persist_marks = {
+            account_id
+            for account_id in self._pending_persist_marks
+            if (status := snapshot.get(account_id)) is not None
+            and not (
+                status[0] in _ROUTING_UNAVAILABLE_STATUSES
+                or (status[0] == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(status[1]))
+            )
+        }
         self._local_marks = {
             account_id
             for account_id in self._local_marks
-            if (status := snapshot.get(account_id)) is None
+            if account_id in self._pending_persist_marks
+            or account_id not in marks_before_refresh
+            or (status := snapshot.get(account_id)) is None
             or status[0] in _ROUTING_UNAVAILABLE_STATUSES
-            or status[0] == AccountStatus.ACTIVE
             or (status[0] == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(status[1]))
         }
 
@@ -186,6 +211,7 @@ class RoutingAvailabilityCache:
         """Drop all state (snapshot back to unseeded). Test isolation helper."""
         self._snapshot = None
         self._local_marks.clear()
+        self._pending_persist_marks.clear()
 
 
 _account_selection_cache = AccountSelectionCache()
@@ -210,6 +236,10 @@ def mark_account_routing_unavailable(account_id: str) -> None:
     _routing_availability_cache.mark_unavailable(account_id)
 
 
+def mark_account_routing_unavailable_pending_persist(account_id: str) -> None:
+    _routing_availability_cache.mark_unavailable_pending_persist(account_id)
+
+
 def clear_account_routing_unavailable(account_id: str) -> None:
     _routing_availability_cache.clear_unavailable(account_id)
 
@@ -220,6 +250,10 @@ def clear_all_account_routing_unavailable() -> None:
 
 def is_account_routing_unavailable(account_id: str) -> bool:
     return _routing_availability_cache.is_unavailable(account_id)
+
+
+def is_account_locally_routing_unavailable(account_id: str) -> bool:
+    return _routing_availability_cache.is_locally_unavailable(account_id)
 
 
 async def propagate_account_routing_change() -> bool:

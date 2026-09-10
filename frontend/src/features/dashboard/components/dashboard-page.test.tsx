@@ -223,6 +223,7 @@ describe("DashboardPage", () => {
         apiKeyIds: [],
         modelOptions: [],
         statuses: [],
+        sources: [],
         limit: 25,
         offset: 0,
       },
@@ -615,6 +616,7 @@ describe("DashboardPage", () => {
         apiKeyIds: [],
         modelOptions: [],
         statuses: ["ok"],
+        sources: [],
         conversationId: "conv_page_badge",
         limit: 25,
         offset: 0,
@@ -671,6 +673,7 @@ describe("DashboardPage", () => {
         apiKeyIds: ["key_1"],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["ok"],
+        sources: [],
         conversationId: "conv_page_summary",
         limit: 25,
         offset: 0,
@@ -776,6 +779,7 @@ describe("DashboardPage", () => {
         apiKeyIds: ["key_missing"],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["error"],
+        sources: [],
         conversationId: "conv_safety",
         limit: 25,
         offset: 0,
@@ -846,6 +850,7 @@ describe("DashboardPage", () => {
         apiKeyIds: [],
         modelOptions: [],
         statuses: [],
+        sources: [],
         conversationId: "conv_no_suffix",
         limit: 25,
         offset: 0,
@@ -906,6 +911,7 @@ describe("DashboardPage", () => {
         apiKeyIds: [],
         modelOptions: [],
         statuses: ["ok"],
+        sources: [],
         conversationId: "conv_dismiss_preserve",
         limit: 25,
         offset: 0,
@@ -966,6 +972,7 @@ describe("DashboardPage", () => {
         apiKeyIds: ["key_1"],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["ok"],
+        sources: [],
         conversationId: "conv_reset_all",
         limit: 25,
         offset: 5,
@@ -1017,7 +1024,75 @@ describe("DashboardPage", () => {
       apiKeyIds: [],
       modelOptions: [],
       statuses: [],
+      sources: [],
       conversationId: null,
+      offset: 0,
+    });
+  });
+
+  it("renders no source filter when the overview reports no overflow activity", () => {
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.queryByRole("button", { name: "Source" })).not.toBeInTheDocument();
+  });
+
+  it("renders the source filter once the overview reports overflow activity", async () => {
+    const user = userEvent.setup();
+    const overview = mockReadyDashboard();
+    const updateFilters = vi.fn();
+    useDashboardMock.mockReturnValue({
+      data: {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          subscriptionOverflow: { requests: 4, costUsd: 1.5, usageLessRequests: 0, livePins: 2 },
+        },
+      },
+      isFetching: false,
+      error: null,
+    } as ReturnType<typeof useDashboard>);
+    useRequestLogsMock.mockReturnValue({
+      filters: {
+        search: "",
+        timeframe: "all",
+        accountIds: [],
+        apiKeyIds: [],
+        modelOptions: [],
+        statuses: [],
+        sources: [],
+        conversationId: null,
+        limit: 25,
+        offset: 0,
+      },
+      listFilters: { limit: 25, offset: 0 },
+      facetFilters: {},
+      emptyStateFiltersApplied: false,
+      logsQuery: {
+        data: { requests: [], total: 0, hasMore: false },
+        isFetching: false,
+        error: null,
+        isLoading: false,
+        isPending: false,
+        isSuccess: true,
+        refetch: vi.fn(),
+      },
+      optionsQuery: {
+        data: { accountIds: [], apiKeys: [], modelOptions: [], statuses: [] },
+        error: null,
+      },
+      updateFilters,
+    } as unknown as ReturnType<typeof useRequestLogs>);
+
+    renderWithProviders(<DashboardPage />);
+
+    const sourceButton = screen.getByRole("button", { name: "Source" });
+    await user.click(sourceButton);
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Overflow (pinned)" }));
+
+    expect(updateFilters).toHaveBeenCalledWith({
+      sources: ["subscription_overflow_pinned"],
       offset: 0,
     });
   });

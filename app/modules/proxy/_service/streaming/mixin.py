@@ -717,7 +717,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                             _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
                             upstream_error,
                         )
-                    if allow_retry and _facade()._should_retry_stream_error(code):
+                    if overload_replay.should_retry_first_terminal(allow_retry, code, first_payload):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
@@ -771,7 +771,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         latency_first_token_ms = _ttft_event_latency_ms(
                             event_type, first_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                         )
-                    for relay_line in overload_replay.relay(event_type, first, settlement):
+                    for relay_line in overload_replay.relay(event_type, first, settlement, terminal_event_seen):
                         yield relay_line
             if terminal_stream_error is not None:
                 raise terminal_stream_error
@@ -937,8 +937,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                     continue
                 if event_payload is not None and not preserve_raw_sse_line:
                     line = format_sse_event(event_payload)
-                for relay_line in overload_replay.relay(event_type, line, settlement):
-                    terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
+                terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
+                for relay_line in overload_replay.relay(event_type, line, settlement, terminal_event_seen):
                     yield relay_line
             if not terminal_event_seen:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)

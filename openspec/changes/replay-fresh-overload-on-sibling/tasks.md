@@ -1,8 +1,9 @@
 ## 1. Regression coverage
 
-- [x] 1.1 Reproduce a fresh HTTP stream receiving `server_is_overloaded` as
-  either the first SSE event or after only `response.created`, then succeeding
-  on excluded-account sibling B with live-effective deterministic failover.
+- [x] 1.1 Reproduce a fresh HTTP stream receiving `server_is_overloaded` or
+  `overloaded_error` as either the first SSE event or after only
+  `response.created`, then succeeding on excluded-account sibling B with
+  live-effective deterministic failover.
 - [x] 1.2 Prove previous-response ownership, disabled deterministic failover,
   emitted content/tool output, and terminal output evidence remain fail closed.
 

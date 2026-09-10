@@ -541,6 +541,7 @@ class _OutputFreeOverloadReplayBuffer:
     def __init__(self, *, enabled: bool) -> None:
         self.enabled = enabled
         self._lines: list[str] = []
+        self._buffered_prelude_types: set[str] = set()
 
     def raise_if_retryable(
         self,
@@ -560,11 +561,32 @@ class _OutputFreeOverloadReplayBuffer:
             exclude_account=True,
         )
 
-    def relay(self, event_type: str | None, line: str, settlement: _StreamSettlement) -> list[str]:
-        if self.enabled and event_type in self._PRELUDE_EVENT_TYPES:
+    @staticmethod
+    def should_retry_first_terminal(
+        allow_retry: bool, error_code: str | None, event_payload: dict[str, JsonValue] | None
+    ) -> bool:
+        return (
+            allow_retry
+            and not _terminal_payload_reports_output(event_payload)
+            and _facade()._should_retry_stream_error(error_code)
+        )
+
+    def relay(
+        self, event_type: str | None, line: str, settlement: _StreamSettlement, terminal: bool = False
+    ) -> list[str]:
+        if self.enabled and self._is_account_neutral_comment(line):
+            return [line]
+        if (
+            self.enabled
+            and not terminal
+            and event_type in self._PRELUDE_EVENT_TYPES
+            and event_type not in self._buffered_prelude_types
+        ):
+            self._buffered_prelude_types.add(event_type)
             self._lines.append(line)
             return []
         lines, self._lines = [*self._lines, line], []
+        self._buffered_prelude_types.clear()
         settlement.downstream_visible = True
         if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
             settlement.downstream_text_visible = True
@@ -572,9 +594,15 @@ class _OutputFreeOverloadReplayBuffer:
 
     def flush(self, settlement: _StreamSettlement) -> list[str]:
         lines, self._lines = self._lines, []
+        self._buffered_prelude_types.clear()
         if lines:
             settlement.downstream_visible = True
         return lines
+
+    @staticmethod
+    def _is_account_neutral_comment(line: str) -> bool:
+        """SSE comments carry no response state and do not commit replay."""
+        return bool(line.strip()) and all(not field or field.lstrip().startswith(":") for field in line.splitlines())
 
 
 def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:

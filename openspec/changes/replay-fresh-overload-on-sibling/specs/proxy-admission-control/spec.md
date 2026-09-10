@@ -22,7 +22,7 @@ single-account, or dispatched-payload owner.
 - **AND** account B is eligible for the requested model
 - **AND** deterministic failover is enabled
 - **WHEN** A returns `response.created` followed by an output-free
-  `server_is_overloaded` rejection
+  `server_is_overloaded` or `overloaded_error` rejection
 - **THEN** the stream excludes A and sends one bounded replay selection to B
 - **AND** the client observes only B's response lifecycle
 
@@ -31,7 +31,8 @@ single-account, or dispatched-payload owner.
 - **GIVEN** a self-contained HTTP Responses stream selects account A
 - **AND** account B is eligible for the requested model
 - **AND** deterministic failover is enabled
-- **WHEN** A returns `server_is_overloaded` as its first SSE event
+- **WHEN** A returns `server_is_overloaded` or `overloaded_error` as its first
+  SSE event
 - **THEN** the stream excludes A and sends one bounded replay selection to B
 - **AND** the client observes only B's response lifecycle
 

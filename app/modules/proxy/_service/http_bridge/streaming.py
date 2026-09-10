@@ -642,7 +642,8 @@ def _http_bridge_unsafe_new_response_recovery_eligible(
     """
     settings = _service_get_settings()
     return bool(
-        getattr(settings, "http_responses_session_bridge_unsafe_new_response_recovery_enabled", False)
+        getattr(settings, "http_responses_session_bridge_complete_transcript_recovery_enabled", False)
+        and getattr(settings, "http_responses_session_bridge_unsafe_new_response_recovery_enabled", False)
         and request_state.previous_response_not_found_rewritten
         and request_state.previous_response_id is not None
         and request_state.response_id is None

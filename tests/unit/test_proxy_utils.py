@@ -38680,6 +38680,7 @@ async def test_process_upstream_websocket_text_replays_opted_in_terse_invalid_an
         proxy_service,
         "get_settings",
         lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
             http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
             http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
         ),
@@ -38768,6 +38769,7 @@ async def test_process_upstream_websocket_text_does_not_replay_identity_bearing_
         proxy_service,
         "get_settings",
         lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
             http_responses_session_bridge_unsafe_new_response_recovery_enabled=True,
             http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
         ),

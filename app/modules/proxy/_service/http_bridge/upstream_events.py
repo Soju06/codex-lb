@@ -272,7 +272,10 @@ def _http_bridge_unsafe_new_response_anchor_error(
 ) -> bool:
     """Classify the upstream's terse invalid-anchor error only when opted in."""
     settings = _service_get_settings()
-    if not (getattr(settings, "http_responses_session_bridge_unsafe_new_response_recovery_enabled", False)):
+    if not (
+        getattr(settings, "http_responses_session_bridge_complete_transcript_recovery_enabled", False)
+        and getattr(settings, "http_responses_session_bridge_unsafe_new_response_recovery_enabled", False)
+    ):
         return False
     if code != "invalid_request_error":
         return False

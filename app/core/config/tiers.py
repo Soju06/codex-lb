@@ -74,7 +74,6 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "http_responses_session_bridge_operation_event_spool_max_pending_events": "T1",
     "http_responses_session_bridge_operation_event_spool_max_pending_bytes": "T1",
     "http_responses_session_bridge_operation_spool_retention_seconds": "T3",
-    "http_responses_session_bridge_ambiguous_continuation_recovery_mode": "T3",
     "http_responses_session_bridge_instance_id": "T1",
     "http_responses_session_bridge_instance_ring": "T1",
     "http_responses_session_bridge_advertise_base_url": "T1",
@@ -155,7 +154,6 @@ MIGRATING: Final[dict[str, str]] = {
     # K2 bridge: http_responses_session_bridge_enabled is a T4 kill switch, not
     # a tunable, so it has no MIGRATING row.
     "http_responses_session_bridge_operation_spool_retention_seconds": "backlog",
-    "http_responses_session_bridge_ambiguous_continuation_recovery_mode": "backlog",
 }
 
 # T3 fields whose database home already exists under a different column name

@@ -94,8 +94,9 @@ def test_removed_settings_tuple_covers_the_current_warning_batch():
     # remove-dead-env-settings + CODEX_LB_UPSTREAM_STREAM_TRANSPORT
     # (remove-upstream-stream-transport-env: the dashboard owns the value)
     # + 27 never-tuned core tunables (constantize-core-tunables)
-    # + seven K2 bridge names (constantize-session-bridge-tunables).
-    assert len(_REMOVED_SETTINGS) == 34 + 7
+    # + seven K2 bridge names (constantize-session-bridge-tunables)
+    # + the ambiguous-continuation recovery mode (drop-bridge-recovery-modes).
+    assert len(_REMOVED_SETTINGS) == 34 + 7 + 1
     assert all(name.startswith("CODEX_LB_") for name in _REMOVED_SETTINGS)
     assert len(set(_REMOVED_SETTINGS)) == len(_REMOVED_SETTINGS)
 
@@ -244,3 +245,21 @@ def test_constantized_bridge_tunables_are_listed_and_ignored(monkeypatch, caplog
 
 
 # end K2 bridge
+
+
+_DROPPED_BRIDGE_RECOVERY_MODE_ENV_NAME = "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_AMBIGUOUS_CONTINUATION_RECOVERY_MODE"
+
+
+def test_dropped_bridge_recovery_mode_env_is_listed_and_ignored(monkeypatch, caplog):
+    """The recovery-mode selector is gone; fail-closed is the only behaviour."""
+    assert _DROPPED_BRIDGE_RECOVERY_MODE_ENV_NAME in _REMOVED_SETTINGS
+    # The old Literal rejected anything outside the four modes.
+    monkeypatch.setenv(_DROPPED_BRIDGE_RECOVERY_MODE_ENV_NAME, "server_indefinite_recovery")
+
+    settings = Settings()
+    assert not hasattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode")
+
+    with caplog.at_level(logging.WARNING, logger="app.core.config.settings"):
+        found = warn_removed_settings({_DROPPED_BRIDGE_RECOVERY_MODE_ENV_NAME: "server_indefinite_recovery"})
+
+    assert found == [_DROPPED_BRIDGE_RECOVERY_MODE_ENV_NAME]

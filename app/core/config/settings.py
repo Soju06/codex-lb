@@ -119,6 +119,10 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS",
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED",
     # end K2 bridge
+    # drop-bridge-recovery-modes (first release after v1.25.0-beta.7): the
+    # three non-default ambiguous-continuation recovery modes were deleted and
+    # the shipped ``fail_closed`` behaviour is now the only one.
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_AMBIGUOUS_CONTINUATION_RECOVERY_MODE",
 )
 
 
@@ -363,15 +367,6 @@ class Settings(BaseSettings):
         default=7 * 24 * 60 * 60,
         gt=0,
     )
-    # Recovery-first mode can either ask the client to drop an ambiguous anchor
-    # or let the bridge retry that anchored request once on a fresh upstream
-    # socket. Both are at-least-once strategies; fail-closed remains default.
-    http_responses_session_bridge_ambiguous_continuation_recovery_mode: Literal[
-        "fail_closed",
-        "client_full_history_once",
-        "server_anchored_replay_once",
-        "server_indefinite_recovery",
-    ] = "fail_closed"
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None

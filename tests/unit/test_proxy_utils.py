@@ -39295,26 +39295,27 @@ def test_http_bridge_should_attempt_local_previous_response_recovery_normalizes_
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(type_only_not_found_error) is True
 
 
-def test_http_bridge_server_recovery_mode_retries_ambiguous_transport_once(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("code", ["stream_incomplete", "stream_idle_timeout", "upstream_request_timeout"])
+def test_http_bridge_ambiguous_transport_never_attempts_local_recovery(code: str):
+    """Ambiguous continuation failures are always classified fail-closed.
+
+    The bridge has no upstream idempotency or status endpoint, so a transport
+    failure on an anchored ``response.create`` cannot be distinguished from an
+    accepted-but-unobserved dispatch. There is no setting that relaxes this
+    (``drop-bridge-recovery-modes`` deleted the three at-least-once modes).
+    """
     ambiguous_error = proxy_module.ProxyResponseError(
         502,
         {
             "error": {
                 "type": "server_error",
-                "code": "upstream_request_timeout",
+                "code": code,
                 "message": "Upstream did not acknowledge response.create",
             }
         },
     )
-    monkeypatch.setattr(
-        proxy_service,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_anchored_replay_once"
-        ),
-    )
 
-    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(ambiguous_error) is True
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(ambiguous_error) is False
 
 
 def test_http_bridge_should_rollover_after_context_overflow():
@@ -49353,83 +49354,6 @@ async def test_http_bridge_eventless_retry_transport_failure_uses_bridge_timeout
     assert error["code"] == "bridge_eventless_timeout"
     assert "retry may duplicate upstream work" in cast(str, error["message"])
     assert request_state.failure_detail_override == "bridge_eventless_timeout"
-    record_failure.assert_awaited_once_with(session, detail="bridge_eventless_timeout")
-
-
-@pytest.mark.asyncio
-async def test_http_bridge_eventless_retry_transport_failure_raises_bridge_timeout_proxy_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
-    settings = _make_proxy_settings()
-    settings.sse_keepalive_interval_seconds = 0.001
-    settings.stream_idle_timeout_seconds = 1.0
-    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.002)
-    settings.http_responses_session_bridge_ambiguous_continuation_recovery_mode = "server_indefinite_recovery"
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="req_bridge_retry_transport_failure_proxy",
-        model="gpt-5.1",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=time.monotonic(),
-        response_id=None,
-        event_queue=asyncio.Queue(),
-        request_text='{"type":"response.create"}',
-        previous_response_id="resp-anchor",
-        transport="http",
-    )
-    session = proxy_service._HTTPBridgeSession(
-        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-retry-transport-failure-proxy", None),
-        headers={},
-        affinity=proxy_service._AffinityPolicy(),
-        request_model="gpt-5.1",
-        account=_make_account("acc_bridge_retry_transport_failure_proxy"),
-        upstream=AsyncMock(),
-        upstream_control=proxy_service._WebSocketUpstreamControl(),
-        pending_requests=deque([request_state]),
-        pending_lock=anyio.Lock(),
-        response_create_gate=asyncio.Semaphore(1),
-        queued_request_count=1,
-        last_used_at=0.0,
-        idle_ttl_seconds=30.0,
-    )
-    record_failure = AsyncMock(return_value=1)
-
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
-    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
-    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
-    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
-    monkeypatch.setattr(
-        service,
-        "_retry_http_bridge_precreated_request",
-        AsyncMock(
-            side_effect=UpstreamWebSocketTransportError(
-                "dial failed",
-                error_code="upstream_unavailable",
-            )
-        ),
-    )
-    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
-
-    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
-        async for _ in service._stream_http_bridge_session_events(
-            session,
-            request_state=request_state,
-            text_data='{"type":"response.create"}',
-            queue_limit=10,
-            propagate_http_errors=True,
-            downstream_turn_state=None,
-        ):
-            pass
-
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.payload["error"]["code"] == "bridge_eventless_timeout"
-    assert (
-        exc_info.value.payload["error"]["message"] == http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE
-    )
     record_failure.assert_awaited_once_with(session, detail="bridge_eventless_timeout")
 
 

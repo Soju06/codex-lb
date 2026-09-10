@@ -51,8 +51,10 @@ max_items = 5
 # 130 -> 103 constantize-core-tunables turned 27 never-tuned core tunables
 # into fixed constants (#1340 precedent, slop-removal 0908 K1); 103 -> 96
 # K2 bridge: constantize-session-bridge-tunables fixed seven never-tuned
-# HTTP session bridge tunables.
-max = 96
+# HTTP session bridge tunables; 96 -> 95 drop-bridge-recovery-modes deleted
+# the ambiguous-continuation recovery mode selector (fail-closed is the only
+# behaviour now).
+max = 95
 
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and

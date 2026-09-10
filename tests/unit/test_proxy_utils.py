@@ -13028,6 +13028,7 @@ async def test_compact_responses_rejects_image_inlining_that_exceeds_wire_budget
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
         compact_request_budget_seconds = 7200.0
+        stream_idle_timeout_seconds = 7200.0
         trace_channels = frozenset()
 
     async def fake_inline(payload_dict, session, connect_timeout):

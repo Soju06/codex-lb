@@ -23888,6 +23888,7 @@ async def test_aborted_creator_rejects_before_durable_claim(
         raise AssertionError("create_session should be cancelled by the aborting waiter")
 
     settings = _make_app_settings(proxy_admission_wait_timeout_seconds=0.01)
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", claim_durable)
@@ -38510,6 +38511,7 @@ async def test_inflight_waiter_retries_after_aborted_owner_finalizes(
         return replacement
 
     settings = _make_app_settings(proxy_admission_wait_timeout_seconds=0.01)
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())

@@ -2618,6 +2618,15 @@ class _StreamingRetryMixin:
                                     http_status=tex.status_code,
                                 )
                                 if resilience.deterministic_failover_enabled:
+                                    if (
+                                        not settlement.downstream_visible
+                                        and attempt < max_attempts - 1
+                                        and classified["failure_class"] in ("rate_limit", "quota")
+                                    ):
+                                        _move_previsible_quota_rejection_from_soft_owner(
+                                            account_id=account.id,
+                                            outcome="owner_previsible_status_quota_rejection",
+                                        )
                                     action = failover_decision(
                                         failure_class=classified["failure_class"],
                                         downstream_visible=settlement.downstream_visible,

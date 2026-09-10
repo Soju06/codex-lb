@@ -17,3 +17,5 @@
 - [x] 3.2 Run focused streaming, ownership, replay-safety, and lint validation.
 - [x] 3.3 Add route-level scheduled-heartbeat failover and fail-closed shape coverage.
 - [x] 3.4 Run strict OpenSpec validation: `npx --yes @fission-ai/openspec@1.11.0 validate recover-unanchored-quota-replay --strict` passes.
+
+- [x] Reconcile current-main status-error failover: establish a verified portable projection before evaluating dispatch ownership, preserving hard pins and visible-output rejection.

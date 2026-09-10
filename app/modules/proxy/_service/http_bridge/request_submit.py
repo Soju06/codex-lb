@@ -321,8 +321,12 @@ def _http_bridge_cooldown_suppression_is_replay_safe(request_state: _WebSocketRe
 
 
 def _http_bridge_operation_fence_for_hard_continuity_enabled(request_state: _WebSocketRequestState) -> bool:
-    """The removed server-owned recovery mode is permanently disabled."""
-    return False
+    """Return whether parked recovery may use the hard-continuity operation fence."""
+    settings = _service_get_settings()
+    return bool(
+        request_state.hard_continuity_anchor
+        and getattr(settings, "http_responses_session_bridge_parked_recovery_enabled", False)
+    )
 
 
 def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketRequestState) -> bool:

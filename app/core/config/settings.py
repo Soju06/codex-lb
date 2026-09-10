@@ -417,7 +417,7 @@ class Settings(BaseSettings):
         ge=1,
         le=12,
     )
-    # When enabled together with server_indefinite_recovery, an explicit
+    # When enabled together with complete_transcript_recovery_enabled, an explicit
     # previous_response_id loss may be recovered by replaying a proof-gated
     # full-history request without the stale anchor. The upstream then mints a
     # new response id. This is intentionally a separate opt-in because the
@@ -469,7 +469,7 @@ class Settings(BaseSettings):
     # Must stay >= the highest ``minimal_client_version`` in the bootstrap
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
     # receive an upstream catalog without those models.
-    model_registry_client_version: str = "0.154.0"
+    model_registry_client_version: str = CODEX_VERSION
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)

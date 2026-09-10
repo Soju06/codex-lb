@@ -22,3 +22,5 @@
 - [x] Cover the refusal (disabled source, disabled source model, all three
       routes) and the negative controls (unknown model, subscription slug
       shadowed by a disabled source) with integration tests.
+- [x] Cover recorded previous-response ownership overriding disabled-source
+      denial on both HTTP Responses routes.

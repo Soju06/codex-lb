@@ -1218,14 +1218,19 @@ async def responses(
         # The ordinary lookup itself missed (continuity suppression means an
         # enabled source claimed the model, so the disabled probe must not
         # override the recorded subscription anchor).
-        disabled_denial = await _disabled_model_source_denial(
-            request,
-            responses_payload.model,
-            api_key,
-            route="responses",
-            raw_model=raw_source_model,
-            require_streaming=not backend_non_streaming_requested,
-        )
+        try:
+            disabled_denial = await _disabled_model_source_denial(
+                request,
+                responses_payload.model,
+                api_key,
+                route="responses",
+                raw_model=raw_source_model,
+                require_streaming=not backend_non_streaming_requested,
+                context=context,
+                previous_response_id=responses_payload.previous_response_id,
+            )
+        except ProxyResponseError as exc:
+            return _logged_error_json_response(request, exc.status_code, exc.payload)
         if disabled_denial is not None:
             return disabled_denial
     if source is None:
@@ -1361,11 +1366,11 @@ async def responses_websocket(
         if overflow_denial is not None:
             await websocket.send_denial_response(overflow_denial)
             return
-    client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
+    turn_state_header_present = proxy_affinity_module._turn_state_header_present(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
-    if client_turn_state is None and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
+    if not turn_state_header_present and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
         forwarded_headers["x-codex-turn-state"] = turn_state
     await context.service.proxy_responses_websocket(
         websocket,
@@ -1374,7 +1379,7 @@ async def responses_websocket(
         openai_cache_affinity=True,
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
-        synthesized_turn_state=turn_state if client_turn_state is None else None,
+        synthesized_turn_state=turn_state if not turn_state_header_present else None,
         capability_header_values=capability_header_values,
     )
 
@@ -1463,14 +1468,19 @@ async def v1_responses(
         # The ordinary lookup itself missed (continuity suppression means an
         # enabled source claimed the model, so the disabled probe must not
         # override the recorded subscription anchor).
-        disabled_denial = await _disabled_model_source_denial(
-            request,
-            responses_payload.model,
-            api_key,
-            route="responses",
-            raw_model=raw_source_model,
-            require_streaming=responses_payload.stream is True,
-        )
+        try:
+            disabled_denial = await _disabled_model_source_denial(
+                request,
+                responses_payload.model,
+                api_key,
+                route="responses",
+                raw_model=raw_source_model,
+                require_streaming=responses_payload.stream is True,
+                context=context,
+                previous_response_id=responses_payload.previous_response_id,
+            )
+        except ProxyResponseError as exc:
+            return _logged_error_json_response(request, exc.status_code, exc.payload)
         if disabled_denial is not None:
             return disabled_denial
     if source is None:
@@ -1611,6 +1621,7 @@ async def internal_bridge_responses(
         forwarded_legacy_signature=forwarded_request_context.context.signature_version is None,
         forwarded_headers=forwarded_headers,
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
+        forwarded_synthesized_turn_state=forwarded_request_context.context.synthesized_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
         forwarded_file_owner_account_id=forwarded_request_context.context.file_owner_account_id,
@@ -1763,11 +1774,11 @@ async def v1_responses_websocket(
         if overflow_denial is not None:
             await websocket.send_denial_response(overflow_denial)
             return
-    client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
+    turn_state_header_present = proxy_affinity_module._turn_state_header_present(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
-    if client_turn_state is None and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
+    if not turn_state_header_present and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
         forwarded_headers["x-codex-turn-state"] = turn_state
     await context.service.proxy_responses_websocket(
         websocket,
@@ -1776,7 +1787,7 @@ async def v1_responses_websocket(
         openai_cache_affinity=True,
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
-        synthesized_turn_state=turn_state if client_turn_state is None else None,
+        synthesized_turn_state=turn_state if not turn_state_header_present else None,
         capability_header_values=capability_header_values,
     )
 
@@ -4812,19 +4823,34 @@ async def _select_responses_model_source_with_continuity(
     """Select a source unless recorded subscription continuity owns the anchor.
 
     Returns ``(selection, continuity_suppressed)``. ``continuity_suppressed``
-    is ``True`` only when an enabled source claimed the model but a recorded
-    subscription owner for ``previous_response_id`` pinned the turn to a
-    subscription account instead. Callers use it to tell that case apart from
-    a genuine lookup miss: only a genuine miss may consult the disabled-source
+    is ``True`` when a recorded subscription owner for the turn state or
+    ``previous_response_id`` pinned the turn to a subscription account instead
+    of an enabled model source. Callers use it to tell that case apart from a
+    genuine lookup miss: only a genuine miss may consult the disabled-source
     denial, because a continuity-suppressed turn already has a subscription
     anchor that must keep being served.
     """
+    turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(request.headers)
     source_selection = await _select_responses_model_source(
         payload.model,
         api_key,
         raw_model=raw_model,
         require_streaming=require_streaming,
     )
+
+    if turn_state is not None:
+        turn_state_owner_account_id = await context.service._resolve_compact_turn_state_owner(
+            turn_state=turn_state,
+            api_key=api_key,
+            # Synthetic markers are compatibility placeholders when their
+            # bridge alias is unavailable; non-synthetic client values remain
+            # hard continuity constraints.
+            fail_on_missing=not proxy_affinity_module._is_synthesized_turn_state(turn_state),
+        )
+        payload._codex_lb_turn_state_owner_account_id = turn_state_owner_account_id
+        payload._codex_lb_turn_state_owner_lookup_completed = True
+        if turn_state_owner_account_id is not None:
+            return None, True
     if source_selection is None or payload.previous_response_id is None:
         return source_selection, False
     owner_account_id = await context.service._resolve_websocket_previous_response_owner(
@@ -4847,6 +4873,8 @@ async def _disabled_model_source_denial(
     raw_model: str | None = None,
     require_streaming: bool = False,
     headers: Mapping[str, str] | None = None,
+    context: ProxyContext | None = None,
+    previous_response_id: str | None = None,
 ) -> JSONResponse | None:
     """Refuse a request whose model source exists but is switched off.
 
@@ -4892,6 +4920,15 @@ async def _disabled_model_source_denial(
     )
     if selection is None:
         return None
+    if route == "responses" and context is not None and previous_response_id is not None:
+        owner_account_id = await context.service._resolve_websocket_previous_response_owner(
+            previous_response_id=previous_response_id,
+            api_key=api_key,
+            session_id=proxy_affinity_module._owner_lookup_session_id_from_headers(request.headers),
+            surface="http_source_route",
+        )
+        if owner_account_id is not None:
+            return None
     source, matched_model = selection
     # The source name is operator-facing configuration, not a client-visible
     # identifier, so the envelope names the model and the condition only.
@@ -6496,6 +6533,7 @@ async def _stream_responses(
     forwarded_legacy_signature: bool = False,
     forwarded_headers: Mapping[str, str] | None = None,
     forwarded_downstream_turn_state: str | None = None,
+    forwarded_synthesized_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
     forwarded_file_owner_account_id: str | None = None,
@@ -6621,6 +6659,17 @@ async def _stream_responses(
         if bridge_active
         else None
     )
+    synthesized_turn_state = (
+        forwarded_synthesized_turn_state
+        if bridge_active and forwarded_request
+        else downstream_turn_state
+        if (
+            bridge_active
+            and not forwarded_request
+            and not proxy_affinity_module._turn_state_header_present(effective_headers)
+        )
+        else None
+    )
     turn_state_headers = (
         proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state)
         if downstream_turn_state is not None
@@ -6739,6 +6788,7 @@ async def _stream_responses(
                 api_key_reservation=reservation,
                 suppress_text_done_events=suppress_text_done_events,
                 downstream_turn_state=downstream_turn_state,
+                synthesized_turn_state=synthesized_turn_state,
                 forwarded_request=forwarded_request,
                 forwarded_original_request_unanchored=forwarded_original_request_unanchored,
                 forwarded_legacy_signature=forwarded_legacy_signature,
@@ -6990,6 +7040,11 @@ async def _collect_responses(
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
+    synthesized_turn_state = (
+        downstream_turn_state
+        if bridge_active and not proxy_affinity_module._turn_state_header_present(request.headers)
+        else None
+    )
     client_ip = resolve_request_client_host(request)
     turn_state_headers = (
         proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state)
@@ -7010,6 +7065,7 @@ async def _collect_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
+            synthesized_turn_state=synthesized_turn_state,
             client_ip=client_ip,
             http_bridge_active=bridge_active,
         )

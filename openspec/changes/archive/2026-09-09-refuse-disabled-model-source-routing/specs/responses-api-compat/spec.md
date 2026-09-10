@@ -34,6 +34,11 @@ subscription account, and the client's HTTP fallback then meets the
 structurally excluded request and a recorded previous-response subscription
 owner — keep bypassing the guard unchanged.
 
+For the HTTP Responses routes, a recorded subscription owner for
+`previous_response_id` SHALL be resolved before disabled-source denial. That
+owner evidence overrides the disabled model source and keeps the continuation
+on subscription routing; it MUST NOT be rejected as `model_source_disabled`.
+
 The refusal MUST happen before any usage reservation is taken, so a refused
 request strands no reservation, and MUST NOT create a request log entry for a
 dispatch that never happened.
@@ -52,6 +57,14 @@ dispatch that never happened.
 - **WHEN** a client calls `POST /v1/responses` or `POST /backend-api/codex/responses` with model `m`
 - **THEN** the response is `503` with error code `model_source_disabled`
 - **AND** no subscription account is selected for the request
+
+#### Scenario: Recorded subscription owner overrides disabled-source denial
+
+- **GIVEN** a Responses-capable model source exposes model `m` and is disabled
+- **AND** request logs record a subscription account as the owner of `previous_response_id`
+- **WHEN** a client calls `POST /v1/responses` or `POST /backend-api/codex/responses` with model `m` and that previous response
+- **THEN** the request is not rejected with `model_source_disabled`
+- **AND** subscription routing preserves the recorded account owner
 
 #### Scenario: A disabled model on an enabled source is refused
 

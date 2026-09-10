@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import deque
 from collections.abc import Container, Mapping
 from dataclasses import dataclass
@@ -1227,14 +1228,19 @@ def transcript_is_source_free(view: PortabilityView, *, supported_tool_types: fr
     return not any(_item_type(item) in ("compaction", "reasoning") for item in input_items)
 
 
+_PORTABLE_TURN_STATE_PATTERN = re.compile(r"(?:http_)?turn_[0-9a-f]{32}")
+
+
 def is_binding_turn_state(headers: Mapping[str, str]) -> bool:
-    """Non-blank ``x-codex-turn-state`` that does not match ``_SYNTHESIZED_TURN_STATE_PATTERN``."""
+    """Nonblank turn state outside the generated shape allowed by provider portability."""
 
     # ``affinity`` imports this module; resolve its helpers at call time.
-    from app.modules.proxy.affinity import _is_synthesized_turn_state, _sticky_key_from_turn_state_header
+    from app.modules.proxy.affinity import _sticky_key_from_turn_state_header
 
     turn_state = _sticky_key_from_turn_state_header(headers)
-    return turn_state is not None and not _is_synthesized_turn_state(turn_state)
+    # Subscription compatibility accepts readable markers under a sole-owner
+    # constraint. That exception does not establish cross-provider portability.
+    return turn_state is not None and _PORTABLE_TURN_STATE_PATTERN.fullmatch(turn_state) is None
 
 
 def _classification_view(

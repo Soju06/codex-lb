@@ -236,7 +236,11 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
-from app.modules.proxy.load_balancer import effective_account_concurrency_caps, effective_routing_tunables
+from app.modules.proxy.load_balancer import (
+    SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+    effective_account_concurrency_caps,
+    effective_routing_tunables,
+)
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -4415,7 +4419,10 @@ class _HTTPBridgeRequestSubmitMixin:
             if isinstance(exc, ProxyResponseError):
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
-                if code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE and request_state.event_queue is not None:
+                if request_state.event_queue is not None and code in {
+                    _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
+                    SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+                }:
                     await request_state.event_queue.put(
                         format_sse_event(
                             _security_work_advisory_event(

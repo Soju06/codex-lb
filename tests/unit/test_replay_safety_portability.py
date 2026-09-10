@@ -32,6 +32,7 @@ from app.modules.model_sources.projection import (
     overflow_portability_view,
     strip_source_telemetry,
 )
+from app.modules.proxy.affinity import _is_synthesized_turn_state
 from app.modules.proxy.replay_safety import (
     _ACCOUNT_NEUTRAL_TOOL_TYPES,
     _PORTABILITY_VIEW_ONLY_FIELDS,
@@ -423,6 +424,16 @@ def test_hand_built_view_with_an_unknown_field_fails_closed_as_history() -> None
 )
 def test_is_binding_turn_state(headers: Mapping[str, str], binding: bool) -> None:
     assert is_binding_turn_state(headers) is binding
+
+
+@pytest.mark.parametrize("prefix", ["turn_", "http_turn_"])
+@pytest.mark.parametrize("suffix", ["readable-marker", "f" * 31, "F" * 32, "f" * 33])
+def test_subscription_marker_compatibility_does_not_prove_provider_portability(prefix: str, suffix: str) -> None:
+    marker = prefix + suffix
+    assert _is_synthesized_turn_state(marker)
+    assert _verdict(_portable_body(), headers={"x-codex-turn-state": marker}) == PortabilityVerdict(
+        False, "turn_state_bound"
+    )
 
 
 def test_binding_turn_state_is_the_last_reason() -> None:

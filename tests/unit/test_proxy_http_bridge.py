@@ -49,7 +49,7 @@ from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE, openai_error
 from app.core.openai.models import OpenAIError, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
-from app.db.models import AccountStatus, Base, DashboardSettings, HttpBridgeSessionState
+from app.db.models import Account, AccountStatus, Base, DashboardSettings, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
@@ -16816,7 +16816,12 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
-        {"model": "gpt-5.4", "instructions": "hi", "input": "hello"},
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            # Opaque state exercises owner fallback and the legacy-forward fence.
+            "input": [{"type": "reasoning", "encrypted_content": "opaque-test-state", "summary": []}],
+        },
     )
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-fallback-owner-proof",
@@ -16874,6 +16879,9 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     unknown_alias = AsyncMock(return_value=None)
     monkeypatch.setattr(service._durable_bridge, "lookup_turn_state_target", unknown_alias)
+    # Reach the legacy-forward proof with an unambiguous subscription owner.
+    candidates = AsyncMock(return_value=(Account(id="legacy-owner"),))
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", candidates)
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=owner_forward))
 
@@ -16912,7 +16920,13 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.payload["error"]["code"] == "bridge_forward_upgrade_required"
-    unknown_alias.assert_awaited_once_with(turn_state="http_turn_unknown", api_key_id=None)
+    # The marker preflight and the independent legacy-forward proof both miss.
+    assert unknown_alias.await_count == 2
+    assert all(
+        awaited.args == () and awaited.kwargs == {"turn_state": "http_turn_unknown", "api_key_id": None}
+        for awaited in unknown_alias.await_args_list
+    )
+    candidates.assert_awaited_once_with(account_ids=None)
     assert forward_called is False
 
 
@@ -17459,8 +17473,34 @@ async def test_stream_via_http_bridge_resolves_previous_response_owner_from_requ
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_fails_closed_when_previous_response_owner_missing_with_single_candidate(
+@pytest.mark.parametrize(
+    (
+        "candidate_count",
+        "client_turn_state",
+        "synthesized_turn_state",
+        "forwarded_request",
+        "allow_fallback",
+    ),
+    [
+        (0, None, "http_turn_generated", False, False),
+        (1, None, "http_turn_generated", False, True),
+        (2, None, "http_turn_generated", False, False),
+        (1, "client-turn-state", None, False, False),
+        (1, "turn_00000000000000000000000000000000", None, False, True),
+        (1, "http_turn_00000000000000000000000000000000", None, False, True),
+        (1, "", None, False, False),
+        (1, "   ", None, False, False),
+        (1, "client-turn-state", None, True, False),
+        (1, "http_turn_generated", "http_turn_generated", True, True),
+    ],
+)
+async def test_stream_via_http_bridge_previous_response_owner_miss_uses_sole_candidate_or_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
+    candidate_count: int,
+    client_turn_state: str | None,
+    synthesized_turn_state: str | None,
+    forwarded_request: bool,
+    allow_fallback: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
@@ -17517,40 +17557,77 @@ async def test_stream_via_http_bridge_fails_closed_when_previous_response_owner_
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
-    load_selection_inputs = AsyncMock(
-        return_value=SimpleNamespace(
-            accounts=[SimpleNamespace(id="acc-only", status=AccountStatus.ACTIVE)],
-        )
+    candidates = tuple(
+        SimpleNamespace(id=f"acc-owner-miss-{index}", status=AccountStatus.ACTIVE) for index in range(candidate_count)
     )
-    monkeypatch.setattr(
-        service._load_balancer,
-        "_load_selection_inputs",
-        load_selection_inputs,
-    )
-    get_or_create = AsyncMock()
+    list_continuity_owner_candidates = AsyncMock(return_value=candidates)
+    monkeypatch.setattr(service._load_balancer, "list_continuity_owner_candidates", list_continuity_owner_candidates)
+    session = _make_bridge_session(key_value="owner-miss-single")
+    get_or_create = AsyncMock(return_value=session if candidate_count == 1 else None)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
 
-    with pytest.raises(ProxyResponseError) as exc_info:
-        async for _chunk in service._stream_via_http_bridge(
-            payload,
-            headers={"x-codex-turn-state": "turn_owner_miss"},
-            codex_session_affinity=True,
-            propagate_http_errors=False,
-            openai_cache_affinity=False,
-            api_key=None,
-            api_key_reservation=None,
-            suppress_text_done_events=False,
-            idle_ttl_seconds=120.0,
-            codex_idle_ttl_seconds=1800.0,
-            max_sessions=8,
-            queue_limit=4,
-        ):
-            pass
+    async def fake_stream_http_bridge_session_events(
+        _session: proxy_service._HTTPBridgeSession,
+        **_kwargs: object,
+    ):
+        yield 'data: {"type":"response.completed"}\n\n'
 
-    get_or_create.assert_not_awaited()
-    load_selection_inputs.assert_not_awaited()
-    assert exc_info.value.status_code == 502
-    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
+
+    request_headers = {"x-codex-turn-state": client_turn_state} if client_turn_state is not None else {}
+    if allow_fallback:
+        chunks = [
+            chunk
+            async for chunk in service._stream_via_http_bridge(
+                payload,
+                headers=request_headers,
+                codex_session_affinity=True,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=1800.0,
+                max_sessions=8,
+                queue_limit=4,
+                synthesized_turn_state=synthesized_turn_state,
+                forwarded_request=forwarded_request,
+            )
+        ]
+        assert chunks == ['data: {"type":"response.completed"}\n\n']
+        get_or_create.assert_awaited_once()
+        assert get_or_create.await_args is not None
+        assert get_or_create.await_args.kwargs["preferred_account_id"] == candidates[0].id
+        assert get_or_create.await_args.kwargs["allow_previous_response_recovery_rebind"] is True
+    else:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            async for _chunk in service._stream_via_http_bridge(
+                payload,
+                headers=request_headers,
+                codex_session_affinity=True,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=1800.0,
+                max_sessions=8,
+                queue_limit=4,
+                synthesized_turn_state=synthesized_turn_state,
+                forwarded_request=forwarded_request,
+            ):
+                pass
+
+        get_or_create.assert_not_awaited()
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+
+    if client_turn_state is None or allow_fallback:
+        list_continuity_owner_candidates.assert_awaited_once()
+    else:
+        list_continuity_owner_candidates.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -17790,6 +17867,52 @@ async def test_forward_http_bridge_request_to_owner_preserves_session_header_key
     assert context.original_affinity_kind == "session_header"
     assert context.original_affinity_key == "sid-123"
     assert cast(dict[str, str], captured["headers"])["x-codex-session-id"] == "sid-123"
+
+
+@pytest.mark.asyncio
+async def test_forward_http_bridge_request_to_owner_preserves_synthesized_turn_state_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+    )
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    captured: dict[str, object] = {}
+
+    async def fake_stream_responses(**kwargs: object):
+        captured.update(kwargs)
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_owner_client",
+        cast(Any, SimpleNamespace(stream_responses=fake_stream_responses)),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=payload,
+            headers={},
+            api_key_reservation=None,
+            codex_session_affinity=True,
+            downstream_turn_state="http_turn_generated",
+            synthesized_turn_state="http_turn_generated",
+            request_started_at=10.0,
+            proxy_api_authorization=None,
+        )
+    ]
+
+    assert chunks == []
+    context = cast(proxy_service.HTTPBridgeForwardContext, captured["context"])
+    assert context.downstream_turn_state == "http_turn_generated"
+    assert context.synthesized_turn_state == "http_turn_generated"
 
 
 @pytest.mark.asyncio
@@ -20030,6 +20153,7 @@ async def test_stream_via_http_bridge_context_overflow_keeps_hard_affinity_sessi
         idle_ttl_seconds=120.0,
     )
     service._http_bridge_sessions[key] = session
+    service._http_bridge_turn_state_index[("turn_hard_overflow", None)] = key
 
     async def fake_stream_http_bridge_session_events(
         _session: proxy_service._HTTPBridgeSession,
@@ -20074,6 +20198,7 @@ async def test_stream_via_http_bridge_context_overflow_keeps_hard_affinity_sessi
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._durable_bridge, "lookup_turn_state_target", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)

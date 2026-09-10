@@ -27,6 +27,8 @@ from app.core.clients.proxy import (
 )
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
+    PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE,
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
     openai_error,
     synthetic_transport_failure_event,
@@ -85,6 +87,7 @@ from app.modules.proxy.affinity import (
     _prompt_cache_key_from_request_model,
     _sticky_key_for_responses_request,
     _sticky_key_from_turn_state_header,
+    _turn_state_header_present,
     _websocket_continuity_key_from_headers,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -100,7 +103,11 @@ from app.modules.proxy.helpers import (
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.http_continuation import http_continuation_signal
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.load_balancer import (
+    SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+    AccountLease,
+    AccountSelection,
+)
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
@@ -334,6 +341,7 @@ class _StreamingRetryMixin:
         rewritten_file_account_id: str | None = None,
         file_account_resolution_complete: bool = False,
         upstream_stream_transport_override: str | None = None,
+        synthesized_turn_state: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
@@ -440,17 +448,24 @@ class _StreamingRetryMixin:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+            synthesized_turn_state=synthesized_turn_state,
         )
-        turn_state_owner_account_id: str | None = None
+        turn_state_owner_account_id: str | None = payload._codex_lb_turn_state_owner_account_id
+        turn_state_owner_lookup_completed = payload._codex_lb_turn_state_owner_lookup_completed
+        turn_state_header_present = _turn_state_header_present(headers)
         turn_state = _sticky_key_from_turn_state_header(headers)
-        if turn_state is not None:
+        turn_state_is_synthesized = turn_state is not None and _is_synthesized_turn_state(turn_state)
+        if turn_state is not None and not turn_state_owner_lookup_completed:
             # HTTP and WebSocket transports share the bridge turn-state index;
             # treating this as ordinary sticky input would cross replicas or
             # accounts when the token was minted by an HTTP bridge session.
             turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
                 turn_state=turn_state,
                 api_key=api_key,
-                fail_on_missing=not _is_synthesized_turn_state(turn_state),
+                # Synthetic markers are compatibility placeholders when their
+                # bridge alias is unavailable; non-synthetic and blank client
+                # values remain hard continuity constraints.
+                fail_on_missing=not turn_state_is_synthesized,
             )
         sticky_key_source = "none"
         if affinity.codex_session_source == "thread_header":
@@ -1268,27 +1283,56 @@ class _StreamingRetryMixin:
             # settlement/release. Preflight failures before this boundary are
             # still owned by the originating API startup guard.
             _signal_propagated_responses_service_cleanup_ready()
-            if payload.previous_response_id is not None:
+            owner_miss_continuation = payload.previous_response_id is not None or (
+                turn_state_is_synthesized
+                and turn_state != synthesized_turn_state
+                and turn_state_owner_account_id is None
+                and rewritten_file_account_id is None
+                and not responses_payload_is_account_neutral_fresh_replay(payload.to_replay_safety_payload())
+            )
+            if owner_miss_continuation:
                 previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
-                preferred_account_id = await proxy._resolve_websocket_previous_response_owner(
-                    previous_response_id=payload.previous_response_id,
-                    api_key=api_key,
-                    session_id=previous_response_lookup_session_id,
-                    surface="http_stream",
-                )
+                if payload.previous_response_id is not None:
+                    preferred_account_id = await proxy._resolve_websocket_previous_response_owner(
+                        previous_response_id=payload.previous_response_id,
+                        api_key=api_key,
+                        session_id=previous_response_lookup_session_id,
+                        surface="http_stream",
+                    )
                 require_preferred_account = preferred_account_id is not None
                 # `previous_response_id` is a stored-object continuation, so it
                 # remains hard owner-bound even when the request also carries a
                 # soft prompt-cache affinity key. A different account may have a
                 # warmer cache, but it cannot safely resolve the stored response.
-                if preferred_account_id is None:
-                    selection_inputs = await proxy._load_balancer._load_selection_inputs(
-                        model=payload.model,
-                        additional_limit_name=None,
-                        account_ids=None,
-                    )
-                    if len(selection_inputs.accounts) != 1:
-                        message = "Previous response owner account is unavailable; retry later."
+                if preferred_account_id is None and turn_state_owner_account_id is None:
+                    # File pins and unresolved client turn-state are hard
+                    # continuity boundaries. A physically blank header still
+                    # counts as client input, while a synthetic-shaped marker
+                    # may use the compatibility fallback.
+                    if rewritten_file_account_id is not None or (
+                        turn_state_header_present and not turn_state_is_synthesized
+                    ):
+                        selection_candidates: tuple[Account, ...] = ()
+                    else:
+                        # Preserve the compatibility fallback for an owner miss
+                        # when exactly one subscription account is in scope.
+                        # Routing eligibility cannot identify a missing owner.
+                        try:
+                            selection_candidates = await proxy._load_balancer.list_continuity_owner_candidates(
+                                account_ids=(
+                                    api_key.assigned_account_ids
+                                    if api_key is not None and api_key.account_assignment_scope_enabled
+                                    else None
+                                ),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to list HTTP stream owner-miss candidates request_id=%s",
+                                request_id,
+                            )
+                            selection_candidates = ()
+                    if len(selection_candidates) != 1:
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         _record_continuity_fail_closed(
                             surface="http_stream",
                             reason="owner_account_unavailable",
@@ -1297,11 +1341,10 @@ class _StreamingRetryMixin:
                             upstream_error_code="owner_lookup_miss",
                         )
                         event = response_failed_event(
-                            "previous_response_owner_unavailable",
+                            PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
                             message,
                             response_id=request_id,
                         )
-                        yield format_sse_event(event)
                         await proxy._write_request_log(
                             account_id=None,
                             api_key=api_key,
@@ -1309,7 +1352,7 @@ class _StreamingRetryMixin:
                             model=payload.model,
                             latency_ms=int((clock.monotonic() - start) * 1000),
                             status="error",
-                            error_code="previous_response_owner_unavailable",
+                            error_code=PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE,
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
@@ -1321,7 +1364,15 @@ class _StreamingRetryMixin:
                             conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
+                        if propagate_http_errors:
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE, message),
+                            )
+                        yield format_sse_event(event)
                         return
+                    preferred_account_id = selection_candidates[0].id
+                    require_preferred_account = True
             # File and previous-response ownership are peers, not fallback
             # preferences. Resolve both before selection so a conflict cannot
             # be hidden by whichever source happened to run first. A hard turn
@@ -1438,7 +1489,11 @@ class _StreamingRetryMixin:
                     if (
                         not account
                         and require_security_work_authorized
-                        and selection.error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+                        and selection.error_code
+                        in (
+                            _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
+                            SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED,
+                        )
                     ):
                         _facade().logger.info(
                             "No security-work-authorized account available for stream retry; "
@@ -1716,8 +1771,8 @@ class _StreamingRetryMixin:
                         )
                         return
                     if require_preferred_account and preferred_account_id is not None:
-                        error_code = "previous_response_owner_unavailable"
-                        message = "Previous response owner account is unavailable; retry later."
+                        error_code = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         reason = "owner_account_unavailable"
                         upstream_error_code = "no_accounts"
                         if selection.error_code == "continuity_owner_conflict":
@@ -1735,12 +1790,6 @@ class _StreamingRetryMixin:
                             session_id=headers.get("x-codex-turn-state") or headers.get("session_id"),
                             upstream_error_code=upstream_error_code,
                         )
-                        event = response_failed_event(
-                            error_code,
-                            message,
-                            response_id=request_id,
-                        )
-                        yield format_sse_event(event)
                         await proxy._write_request_log(
                             account_id=preferred_account_id,
                             api_key=api_key,
@@ -1760,6 +1809,21 @@ class _StreamingRetryMixin:
                             conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
+                        # Native Codex clients consume terminal SSE events on
+                        # the backend route. Preserve the established
+                        # continuity-conflict event shape there, while HTTP
+                        # compatibility callers still receive the 502
+                        # response required for preferred-owner failures.
+                        if propagate_http_errors and (
+                            error_code != "continuity_owner_conflict" or enforce_openai_sdk_contract
+                        ):
+                            raise ProxyResponseError(502, openai_error(error_code, message))
+                        event = response_failed_event(
+                            error_code,
+                            message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
                         return
                     # If a prior attempt stored a transient 500 and the caller
                     # expects HTTP error propagation, re-raise the original error
@@ -1867,8 +1931,8 @@ class _StreamingRetryMixin:
                             request_id,
                         )
                     else:
-                        error_code = "previous_response_owner_unavailable"
-                        message = "Previous response owner account is unavailable; retry later."
+                        error_code = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE
+                        message = PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE
                         reason = "owner_account_unavailable"
                         upstream_error_code = "upstream_unavailable"
                         if selection.error_code == "continuity_owner_conflict":
@@ -1886,12 +1950,6 @@ class _StreamingRetryMixin:
                             session_id=headers.get("x-codex-turn-state") or headers.get("session_id"),
                             upstream_error_code=upstream_error_code,
                         )
-                        event = response_failed_event(
-                            error_code,
-                            message,
-                            response_id=request_id,
-                        )
-                        yield format_sse_event(event)
                         await proxy._write_request_log(
                             account_id=preferred_account_id,
                             api_key=api_key,
@@ -1911,6 +1969,21 @@ class _StreamingRetryMixin:
                             conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
+                        # Native Codex clients consume terminal SSE events on
+                        # the backend route. Preserve the established
+                        # continuity-conflict event shape there, while HTTP
+                        # compatibility callers still receive the 502
+                        # response required for preferred-owner failures.
+                        if propagate_http_errors and (
+                            error_code != "continuity_owner_conflict" or enforce_openai_sdk_contract
+                        ):
+                            raise ProxyResponseError(502, openai_error(error_code, message))
+                        event = response_failed_event(
+                            error_code,
+                            message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
                         return
                 try:
                     remaining_budget = proxy._remaining_budget_seconds(deadline)

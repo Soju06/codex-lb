@@ -227,11 +227,108 @@ HTTP bridge tracing archive IDs do not pin neutral requests. A real durable
 replaces that identity. Existing file pins and API-key settlement-before-health
 ordering remain independent invariants.
 
+## Continuity marker compatibility
+
+The proxy returns `turn_*` or `http_turn_*` values as first-turn continuity
+markers. They are useful client echoes, but they are not account-ownership
+proof: an alias can be absent after bridge eviction, a process restart, or a
+replica handoff. The normative routing rule is in the
+`Previous-response source routing follows proven ownership` requirement in
+`spec.md`.
+
+When a missing previous-response owner reaches the compatibility path and no
+independent hard owner is available, a marker-shaped value can continue only
+under the existing sole-eligible-account bound. This deliberately avoids
+requiring process-local issuance provenance, which would make valid HTTP bridge
+and direct WebSocket reconnects fail at topology or lifecycle boundaries. A
+registered marker still resolves to its recorded owner; a resolved
+previous-response owner or file pin remains authoritative. A physically present
+blank header and any non-synthetic marker stay hard client input and fail closed
+in the owner-miss path.
+
+For example, a client can echo `http_turn_<marker>` from an earlier HTTP
+response into a later compact request after the bridge alias has disappeared.
+With one eligible account, the request can use normal compact selection. In an
+owner-miss continuation, an opaque client marker, a blank header, a file pin,
+or an unavailable/ambiguous candidate set keeps the hard-owner or fail-closed
+rule in force. The same shape-based compatibility is used when a direct
+WebSocket continuation crosses an eviction, restart, or replica boundary.
+
 Streaming selection authorizes owner compatibility before opening upstream, but
 persists a new owner only after dispatch is observed. A transport failure that
 is positively classified as pre-dispatch therefore leaves the body unowned and
 eligible for its first real dispatch on another account. Ambiguous failures
 remain owner-bound.
+
+## HTTP alias lookup and marker-only compatibility
+
+The [source-ownership requirement](spec.md#requirement-previous-response-source-routing-follows-proven-ownership)
+distinguishes a marker's shape from the ownership evidence registered under
+it. An HTTP request with only a registered `turn_*` alias still belongs to its
+recorded account, even if no enabled model source matches. Skipping the alias
+lookup would discard ownership before streaming or a disabled-source probe.
+The lookup result is cached only after resolution, and lookup failures retain
+the resolver's sanitized HTTP status and payload.
+
+For example, an unregistered `http_turn_*` echo and a missing previous-response
+owner can continue through the HTTP bridge if the requesting API key permits
+exactly one eligible account. Local issuance history is not required. The
+same scoped count applies to compact requests carrying only an unresolved
+marker. Empty or ambiguous pools fail closed, while file pins and required
+durable bridge owners retain their independent constraints. Both HTTP routes
+are regression-tested, including registered aliases and lookup failures.
+
+For cold bridge continuations, the sole-candidate result also authorizes
+session creation on that account. Passing account resolution alone is not
+enough when the local session has disappeared. The incoming response anchor
+stays in the upstream request; this is not stale-anchor removal or proof of a
+durable owner.
+
+## Direct WebSocket registered alias ownership
+
+Both direct WebSocket source guards run after registered alias ownership has
+been reconciled with independent file and previous-response ownership. For
+example, a registered `http_turn_*` alias keeps an initial request on its
+subscription owner even when the requested model also appears in the source
+catalog. The same decision applies to a later frame on the open socket.
+
+The resolved alias owner stays separate from the preferred account because
+compatibility selection and injected continuity can also set that preference.
+A conflict fails closed before dispatch. Source-only requests still fall back
+to HTTP, and existing replay handling remains unchanged. See the
+[source-ownership requirement](spec.md#requirement-previous-response-source-routing-follows-proven-ownership).
+
+## WebSocket security retry exhaustion
+
+The [security-work retry requirement](spec.md#requirement-security-work-authorization-errors-can-route-to-authorized-accounts)
+covers exhaustion after a retry as well as an initially unavailable authorized
+pool. For example, an ordinary account rejects a security task, the authorized
+replacement's session has expired, and excluding that replacement leaves no
+authorized candidate. Authentication replay retains the original security error
+so the client receives the missing-pool warning and that error, rather than an
+internal account-selection code.
+
+Connection failures can reach the same outcome. The selector signals when it
+has already sent the terminal error so the connection loop does not send its
+last failure again. A later independent request on the same socket checks both
+terminal-event ordering and response-create gate release in regression tests.
+
+This handling does not add ordinary-account fallback or change replay safety.
+Owner-pinned requests and requests that have exposed output remain ineligible
+for an account switch. Account-model rejection fallback is separate: when no
+compatible replacement exists, its original 400 remains the useful failure.
+
+The HTTP bridge also reaches pool exhaustion when its last authorized
+replacement fails credential refresh or authentication before dispatch. Its
+retry handler maps that internal selection code to the same missing-pool
+advisory, then forwards the original security denial. For example, an ordinary
+account rejects a security task and the only authorized account returns 401
+both before and after refresh: the service generates the advisory and original
+denial, not the replacement's internal selection failure. Native backend HTTP
+streams retain the advisory. Public OpenAI-contract streams, including `/v1`
+and OpenAI-shaped backend requests, filter `codex_lb.warning` while preserving
+the original denial. The service still generates the warning before that HTTP
+normalization boundary; direct WebSocket delivery is unchanged.
 
 ## Known Client Integrations (Reference)
 
@@ -251,6 +348,28 @@ examples against the existing contract, not separate compatibility surfaces:
 New client guides added to `docs/client-setup.md` should stay configuration-only
 examples of this contract; anything needing new proxy behavior requires its own
 OpenSpec change first.
+
+## WebSocket capability and owner counting
+
+Previous-response and marker owner-miss counts use the repository-visible account
+collection narrowed only by API-key assignments. For example, if A may own the
+previous response and only B advertises the next requested model, B is not a
+unique possible owner. The same distinction applies to service tier, health,
+quota, capacity, security authorization, and retry exclusions. A sole possible
+owner still has to pass normal routing checks before dispatch.
+
+This enumeration has a separate interface from routing selection so callers
+cannot accidentally turn routing filters into ownership evidence. Existing
+account-deletion visibility stays unchanged. The
+[conversation ambiguity contract](../sticky-session-operations/spec.md#scenario-account-cap-pressure-does-not-manufacture-a-conversation-owner)
+still uses its model/API-key/security-scoped pool; that is not this owner-miss
+compatibility rule. Source precedence, known owners, hard pins, and replay safety
+also remain unchanged.
+
+The [owner-evidence contract](spec.md#requirement-previous-response-source-routing-follows-proven-ownership)
+defines this boundary. A sole unauthorized candidate is still rejected by
+normal capability routing, rather than being dispatched or replaced by an
+authorized account outside the ownership constraint.
 
 ## Operational Notes
 
@@ -297,3 +416,7 @@ stream. Predispatch failures and cancellation release origin-owned reservations;
 accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
+
+## Stateless turn-state placeholders
+
+A proxy-generated marker can be echoed after WebSocket acceptance even if no upstream account was selected. Treating that marker alone as a missing continuation owner blocked fresh requests in pools with multiple accounts. HTTP bridge, raw HTTP and direct WebSocket now retain placeholder behavior only when the complete original body passes the existing account-neutral fresh-replay validator. They do not project or remove fields to make it pass. Opaque history and unresolved tool outputs still need owner evidence; a successful fresh request does not prove those continuations recovered.

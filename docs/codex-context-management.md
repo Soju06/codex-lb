@@ -16,6 +16,10 @@ The client sends one encrypted tool-result string. codex-lb wraps native results
 
 Context tracking is activated by `reasoning.context=all_turns`. A bounded process-local cache avoids repeated writes and recognizes cached sessions even if a later turn omits the marker. An unmarked session absent from that cache follows ordinary inference without a context lookup. After cache eviction, restart or a move to another replica, clients must keep sending the marker for inference participation and durable identity checks. Explicit notes/history operations always validate their stored binding and current key scope.
 
+A fork receives a new root session UUID. It may replay signed results from its parent when it uses the same API key, retains `reasoning.context=all_turns`, and still has access to the result accounts. The fork gets its own durable binding before native inference. Another key, an excluded account, an invalid UUID or unmarked cross-session replay is rejected.
+
+Forks have separate notes namespaces. A copied transcript can contain the result of an earlier note read, but writing the same filename in the fork does not change the parent's file. New context calls keep the fork's explicit session identity.
+
 ## Isolated evaluation
 
 Run a separate build with a new empty data volume and loopback port, such as `127.0.0.1:2456`. Import eligible accounts, enable API-key authentication and create a test key with access to the pool. Use a new task so participation tracking starts before its first inference request.
@@ -61,6 +65,8 @@ Automated tests cover opaque route dispatch, HTTP streaming, HTTP bridging, nati
 Preserve both the database and existing `encryption.key`. Startup migrations create the ownership tables automatically. Replicas must share both to read the same context. Transparent retries through cross-replica forwarding and restored durable request state remain unverified and may preserve account ownership rather than rotate. The live restart test resumed through the normal client request path.
 
 A missing or invalid key returns `401`. Context requests return `409` if global API-key authentication is disabled, `403` for identity/scope conflicts, and `503` for an unavailable owner or unexpected transport failure. Typed upstream and validation errors retain their HTTP status even when history spans multiple accounts. Their error bodies use the generic code `context_backend_unavailable` to avoid exposing private upstream details. Invalid Responses containers produce `400` or `403` with `context_result_invalid`.
+
+The deployed ownership revision keeps its original August 30 parent. A separate merge revision joins it to the current upstream migrations. Startup therefore applies intervening upstream changes on existing context installations, while fresh upstream databases create the context tables. Both paths reach `20260910_120000_merge_codex_context_heads` without manual version stamping. Preserve a consistent database backup and its encryption key before upgrading.
 
 Timeouts and ambiguous writes are not retried. An explicit authentication rejection may refresh and retry once on the same owner. There is no account-to-account notes copy or new dashboard setting.
 

@@ -365,6 +365,7 @@ class CodexClient:
     ) -> CodexWebSocketResult:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
+        interpret_responses = bool(kwargs.pop("native_interpret_responses", False))
         _reject_reserved(kwargs)
         endpoints = (route.endpoint, *route.fallbacks)
         _reject_credentialed_plaintext_target(url, endpoints)
@@ -378,6 +379,7 @@ class CodexClient:
                     url,
                     endpoint.proxy_url,
                     kwargs,
+                    interpret_responses=interpret_responses,
                 )
                 if self._native_egress_client is not None and native_request is not None:
                     try:
@@ -755,6 +757,8 @@ def _prepare_native_websocket_request(
     url: str,
     proxy_url: str,
     kwargs: Mapping[str, Any],
+    *,
+    interpret_responses: bool = False,
 ) -> NativeWebSocketRequest | None:
     supported = {
         "compress",
@@ -800,6 +804,7 @@ def _prepare_native_websocket_request(
         ping_interval_seconds=ping_interval_seconds,
         ping_timeout_seconds=ping_timeout_seconds,
         proxy_url=proxy_url,
+        interpret_responses=interpret_responses,
     )
 
 

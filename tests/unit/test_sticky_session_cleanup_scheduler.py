@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 import app.modules.sticky_sessions.cleanup_scheduler as cleanup_scheduler
-from app.core.config.settings import Settings
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
+from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
@@ -45,15 +45,13 @@ def _purge_batch(
     )
 
 
-def test_build_sticky_session_cleanup_scheduler_respects_enabled_setting(monkeypatch) -> None:
-    settings = SimpleNamespace(sticky_session_cleanup_enabled=False)
-    monkeypatch.setattr(cleanup_scheduler, "get_settings", lambda: settings)
+def test_build_sticky_session_cleanup_scheduler_is_always_enabled(monkeypatch) -> None:
     monkeypatch.setattr(cleanup_scheduler, "_CLEANUP_INTERVAL_SECONDS", 42)
 
     scheduler = cleanup_scheduler.build_sticky_session_cleanup_scheduler()
 
     assert scheduler.interval_seconds == 42
-    assert scheduler.enabled is False
+    assert scheduler.enabled is True
 
 
 @pytest.mark.asyncio
@@ -679,8 +677,6 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
         cleanup_scheduler,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_idle_ttl_seconds=120.0,
-            http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
             http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
         ),
     )
@@ -746,8 +742,6 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
         cleanup_scheduler,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_idle_ttl_seconds=120.0,
-            http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
             http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
         ),
     )
@@ -811,8 +805,6 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
         cleanup_scheduler,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_idle_ttl_seconds=120.0,
-            http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
             http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
         ),
     )
@@ -860,29 +852,19 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
     ring_service.purge_stale_before.assert_called_once()
 
 
-def test_abandoned_bridge_retention_covers_prompt_cache_reuse_window() -> None:
+def test_abandoned_bridge_retention_covers_prompt_cache_reuse_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """Abandoned-row retention must be at least the longest bridge reuse TTL."""
     dashboard_settings = SimpleNamespace(
         openai_cache_affinity_max_age_seconds=1800,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
     )
-    app_settings = SimpleNamespace(
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
-    )
 
-    retention = cleanup_scheduler._abandoned_bridge_retention_seconds(
-        cast(DashboardSettings, dashboard_settings),
-        cast(Settings, app_settings),
-    )
+    retention = cleanup_scheduler._abandoned_bridge_retention_seconds(cast(DashboardSettings, dashboard_settings))
 
     assert retention == 3600.0
 
-    app_settings.http_responses_session_bridge_codex_idle_ttl_seconds = 7200.0
-    retention = cleanup_scheduler._abandoned_bridge_retention_seconds(
-        cast(DashboardSettings, dashboard_settings),
-        cast(Settings, app_settings),
-    )
+    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 7200.0)
+    retention = cleanup_scheduler._abandoned_bridge_retention_seconds(cast(DashboardSettings, dashboard_settings))
     assert retention == 7200.0
 
 
@@ -902,8 +884,6 @@ async def test_cleanup_once_gates_abandoned_purge_on_prompt_cache_reuse_ttl(monk
         cleanup_scheduler,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_idle_ttl_seconds=120.0,
-            http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
             http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
         ),
     )

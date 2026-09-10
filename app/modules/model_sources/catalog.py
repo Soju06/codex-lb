@@ -296,3 +296,10 @@ def _raw_metadata(source_model: ModelSourceModel) -> dict[str, JsonValue]:
         return {}
     parsed = json.loads(source_model.raw_metadata_json)
     return parsed if isinstance(parsed, dict) else {}
+
+
+def source_model_supports_vision(source: ModelSource, model: str) -> bool:
+    """Whether the enabled ``ModelSourceModel`` entry for ``model`` declares ``supports_vision`` (#2123 WP-C1)."""
+
+    entry = _enabled_source_model(source, model)
+    return entry is not None and bool(entry.supports_vision)

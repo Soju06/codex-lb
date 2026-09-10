@@ -246,7 +246,6 @@ def _websocket_settings(**overrides):
         "prefer_earlier_reset_accounts": False,
         "sticky_threads_enabled": False,
         "openai_cache_affinity_max_age_seconds": 300,
-        "openai_prompt_cache_key_derivation_enabled": True,
         "routing_strategy": "usage_weighted",
         "proxy_request_budget_seconds": 75.0,
         "stream_idle_timeout_seconds": 300.0,
@@ -254,12 +253,9 @@ def _websocket_settings(**overrides):
         "http_responses_session_bridge_instance_id": "test-instance",
         "sse_keepalive_interval_seconds": 10.0,
         "trace_channels": frozenset(),
-        "proxy_token_refresh_limit": 32,
-        "proxy_upstream_websocket_connect_limit": 64,
         "proxy_account_stream_recovery_reserve": 1,
         "proxy_api_key_fair_share_congestion_threshold_pct": 0,
         "proxy_response_create_limit": 64,
-        "proxy_compact_response_create_limit": 16,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -4660,6 +4656,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
         "model": "gpt-5.4",
         "input": "first",
         "promptCacheKey": "thread_a",
+        "service_tier": "priority",
         "stream": True,
     }
     second_request = {
@@ -4696,6 +4693,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
+                "service_tier": "priority",
                 "store": False,
                 "include": [],
                 "prompt_cache_key": "thread_a",
@@ -6551,6 +6549,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
         require_security_work_authorized,
         require_preferred_account,
         defer_no_account_error,
+        headers=None,
     ):
         del (
             self,
@@ -6572,6 +6571,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
             require_security_work_authorized,
             require_preferred_account,
             defer_no_account_error,
+            headers,
         )
         assert request_state.previous_response_id == "resp_ws_prev_anchor"
         return SimpleNamespace(id="acct_ws_prev_connect_failure")
@@ -11142,6 +11142,7 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
         require_security_work_authorized,
         require_preferred_account,
         defer_no_account_error,
+        headers=None,
     ):
         del (
             self,
@@ -11163,6 +11164,7 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
             require_security_work_authorized,
             require_preferred_account,
             defer_no_account_error,
+            headers,
         )
         assert request_state.previous_response_id == "resp_ws_prev_anchor_client"
         assert request_state.fresh_upstream_request_is_retry_safe is True

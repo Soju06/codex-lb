@@ -9,17 +9,25 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import update
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.config.dashboard_overrides import dashboard_overrides_bound
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.types import JsonValue
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus, AutomationJob, AutomationRun
+from app.db.models import Account, AccountStatus, AutomationJob, AutomationRun, DashboardSettings
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.automations.repository import AutomationsRepository
-from app.modules.automations.service import AutomationsService, _manual_slot_key, _scheduled_slot_key
+from app.modules.automations.service import (
+    AutomationsService,
+    _manual_slot_key,
+    _scheduled_cycle_key,
+    _scheduled_slot_key,
+)
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.settings.repository import SettingsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -5818,3 +5826,340 @@ async def test_automations_run_details_normalize_legacy_manual_cycle_key(async_c
     assert payload["totalAccounts"] == 2
     assert payload["completedAccounts"] == 1
     assert payload["pendingAccounts"] == 1
+
+
+async def _set_dashboard_compact_budget(seconds: float | None) -> None:
+    async with SessionLocal() as session:
+        await SettingsRepository(session).get_or_create()
+        await session.execute(update(DashboardSettings).values(compact_request_budget_seconds=seconds))
+        await session.commit()
+    await get_settings_cache().invalidate()
+
+
+async def _create_claimed_scheduled_run(
+    *,
+    account: Account,
+    due_slot: datetime,
+    claim_budget_seconds: float,
+) -> tuple[str, str]:
+    """A daily job whose slot at ``due_slot`` holds one in-flight claim pinned to ``claim_budget_seconds``."""
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Pinned claim budget",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=due_slot.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        await _set_job_updated_at(job.id, due_slot)
+        cycle_key = _scheduled_cycle_key(job.id, due_slot)
+        await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=1,
+            cycle_window_end=due_slot,
+            accounts=[(account.id, due_slot)],
+        )
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=claim_budget_seconds)):
+            run = await automations_repository.claim_run(
+                job_id=job.id,
+                trigger="scheduled",
+                slot_key=_scheduled_slot_key(job.id, account_id=account.id, due_slot=due_slot),
+                cycle_key=cycle_key,
+                cycle_expected_accounts=1,
+                cycle_window_end=due_slot,
+                scheduled_for=due_slot,
+                started_at=due_slot + timedelta(seconds=1),
+                account_id=account.id,
+            )
+        assert run is not None
+        assert run.claim_budget_seconds == claim_budget_seconds
+        return job.id, run.id
+
+
+@pytest.mark.asyncio
+async def test_automations_claims_store_compact_budget_in_effect(db_setup):
+    del db_setup
+    account = (await _create_accounts("auto-claim-budget"))[0]
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Claim budget snapshot",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=45.0)):
+            run = await automations_repository.claim_run(
+                job_id=job.id,
+                trigger="scheduled",
+                slot_key=f"scheduled:{job.id}:claim-budget",
+                cycle_key=f"scheduled:{job.id}:claim-budget",
+                cycle_expected_accounts=1,
+                cycle_window_end=now,
+                scheduled_for=now,
+                started_at=now,
+                account_id=account.id,
+            )
+        assert run is not None
+        assert run.claim_budget_seconds == 45.0
+        stored_run = await automations_repository.get_run(run.id)
+        assert stored_run is not None
+        assert stored_run.claim_budget_seconds == 45.0
+
+        # A stale reclaim re-pins the row to the budget in effect at that moment.
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=90.0)):
+            reclaimed_run = await automations_repository.claim_scheduled_cycle_run_execution(
+                run_id=run.id,
+                observed_started_at=run.started_at,
+                claimed_started_at=now + timedelta(seconds=1),
+                stale_started_before=now + timedelta(seconds=1),
+            )
+        assert reclaimed_run is not None
+        assert reclaimed_run.claim_budget_seconds == 90.0
+        assert reclaimed_run.started_at == now + timedelta(seconds=1)
+
+        # A manual cycle created through run-now stores the budget on its runs too.
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=75.0)):
+            _cycle, manual_runs = await automations_repository.create_run_cycle_with_runs(
+                cycle_key=f"manual:{job.id}:claim-budget",
+                job_id=job.id,
+                trigger="manual",
+                cycle_expected_accounts=1,
+                cycle_window_end=now,
+                accounts=[(account.id, now)],
+                runs=[(_manual_slot_key(job.id, "claim-budget", account.id), now, account.id)],
+                started_at=now,
+            )
+        assert [manual_run.claim_budget_seconds for manual_run in manual_runs] == [75.0]
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduler_reclaim_honours_budget_pinned_at_claim_when_dashboard_lowers_it(
+    db_setup, monkeypatch
+):
+    del db_setup
+    account = (await _create_accounts("auto-pinned-budget"))[0]
+    due_slot = datetime(2026, 9, 9, 1, 0, 0)
+    compact_calls: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        compact_calls.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+    job_id, run_id = await _create_claimed_scheduled_run(account=account, due_slot=due_slot, claim_budget_seconds=600.0)
+
+    # The dashboard lowers the budget to 60 s while the run is 200 s into its
+    # 600 s window: the current 90 s window would reclaim it, the pinned one must not.
+    await _set_dashboard_compact_budget(60.0)
+    try:
+        assert await _run_due_jobs(now_utc=due_slot + timedelta(seconds=200)) == 0
+        async with SessionLocal() as session:
+            untouched_run = await AutomationsRepository(session).get_run(run_id)
+        assert untouched_run is not None
+        assert untouched_run.status == "running"
+        assert untouched_run.started_at == due_slot + timedelta(seconds=1)
+        assert untouched_run.claim_budget_seconds == 600.0
+        assert compact_calls == []
+
+        # Past the pinned window (600 s + 30 s grace) the claim is reclaimable again.
+        assert await _run_due_jobs(now_utc=due_slot + timedelta(seconds=700)) == 1
+        async with SessionLocal() as session:
+            runs = await AutomationsRepository(session).list_runs(job_id, limit=10)
+        assert [run.id for run in runs] == [run_id]
+        assert runs[0].status == "success"
+        assert runs[0].claim_budget_seconds == 60.0
+        assert compact_calls == [account.chatgpt_account_id]
+    finally:
+        await _set_dashboard_compact_budget(None)
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduler_reclaim_uses_current_budget_for_legacy_row_without_pinned_budget(
+    db_setup, monkeypatch
+):
+    del db_setup
+    account = (await _create_accounts("auto-legacy-budget"))[0]
+    due_slot = datetime(2026, 9, 9, 1, 0, 0)
+    compact_calls: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        compact_calls.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+    job_id, run_id = await _create_claimed_scheduled_run(account=account, due_slot=due_slot, claim_budget_seconds=600.0)
+    async with SessionLocal() as session:
+        await session.execute(update(AutomationRun).where(AutomationRun.id == run_id).values(claim_budget_seconds=None))
+        await session.commit()
+
+    try:
+        # With the current budget at 600 s the 200 s old legacy claim is still in flight.
+        await _set_dashboard_compact_budget(600.0)
+        assert await _run_due_jobs(now_utc=due_slot + timedelta(seconds=200)) == 0
+        assert compact_calls == []
+
+        # Lowering the current budget to 60 s makes the same legacy claim stale.
+        await _set_dashboard_compact_budget(60.0)
+        assert await _run_due_jobs(now_utc=due_slot + timedelta(seconds=200)) == 1
+        async with SessionLocal() as session:
+            runs = await AutomationsRepository(session).list_runs(job_id, limit=10)
+        assert [run.id for run in runs] == [run_id]
+        assert runs[0].status == "success"
+        assert runs[0].claim_budget_seconds == 60.0
+        assert compact_calls == [account.chatgpt_account_id]
+    finally:
+        await _set_dashboard_compact_budget(None)
+
+
+@pytest.mark.asyncio
+async def test_list_due_manual_runs_honours_budget_pinned_at_claim(db_setup):
+    del db_setup
+    account = (await _create_accounts("auto-manual-pinned-budget"))[0]
+    scheduled_for = datetime(2026, 9, 9, 1, 0, 0)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Manual pinned budget",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=600.0)):
+            run = await automations_repository.claim_run(
+                job_id=job.id,
+                trigger="manual",
+                slot_key=_manual_slot_key(job.id, "pinned", account.id),
+                cycle_key=f"manual:{job.id}:pinned",
+                cycle_expected_accounts=1,
+                cycle_window_end=scheduled_for,
+                scheduled_for=scheduled_for,
+                started_at=scheduled_for + timedelta(seconds=1),
+                account_id=account.id,
+            )
+        assert run is not None
+
+        lowered_budget = DashboardSettings(compact_request_budget_seconds=60.0)
+        with dashboard_overrides_bound(lowered_budget):
+            still_in_flight = await automations_repository.list_due_manual_runs(
+                now_utc=scheduled_for + timedelta(seconds=200)
+            )
+            past_pinned_window = await automations_repository.list_due_manual_runs(
+                now_utc=scheduled_for + timedelta(seconds=700)
+            )
+        assert still_in_flight == []
+        assert [due_run.id for due_run in past_pinned_window] == [run.id]
+
+        # A legacy row without a pinned budget is judged by the current budget.
+        await session.execute(update(AutomationRun).where(AutomationRun.id == run.id).values(claim_budget_seconds=None))
+        await session.commit()
+        with dashboard_overrides_bound(lowered_budget):
+            legacy_due = await automations_repository.list_due_manual_runs(
+                now_utc=scheduled_for + timedelta(seconds=200)
+            )
+        assert [due_run.id for due_run in legacy_due] == [run.id]
+
+        # A pin below the current budget (left behind by a pre-pin writer that
+        # advanced ``started_at`` during a rolling deploy) does not shorten the
+        # window: the raised current budget covers the live attempt.
+        await session.execute(update(AutomationRun).where(AutomationRun.id == run.id).values(claim_budget_seconds=60.0))
+        await session.commit()
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=600.0)):
+            stale_pin_in_flight = await automations_repository.list_due_manual_runs(
+                now_utc=scheduled_for + timedelta(seconds=200)
+            )
+            stale_pin_past_window = await automations_repository.list_due_manual_runs(
+                now_utc=scheduled_for + timedelta(seconds=700)
+            )
+        assert stale_pin_in_flight == []
+        assert [due_run.id for due_run in stale_pin_past_window] == [run.id]
+
+
+@pytest.mark.asyncio
+async def test_list_due_manual_runs_limit_counts_only_eligible_rows(db_setup):
+    """An in-flight claim ordered ahead of a due placeholder must not consume the
+    batch slot owed to the placeholder (the SQL bound is looser than the per-row
+    pinned window, so candidates are paged until ``limit`` eligible rows are found)."""
+    del db_setup
+    account = (await _create_accounts("auto-manual-limit-eligible"))[0]
+    scheduled_for = datetime(2026, 9, 9, 2, 0, 0)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Manual limit eligible",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=600.0)):
+            in_flight = await automations_repository.claim_run(
+                job_id=job.id,
+                trigger="manual",
+                slot_key=_manual_slot_key(job.id, "in-flight", account.id),
+                cycle_key=f"manual:{job.id}:in-flight",
+                cycle_expected_accounts=1,
+                cycle_window_end=scheduled_for,
+                scheduled_for=scheduled_for,
+                started_at=scheduled_for + timedelta(seconds=1),
+                account_id=account.id,
+            )
+            # Sorted after the in-flight claim (later scheduled_for) but still due.
+            placeholder = await automations_repository.claim_run(
+                job_id=job.id,
+                trigger="manual",
+                slot_key=_manual_slot_key(job.id, "placeholder", account.id),
+                cycle_key=f"manual:{job.id}:placeholder",
+                cycle_expected_accounts=1,
+                cycle_window_end=scheduled_for + timedelta(seconds=10),
+                scheduled_for=scheduled_for + timedelta(seconds=10),
+                started_at=scheduled_for + timedelta(seconds=10),
+                account_id=account.id,
+            )
+        assert in_flight is not None
+        assert placeholder is not None
+
+        due = await automations_repository.list_due_manual_runs(now_utc=scheduled_for + timedelta(seconds=200), limit=1)
+        assert [due_run.id for due_run in due] == [placeholder.id]
+
+        past_window = await automations_repository.list_due_manual_runs(
+            now_utc=scheduled_for + timedelta(seconds=700), limit=1
+        )
+        assert [due_run.id for due_run in past_window] == [in_flight.id]

@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from collections.abc import Mapping
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.message_coercion import coerce_messages
@@ -30,6 +40,10 @@ def _validate_optional_messages_array(value: list[JsonValue] | None) -> list[Jso
 
 class V1ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    # The client's own ``store`` (``None`` when omitted), kept for the
+    # subscription-overflow dispatch before ``_ensure_store_false`` collapses
+    # the field for the ChatGPT backend; ``to_responses_request`` carries it over.
+    _codex_lb_client_store: bool | None = PrivateAttr(default=None)
 
     model: str = Field(min_length=1)
     messages: PassthroughJsonList | None = None
@@ -70,6 +84,17 @@ class V1ResponsesRequest(BaseModel):
     @classmethod
     def _ensure_store_false(cls, value: bool | None) -> bool | None:
         return False
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _capture_client_store(
+        cls, data: object, handler: ModelWrapValidatorHandler[V1ResponsesRequest]
+    ) -> V1ResponsesRequest:
+        instance = handler(data)
+        if isinstance(data, Mapping):
+            raw_store = data.get("store")
+            instance._codex_lb_client_store = raw_store if isinstance(raw_store, bool) else None
+        return instance
 
     @field_validator("tools")
     @classmethod
@@ -120,7 +145,9 @@ class V1ResponsesRequest(BaseModel):
             data["input"] = input_text
         else:
             data["input"] = input_items
-        return ResponsesRequest.model_validate(data)
+        responses = ResponsesRequest.model_validate(data)
+        responses._codex_lb_client_store = self._codex_lb_client_store
+        return responses
 
 
 class V1ResponsesCompactRequest(BaseModel):

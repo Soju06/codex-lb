@@ -15,6 +15,7 @@ from app.core.timeout_invariants import (
     validate_timeout_invariants,
 )
 from app.modules.proxy import durable_bridge_repository
+from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
 from app.modules.proxy._service.http_bridge import retry_circuit
 
 pytestmark = pytest.mark.unit
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.unit
 
 def test_default_settings_satisfy_timeout_invariants() -> None:
     settings = Settings()
-    assert len(TIMEOUT_INVARIANT_RULES) == 8
+    assert len(TIMEOUT_INVARIANT_RULES) == 13
     assert find_timeout_invariant_violations(settings) == []
 
 
@@ -35,20 +36,11 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
             "proxy_request_budget_seconds",
             "http_responses_stream_request_budget_seconds",
             "compact_request_budget_seconds",
+            "transcription_request_budget_seconds",
             "stream_idle_timeout_seconds",
             "sse_keepalive_interval_seconds",
-            "usage_fetch_timeout_seconds",
-            "usage_refresh_interval_seconds",
-            "rate_limit_reset_credits_refresh_interval_seconds",
             "http_responses_session_bridge_request_budget_seconds",
-            "http_responses_session_bridge_idle_ttl_seconds",
-            "http_responses_session_bridge_codex_idle_ttl_seconds",
-            "http_responses_session_bridge_stuck_gate_retire_after_seconds",
-            "http_responses_session_bridge_clean_close_retry_jitter_max_seconds",
-            "proxy_admission_wait_timeout_seconds",
             "proxy_account_lease_ttl_seconds",
-            "proxy_refresh_failure_cooldown_seconds",
-            "model_registry_enabled",
             "model_registry_snapshot_max_age_seconds",
             "timeout_invariant_validation_strict",
         )
@@ -60,6 +52,22 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
 @pytest.mark.parametrize(
     ("rule_id", "overrides"),
     [
+        ("upstream-connect-within-proxy-budget", {"upstream_connect_timeout_seconds": 601.0}),
+        ("upstream-connect-within-compact-budget", {"upstream_connect_timeout_seconds": 181.0}),
+        ("upstream-connect-within-transcription-budget", {"upstream_connect_timeout_seconds": 121.0}),
+        # M1 stream/bridge budgets: connect 61 s fits every other budget but not a 60 s stream budget.
+        (
+            "upstream-connect-within-stream-budget",
+            {"upstream_connect_timeout_seconds": 61.0, "http_responses_stream_request_budget_seconds": 60.0},
+        ),
+        # The bridge path spends the connect timeout inside the bridge budget too.
+        (
+            "upstream-connect-within-bridge-budget",
+            {
+                "upstream_connect_timeout_seconds": 61.0,
+                "http_responses_session_bridge_request_budget_seconds": 60.0,
+            },
+        ),
         ("admission-wait-within-proxy-budget", {"proxy_request_budget_seconds": 9.0}),
         ("admission-wait-within-stream-budget", {"http_responses_stream_request_budget_seconds": 9.0}),
         ("admission-wait-within-compact-budget", {"compact_request_budget_seconds": 9.0}),
@@ -71,7 +79,7 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
         ("account-lease-ttl-covers-compact-budget", {"proxy_account_lease_ttl_seconds": 179.0}),
         (
             "model-registry-snapshot-outlives-refresh-interval",
-            {"model_registry_enabled": True, "model_registry_snapshot_max_age_seconds": 300.0},
+            {"model_registry_snapshot_max_age_seconds": 300.0},
         ),
     ],
 )
@@ -85,15 +93,23 @@ def test_each_settings_backed_rule_names_violation(rule_id: str, overrides: dict
     assert rule_id in formatted
 
 
-def test_disabled_model_registry_skips_snapshot_cadence_rule() -> None:
-    settings = _timeout_settings(
-        model_registry_enabled=False,
-        model_registry_snapshot_max_age_seconds=1.0,
+def test_bridge_stuck_gate_rule_evaluates_the_module_constant(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stuck gate is a fixed module constant, not a Settings field; the
+    # `2x stuck gate < bridge budget` rule must still read it at evaluation time.
+    rule_id = "bridge-stuck-gate-retire-within-bridge-budget"
+    assert all(violation.rule.id != rule_id for violation in find_timeout_invariant_violations(Settings()))
+
+    monkeypatch.setattr(
+        http_bridge_helpers,
+        "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
+        Settings().http_responses_session_bridge_request_budget_seconds / 2.0,
     )
 
-    violations = find_timeout_invariant_violations(settings)
+    violations = find_timeout_invariant_violations(Settings())
 
-    assert all(violation.rule.id != "model-registry-snapshot-outlives-refresh-interval" for violation in violations)
+    assert any(violation.rule.id == rule_id for violation in violations)
+    formatted = "\n".join(violation.format() for violation in violations)
+    assert "2 * HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS" in formatted
 
 
 def test_durable_bridge_retry_circuit_rule_names_violation(monkeypatch: pytest.MonkeyPatch) -> None:

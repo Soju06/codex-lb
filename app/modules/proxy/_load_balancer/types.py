@@ -37,6 +37,13 @@ class RuntimeState:
     # Isolation stage deadline (subset of the backoff deadline): while set and
     # in the future, soft sticky owners are rerouted too.
     overload_isolated_until: float | None = None
+    # Short burst cooldown set by a code-less upstream HTTP 429 (per-account
+    # burst/concurrency rejection, no ``rate_limit_exceeded`` / usage code):
+    # fresh (unbound) selection and fresh sticky bindings avoid the account
+    # until this deadline while another candidate exists. Established sticky
+    # owners and hard continuity owners are untouched. Replica-local, never
+    # persisted, independent of ``cooldown_until`` / persisted RATE_LIMITED.
+    burst_backoff_until: float | None = None
     # Recent upstream outcome window (see ``_load_balancer/error_rate.py``):
     # minute bucket -> [successes, failures], pruned to the configured window.
     # Feeds the selection weight multiplier; replica-local, never persisted.

@@ -256,6 +256,7 @@
           default = pkgs.mkShell {
             packages = [
               virtualenv
+              pkgs.bun
               pkgs.git
               pkgs.uv
             ];

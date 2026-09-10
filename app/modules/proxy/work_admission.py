@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import Final
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clock import REAL_SCHEDULER, Scheduler
@@ -11,7 +12,17 @@ from app.core.utils.request_id import get_request_id
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
+# Process-wide admission gates (fixed; issue #1340 / PRINCIPLES.md P2). The
+# response-create gate keeps its ``proxy_response_create_limit`` setting because
+# its binding point moves with the account count; the three below never bound a
+# real deployment and are sized for a single worker process.
+TOKEN_REFRESH_LIMIT: Final[int] = 64
+UPSTREAM_WEBSOCKET_CONNECT_LIMIT: Final[int] = 128
+COMPACT_RESPONSE_CREATE_LIMIT: Final[int] = 64
+# How long one gate acquisition may wait before the request is rejected with a
+# local-overload 429. Also the floor operand of the timeout invariants
+# (``app/core/timeout_invariants.py``) and of the token-refresh claim TTL.
+ADMISSION_WAIT_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 @dataclass(slots=True)
@@ -60,7 +71,7 @@ class WorkAdmissionController:
         websocket_connect_limit: int,
         response_create_limit: int,
         compact_response_create_limit: int,
-        admission_wait_timeout_seconds: float = _DEFAULT_ADMISSION_WAIT_TIMEOUT_SECONDS,
+        admission_wait_timeout_seconds: float = ADMISSION_WAIT_TIMEOUT_SECONDS,
         scheduler: Scheduler = REAL_SCHEDULER,
     ) -> None:
         self._scheduler = scheduler

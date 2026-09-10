@@ -1436,6 +1436,15 @@
         "test",
         "doc"
       ]
+    },
+    {
+      "login": "VictorStatko",
+      "name": "Victor Statko",
+      "avatar_url": "https://avatars.githubusercontent.com/u/34319599?v=4",
+      "profile": "https://github.com/VictorStatko",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

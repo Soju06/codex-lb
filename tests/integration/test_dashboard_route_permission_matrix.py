@@ -111,6 +111,13 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     # Sign-in provider settings (PR-2c-1): security:write throughout.
     ("GET", "/api/auth-providers"): PermissionRequirement(Permission.SECURITY_WRITE),
     ("PATCH", "/api/auth-providers/{provider_id}"): PermissionRequirement(Permission.SECURITY_WRITE),
+    # Group-to-role rules (PR-2c-2): security:write throughout.
+    ("GET", "/api/role-mappings"): PermissionRequirement(Permission.SECURITY_WRITE),
+    ("GET", "/api/role-mappings/assignable-roles"): PermissionRequirement(Permission.SECURITY_WRITE),
+    ("POST", "/api/role-mappings"): PermissionRequirement(Permission.SECURITY_WRITE),
+    ("PUT", "/api/role-mappings/order"): PermissionRequirement(Permission.SECURITY_WRITE),
+    ("PATCH", "/api/role-mappings/{mapping_id}"): PermissionRequirement(Permission.SECURITY_WRITE),
+    ("DELETE", "/api/role-mappings/{mapping_id}"): PermissionRequirement(Permission.SECURITY_WRITE),
     **DASHBOARD_AUTH_GATED,
 }
 
@@ -136,6 +143,10 @@ STEP_UP_GATED: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/dashboard-users/{user_id}/revoke-sessions"),
         ("POST", "/api/dashboard-users/{user_id}/reactivate-keys"),
         ("PATCH", "/api/auth-providers/{provider_id}"),
+        ("POST", "/api/role-mappings"),
+        ("PUT", "/api/role-mappings/order"),
+        ("PATCH", "/api/role-mappings/{mapping_id}"),
+        ("DELETE", "/api/role-mappings/{mapping_id}"),
         ("POST", "/api/dashboard-auth/guest/password"),
         ("DELETE", "/api/dashboard-auth/guest/password"),
         ("POST", "/api/dashboard-auth/guest/logout-all"),

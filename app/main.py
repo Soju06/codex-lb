@@ -128,6 +128,7 @@ from app.modules.rate_limit_reset_credits import api as rate_limit_reset_credits
 from app.modules.reports import api as reports_api
 from app.modules.reports.cache import ReportsCaches
 from app.modules.request_logs import api as request_logs_api
+from app.modules.role_mappings import api as role_mappings_api
 from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
 from app.modules.settings.service import warn_environment_shadowed_by_dashboard
@@ -1051,6 +1052,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_users_api.router)
     app.include_router(dashboard_roles_api.router)
     app.include_router(auth_providers_api.router)
+    app.include_router(role_mappings_api.router)
     app.include_router(settings_api.router)
     app.include_router(telemetry_api.router)
     app.include_router(firewall_api.router)

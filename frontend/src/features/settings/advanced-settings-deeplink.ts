@@ -23,3 +23,15 @@ export function accessTabFromHash(hash: string): AccessTab | null {
   }
   return MY_SIGN_IN_HASHES.has(hash) ? "my-sign-in" : null;
 }
+
+// Organisation group deep links: `/settings#organisation` expands the group,
+// `/settings#organisation-refused` expands it and opens the refused sign-ins
+// of the last seven days (the audit log filtered on `login_failed` /
+// `unknown_identity`). Both are hashes so the link works from anywhere.
+export const ORGANISATION_GROUP_ID = "organisation";
+export const ORGANISATION_HASH = `#${ORGANISATION_GROUP_ID}`;
+export const ORGANISATION_REFUSED_HASH = "#organisation-refused";
+
+export function shouldExpandOrganisationSettings(hash: string): boolean {
+  return hash === ORGANISATION_HASH || hash === ORGANISATION_REFUSED_HASH;
+}

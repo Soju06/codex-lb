@@ -41,8 +41,8 @@ class ExternalIdentity:
 
     ``subject`` is the stable identifier the provider guarantees (the header
     value, an OIDC ``sub``); ``email`` and ``display_name`` are display and
-    linking hints; ``groups`` is the IdP's group snapshot (empty until the
-    groups header ships).
+    linking hints; ``groups`` is the IdP's group snapshot (case-folded), which
+    role mappings match on.
     """
 
     provider: str
@@ -95,7 +95,8 @@ class TrustedHeaderProvider:
     peer and the singular header. The subject is case-folded: two proxies
     spelling the same person differently must not become two accounts. The
     raw value is kept as the display name and, when it parses as an e-mail,
-    as the identity's e-mail. Groups arrive with the groups header (PR-2c-2).
+    as the identity's e-mail. Groups arrive on the same request-auth value,
+    read from ``CODEX_LB_DASHBOARD_AUTH_PROXY_GROUPS_HEADER``.
     """
 
     kind = AuthProviderKind.TRUSTED_HEADER
@@ -105,10 +106,14 @@ class TrustedHeaderProvider:
         request_auth = get_dashboard_request_auth(request)
         if request_auth is None or request_auth.mode != DashboardAuthMode.TRUSTED_HEADER or not request_auth.actor:
             return None
-        return self.identity_from_subject(request_auth.actor)
+        return self.identity_from_subject(request_auth.actor, groups=request_auth.groups)
 
-    def identity_from_subject(self, raw_subject: str) -> ExternalIdentity | None:
-        """``None`` when the value cannot be an identity here (empty or wider than the subject column)."""
+    def identity_from_subject(self, raw_subject: str, *, groups: tuple[str, ...] = ()) -> ExternalIdentity | None:
+        """``None`` when the value cannot be an identity here (empty or wider than the subject column).
+
+        ``groups`` defaults to none so the paths without a request (an invite's
+        expected identity) can still name an identity.
+        """
 
         subject = raw_subject.strip()
         if not subject or len(subject) > MAX_SUBJECT_LENGTH:
@@ -120,4 +125,5 @@ class TrustedHeaderProvider:
             subject=subject.casefold(),
             email=email if email is not None and is_valid_email(email) else None,
             display_name=subject[:MAX_DISPLAY_NAME_LENGTH],
+            groups=groups,
         )

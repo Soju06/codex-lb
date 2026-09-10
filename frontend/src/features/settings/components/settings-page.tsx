@@ -16,6 +16,7 @@ import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
 import { AccessCard } from "@/features/settings/components/access/access-card";
 import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
+import { OrganisationSettingsGroup } from "@/features/settings/components/organisation/organisation-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { ConversationArchiveSettings } from "@/features/settings/components/conversation-archive-settings";
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
@@ -303,6 +304,11 @@ export function SettingsPage() {
                 onSave={handleSave}
               />
             </AdvancedSettingsGroup>
+
+            {/* PR-2c-2: the second collapsed group, last on the page. It draws
+                one line until a company install configures something, and its
+                children (and their requests) only exist while it is open. */}
+            <OrganisationSettingsGroup disabled={controlsDisabled} />
           </div>
 
           <LoadingOverlay visible={!!settings && busy} label={t("settings.page.savingLabel")} />

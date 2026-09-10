@@ -314,6 +314,77 @@ describe("AccessPeopleTab", () => {
     await waitFor(() => expect(within(screen.getByTestId("people-row-ops")).getByText("Viewer")).toBeInTheDocument());
   });
 
+  describe("a role the company login manages", () => {
+    const mapped = () =>
+      createDashboardUser({
+        id: "user_mapped",
+        username: "kim",
+        displayName: "Kim Park",
+        roleSource: "mapping",
+        isBreakGlass: false,
+        totpConfigured: false,
+        role: { id: PRESET_ROLE_IDS.viewer, slug: "viewer", name: "Viewer", kind: "preset" },
+      });
+
+    beforeEach(() => {
+      server.use(
+        http.get("/api/dashboard-users", () => HttpResponse.json([...createDefaultDashboardUsers(), mapped()])),
+      );
+    });
+
+    it("marks the row and offers taking it over instead of a plain change", async () => {
+      const user = userEvent.setup();
+      renderTab();
+
+      expect(within(await screen.findByTestId("people-row-kim")).getByText("From company login")).toBeInTheDocument();
+      expect(menuLabels(await openRowMenu(user, "kim", "Kim Park"))).toContain("Take over and change");
+    });
+
+    it("warns, then sends force so the account stops following the rules", async () => {
+      const user = userEvent.setup();
+      const patched: unknown[] = [];
+      server.use(
+        http.patch("/api/dashboard-users/user_mapped", async ({ request }) => {
+          patched.push(await request.json());
+          return HttpResponse.json({ ...mapped(), roleSource: "manual" });
+        }),
+      );
+      renderTab();
+
+      await user.click(
+        within(await openRowMenu(user, "kim", "Kim Park")).getByRole("menuitem", { name: "Take over and change" }),
+      );
+      const dialog = await screen.findByRole("dialog", { name: "Change role" });
+      expect(dialog).toHaveTextContent("Changing it here takes the account over");
+
+      await user.click(within(dialog).getByRole("combobox", { name: "Role" }));
+      await user.click(await screen.findByRole("option", { name: "Operator" }));
+      await user.click(within(dialog).getByRole("button", { name: "Take over and change" }));
+
+      await waitFor(() =>
+        expect(patched).toEqual([{ roleId: PRESET_ROLE_IDS.operator, force: true }]),
+      );
+    });
+
+    it("explains a role_managed_externally refusal in its own words", async () => {
+      const user = userEvent.setup();
+      server.use(http.patch("/api/dashboard-users/user_mapped", () => conflict("role_managed_externally")));
+      renderTab();
+
+      await user.click(
+        within(await openRowMenu(user, "kim", "Kim Park")).getByRole("menuitem", { name: "Take over and change" }),
+      );
+      const dialog = await screen.findByRole("dialog", { name: "Change role" });
+      await user.click(within(dialog).getByRole("combobox", { name: "Role" }));
+      await user.click(await screen.findByRole("option", { name: "Operator" }));
+      await user.click(within(dialog).getByRole("button", { name: "Take over and change" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "The company login decides this role. Use \u201cTake over and change\u201d to set it by hand.",
+      );
+    });
+  });
+
   it("enables a disabled account", async () => {
     const user = userEvent.setup();
     server.use(

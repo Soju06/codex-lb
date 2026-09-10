@@ -120,6 +120,14 @@ class UserNotActiveError(ValueError):
     pass
 
 
+class RoleManagedExternallyError(ValueError):
+    pass
+
+
+class ForceWithoutRoleChangeError(ValueError):
+    pass
+
+
 class SsoNotAvailableError(ValueError):
     pass
 
@@ -325,8 +333,9 @@ class DashboardUsersService:
     async def update_user(
         self, principal: DashboardPrincipal, user_id: str, payload: DashboardUserUpdateRequest, *, actor_ip: str | None
     ) -> UserListing:
-        """Rules, in this order: compat lock, self, invite pending, delegation
-        (new role), act-on (current role), last admin, credential required."""
+        """Rules, in this order: compat lock, self, invite pending, externally
+        managed role, delegation (new role), act-on (current role), last admin,
+        credential required."""
 
         caller_id = self._require_account(principal)
         await self._purge_expired()
@@ -342,6 +351,17 @@ class DashboardUsersService:
             raise SelfModificationForbiddenError("You cannot change your own role or status")
         if new_status is not None and user.status == DashboardUserStatus.INVITED.value:
             raise InvitePendingError("The account has not accepted its invite yet; revoke the invite instead")
+        if payload.force and not role_changes:
+            raise ForceWithoutRoleChangeError("force only applies to a role change")
+        # A role a sign-in provider manages is only edited on purpose: without
+        # ``force`` the next sign-in would silently move it back.
+        overridden_source = (
+            user.role_source if role_changes and user.role_source != DashboardUserRoleSource.MANUAL.value else None
+        )
+        if overridden_source is not None and not payload.force:
+            raise RoleManagedExternallyError(
+                "That account's role is managed by its sign-in method; repeat with force to take it over"
+            )
         new_role: DashboardRoleRecord | None = None
         if role_changes:
             assert payload.role_id is not None
@@ -372,6 +392,9 @@ class DashboardUsersService:
             profile_changed = await self._apply_profile(user, payload, fields)
             if new_status == DashboardUserStatus.DISABLED.value:
                 key_hashes = await self._repo.deactivate_owned_keys(user.id)
+            if overridden_source is not None:
+                # Taken over by hand: no later re-evaluation moves this role again.
+                user.role_source = DashboardUserRoleSource.MANUAL.value
             if leaves_admin:
                 # The invariant is part of the write: the row only changes while
                 # another active admin exists at the moment of the UPDATE.
@@ -398,6 +421,19 @@ class DashboardUsersService:
                 user.id,
                 actor_ip,
                 {"username": user.username, "from": old_role_slug, "to": new_role_slug},
+            )
+        if overridden_source is not None:
+            self._audit(
+                "role_source_overridden",
+                principal,
+                user.id,
+                actor_ip,
+                {
+                    "username": user.username,
+                    "from_source": overridden_source,
+                    "to_source": DashboardUserRoleSource.MANUAL.value,
+                    "provider": await self._repo.primary_identity_provider(user.id),
+                },
             )
         if new_status == DashboardUserStatus.DISABLED.value:
             self._audit("user_disabled", principal, user.id, actor_ip, {"username": user.username})

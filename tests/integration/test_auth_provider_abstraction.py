@@ -474,7 +474,11 @@ async def test_provider_api_lists_and_edits_the_resolver_knobs(async_client: Asy
     assert trusted["active"] is True and trusted["enabled"] is True
     assert trusted["unknownIdentityRoleId"] == ADMIN_ROLE
     assert trusted["noMatchRoleId"] == VIEWER_ROLE
-    assert trusted["linkByEmail"] is False and trusted["idpMfaEnforced"] is False and trusted["config"] == {}
+    assert trusted["linkByEmail"] is False and trusted["idpMfaEnforced"] is False
+    # The header names are topology, not database: the settings card shows the
+    # values it cannot edit next to the variables that set them.
+    assert trusted["config"] == {"identityHeader": "Remote-User", "groupsHeader": "Remote-Groups"}
+    assert by_kind["password"]["config"] == {}
 
     not_assignable = await async_client.patch(
         f"{PROVIDERS}/{TRUSTED_HEADER_PROVIDER_ID}", json={"unknownIdentityRoleId": MEMBER_ROLE}, headers=admin
@@ -603,7 +607,7 @@ async def test_providers_migration_upgrades_and_downgrades(tmp_path) -> None:
         assert "dashboard_auth_providers" not in tables
         assert not {"expected_provider", "expected_provider_key", "expected_subject"} & invite_columns
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-        assert result.current_revision == _HEAD_REVISION == _TARGET_REVISION
+        assert result.current_revision == _HEAD_REVISION
     finally:
         await engine.dispose()
 

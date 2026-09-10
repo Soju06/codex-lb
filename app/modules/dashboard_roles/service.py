@@ -68,6 +68,22 @@ class RoleNotAssignableError(ValueError):
     pass
 
 
+#: Presets a person may hold. Code is the truth; the row's flag only mirrors it.
+_ASSIGNABLE_PRESET_SLUGS = frozenset(slug.value for slug in ASSIGNABLE_PRESET_ROLES)
+
+
+def role_assignable_to_users(role: DashboardRoleRecord) -> bool:
+    """Whether this role may be given to a person, presets from code and custom roles from the row.
+
+    One predicate for every surface that hands a role out or offers one, so a
+    picker can never list a role the write path would refuse.
+    """
+
+    if RoleKind(role.kind) is RoleKind.PRESET:
+        return role.slug in _ASSIGNABLE_PRESET_SLUGS
+    return role.assignable_to_users
+
+
 async def resolve_assignable_role(roles: DashboardRolesRepository, role_id: str) -> DashboardRoleRecord:
     """The role row a person may be given: an assignable preset or an assignable custom role.
 
@@ -78,12 +94,7 @@ async def resolve_assignable_role(roles: DashboardRolesRepository, role_id: str)
     role = await roles.get_role(role_id)
     if role is None:
         raise RoleNotAssignableError("Unknown role")
-    assignable = (
-        role.slug in {slug.value for slug in ASSIGNABLE_PRESET_ROLES}
-        if RoleKind(role.kind) is RoleKind.PRESET
-        else role.assignable_to_users
-    )
-    if not assignable:
+    if not role_assignable_to_users(role):
         raise RoleNotAssignableError(f"Role '{role.slug}' cannot be assigned to an account")
     return role
 

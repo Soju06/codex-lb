@@ -176,6 +176,9 @@ class _FakeRepository:
     async def count_custom_roles(self) -> int:
         return 0
 
+    async def count_role_mappings(self) -> int:
+        return 0
+
     async def create_first_admin(self, password_hash: str) -> DashboardUser | None:
         if (await self.get_local_auth_state()).requires_auth:
             return None

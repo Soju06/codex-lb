@@ -104,7 +104,12 @@ export type PendingInvite = z.infer<typeof PendingInviteSchema>;
 export type DashboardRole = z.infer<typeof DashboardRoleSchema>;
 export type PermissionDescriptor = z.infer<typeof PermissionDescriptorSchema>;
 export type DashboardUserCreateRequest = z.infer<typeof DashboardUserCreateRequestSchema>;
-export type DashboardUserUpdateRequest = { roleId?: string; status?: "active" | "disabled" };
+export type DashboardUserUpdateRequest = {
+  roleId?: string;
+  status?: "active" | "disabled";
+  /** Take a role the company login manages back under manual control (`409 role_managed_externally` otherwise). */
+  force?: boolean;
+};
 
 const StatusSchema = z.object({ status: z.string() });
 

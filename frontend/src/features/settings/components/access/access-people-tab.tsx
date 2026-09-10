@@ -214,7 +214,15 @@ export function AccessPeopleTab({ fullPage = false, onOpenMySignIn, onInvite, on
                     </div>
                   </TableCell>
                   <TableCell>
-                    <RoleBadge role={user.role} roles={roles} descriptors={descriptors} />
+                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                      <RoleBadge role={user.role} roles={roles} descriptors={descriptors} />
+                      {/* The company login owns this role until someone takes it over. */}
+                      {user.roleSource !== "manual" ? (
+                        <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
+                          {t("access.people.managedExternally")}
+                        </Badge>
+                      ) : null}
+                    </span>
                   </TableCell>
                   <TableCell>
                     <StatusCell user={user} />

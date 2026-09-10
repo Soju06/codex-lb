@@ -34,6 +34,7 @@ from app.db.migrate import _build_alembic_config, inspect_migration_state, run_u
 from app.db.models import (
     ApiKey,
     AuditLog,
+    DashboardIdentity,
     DashboardRoleGrant,
     DashboardRoleRecord,
     DashboardSettings,
@@ -1097,3 +1098,60 @@ async def test_invites_migration_upgrades_and_downgrades(tmp_path) -> None:
         assert result.current_revision == _HEAD_REVISION
     finally:
         await engine.dispose()
+
+
+# --- roles a sign-in provider manages (PR-2c-2) ---
+
+
+async def _managed_by_provider(user_id: str) -> None:
+    """Make the account look like one a sign-in provider created and manages."""
+
+    async with SessionLocal() as session:
+        user = await session.get(DashboardUser, user_id)
+        assert user is not None
+        user.role_source = "mapping"
+        session.add(
+            DashboardIdentity(
+                user_id=user_id, provider="trusted_header", provider_key="default", subject="bob@example.com"
+            )
+        )
+        await session.commit()
+    await get_dashboard_users_cache().invalidate()
+
+
+@pytest.mark.asyncio
+async def test_an_externally_managed_role_is_changed_only_with_force(async_client: AsyncClient) -> None:
+    admin_id = await _setup_admin(async_client)
+    created = await _create(async_client, "bob", role_id=OPERATOR_ROLE)
+    user_id = created["user"]["id"]
+    await _managed_by_provider(user_id)
+
+    refused = await async_client.patch(f"{USERS}/{user_id}", json={"roleId": VIEWER_ROLE})
+    assert refused.status_code == 409 and _error(refused) == "role_managed_externally"
+    unchanged = await _user(user_id)
+    assert unchanged is not None and unchanged.role_id == OPERATOR_ROLE and unchanged.role_source == "mapping"
+    assert await _rows("user_role_changed") == []
+
+    # ``force`` only means something together with a role change.
+    pointless = await async_client.patch(f"{USERS}/{user_id}", json={"force": True, "displayName": "Bobby"})
+    assert pointless.status_code == 422
+
+    forced = await async_client.patch(f"{USERS}/{user_id}", json={"roleId": VIEWER_ROLE, "force": True})
+    assert forced.status_code == 200, forced.text
+    assert forced.json()["role"]["slug"] == "viewer"
+    taken_over = await _user(user_id)
+    # Taken over by hand: no later re-evaluation moves this role again.
+    assert taken_over is not None and taken_over.role_id == VIEWER_ROLE and taken_over.role_source == "manual"
+
+    (override,) = await _rows("role_source_overridden")
+    assert override.actor_user_id == admin_id and override.target_id == user_id
+    assert '"from_source": "mapping"' in (override.details or "")
+    assert '"to_source": "manual"' in (override.details or "")
+    assert '"provider": "trusted_header"' in (override.details or "")
+    assert len(await _rows("user_role_changed")) == 1
+
+    # An account that is already manual takes ``force`` without a second override row.
+    again = await async_client.patch(f"{USERS}/{user_id}", json={"roleId": OPERATOR_ROLE, "force": True})
+    assert again.status_code == 200, again.text
+    assert len(await _rows("role_source_overridden")) == 1
+    assert len(await _rows("user_role_changed")) == 2

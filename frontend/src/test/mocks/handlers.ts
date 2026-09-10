@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import type { InviteDescription } from "@/features/auth/schemas";
 import type { DashboardRole, DashboardUser } from "@/features/access/api";
+import type { AuditEntry, AuthProvider, RoleMapping } from "@/features/organisation/api";
 
 import {
   LIMIT_TYPES,
@@ -23,8 +24,10 @@ import {
   createConversationDetails,
   createConversationsResponse,
   createDashboardAuthSession,
+  createDefaultAuthProviders,
   createDefaultDashboardRoles,
   createDefaultDashboardUsers,
+  createDefaultRefusedSignIns,
   createPermissionDescriptors,
   createSessionUser,
   OPERATOR_PERMISSIONS,
@@ -83,6 +86,33 @@ const DashboardUserCreatePayloadSchema = z.looseObject({
 const DashboardUserUpdatePayloadSchema = z.looseObject({
   roleId: z.string().optional(),
   status: z.enum(["active", "disabled"]).optional(),
+  force: z.boolean().optional(),
+});
+
+const AuthProviderUpdatePayloadSchema = z.looseObject({
+  unknownIdentityRoleId: z.string().nullable().optional(),
+  noMatchRoleId: z.string().nullable().optional(),
+  linkByEmail: z.boolean().optional(),
+  skipRoleSync: z.boolean().optional(),
+});
+
+const RoleMappingCreatePayloadSchema = z.looseObject({
+  provider: z.string(),
+  providerKey: z.string(),
+  claimName: z.string(),
+  claimValue: z.string(),
+  roleId: z.string(),
+});
+
+const RoleMappingUpdatePayloadSchema = z.looseObject({
+  claimValue: z.string().optional(),
+  roleId: z.string().optional(),
+});
+
+const RoleMappingOrderPayloadSchema = z.looseObject({
+  provider: z.string(),
+  providerKey: z.string(),
+  ids: z.array(z.string()),
 });
 
 const InviteAcceptPayloadSchema = z.looseObject({
@@ -286,6 +316,11 @@ async function parseJsonBody<T>(
   }
 }
 
+/** Winner-first order onto the contiguous `N..1` priorities the server owns. */
+function renumberMappings(ordered: readonly RoleMapping[]): RoleMapping[] {
+  return ordered.map((mapping, index) => ({ ...mapping, priority: ordered.length - index }));
+}
+
 type MockState = {
   accounts: AccountSummary[];
   requestLogs: RequestLogEntry[];
@@ -363,6 +398,9 @@ type MockState = {
     }>
   >;
   modelSources: ModelSource[];
+  authProviders: AuthProvider[];
+  roleMappings: RoleMapping[];
+  refusedSignIns: AuditEntry[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
     key: string;
@@ -409,6 +447,10 @@ function createInitialState(): MockState {
     automations: [],
     automationRuns: {},
     modelSources: createDefaultModelSources(),
+    authProviders: createDefaultAuthProviders(),
+    // Zero rules is the shipped default: the empty state is the common case.
+    roleMappings: [],
+    refusedSignIns: createDefaultRefusedSignIns(),
     firewallEntries: [],
     stickySessions: [],
   };
@@ -2356,11 +2398,19 @@ export const handlers = [
         { status: 409 },
       );
     }
+    // A role the company login manages needs the take-over to be explicit.
+    if (user.roleSource !== "manual" && payload.roleId && payload.roleId !== user.role.id && !payload.force) {
+      return HttpResponse.json(
+        { error: { code: "role_managed_externally", message: "This role is managed by the sign-in provider" } },
+        { status: 409 },
+      );
+    }
     const role = payload.roleId ? state.dashboardRoles.find((candidate) => candidate.id === payload.roleId) : null;
     const updated: DashboardUser = {
       ...user,
       role: role ? { id: role.id, slug: role.slug, name: role.name, kind: role.kind } : user.role,
       status: payload.status ?? user.status,
+      roleSource: payload.force ? "manual" : user.roleSource,
     };
     state.dashboardUsers = state.dashboardUsers.map((candidate) => (candidate.id === user.id ? updated : candidate));
     return HttpResponse.json(updated);
@@ -2448,6 +2498,146 @@ export const handlers = [
 
   http.post("/api/dashboard-users/:userId/revoke-sessions", () => {
     return HttpResponse.json({ status: "ok" });
+  }),
+
+  // ── Organisation: sign-in providers, group-to-role rules, refusals ──
+
+  http.get("/api/auth-providers", () => {
+    return HttpResponse.json(state.authProviders);
+  }),
+
+  http.patch("/api/auth-providers/:providerId", async ({ params, request }) => {
+    const payload = await parseJsonBody(request, AuthProviderUpdatePayloadSchema);
+    const provider = state.authProviders.find((candidate) => candidate.id === params.providerId);
+    if (!provider || !payload) {
+      return HttpResponse.json(
+        { error: { code: "provider_not_found", message: "Provider not found" } },
+        { status: 404 },
+      );
+    }
+    const updated: AuthProvider = {
+      ...provider,
+      unknownIdentityRoleId:
+        payload.unknownIdentityRoleId === undefined
+          ? provider.unknownIdentityRoleId
+          : payload.unknownIdentityRoleId,
+      noMatchRoleId: payload.noMatchRoleId === undefined ? provider.noMatchRoleId : payload.noMatchRoleId,
+      linkByEmail: payload.linkByEmail ?? provider.linkByEmail,
+      skipRoleSync: payload.skipRoleSync ?? provider.skipRoleSync,
+    };
+    state.authProviders = state.authProviders.map((candidate) =>
+      candidate.id === provider.id ? updated : candidate,
+    );
+    return HttpResponse.json(updated);
+  }),
+
+  http.get("/api/role-mappings", () => {
+    return HttpResponse.json(state.roleMappings);
+  }),
+
+  // The rules surface serves its own, smaller roles read: this group is
+  // `security:write`, and the full list is `users:manage`.
+  http.get("/api/role-mappings/assignable-roles", () => {
+    return HttpResponse.json(
+      state.dashboardRoles
+        .filter((role) => role.assignableToUsers)
+        .map(({ id, slug, name, description, kind, locked }) => ({ id, slug, name, description, kind, locked })),
+    );
+  }),
+
+  http.post("/api/role-mappings", async ({ request }) => {
+    const payload = await parseJsonBody(request, RoleMappingCreatePayloadSchema);
+    if (!payload) {
+      return HttpResponse.json({ error: { code: "validation_error", message: "Invalid payload" } }, { status: 422 });
+    }
+    const claimValue = payload.claimValue.trim().toLowerCase();
+    if (
+      state.roleMappings.some(
+        (mapping) => mapping.claimName === payload.claimName && mapping.claimValue === claimValue,
+      )
+    ) {
+      return HttpResponse.json(
+        { error: { code: "mapping_exists", message: "A rule for that value already exists" } },
+        { status: 409 },
+      );
+    }
+    const created: RoleMapping = {
+      id: `mapping_${claimValue}`,
+      provider: payload.provider,
+      providerKey: payload.providerKey,
+      claimName: payload.claimName,
+      claimValue,
+      roleId: payload.roleId,
+      priority: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    // Appended at the bottom, then renumbered winner-first like the server does.
+    state.roleMappings = renumberMappings([...state.roleMappings, created]);
+    return HttpResponse.json(state.roleMappings.find((mapping) => mapping.id === created.id), { status: 201 });
+  }),
+
+  http.put("/api/role-mappings/order", async ({ request }) => {
+    const payload = await parseJsonBody(request, RoleMappingOrderPayloadSchema);
+    if (!payload) {
+      return HttpResponse.json({ error: { code: "validation_error", message: "Invalid payload" } }, { status: 422 });
+    }
+    const known = new Set(state.roleMappings.map((mapping) => mapping.id));
+    if (payload.ids.length !== known.size || payload.ids.some((id) => !known.has(id))) {
+      return HttpResponse.json(
+        { error: { code: "order_stale", message: "The order must list every rule exactly once" } },
+        { status: 409 },
+      );
+    }
+    const byId = new Map(state.roleMappings.map((mapping) => [mapping.id, mapping]));
+    state.roleMappings = renumberMappings(payload.ids.map((id) => byId.get(id) as RoleMapping));
+    return HttpResponse.json(state.roleMappings);
+  }),
+
+  http.patch("/api/role-mappings/:mappingId", async ({ params, request }) => {
+    const payload = await parseJsonBody(request, RoleMappingUpdatePayloadSchema);
+    const mapping = state.roleMappings.find((candidate) => candidate.id === params.mappingId);
+    if (!mapping || !payload) {
+      return HttpResponse.json(
+        { error: { code: "mapping_not_found", message: "Rule not found" } },
+        { status: 404 },
+      );
+    }
+    const updated: RoleMapping = {
+      ...mapping,
+      claimValue: payload.claimValue?.trim().toLowerCase() ?? mapping.claimValue,
+      roleId: payload.roleId ?? mapping.roleId,
+    };
+    state.roleMappings = state.roleMappings.map((candidate) =>
+      candidate.id === mapping.id ? updated : candidate,
+    );
+    return HttpResponse.json(updated);
+  }),
+
+  http.delete("/api/role-mappings/:mappingId", ({ params }) => {
+    if (!state.roleMappings.some((mapping) => mapping.id === params.mappingId)) {
+      return HttpResponse.json(
+        { error: { code: "mapping_not_found", message: "Rule not found" } },
+        { status: 404 },
+      );
+    }
+    state.roleMappings = renumberMappings(
+      state.roleMappings.filter((mapping) => mapping.id !== params.mappingId),
+    );
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.get("/api/audit-logs", ({ request }) => {
+    const url = new URL(request.url);
+    const action = url.searchParams.get("action");
+    const reason = url.searchParams.get("reason");
+    return HttpResponse.json(
+      state.refusedSignIns.filter(
+        (entry) =>
+          (action === null || entry.action === action) &&
+          (reason === null || entry.details?.["reason"] === reason),
+      ),
+    );
   }),
 
   http.get("/api/dashboard-roles", () => {

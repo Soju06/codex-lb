@@ -35,6 +35,7 @@ import type {
 	PendingInvite,
 	PermissionDescriptor,
 } from "@/features/access/api";
+import type { AuditEntry, AuthProvider, RoleMapping } from "@/features/organisation/api";
 import type {
 	DashboardOverview,
 	DashboardProjections,
@@ -732,6 +733,102 @@ export function createDefaultDashboardUsers(): DashboardUser[] {
 			hasPassword: false,
 			lastLoginAt: null,
 			pendingInvite: { expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString(), ssoOnly: false },
+		}),
+	];
+}
+
+// ── Organisation (sign-in providers, group-to-role rules, refusals) ──
+
+export const TRUSTED_HEADER_PROVIDER_ID = "provider_trusted_header";
+export const PASSWORD_PROVIDER_ID = "provider_password";
+
+export function createAuthProvider(overrides: Partial<AuthProvider> = {}): AuthProvider {
+	return {
+		id: TRUSTED_HEADER_PROVIDER_ID,
+		kind: "trusted_header",
+		providerKey: "default",
+		label: "Reverse proxy",
+		enabled: true,
+		active: true,
+		unknownIdentityRoleId: PRESET_ROLE_IDS.admin,
+		noMatchRoleId: PRESET_ROLE_IDS.viewer,
+		linkByEmail: false,
+		skipRoleSync: false,
+		idpMfaEnforced: false,
+		// The reverse-proxy header names are topology; the backend returns them read-only.
+		config: { identityHeader: "Remote-User", groupsHeader: "Remote-Groups" },
+		createdAt: "2026-01-01T00:00:00Z",
+		updatedAt: "2026-01-01T00:00:00Z",
+		...overrides,
+	};
+}
+
+export function createDefaultAuthProviders(): AuthProvider[] {
+	return [
+		createAuthProvider({
+			id: PASSWORD_PROVIDER_ID,
+			kind: "password",
+			label: "Password",
+			unknownIdentityRoleId: null,
+			noMatchRoleId: null,
+			config: {},
+		}),
+		createAuthProvider(),
+	];
+}
+
+export function createRoleMapping(overrides: Partial<RoleMapping> = {}): RoleMapping {
+	return {
+		id: "mapping_engineering",
+		provider: "trusted_header",
+		providerKey: "default",
+		claimName: "groups",
+		claimValue: "engineering",
+		roleId: PRESET_ROLE_IDS.operator,
+		priority: 1,
+		createdAt: "2026-01-01T00:00:00Z",
+		updatedAt: "2026-01-01T00:00:00Z",
+		...overrides,
+	};
+}
+
+/** Two rules, winner first, exactly as the backend orders them. */
+export function createDefaultRoleMappings(): RoleMapping[] {
+	return [
+		createRoleMapping({ id: "mapping_platform", claimValue: "platform", priority: 2 }),
+		createRoleMapping(),
+	];
+}
+
+export function createRefusedSignIn(overrides: Partial<AuditEntry> = {}): AuditEntry {
+	return {
+		id: 1,
+		timestamp: "2026-01-31T09:00:00Z",
+		action: "login_failed",
+		actorIp: "203.0.113.8",
+		details: {
+			method: "trusted_header",
+			reason: "unknown_identity",
+			subject: "sarah@example.com",
+			email: "sarah@example.com",
+		},
+		severity: "warning",
+		...overrides,
+	};
+}
+
+export function createDefaultRefusedSignIns(): AuditEntry[] {
+	return [
+		createRefusedSignIn(),
+		createRefusedSignIn({
+			id: 2,
+			timestamp: "2026-01-30T11:30:00Z",
+			details: {
+				method: "trusted_header",
+				reason: "unknown_identity",
+				subject: "lee@example.com",
+				email: "lee@example.com",
+			},
 		}),
 	];
 }

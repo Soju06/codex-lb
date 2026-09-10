@@ -96,6 +96,8 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def count_custom_roles(self) -> int: ...
 
+    async def count_role_mappings(self) -> int: ...
+
     async def create_first_admin(self, password_hash: str) -> DashboardUser | None: ...
 
     async def set_user_password_hash(self, user_id: str, password_hash: str) -> DashboardUser: ...
@@ -684,7 +686,7 @@ class DashboardAuthService:
             non_admin_users=counts.non_admin,
             custom_roles=await self._repository.count_custom_roles(),
             providers_enabled=[item.row.kind for item in await self._active_providers()],
-            role_mappings=0,
+            role_mappings=await self._repository.count_role_mappings(),
             scim_tokens=0,
             audit_sinks=0,
             local_login_policy="enabled",

@@ -36,6 +36,7 @@ const EXPLAINED_ERROR_CODES = new Set([
   "invite_not_pending",
   "invite_pending",
   "last_admin_protected",
+  "role_managed_externally",
   "role_not_assignable",
   "self_modification_forbidden",
   "user_not_active",

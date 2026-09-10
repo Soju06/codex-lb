@@ -19,7 +19,7 @@ import {
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   DashboardUserCreateRequestSchema,
   inviteLinkFor,
@@ -28,6 +28,7 @@ import {
   type IssuedInvite,
 } from "@/features/access/api";
 import { accessErrorMessage, useAccessMutations, useDashboardRoles } from "@/features/access/hooks";
+import { RoleSelectItems } from "@/features/settings/components/access/role-picker";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { ApiError } from "@/lib/api-client";
 
@@ -225,11 +226,7 @@ export function InviteDialog({ open, onOpenChange, onIssued }: InviteDialogProps
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {roles.map((role) => (
-                        <SelectItem key={role.id} value={role.id}>
-                          {role.name}
-                        </SelectItem>
-                      ))}
+                      <RoleSelectItems roles={roles} />
                     </SelectContent>
                   </Select>
                   {selectedRole ? <FormDescription>{roleSummary(selectedRole, t)}</FormDescription> : null}

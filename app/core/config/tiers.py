@@ -108,6 +108,8 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "dashboard_trust_loopback_host_header_for_long_sessions": "T1",
     # header name is fixed by the reverse-proxy deployment (policy D2)
     "dashboard_auth_proxy_header": "T1",
+    # the group header the same reverse proxy sets (policy D2)
+    "dashboard_auth_proxy_groups_header": "T1",
     "metrics_enabled": "T1",
     "metrics_port": "T1",
     "log_format": "T1",

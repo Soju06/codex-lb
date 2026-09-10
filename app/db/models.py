@@ -1110,6 +1110,51 @@ class DashboardAuthProvider(Base):
     )
 
 
+class DashboardRoleMappingClaim(str, Enum):
+    """Which fact about an identity a rule matches on.
+
+    A plain string column validated here, not a database enum: a later claim
+    (an OIDC claim name, a SCIM attribute) must not need a type migration.
+    """
+
+    GROUPS = "groups"
+    EMAIL_DOMAIN = "email_domain"
+
+
+class DashboardRoleMapping(Base):
+    """One "identities like this get that role" rule of a sign-in provider.
+
+    Rules are evaluated in descending ``priority`` and the first match wins;
+    ``UNIQUE(provider, provider_key, priority)`` makes a tie impossible and the
+    order server-owned (the rows of one provider are always the contiguous
+    integers ``N..1``). ``role_id`` is RESTRICT: a role a rule hands out cannot
+    be deleted while the rule exists.
+    """
+
+    __tablename__ = "dashboard_role_mappings"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_key", "priority", name="uq_dashboard_role_mappings_priority"),
+        Index("idx_dashboard_role_mappings_provider", "provider", "provider_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    claim_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: Normalized (trimmed, case-folded; an ``email_domain`` value carries no leading ``@``).
+    claim_value: Mapped[str] = mapped_column(String(320), nullable=False)
+    role_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_roles.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class DashboardRoleRecord(Base):
     """A dashboard role: one of the five presets or an operator-defined custom role.
 

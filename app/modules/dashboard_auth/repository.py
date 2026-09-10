@@ -35,6 +35,7 @@ from app.modules.dashboard_users.repository import (
     LocalAuthState,
     utc_now,
 )
+from app.modules.role_mappings.repository import RoleMappingsRepository
 from app.modules.settings.repository import SettingsRepository
 
 _SETTINGS_ID = 1
@@ -46,6 +47,7 @@ class DashboardAuthRepository:
         self._settings_repository = SettingsRepository(session)
         self._users = DashboardUsersRepository(session)
         self._roles = DashboardRolesRepository(session)
+        self._mappings = RoleMappingsRepository(session)
 
     # --- settings (guest access, policy flags, bootstrap token) ---
 
@@ -161,6 +163,9 @@ class DashboardAuthRepository:
 
     async def count_custom_roles(self) -> int:
         return await self._roles.count_custom_roles()
+
+    async def count_role_mappings(self) -> int:
+        return await self._mappings.count_mappings()
 
     # --- users: writes (compat admin mirrored to the legacy columns) ---
 

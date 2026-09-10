@@ -165,6 +165,17 @@ class DashboardUsersRepository:
         stmt = select(func.count()).select_from(DashboardIdentity).where(DashboardIdentity.user_id == user_id)
         return int((await self._session.execute(stmt)).scalar_one())
 
+    async def primary_identity_provider(self, user_id: str) -> str | None:
+        """The provider of the account's oldest identity (which sign-in method manages it)."""
+
+        stmt = (
+            select(DashboardIdentity.provider)
+            .where(DashboardIdentity.user_id == user_id)
+            .order_by(DashboardIdentity.created_at.asc(), DashboardIdentity.id.asc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalars().first()
+
     async def count_active_admins(self, *, exclude_user_id: str | None = None) -> int:
         """Active accounts holding the admin *preset* (custom roles never count, however wide)."""
 

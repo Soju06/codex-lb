@@ -19,7 +19,7 @@ from app.core.exceptions import (
     DashboardPermissionError,
     DashboardValidationError,
 )
-from app.db.models import DashboardAuthProvider
+from app.db.models import AuthProviderKind, DashboardAuthProvider
 from app.dependencies import AuthProvidersContext, get_auth_providers_context
 from app.modules.auth_providers.schemas import AuthProviderResponse, AuthProviderUpdateRequest
 from app.modules.auth_providers.service import ProviderNotFoundError
@@ -45,6 +45,24 @@ async def _require_account(
     return principal
 
 
+def _config(provider: DashboardAuthProvider) -> dict[str, str]:
+    """Read-only, non-secret provider configuration the settings UI shows.
+
+    The trusted-header provider is configured by the deployment topology, not
+    by the database: both header names come from ``CODEX_LB_DASHBOARD_AUTH_PROXY_*``
+    and have to match the reverse proxy. Returning them lets the settings card
+    name the values it cannot edit instead of only naming the variables.
+    """
+
+    if provider.kind != AuthProviderKind.TRUSTED_HEADER.value:
+        return {}
+    settings = get_settings()
+    return {
+        "identityHeader": settings.dashboard_auth_proxy_header,
+        "groupsHeader": settings.dashboard_auth_proxy_groups_header,
+    }
+
+
 def _response(provider: DashboardAuthProvider) -> AuthProviderResponse:
     return AuthProviderResponse(
         id=provider.id,
@@ -58,6 +76,7 @@ def _response(provider: DashboardAuthProvider) -> AuthProviderResponse:
         link_by_email=provider.link_by_email,
         skip_role_sync=provider.skip_role_sync,
         idp_mfa_enforced=provider.idp_mfa_enforced,
+        config=_config(provider),
         created_at=provider.created_at,
         updated_at=provider.updated_at,
     )

@@ -82,6 +82,16 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/dashboard-users/:userId/revoke-sessions",
 	"GET /api/dashboard-roles",
 	"GET /api/dashboard-roles/permissions",
+	// organisation (sign-in providers, group-to-role rules, refused sign-ins)
+	"GET /api/auth-providers",
+	"PATCH /api/auth-providers/:providerId",
+	"GET /api/role-mappings",
+	"GET /api/role-mappings/assignable-roles",
+	"POST /api/role-mappings",
+	"PUT /api/role-mappings/order",
+	"PATCH /api/role-mappings/:mappingId",
+	"DELETE /api/role-mappings/:mappingId",
+	"GET /api/audit-logs",
 	// settings
 	"GET /api/settings",
 	"PUT /api/settings",

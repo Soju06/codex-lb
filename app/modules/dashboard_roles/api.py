@@ -5,19 +5,21 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.core.auth.dashboard_access import ASSIGNABLE_PRESET_ROLES, Permission, RoleKind
+from app.core.auth.dashboard_access import Permission, RoleKind
 from app.core.auth.dependencies import require_dashboard_permission, set_dashboard_error_format
 from app.dependencies import DashboardRolesContext, get_dashboard_roles_context
 from app.modules.dashboard_roles.schemas import DashboardRoleResponse, PermissionDescriptorResponse, RoleGrantResponse
-from app.modules.dashboard_roles.service import permission_descriptors, resolve_role_grants
+from app.modules.dashboard_roles.service import (
+    permission_descriptors,
+    resolve_role_grants,
+    role_assignable_to_users,
+)
 
 router = APIRouter(
     prefix="/api/dashboard-roles",
     tags=["dashboard"],
     dependencies=[Depends(require_dashboard_permission(Permission.USERS_MANAGE)), Depends(set_dashboard_error_format)],
 )
-
-_ASSIGNABLE_PRESET_SLUGS = frozenset(slug.value for slug in ASSIGNABLE_PRESET_ROLES)
 
 
 @router.get("", response_model=list[DashboardRoleResponse])
@@ -37,7 +39,7 @@ async def list_roles(
                 kind=role.kind,
                 locked=is_preset,
                 # Code is the truth for presets: the row's flag only mirrors it.
-                assignable_to_users=role.slug in _ASSIGNABLE_PRESET_SLUGS if is_preset else role.assignable_to_users,
+                assignable_to_users=role_assignable_to_users(role),
                 grants=[
                     RoleGrantResponse(permission=permission.value, scope=scope.value)
                     for permission, scope in sorted(resolve_role_grants(role).items(), key=lambda item: item[0].value)

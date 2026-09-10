@@ -57,7 +57,7 @@ async def resolve_trusted_header_request(
     )
     if active is None:
         return None
-    identity = TrustedHeaderProvider().identity_from_subject(request_auth.actor)
+    identity = TrustedHeaderProvider().identity_from_subject(request_auth.actor, groups=request_auth.groups)
     if identity is None:
         return None
     actor_ip = request.client.host if request.client else None

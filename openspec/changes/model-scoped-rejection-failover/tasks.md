@@ -9,6 +9,8 @@
   not write an account error for a model-scoped rejection.
 - [x] 1.3 Keep a required WebSocket owner selected and surface its original
   model rejection instead of excluding it for another account.
+- [x] 1.4 Consolidate the required-owner predicate so temporary forced-refresh
+  preference cannot pin a movable model-rejection replay.
 
 ## 2. WebSocket pre-created retry
 
@@ -16,6 +18,8 @@
   `response.failed` events before `response.created`.
 - [x] 2.2 Keep accepted output, file-pinned, and previous-owner requests out
   of cross-account replay.
+- [x] 2.3 Preserve the original `model_not_found` envelope when bounded
+  replacement selection exhausts before opening another account.
 
 ## 3. Verification
 
@@ -24,3 +28,5 @@
   owner-bound original-404 control through the public routes.
 - [x] 3.2 Run proxy architecture, cancellation, timing, settings, lint/type,
   targeted route suites, and strict change validation.
+- [x] 3.3 Add route regressions for temporary refresh preference, exhausted
+  WebSocket envelope retention, and HTTP 404 model-rejection exhaustion.

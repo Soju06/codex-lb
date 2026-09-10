@@ -4219,4 +4219,3 @@ model-source models without assuming one global effort vocabulary.
   so the operator can save a valid initial configuration
 - **AND** the operator MUST still be able to replace that seed with arbitrary
   effort slugs before saving.
-

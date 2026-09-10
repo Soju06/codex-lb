@@ -320,4 +320,3 @@ any further rows.
 - **WHEN** the worker's next chunk or finalization re-checks the row
 - **THEN** the worker clears the marker, abandons the deletion, and the
   fresh credentials survive
-

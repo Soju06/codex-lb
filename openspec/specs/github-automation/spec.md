@@ -171,4 +171,3 @@ body-only edit could then mint passing checks for a red or untested head.
 - **WHEN** the release guards run from their own workflow
 - **THEN** they report as `Beta release guard` and `Stable release guard`
 - **AND** the branch ruleset's required contexts are unchanged
-

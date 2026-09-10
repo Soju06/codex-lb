@@ -200,4 +200,3 @@ If the Release workflow is triggered by a public GitHub Release event and any re
 - **WHEN** the failure cleanup job runs
 - **THEN** the GitHub Release is changed back to draft
 - **AND** the release no longer appears as the public latest release
-

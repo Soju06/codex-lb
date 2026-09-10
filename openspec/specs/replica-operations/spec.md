@@ -359,4 +359,3 @@ Each replica SHALL schedule cleanup for locally started or hydrated pending brow
 - **GIVEN** the store owns a browser-flow expiry task
 - **WHEN** the store is reset
 - **THEN** its expiry task is cancelled and awaited before reset returns
-

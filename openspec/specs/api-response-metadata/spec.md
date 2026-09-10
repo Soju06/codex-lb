@@ -32,4 +32,3 @@ The system MUST NOT add `X-App-Version` to HTTP responses whose final status cod
 #### Scenario: Websocket route does not gain app version response metadata
 - **WHEN** a client connects to a websocket route
 - **THEN** the global HTTP app-version response-header policy does not apply to websocket traffic
-

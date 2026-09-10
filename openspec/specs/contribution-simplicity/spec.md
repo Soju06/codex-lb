@@ -111,4 +111,3 @@ Every tracked repository-root entry (file or directory, as listed by `git ls-tre
 
 - **WHEN** the budget configuration has no `[root_files]` section
 - **THEN** the simplicity-budget check skips root-entry enforcement and evaluates the remaining budgets unchanged
-

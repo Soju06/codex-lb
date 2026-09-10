@@ -1942,4 +1942,3 @@ The database SHALL provide an index that supports filtering request logs by API 
 - **WHEN** database migrations are applied
 - **THEN** the `request_logs` table includes an index whose leading key columns are `api_key_id` and descending `requested_at`
 - **AND** the 7-day account-cost breakdown query for an API key is satisfiable by that index for its filter phase
-

@@ -201,4 +201,3 @@ The `/api/conversations` endpoint SHALL reject any request that supplies both `t
 
 - **WHEN** the operator requests `GET /api/conversations` with neither `timeframe` nor `since`
 - **THEN** the effective window is `utcnow() - 30 days`, matching the pre-existing default
-

@@ -1400,4 +1400,3 @@ The per-model reported context window override (`model_context_window_overrides`
 - **WHEN** `GET /v1/models` or `GET /backend-api/codex/models` builds its entries
 - **THEN** the merged overrides are resolved once before the per-model loop from the cached row snapshot and the process settings
 - **AND** no database read happens per model entry
-

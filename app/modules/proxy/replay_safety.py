@@ -16,11 +16,10 @@ _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
     "function_call_output": "function_call",
     "custom_tool_call_output": "custom_tool_call",
     "apply_patch_call_output": "apply_patch_call",
+    "tool_search_output": "tool_search_call",
 }
 _TOOL_CALL_TYPES = frozenset(_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values())
-_ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset(
-    {"reasoning", "tool_search_call", "tool_search_output", "web_search_call"}
-)
+_ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset({"reasoning", "web_search_call"})
 _INTERNAL_CHAT_MESSAGE_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id"})
 _ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
@@ -34,6 +33,7 @@ _ACCOUNT_NEUTRAL_TOOL_CHOICE_STRINGS = frozenset({"auto", "none", "required"})
 _ACCOUNT_NEUTRAL_WEB_SEARCH_CONTEXT_SIZES = frozenset({"high", "low", "medium"})
 _ACCOUNT_NEUTRAL_WEB_SEARCH_FILTER_FIELDS = frozenset({"allowed_domains"})
 _ACCOUNT_NEUTRAL_WEB_SEARCH_LOCATION_FIELDS = frozenset({"city", "country", "region", "timezone", "type"})
+_ACCOUNT_NEUTRAL_TOOL_SEARCH_OUTPUT_TOOL_FIELDS = frozenset({"name"})
 _ACCOUNT_NEUTRAL_MESSAGE_ROLES = frozenset({"assistant", "developer", "system", "user"})
 _ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES = frozenset(
     {
@@ -48,6 +48,8 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES = frozenset(
         "input_image",
         "input_text",
         "message",
+        "tool_search_call",
+        "tool_search_output",
     }
 )
 _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES = frozenset(
@@ -93,6 +95,22 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS = {
     ),
     "function_call_output": frozenset(
         {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
+    ),
+    "tool_search_call": frozenset(
+        {"arguments", "call_id", "caller", "execution", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "status", "type"}
+    ),
+    "tool_search_output": frozenset(
+        {
+            "call_id",
+            "caller",
+            "execution",
+            "id",
+            _INTERNAL_CHAT_MESSAGE_METADATA_FIELD,
+            "output",
+            "status",
+            "tools",
+            "type",
+        }
     ),
 }
 _ACCOUNT_NEUTRAL_ITEM_STATUSES = frozenset({"completed", "failed"})
@@ -650,6 +668,14 @@ def _tool_call_is_self_contained(item_type: str, item: Mapping[str, JsonValue]) 
         return _is_nonblank_string(item.get("name")) and isinstance(item.get("arguments"), str)
     if item_type == "custom_tool_call":
         return _is_nonblank_string(item.get("name")) and isinstance(item.get("input"), str)
+    if item_type == "tool_search_call":
+        arguments = item.get("arguments")
+        return (
+            isinstance(arguments, dict)
+            and item.get("execution") in (None, "client")
+            and not _contains_account_scoped_input_state(arguments)
+            and not _contains_mcp_tool_state(arguments)
+        )
     operation = item.get("operation")
     patch = item.get("patch")
     input_value = item.get("input")
@@ -699,6 +725,18 @@ def _apply_patch_operation_is_self_contained(operation: JsonValue | None) -> boo
 def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]) -> bool:
     if item.get("status") not in (None, "completed", "failed"):
         return False
+    if item_type == "tool_search_output":
+        if item.get("status") == "failed":
+            return False
+        if item.get("execution") not in (None, "client"):
+            return False
+        has_tools_field = "tools" in item
+        has_output_field = "output" in item
+        if has_tools_field == has_output_field:
+            return False
+        if has_tools_field:
+            return _tool_search_output_tools_are_account_neutral(item.get("tools"))
+        return isinstance(item.get("output"), str)
     output = item.get("output")
     if isinstance(output, str):
         return True
@@ -837,6 +875,16 @@ def _client_metadata_is_account_neutral(client_metadata: JsonValue | None) -> bo
 def _tools_are_account_neutral(tools: JsonValue) -> bool:
     return isinstance(tools, list) and all(
         isinstance(tool, dict) and _tool_declaration_is_account_neutral(tool) for tool in tools
+    )
+
+
+def _tool_search_output_tools_are_account_neutral(tools: JsonValue) -> bool:
+    return isinstance(tools, list) and all(
+        isinstance(tool, dict)
+        and set(tool) <= _ACCOUNT_NEUTRAL_TOOL_SEARCH_OUTPUT_TOOL_FIELDS
+        and _is_nonblank_string(tool.get("name"))
+        and not _contains_account_scoped_input_state(tool)
+        for tool in tools
     )
 
 
@@ -1063,6 +1111,19 @@ def _contains_account_scoped_input_state(value: JsonValue) -> bool:
             pending.extend(
                 nested for key, nested in current.items() if not (item_type == "additional_tools" and key == "tools")
             )
+        elif isinstance(current, list):
+            pending.extend(current)
+    return False
+
+
+def _contains_mcp_tool_state(value: JsonValue) -> bool:
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            if current.get("type") == "mcp" or _is_nonblank_string(current.get("server_label")):
+                return True
+            pending.extend(current.values())
         elif isinstance(current, list):
             pending.extend(current)
     return False

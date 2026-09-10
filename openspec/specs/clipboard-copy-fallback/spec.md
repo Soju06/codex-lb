@@ -28,4 +28,3 @@ The fallback clipboard path SHALL accept an optional DOM container and SHALL mou
 #### Scenario: Fallback container cleanup always runs
 - **WHEN** fallback copy completes or throws
 - **THEN** the temporary textarea is removed from the provided container
-

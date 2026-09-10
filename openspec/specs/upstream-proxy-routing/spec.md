@@ -267,4 +267,3 @@ An upstream proxy endpoint whose scheme is `http`, `socks5`, or `socks5h` and wh
 - **WHEN** it is resolved twice in the same process
 - **THEN** exactly one warning is logged for it
 - **AND** the warning contains neither the username nor the password
-

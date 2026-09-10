@@ -1127,4 +1127,3 @@ The settings API MUST report, for each of `proxy_account_response_create_limit`,
 - **GIVEN** the stream limit is stored as 24 and the recovery reserve as 9 while the inherited stream limit is 8
 - **WHEN** the operator opens routing settings
 - **THEN** the stream limit's "Reset to inherited" action is disabled with the reason that the reserve would exceed the limit, while the reserve's reset (which would clear it to 1) stays enabled
-

@@ -112,4 +112,3 @@ from regenerated output, when the settings surface exceeds its ratchet
 - **WHEN** the reference page is regenerated
 - **THEN** its "Removed" section lists exactly the names in `_REMOVED_SETTINGS`
 - **AND** the page has no deprecated-env-alias list
-

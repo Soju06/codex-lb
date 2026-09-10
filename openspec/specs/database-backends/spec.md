@@ -894,4 +894,3 @@ The schema MUST NOT maintain indexes on `request_logs` or `additional_usage_hist
 
 - **WHEN** the response-owner lookup falls back to a sessionless search by `request_id` and `status`
 - **THEN** the newest matching row by `requested_at DESC, id DESC` MUST be retrievable from `idx_logs_request_status_api_key_time` in index order
-

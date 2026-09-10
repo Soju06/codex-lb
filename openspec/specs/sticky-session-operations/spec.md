@@ -1602,4 +1602,3 @@ When a pre-visible upstream failure on the HTTP stream transport is a code-less 
 - **WHEN** account A returns a code-less HTTP 429 before any downstream-visible output
 - **THEN** the failover decision is `failover_next`
 - **AND** the next selection excludes account A and, while another candidate exists, the burst cooldown steers it away from A as well
-

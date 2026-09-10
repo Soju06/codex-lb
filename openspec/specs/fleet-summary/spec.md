@@ -184,4 +184,3 @@ Immediately after the in-flight drain attempt returns, graceful shutdown MUST sy
 - **THEN** the response status is 503
 - **AND** the dashboard error code is `service_unavailable`
 - **AND** no fleet refresh task or background session starts
-

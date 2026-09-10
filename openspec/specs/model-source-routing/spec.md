@@ -152,4 +152,3 @@ source-ownership selection, owner pinning, or stale-anchor matching.
   rewritten to `previous_response_owner_unavailable`
 - **THEN** account health receives the original upstream code
 - **AND** source ownership and stale-anchor classification remain unchanged
-

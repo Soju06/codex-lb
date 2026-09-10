@@ -18,4 +18,3 @@ The `GET /api/reports` endpoint MUST support filtering report aggregations by on
 #### Scenario: Default all API Keys when unselected
 - **WHEN** `GET /api/reports` is requested without any `api_key_id` query parameter
 - **THEN** report metrics SHALL aggregate across all API keys without filtering by key ID.
-

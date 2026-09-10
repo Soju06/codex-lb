@@ -10830,4 +10830,3 @@ still awaiting I/O.
 - **WHEN** the cooldown expires and the next full-resend request is admitted as the probe
 - **THEN** the key is quarantined and the probe is planned without the dead anchor
 - **AND** the probe resends full history rather than the dead anchor
-

@@ -251,6 +251,22 @@ def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() 
             "internal_chat_message_metadata_passthrough": metadata,
         },
         {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "github"},
+            "execution": "client",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
             "type": "message",
             "role": "assistant",
             "status": "completed",
@@ -272,6 +288,27 @@ def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() 
         is True
     )
     assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is True
+
+
+def test_account_neutral_fresh_replay_rejects_tool_search_output_with_mcp_tool_state() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "private status"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [{"type": "mcp", "server_label": "private"}],
+        },
+    ]
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is False
 
 
 def test_account_neutral_replay_projection_rejects_invalid_stored_boundary() -> None:

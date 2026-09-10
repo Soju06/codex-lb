@@ -60,4 +60,3 @@ The beta release sync workflow SHALL include a generated changelog section in th
 - **WHEN** the beta release sync workflow opens or updates the next beta release PR
 - **THEN** the PR body includes a `Changes since v1.20.0-beta.2` section
 - **AND** the section lists the releasable Conventional Commit subjects included in that beta PR
-

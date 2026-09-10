@@ -366,4 +366,3 @@ The required repository architecture gate SHALL reject a bare `await` of an asyn
 
 - **WHEN** a function creates a task whose coroutine neither drives an async iterator nor calls a deferring helper and awaits it directly
 - **THEN** the gate reports no violation
-

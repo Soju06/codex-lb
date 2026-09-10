@@ -120,6 +120,7 @@ def _install(
 def _settings(**overrides: object) -> SimpleNamespace:
     fields: dict[str, object] = {
         "totp_required_on_login": False,
+        "totp_required_for_admin_role": False,
         "guest_access_enabled": False,
         "guest_password_hash": None,
         "guest_session_generation": 0,

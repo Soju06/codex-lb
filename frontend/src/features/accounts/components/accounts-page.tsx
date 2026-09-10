@@ -26,7 +26,7 @@ import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { usePermission } from "@/features/auth/hooks/use-auth";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const OauthDialog = lazy(() =>
@@ -55,11 +55,12 @@ export function AccountsPage() {
     exportAuthMutation,
   } = useAccounts();
   const { settingsQuery } = useSettings();
-  const canWrite = useAuthStore((state) => state.canWrite);
-  // Upstream-proxy administration is a write-only read on the backend; cached
+  const canWrite = usePermission("accounts:write");
+  // Upstream-proxy administration is an `ops:write` read on the backend; cached
   // data from an earlier admin session must not be rendered either.
+  const canReadUpstreamProxy = usePermission("ops:write");
   const { upstreamProxyQuery, accountBindingMutation, testEndpointMutation } = useUpstreamProxyAdmin({
-    enabled: canWrite,
+    enabled: canReadUpstreamProxy,
   });
   const oauth = useOauth();
 
@@ -242,7 +243,7 @@ export function AccountsPage() {
                 securityWorkAuthorized: enabled,
               })
             }
-            upstreamProxyAdmin={canWrite ? (upstreamProxyQuery.data ?? null) : null}
+            upstreamProxyAdmin={canReadUpstreamProxy ? (upstreamProxyQuery.data ?? null) : null}
             onProxyBindingSave={(accountId, payload) =>
               accountBindingMutation.mutateAsync({ accountId, payload })
             }

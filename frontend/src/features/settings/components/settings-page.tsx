@@ -31,7 +31,7 @@ import { SettingsSkeleton } from "@/features/settings/components/settings-skelet
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
 import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -66,6 +66,11 @@ export function SettingsPage() {
   const { modelSourcesQuery } = useModelSources();
   const authMode = useAuthStore((state) => state.authMode);
   const canWrite = useAuthStore((state) => state.canWrite);
+  // Security-bearing controls (API-key auth policy, firewall, proxy endpoints)
+  // need `security:write`; an Operator sees them read-only instead of a 403.
+  const canWriteSecurity = usePermission("security:write");
+  // A fully signed-in account without `write` (a Viewer) still owns its password and two-factor.
+  const personalSignIn = useAuthStore((state) => state.passwordManagementEnabled && state.passwordSessionActive);
   // API keys, upstream-proxy administration, and sticky sessions are write-only
   // reads on the backend (403 for guests), so they are not mounted or fetched
   // without write access. `enabled: false` only stops fetching; cached data from
@@ -168,8 +173,9 @@ export function SettingsPage() {
             <ImportSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
             <ResetCreditSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
             {/* Guest access, password, session and TOTP live inside the Access
-                card; guests (no `write`) never saw them and still do not. */}
-            {canWrite ? (
+                card. It mounts for `write` holders and for any fully signed-in
+                account (its own password/TOTP); guests never saw it and still do not. */}
+            {canWrite || personalSignIn ? (
               <AccessCard
                 settings={settings}
                 busy={busy}
@@ -183,6 +189,7 @@ export function SettingsPage() {
                 apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
                 hideUpstreamQuotaFromApiKeys={settings.hideUpstreamQuotaFromApiKeys}
                 disabled={controlsDisabled}
+                policyControlsDisabled={controlsDisabled || !canWriteSecurity}
                 onApiKeyAuthEnabledChange={(enabled) =>
                   void handleSave(buildSettingsUpdateRequest(settings, { apiKeyAuthEnabled: enabled }))
                 }
@@ -241,6 +248,7 @@ export function SettingsPage() {
                 <UpstreamProxySettings
                   admin={upstreamProxyQuery.data}
                   busy={controlsDisabled}
+                  canCreateEndpoint={canWriteSecurity}
                   onSaveSettings={handleSave}
                   onCreateEndpoint={(payload) => createEndpointMutation.mutateAsync(payload)}
                   onTestEndpoint={(endpointId) => testEndpointMutation.mutateAsync(endpointId)}
@@ -252,7 +260,7 @@ export function SettingsPage() {
               ) : null}
               <ModelSourcesSettings disabled={controlsDisabled} />
               <ModelCatalogueSettings disabled={controlsDisabled} />
-              <FirewallSection disabled={controlsDisabled} />
+              <FirewallSection disabled={controlsDisabled || !canWriteSecurity} />
               <QuotaPlannerSection disabled={controlsDisabled} />
               {canWrite ? <StickySessionsSection disabled={controlsDisabled} /> : null}
               <DataRetentionSettings

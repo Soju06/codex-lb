@@ -7,10 +7,12 @@ from app.core.auth.dashboard_access import (
     ADMIN_PERMISSIONS,
     GUEST_GRANTS,
     GUEST_PERMISSIONS,
+    OPERATOR_GRANTS,
     OWN_SCOPED_PERMISSIONS,
     PERMISSION_IMPLIES,
     PRIVILEGED_PERMISSIONS,
     ROLE_GRANTS,
+    VIEWER_GRANTS,
     DashboardPermission,
     DashboardPrincipal,
     DashboardRole,
@@ -18,8 +20,10 @@ from app.core.auth.dashboard_access import (
     Scope,
     admin_principal,
     guest_principal,
+    is_admin_level,
     legacy_permissions,
     scope_satisfies,
+    totp_policy_applies,
     validate_grants,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode
@@ -91,6 +95,30 @@ def test_validate_grants_enforces_dependency_rules() -> None:
 def test_privileged_permissions_are_admin_only_in_presets() -> None:
     assert PRIVILEGED_PERMISSIONS <= set(ADMIN_GRANTS)
     assert not (PRIVILEGED_PERMISSIONS & set(GUEST_GRANTS))
+
+
+def test_is_admin_level_follows_privileged_permissions() -> None:
+    assert is_admin_level(ADMIN_GRANTS)
+    assert is_admin_level({Permission.DASHBOARD_READ: Scope.ALL, Permission.AUDIT_READ: Scope.ALL})
+    assert is_admin_level({Permission.OPS_WRITE: Scope.ALL, Permission.SECURITY_WRITE: Scope.ALL})
+    assert not is_admin_level(OPERATOR_GRANTS)
+    assert not is_admin_level(VIEWER_GRANTS)
+    assert not is_admin_level(GUEST_GRANTS)
+    assert not is_admin_level({})
+
+
+def test_totp_policy_applies_combines_global_and_admin_role_toggles() -> None:
+    for grants in (ADMIN_GRANTS, OPERATOR_GRANTS, VIEWER_GRANTS):
+        assert totp_policy_applies(required_on_login=True, required_for_admin_role=False, grants=grants)
+        assert not totp_policy_applies(required_on_login=False, required_for_admin_role=False, grants=grants)
+    assert totp_policy_applies(required_on_login=False, required_for_admin_role=True, grants=ADMIN_GRANTS)
+    assert totp_policy_applies(
+        required_on_login=False,
+        required_for_admin_role=True,
+        grants={Permission.DASHBOARD_READ: Scope.ALL, Permission.USERS_MANAGE: Scope.ALL},
+    )
+    assert not totp_policy_applies(required_on_login=False, required_for_admin_role=True, grants=OPERATOR_GRANTS)
+    assert not totp_policy_applies(required_on_login=False, required_for_admin_role=True, grants=VIEWER_GRANTS)
 
 
 def test_principal_scope_and_has() -> None:

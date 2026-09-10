@@ -39,13 +39,18 @@ type TotpDialog = "setup" | "disable" | null;
 export type TotpSettingsProps = {
   settings: DashboardSettings;
   disabled?: boolean;
+  /** The "require on login" toggle is a security setting; without it only the personal controls render. */
+  canEditPolicy?: boolean;
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
 };
 
-export function TotpSettings({ settings, disabled = false, onSave }: TotpSettingsProps) {
+export function TotpSettings({ settings, disabled = false, canEditPolicy = true, onSave }: TotpSettingsProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const refreshSession = useAuthStore((state) => state.refreshSession);
+  // Per account, so it comes from the session rather than the shared settings
+  // cache (which would show the previous account's state right after a sign-in).
+  const totpConfigured = useAuthStore((state) => state.totpConfigured);
 
   const [activeDialog, setActiveDialog] = useState<TotpDialog>(null);
   const [error, setError] = useState<string | null>(null);
@@ -95,7 +100,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
             <div>
               <h3 className="text-sm font-semibold">{t("settings.totp.title")}</h3>
               <p className="text-xs text-muted-foreground">
-                {settings.totpConfigured
+                {totpConfigured
                   ? t("settings.totp.status.configured")
                   : t("settings.totp.status.notConfigured")}
               </p>
@@ -103,7 +108,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
           </div>
 
           <div className="flex items-center gap-2">
-            {settings.totpConfigured ? (
+            {totpConfigured ? (
               <Button
                 type="button"
                 size="sm"
@@ -129,19 +134,21 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
         </div>
 
         {/* Require on login toggle */}
-        <div className="flex items-center justify-between rounded-lg border p-3">
-          <div>
-            <p className="text-sm font-medium">{t("settings.totp.requireLogin.label")}</p>
-            <p className="text-xs text-muted-foreground">{t("settings.totp.requireLogin.description")}</p>
+        {canEditPolicy ? (
+          <div className="flex items-center justify-between rounded-lg border p-3">
+            <div>
+              <p className="text-sm font-medium">{t("settings.totp.requireLogin.label")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.totp.requireLogin.description")}</p>
+            </div>
+            <Switch
+              checked={settings.totpRequiredOnLogin}
+              disabled={lock}
+              onCheckedChange={(checked) =>
+                void onSave(buildSettingsUpdateRequest(settings, { totpRequiredOnLogin: checked }))
+              }
+            />
           </div>
-          <Switch
-            checked={settings.totpRequiredOnLogin}
-            disabled={lock}
-            onCheckedChange={(checked) =>
-              void onSave(buildSettingsUpdateRequest(settings, { totpRequiredOnLogin: checked }))
-            }
-          />
-        </div>
+        ) : null}
       </div>
 
       {/* Setup dialog */}

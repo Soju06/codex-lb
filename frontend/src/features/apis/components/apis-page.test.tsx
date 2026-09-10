@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { createApiKey } from "@/test/mocks/factories";
+import { ADMIN_PERMISSIONS, createApiKey } from "@/test/mocks/factories";
 import { renderWithProviders } from "@/test/utils";
 
 import { ApisPage } from "./apis-page";
@@ -83,12 +83,12 @@ function renderApisPage({
 // The store boots least-privilege, so every page test that exercises admin
 // controls must seed write access explicitly rather than rely on defaults.
 beforeEach(() => {
-	useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true, initialized: true });
+	useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true, initialized: true });
 });
 
 afterEach(() => {
 	vi.clearAllMocks();
-	useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true });
+	useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true });
 });
 
 describe("ApisPage", () => {
@@ -169,6 +169,23 @@ describe("ApisPage", () => {
 		expect(screen.queryByText("Overview")).not.toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Create API Key" })).not.toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+	});
+
+	it("lists keys without create, edit, regenerate or delete for api_keys:read without the write alias", () => {
+		useAuthStore.setState({
+			role: "admin",
+			permissions: ["read", "api_keys:read:all", "dashboard:read:all"],
+			canWrite: false,
+			initialized: true,
+		});
+
+		renderApisPage();
+
+		expect(hookMocks.useApiKeys).toHaveBeenCalledWith({ enabled: true });
+		expect(screen.getByText("Overview")).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Create API Key" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Actions" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
 	});
 
 	it("enables the API key queries for writers", () => {

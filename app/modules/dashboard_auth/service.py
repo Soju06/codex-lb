@@ -24,6 +24,7 @@ from app.core.auth.dashboard_access import (
     Permission,
     PresetRoleSlug,
     permission_strings,
+    totp_policy_applies,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
@@ -65,6 +66,7 @@ class DashboardAuthSettingsProtocol(Protocol):
     guest_password_hash: str | None
     guest_session_generation: int
     totp_required_on_login: bool
+    totp_required_for_admin_role: bool
 
 
 class DashboardAuthRepositoryProtocol(Protocol):
@@ -456,8 +458,7 @@ class DashboardAuthService:
         """
 
         resolved = await self.require_password_session(session_id)
-        settings = await self._repository.get_settings()
-        if settings.totp_required_on_login:
+        if await self._totp_required_for(resolved.user):
             if resolved.user.totp_secret_encrypted is None:
                 if not allow_unenrolled:
                     raise TotpEnrollmentRequiredError("TOTP enrollment is required before dashboard access")
@@ -465,10 +466,19 @@ class DashboardAuthService:
                 raise TotpVerificationRequiredError("TOTP verification is required for dashboard access")
         return resolved
 
+    async def _totp_required_for(self, user: DashboardUser) -> bool:
+        """The TOTP policy as it binds ``user``: the global toggle, or the admin-role toggle for admin-level roles."""
+
+        settings = await self._repository.get_settings()
+        return totp_policy_applies(
+            required_on_login=settings.totp_required_on_login,
+            required_for_admin_role=settings.totp_required_for_admin_role,
+            grants=resolve_role_grants(user.role),
+        )
+
     async def _require_totp_verified_session(self, session_id: str | None) -> ResolvedUserSession:
         resolved = await self.require_password_session(session_id)
-        settings = await self._repository.get_settings()
-        if settings.totp_required_on_login and resolved.user.totp_secret_encrypted is None:
+        if resolved.user.totp_secret_encrypted is None and await self._totp_required_for(resolved.user):
             raise TotpEnrollmentRequiredError("TOTP enrollment is required before dashboard access")
         if not resolved.state.totp_verified:
             raise PasswordSessionRequiredError("TOTP-verified session is required")
@@ -489,7 +499,6 @@ class DashboardAuthService:
         settings = await self._repository.get_settings()
         auth_state = await self._auth_state()
         password_required = auth_state.requires_auth
-        totp_policy = settings.totp_required_on_login
         guest_access_enabled = settings.guest_access_enabled
         guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
         state = self._session_store.get(session_id) if password_required or guest_access_enabled else None
@@ -519,9 +528,14 @@ class DashboardAuthService:
         elif resolved is not None and resolved.state.password_verified:
             user = resolved.user
             grants = resolve_role_grants(user.role)
+            totp_policy = totp_policy_applies(
+                required_on_login=settings.totp_required_on_login,
+                required_for_admin_role=settings.totp_required_for_admin_role,
+                grants=grants,
+            )
             totp_configured = user.totp_secret_encrypted is not None
-            totp_pending = bool(totp_policy and totp_configured and not resolved.state.totp_verified)
-            totp_enrollment_required = bool(totp_policy and not totp_configured)
+            totp_pending = totp_policy and totp_configured and not resolved.state.totp_verified
+            totp_enrollment_required = totp_policy and not totp_configured
             authenticated = not totp_pending
             role = DashboardRole.ADMIN
             auth_method = resolved.state.auth_method
@@ -666,8 +680,7 @@ class DashboardAuthService:
             )
             raise InvalidCredentialsError("Invalid credentials")
         await self._repository.touch_last_login(user.id)
-        settings = await self._repository.get_settings()
-        if not settings.totp_required_on_login or user.totp_secret_encrypted is None:
+        if user.totp_secret_encrypted is None or not await self._totp_required_for(user):
             AuditService.log_async(
                 "login_success",
                 actor_ip=actor_ip,

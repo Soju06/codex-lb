@@ -11,6 +11,7 @@ import { server } from "@/test/mocks/server";
 import {
   ADMIN_PERMISSIONS,
   OPERATOR_PERMISSIONS,
+  VIEWER_PERMISSIONS,
   createAccountSummary,
   createDashboardSettings,
   createSessionUser,
@@ -243,6 +244,25 @@ describe("AppHeader", () => {
       expect(screen.queryByRole("menuitem", { name: "Invite teammate" })).not.toBeInTheDocument();
     });
 
+    it("offers My two-factor to a fully signed-in Viewer without write, and no Invite teammate", async () => {
+      const user = userEvent.setup();
+      useAuthStore.setState({
+        permissions: VIEWER_PERMISSIONS,
+        user: createSessionUser({ id: "user_viewer", username: "viewer", role: { id: "r4", slug: "viewer", name: "Viewer", kind: "preset" } }),
+        tier: "team",
+        canWrite: false,
+        passwordManagementEnabled: true,
+        passwordSessionActive: true,
+      });
+
+      renderHeader();
+
+      await user.click(screen.getByRole("button", { name: /viewer\s*·\s*Viewer/ }));
+      expect(await screen.findByRole("menuitem", { name: "My two-factor" })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: "My password" })).toBeInTheDocument();
+      expect(screen.queryByRole("menuitem", { name: "Invite teammate" })).not.toBeInTheDocument();
+    });
+
     it("is keyboard operable: Enter opens the menu and the arrow keys reach the items", async () => {
       const user = userEvent.setup();
       useAuthStore.setState({ user: createSessionUser(), tier: "team" });
@@ -298,8 +318,12 @@ describe("AppHeader", () => {
       expect(screen.queryByRole("link", { name: /Accounts/i })).not.toBeInTheDocument();
     });
 
-    it("keeps every core item for the guest grant set", () => {
-      useAuthStore.setState({ permissions: ["read", "accounts:read:all", "dashboard:read:all"] });
+    it.each([
+      ["guest", ["read", "accounts:read:all", "dashboard:read:all"]],
+      ["viewer", VIEWER_PERMISSIONS],
+      ["operator", OPERATOR_PERMISSIONS],
+    ])("keeps every core item for the %s grant set", (_label, permissions) => {
+      useAuthStore.setState({ permissions });
 
       renderHeader();
 

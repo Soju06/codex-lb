@@ -1237,6 +1237,14 @@ class DashboardSettings(Base):
         default=False,
         nullable=False,
     )
+    # D9: TOTP required for admin-level accounts only (admin preset or a custom
+    # role holding a privileged permission); independent of the global toggle.
+    totp_required_for_admin_role: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     guest_access_enabled: Mapped[bool] = mapped_column(
         Boolean,

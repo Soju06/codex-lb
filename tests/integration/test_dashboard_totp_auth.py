@@ -105,7 +105,7 @@ async def test_totp_setup_rejects_stale_password_session_after_password_removal(
 
     settings = await async_client.get("/api/settings")
     assert settings.status_code == 200
-    assert settings.json()["totpConfigured"] is False
+    assert (await async_client.get("/api/dashboard-auth/session")).json()["totpConfigured"] is False
 
 
 @pytest.mark.asyncio
@@ -151,7 +151,7 @@ async def test_dashboard_password_and_totp_flow(async_client, monkeypatch):
     assert enable.status_code == 200
     enabled_payload = enable.json()
     assert enabled_payload["totpRequiredOnLogin"] is True
-    assert enabled_payload["totpConfigured"] is True
+    assert (await async_client.get("/api/dashboard-auth/session")).json()["totpConfigured"] is True
 
     logout = await async_client.post("/api/dashboard-auth/logout", json={})
     assert logout.status_code == 200
@@ -196,7 +196,6 @@ async def test_dashboard_password_and_totp_flow(async_client, monkeypatch):
     settings = await async_client.get("/api/settings")
     assert settings.status_code == 200
     settings_payload = settings.json()
-    assert settings_payload["totpConfigured"] is False
     assert settings_payload["totpRequiredOnLogin"] is False
 
 

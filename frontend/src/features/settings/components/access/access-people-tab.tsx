@@ -1,5 +1,6 @@
 import { ShieldCheck } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError } from "@/lib/api-client";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
@@ -7,6 +8,7 @@ import { Link } from "react-router-dom";
 import { AlertMessage } from "@/components/alert-message";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { DashboardUser } from "@/features/access/api";
 import {
@@ -17,15 +19,18 @@ import {
   usePendingInvites,
   usePermissionDescriptors,
 } from "@/features/access/hooks";
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
 import { ACCESS_HASH } from "@/features/settings/advanced-settings-deeplink";
-import { getSettings } from "@/features/settings/api";
+import { getSettings, updateSettings } from "@/features/settings/api";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
+import type { DashboardSettings } from "@/features/settings/schemas";
 import type { IssuedLink } from "@/features/settings/components/access/invite-dialog";
 import { PendingInvitesSheet } from "@/features/settings/components/access/pending-invites-sheet";
 import { PeopleRowActions } from "@/features/settings/components/access/people-row-actions";
 import { RoleBadge } from "@/features/settings/components/access/role-badge";
 import { RolesSheet } from "@/features/settings/components/access/roles-sheet";
 import { formatDateTimeInline, formatExpiresIn } from "@/utils/formatters";
+import { getErrorMessage } from "@/utils/errors";
 
 // Above this many rows the card offers the full page.
 const FULL_PAGE_THRESHOLD = 8;
@@ -61,11 +66,67 @@ function StatusCell({ user }: { user: DashboardUser }) {
   );
 }
 
+/**
+ * "Require two-factor for administrators" (D9): the one requirement control the
+ * People tab owns, rendered only with `security:write`. The server refuses to
+ * turn it on for an actor without their own secret (`invalid_totp_config`); that
+ * refusal is worded here, everything else shows the server message.
+ */
+function AdminTotpRequirement({ settings }: { settings: DashboardSettings }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const mutation = useMutation({
+    mutationFn: (enabled: boolean) =>
+      updateSettings(buildSettingsUpdateRequest(settings, { totpRequiredForAdminRole: enabled })),
+    onMutate: () => setError(null),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] }),
+    onError: (caught) => {
+      if (caught instanceof ApiError && caught.code === "settings_conflict") {
+        // Another writer committed since the settings loaded; refetch so the retry carries the fresh version.
+        void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
+      }
+      setError(
+        caught instanceof ApiError && caught.code === "invalid_totp_config"
+          ? t("access.people.signInRequirements.adminTotp.setUpYourOwnFirst")
+          : getErrorMessage(caught),
+      );
+    },
+  });
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+        <div>
+          <p className="text-sm font-medium text-foreground">{t("access.people.signInRequirements.adminTotp.label")}</p>
+          <p className="text-xs text-muted-foreground">
+            {t("access.people.signInRequirements.adminTotp.description")}
+            {settings.adminsWithoutTotpCount > 0
+              ? ` ${t("access.people.signInRequirements.adminTotp.pendingEnrolment", { count: settings.adminsWithoutTotpCount })}`
+              : null}
+          </p>
+        </div>
+        <Switch
+          aria-label={t("access.people.signInRequirements.adminTotp.label")}
+          checked={settings.totpRequiredForAdminRole}
+          disabled={mutation.isPending}
+          onCheckedChange={(checked) => mutation.mutate(checked)}
+        />
+      </div>
+      {error ? (
+        <p role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 /** Everyone who can sign in: the table, its row actions and the invite entry points. */
 export function AccessPeopleTab({ fullPage = false, onOpenMySignIn, onInvite, onIssued }: AccessPeopleTabProps) {
   const { t } = useTranslation();
   const selfId = useAuthStore((state) => state.user?.id ?? null);
   const assignableRoleIds = useAuthStore((state) => state.assignableRoleIds);
+  const canWriteSecurity = usePermission("security:write");
   const [error, setError] = useState<string | null>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
   const usersQuery = useDashboardUsers();
@@ -186,6 +247,8 @@ export function AccessPeopleTab({ fullPage = false, onOpenMySignIn, onInvite, on
           </TableBody>
         </Table>
       </div>
+
+      {canWriteSecurity && settingsQuery.data ? <AdminTotpRequirement settings={settingsQuery.data} /> : null}
 
       <div className="flex flex-col gap-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
         <p className="flex flex-wrap items-center gap-x-1">

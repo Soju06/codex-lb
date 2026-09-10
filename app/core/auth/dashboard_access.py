@@ -247,6 +247,28 @@ def assert_can_act_on(caller: Grants, target_user_grants: Grants) -> None:
         raise InsufficientDelegationError("The account holds permissions the caller does not have")
 
 
+def is_admin_level(grants: Grants) -> bool:
+    """Whether a grant table counts as "admin-level" for security policy.
+
+    The admin preset qualifies by definition; a custom role qualifies as soon as
+    it holds one :data:`PRIVILEGED_PERMISSIONS` entry. Operator, member, viewer
+    and guest never do.
+    """
+
+    return not PRIVILEGED_PERMISSIONS.isdisjoint(grants)
+
+
+def totp_policy_applies(*, required_on_login: bool, required_for_admin_role: bool, grants: Grants) -> bool:
+    """Whether the install's TOTP policy binds an account holding ``grants``.
+
+    The global toggle binds every password account; the admin-role toggle binds
+    admin-level accounts only. One predicate serves the session dependency and
+    the session response so the two can never disagree.
+    """
+
+    return required_on_login or (required_for_admin_role and is_admin_level(grants))
+
+
 def legacy_permissions(grants: Grants) -> frozenset[DashboardPermission]:
     """Derive the coarse ``read`` / ``write`` aliases from fine-grained grants."""
 

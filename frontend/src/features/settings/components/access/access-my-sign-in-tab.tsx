@@ -1,6 +1,6 @@
 import { Suspense, lazy } from "react";
 
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
@@ -19,23 +19,31 @@ export type AccessMySignInTabProps = {
 
 /**
  * The signed-in person's own controls: the four sections the Settings page
- * rendered at top level before the Access card existed, in the same order and
- * behind the same gates (guest access and session need `write`; TOTP needs a
- * password-backed session).
+ * rendered at top level before the Access card existed, in the same order.
+ * Guest access, session length and the TOTP requirement toggle are security
+ * settings (`security:write`). The person's own password and TOTP secret belong
+ * to any fully signed-in account (a Viewer included): they follow
+ * `passwordManagementEnabled && passwordSessionActive`; the password card also
+ * renders for the implicit admin holding `write`, who has no password yet.
  */
 export function AccessMySignInTab({ settings, busy, onSave, onRefresh }: AccessMySignInTabProps) {
   const canWrite = useAuthStore((state) => state.canWrite);
+  const canWriteSecurity = usePermission("security:write");
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
-  const passwordSessionActive = useAuthStore((state) => state.passwordSessionActive);
+  const personal = useAuthStore((state) => state.passwordManagementEnabled && state.passwordSessionActive);
 
   return (
     <div className="space-y-4">
-      {canWrite ? <GuestAccessSettings settings={settings} busy={busy} onSave={onSave} onRefresh={onRefresh} /> : null}
-      {canWrite ? <PasswordSettings disabled={busy} /> : null}
-      {canWrite && passwordManagementEnabled ? <SessionSettings settings={settings} busy={busy} onSave={onSave} /> : null}
-      {canWrite && passwordManagementEnabled && passwordSessionActive ? (
+      {canWriteSecurity ? (
+        <GuestAccessSettings settings={settings} busy={busy} onSave={onSave} onRefresh={onRefresh} />
+      ) : null}
+      {canWrite || personal ? <PasswordSettings disabled={busy} /> : null}
+      {canWriteSecurity && passwordManagementEnabled ? (
+        <SessionSettings settings={settings} busy={busy} onSave={onSave} />
+      ) : null}
+      {personal ? (
         <Suspense fallback={null}>
-          <TotpSettings settings={settings} disabled={busy} onSave={onSave} />
+          <TotpSettings settings={settings} disabled={busy} canEditPolicy={canWriteSecurity} onSave={onSave} />
         </Suspense>
       ) : null}
     </div>

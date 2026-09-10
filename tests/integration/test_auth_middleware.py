@@ -197,15 +197,18 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
 
     blocked_alias = await client.put("/api/accounts/missing/alias", json={"alias": "Guest Alias"})
     assert blocked_alias.status_code == 403
-    assert blocked_alias.json()["error"]["code"] == "read_only_access"
+    assert blocked_alias.json()["error"]["code"] == "permission_required"
+    assert blocked_alias.json()["error"]["param"] == "accounts:write"
 
     blocked_limit_warmup = await client.put("/api/accounts/missing/limit-warmup", json={"enabled": True})
     assert blocked_limit_warmup.status_code == 403
-    assert blocked_limit_warmup.json()["error"]["code"] == "read_only_access"
+    assert blocked_limit_warmup.json()["error"]["code"] == "permission_required"
+    assert blocked_limit_warmup.json()["error"]["param"] == "accounts:write"
 
     blocked_usage_reset = await client.post("/api/accounts/missing/usage-reset-credits/consume")
     assert blocked_usage_reset.status_code == 403
-    assert blocked_usage_reset.json()["error"]["code"] == "read_only_access"
+    assert blocked_usage_reset.json()["error"]["code"] == "permission_required"
+    assert blocked_usage_reset.json()["error"]["param"] == "accounts:write"
 
     blocked_proxy_endpoint = await client.post(
         "/api/settings/upstream-proxy/endpoints",

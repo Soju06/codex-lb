@@ -21,6 +21,7 @@ from app.core.auth.dashboard_access import (
     admin_principal,
     guest_principal,
     scope_satisfies,
+    totp_policy_applies,
     user_principal,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
@@ -35,7 +36,7 @@ from app.core.request_locality import is_local_request
 from app.core.socket_peer import raw_socket_peer_host
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
-from app.db.models import AccountStatus, DashboardUser, DashboardUserStatus
+from app.db.models import AccountStatus, DashboardSettings, DashboardUser, DashboardUserStatus
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -214,13 +215,18 @@ def _user_session_principal(
     user: DashboardUser,
     state: DashboardSessionState,
     *,
-    totp_policy_applies: bool,
+    settings: DashboardSettings,
 ) -> DashboardPrincipal:
-    totp_configured = user.totp_secret_encrypted is not None
-    if totp_policy_applies and totp_configured and not state.totp_verified:
-        raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
-    totp_enrollment_required = totp_policy_applies and not totp_configured
     grants = resolve_role_grants(user.role)
+    totp_required = totp_policy_applies(
+        required_on_login=settings.totp_required_on_login,
+        required_for_admin_role=settings.totp_required_for_admin_role,
+        grants=grants,
+    )
+    totp_configured = user.totp_secret_encrypted is not None
+    if totp_required and totp_configured and not state.totp_verified:
+        raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
+    totp_enrollment_required = totp_required and not totp_configured
     # Routes guarded only by this dependency (account inventory, request logs,
     # ...) assume a reader who may see everything. Until the self-service phase
     # makes own-scoped routes declare their own requirement (this guard then
@@ -265,8 +271,9 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     users_cache = get_dashboard_users_cache()
     auth_state = await users_cache.local_auth_state()
     password_required = auth_state.requires_auth
-    totp_policy_applies = settings.totp_required_on_login
-    requires_auth = password_required or totp_policy_applies
+    # The admin-role requirement binds accounts only, so on its own it never
+    # turns a passwordless install into one that demands a login.
+    requires_auth = password_required or settings.totp_required_on_login
     guest_access_enabled = settings.guest_access_enabled
     guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
     passwordless_guest_fallback_allowed = not (
@@ -293,7 +300,7 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     ):
         return _set_dashboard_principal(request, guest_principal())
     if state is not None and session_user is not None and state.password_verified:
-        return _user_session_principal(request, session_user, state, totp_policy_applies=totp_policy_applies)
+        return _user_session_principal(request, session_user, state, settings=settings)
 
     if not requires_auth:
         if not is_local_request(request):
@@ -313,7 +320,7 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     if guest_access_enabled and not guest_password_required and passwordless_guest_fallback_allowed:
         return _set_dashboard_principal(request, guest_principal())
 
-    if auth_state.active_local_password_users == 0 and totp_policy_applies:
+    if auth_state.active_local_password_users == 0 and settings.totp_required_on_login:
         logger.warning(
             "dashboard_auth_migration_inconsistency no active local password user"
             " while totp_required_on_login=true metric=dashboard_auth_migration_inconsistency"

@@ -74,6 +74,7 @@ class _FakeSettings:
     guest_session_generation: int = 0
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
     totp_required_on_login: bool = False
+    totp_required_for_admin_role: bool = False
 
 
 def _role(slug: PresetRoleSlug) -> DashboardRoleRecord:

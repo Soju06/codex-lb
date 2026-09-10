@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
-import { createUpstreamProxyAdmin } from "@/test/mocks/factories";
+import { ADMIN_PERMISSIONS, createUpstreamProxyAdmin } from "@/test/mocks/factories";
 import type { AccountSummary } from "@/features/accounts/schemas";
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
@@ -115,7 +115,7 @@ describe("AccountsPage", () => {
       initialized: true,
       authenticated: true,
       role: "admin",
-      permissions: ["read", "write"],
+      permissions: ADMIN_PERMISSIONS,
       canWrite: true,
     });
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
@@ -126,7 +126,7 @@ describe("AccountsPage", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-    useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true });
+    useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true });
   });
 
   it("keeps the upstream-proxy admin query idle and hides OAuth help for read-only guests", () => {

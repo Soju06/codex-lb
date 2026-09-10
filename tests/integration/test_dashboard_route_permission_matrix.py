@@ -76,6 +76,25 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("GET", "/api/settings/runtime/connect-address"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/sticky-sessions"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/oauth/status"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    # Pure account mutations (PR-2a): accounts:write suffices, the coarse alias is not required.
+    ("POST", "/api/oauth/start"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("POST", "/api/oauth/complete"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("POST", "/api/oauth/manual-callback"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("POST", "/api/accounts/import"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("PATCH", "/api/accounts/{account_id}"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("DELETE", "/api/accounts/{account_id}"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("POST", "/api/accounts/{account_id}/pause"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("POST", "/api/accounts/{account_id}/reactivate"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("POST", "/api/accounts/{account_id}/probe"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("PUT", "/api/accounts/{account_id}/alias"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("PUT", "/api/accounts/{account_id}/limit-warmup"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("PUT", "/api/accounts/{account_id}/routing-policy"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
+    ("POST", "/api/accounts/{account_id}/usage-reset-credits/consume"): PermissionRequirement(
+        Permission.ACCOUNTS_WRITE
+    ),
+    ("POST", "/api/accounts/{account_id}/rate-limit-reset-credits/consume"): PermissionRequirement(
+        Permission.ACCOUNTS_WRITE
+    ),
     # Account management and the roles read API (PR-1c): users:manage throughout.
     ("GET", "/api/dashboard-users"): PermissionRequirement(Permission.USERS_MANAGE),
     ("POST", "/api/dashboard-users"): PermissionRequirement(Permission.USERS_MANAGE),

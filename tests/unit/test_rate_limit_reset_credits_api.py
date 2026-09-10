@@ -9,8 +9,8 @@ from typing import Any, cast
 import pytest
 from fastapi import Request
 
-from app.core.auth.dashboard_access import DashboardAuthMode, admin_principal
-from app.core.auth.dependencies import require_dashboard_write_access
+from app.core.auth.dashboard_access import DashboardAuthMode, Permission, admin_principal
+from app.core.auth.dependencies import require_dashboard_permission
 from app.core.auth.refresh import RefreshError
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
@@ -1518,11 +1518,11 @@ async def test_consume_refuses_read_only_guest(app_instance, async_client) -> No
             code="read_only_access",
         )
 
-    app_instance.dependency_overrides[require_dashboard_write_access] = _guest_refused
+    app_instance.dependency_overrides[require_dashboard_permission(Permission.ACCOUNTS_WRITE)] = _guest_refused
     try:
         response = await async_client.post("/api/accounts/acc_guest/rate-limit-reset-credits/consume")
     finally:
-        app_instance.dependency_overrides.pop(require_dashboard_write_access, None)
+        app_instance.dependency_overrides.pop(require_dashboard_permission(Permission.ACCOUNTS_WRITE), None)
 
     assert response.status_code == 403
 

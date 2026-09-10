@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AccessCard } from "@/features/settings/components/access/access-card";
 import { renderAt, settings, signInAsTeamAdmin } from "@/test/access-test-utils";
-import { OPERATOR_PERMISSIONS, createAccessSummary, createSessionUser } from "@/test/mocks/factories";
+import { OPERATOR_PERMISSIONS, VIEWER_PERMISSIONS, createAccessSummary, createSessionUser } from "@/test/mocks/factories";
 import { MOCK_ISSUED_INVITE_TOKEN } from "@/test/mocks/handlers";
 
 vi.mock("@/features/settings/components/guest-access-settings", () => ({
@@ -27,6 +27,8 @@ vi.mock("@/features/settings/components/totp-settings", () => ({
 }));
 
 const TODAYS_ORDER = ["Guest Access Settings", "Password Settings", "Session Settings", "TOTP Settings"];
+// Guest access and session length are security settings; without `security:write` only the personal controls render.
+const PERSONAL_ORDER = ["Password Settings", "TOTP Settings"];
 
 function renderCard(initialEntry = "/settings") {
   return renderAt(
@@ -81,7 +83,7 @@ describe("AccessCard", () => {
 
     expect(screen.queryByTestId("access-solo-line")).not.toBeInTheDocument();
     expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
-    expect(await controlLabels()).toEqual(TODAYS_ORDER);
+    expect(await controlLabels()).toEqual(PERSONAL_ORDER);
   });
 
   it("keeps the first invite link on screen through the tier flip, then switches to People", async () => {
@@ -140,11 +142,12 @@ describe("AccessCard", () => {
   });
 
   it.each([
-    ["without users:manage", { permissions: OPERATOR_PERMISSIONS, accessSummary: null, assignableRoleIds: [], user: createSessionUser({ id: "user_ops", username: "ops" }) }],
-    ["standard mode without an account", { user: null }],
-    ["on a trusted-header install", { user: null, authMode: "trusted_header" as const }],
-    ["when auth is disabled", { user: null, authMode: "disabled" as const }],
-  ])("team tier %s shows only the sign-in controls, no tabs, no invite", async (_label, overrides) => {
+    ["without users:manage", { permissions: OPERATOR_PERMISSIONS, accessSummary: null, assignableRoleIds: [], user: createSessionUser({ id: "user_ops", username: "ops" }) }, PERSONAL_ORDER],
+    ["as a viewer without write", { permissions: VIEWER_PERMISSIONS, canWrite: false, accessSummary: null, assignableRoleIds: [], user: createSessionUser({ id: "user_viewer", username: "viewer" }) }, PERSONAL_ORDER],
+    ["standard mode without an account", { user: null }, TODAYS_ORDER],
+    ["on a trusted-header install", { user: null, authMode: "trusted_header" as const }, TODAYS_ORDER],
+    ["when auth is disabled", { user: null, authMode: "disabled" as const }, TODAYS_ORDER],
+  ])("team tier %s shows only the sign-in controls, no tabs, no invite", async (_label, overrides, order) => {
     signInAsTeamAdmin({ accessSummary: createAccessSummary({ usersTotal: 2, nonAdminUsers: 1 }), ...overrides });
 
     renderCard();
@@ -152,7 +155,7 @@ describe("AccessCard", () => {
     expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Invite/ })).not.toBeInTheDocument();
     expect(screen.queryByTestId("access-solo-line")).not.toBeInTheDocument();
-    expect(await controlLabels()).toEqual(TODAYS_ORDER);
+    expect(await controlLabels()).toEqual(order);
   });
 
   it("#access-people selects People, #access selects My sign-in, #totp reaches the TOTP section", async () => {

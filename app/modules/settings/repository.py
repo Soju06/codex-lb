@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 
 from sqlalchemy import func, select
@@ -14,7 +14,8 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.db.models import DashboardSettings, ModelContextWindowOverride
+from app.db.models import DashboardSettings, DashboardUser, ModelContextWindowOverride
+from app.modules.dashboard_users.repository import DashboardUsersRepository
 
 _SETTINGS_ID = 1
 
@@ -22,6 +23,11 @@ _SETTINGS_ID = 1
 class SettingsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_active_password_users(self) -> Sequence[DashboardUser]:
+        """Accounts the TOTP requirements bind (roles loaded for the admin-level check)."""
+
+        return await DashboardUsersRepository(self._session).list_active_local_password_users()
 
     async def get_or_create(self) -> DashboardSettings:
         existing = await self._session.get(DashboardSettings, _SETTINGS_ID)
@@ -64,6 +70,7 @@ class SettingsRepository:
             dashboard_session_ttl_seconds=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
             import_without_overwrite=True,
             totp_required_on_login=False,
+            totp_required_for_admin_role=False,
             password_hash=None,
             guest_access_enabled=False,
             guest_password_hash=None,
@@ -169,6 +176,7 @@ class SettingsRepository:
         warmup_model: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
+        totp_required_for_admin_role: bool | None = None,
         api_key_auth_enabled: bool | None = None,
         hide_upstream_quota_from_api_keys: bool | None = None,
         limit_warmup_enabled: bool | None = None,
@@ -364,6 +372,8 @@ class SettingsRepository:
             settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:
             settings.totp_required_on_login = totp_required_on_login
+        if totp_required_for_admin_role is not None:
+            settings.totp_required_for_admin_role = totp_required_for_admin_role
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
         if hide_upstream_quota_from_api_keys is not None:

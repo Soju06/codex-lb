@@ -538,7 +538,9 @@ export const OPERATOR_PERMISSIONS: string[] = [
 	"ops:write:all",
 ];
 
-export const GUEST_PERMISSIONS: string[] = ["read", "accounts:read:all", "dashboard:read:all"];
+export const VIEWER_PERMISSIONS: string[] = ["read", "accounts:read:all", "dashboard:read:all"];
+
+export const GUEST_PERMISSIONS: string[] = VIEWER_PERMISSIONS;
 
 export function createSessionUser(overrides: Partial<AuthSessionUser> = {}): AuthSessionUser {
 	return {
@@ -793,7 +795,9 @@ export function createDashboardSettings(
 		warmupModel: "gpt-5.4-mini",
 		importWithoutOverwrite: false,
 		totpRequiredOnLogin: false,
-		totpConfigured: true,
+		totpRequiredForAdminRole: false,
+		usersWithoutTotpCount: 0,
+		adminsWithoutTotpCount: 0,
 		apiKeyAuthEnabled: true,
 		hideUpstreamQuotaFromApiKeys: false,
 		limitWarmupEnabled: false,

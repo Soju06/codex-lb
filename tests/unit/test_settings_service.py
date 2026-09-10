@@ -9,7 +9,7 @@ import pytest
 import app.modules.settings.service as settings_service_module
 from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 from app.core.config.settings import Settings
-from app.db.models import DashboardSettings
+from app.db.models import DashboardSettings, DashboardUser
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import (
     InheritableValue,
@@ -54,6 +54,10 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
     class _Repository:
         async def get_or_create(self) -> DashboardSettings:
             return row
+
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
 
     # Environment differs from the code default for the stream limit (8) only.
     monkeypatch.setattr(
@@ -151,6 +155,10 @@ async def test_timeout_settings_resolve_dashboard_then_environment_then_default(
         async def get_or_create(self) -> DashboardSettings:
             return row
 
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
+
     monkeypatch.setattr(
         settings_service_module,
         "get_settings",
@@ -179,6 +187,10 @@ async def test_stream_and_bridge_budgets_resolve_dashboard_then_environment_then
     class _Repository:
         async def get_or_create(self) -> DashboardSettings:
             return row
+
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
 
     # (a) dashboard column set -> dashboard; (b) NULL column + env differs -> env.
     monkeypatch.setattr(
@@ -221,6 +233,10 @@ async def test_migrated_null_account_caps_inherit_environment(monkeypatch: pytes
         async def get_or_create(self) -> DashboardSettings:
             return row
 
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
+
     monkeypatch.setattr(
         settings_service_module,
         "get_settings",
@@ -261,6 +277,10 @@ async def test_cleared_account_cap_follows_environment_changes(monkeypatch: pyte
         async def get_or_create(self) -> DashboardSettings:
             return row
 
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
+
     monkeypatch.setattr(settings_service_module, "get_settings", lambda: startup_settings)
     service = SettingsService(cast(SettingsRepository, _Repository()))
 
@@ -284,6 +304,10 @@ async def test_migrated_null_api_key_fair_share_threshold_inherits_environment(
     class _Repository:
         async def get_or_create(self) -> DashboardSettings:
             return row
+
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
 
     monkeypatch.setattr(
         settings_service_module,
@@ -327,6 +351,10 @@ async def test_null_retention_inherits_environment_and_dashboard_value_wins(
     class _Repository:
         async def get_or_create(self) -> DashboardSettings:
             return row
+
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
 
     monkeypatch.setattr(
         settings_service_module,
@@ -420,6 +448,10 @@ async def test_settings_data_resolves_resilience_toggles_with_provenance(monkeyp
         async def get_or_create(self) -> DashboardSettings:
             return row
 
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
+
     monkeypatch.setattr(
         settings_service_module,
         "get_settings",
@@ -474,6 +506,10 @@ async def test_settings_data_resolves_codex_prewarm_switch_with_provenance(
         async def get_or_create(self) -> DashboardSettings:
             return row
 
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
+
     monkeypatch.setattr(
         settings_service_module,
         "get_settings",
@@ -519,6 +555,10 @@ async def test_settings_data_resolves_background_job_toggles_with_provenance(mon
         async def get_or_create(self) -> DashboardSettings:
             return row
 
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
+
     service = SettingsService(cast(SettingsRepository, _Repository()))
 
     data = await service.get_settings()
@@ -555,6 +595,10 @@ async def test_settings_data_resolves_conversation_archive_toggle_with_provenanc
     class _Repository:
         async def get_or_create(self) -> DashboardSettings:
             return row
+
+        async def list_active_password_users(self) -> list[DashboardUser]:
+            # No accounts: these tests exercise settings resolution, not enrolment.
+            return []
 
     monkeypatch.setattr(
         settings_service_module,

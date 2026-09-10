@@ -7,7 +7,14 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { SettingsPage } from "@/features/settings/components/settings-page";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import type { DashboardSettings } from "@/features/settings/schemas";
-import { createDashboardSettings, createUpstreamProxyAdmin } from "@/test/mocks/factories";
+import {
+  ADMIN_PERMISSIONS,
+  OPERATOR_PERMISSIONS,
+  VIEWER_PERMISSIONS,
+  createDashboardSettings,
+  createSessionUser,
+  createUpstreamProxyAdmin,
+} from "@/test/mocks/factories";
 
 const useSettingsMock = vi.fn();
 const useAccountsMock = vi.fn();
@@ -187,6 +194,7 @@ describe("SettingsPage", () => {
       passwordManagementEnabled: true,
       passwordSessionActive: false,
       canWrite: true,
+      permissions: ADMIN_PERMISSIONS,
     });
 
     mockSettingsQuery({
@@ -277,6 +285,31 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Telemetry Settings")).toBeInTheDocument();
   });
 
+  it("renders the security-bearing controls read-only for an operator (write without security:write)", async () => {
+    useAuthStore.setState({ permissions: OPERATOR_PERMISSIONS });
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+    renderSettings();
+
+    expect(screen.queryByText("Read-only access")).not.toBeInTheDocument();
+    expect(apiKeysSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ disabled: false, policyControlsDisabled: true }),
+    );
+
+    await expandAdvancedSettings();
+
+    expect(firewallSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    expect(upstreamProxySettingsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ busy: false, canCreateEndpoint: false }),
+    );
+    expect(modelSourcesSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+  });
+
   it("mounts every advanced section after one expand interaction", async () => {
     renderSettings();
 
@@ -365,6 +398,24 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Upstream Proxy Settings")).toBeInTheDocument();
     expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
     expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+  });
+
+  it("mounts the Access card for a fully signed-in Viewer (own password and TOTP, no security controls)", async () => {
+    useAuthStore.setState({
+      canWrite: false,
+      permissions: VIEWER_PERMISSIONS,
+      passwordSessionActive: true,
+      user: createSessionUser({ id: "user_viewer", username: "viewer" }),
+    });
+
+    renderSettings();
+
+    expect(screen.getByRole("heading", { name: "Access" })).toBeInTheDocument();
+    expect(await screen.findByText("Password Settings")).toBeInTheDocument();
+    expect(await screen.findByText("TOTP Settings")).toBeInTheDocument();
+    expect(screen.queryByText("Guest Access Settings")).not.toBeInTheDocument();
+    expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
+    expect(apiKeysSectionMock).not.toHaveBeenCalled();
   });
 
   it("folds guest access, password, session and TOTP into the Access card in today's order", async () => {

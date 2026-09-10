@@ -33,10 +33,9 @@ type AccountMenuItem = {
 function useAccountMenuItems(onOpenPasswordDialog: () => void): AccountMenuItem[] {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  // Same predicate the Settings page uses to mount the TOTP card.
-  const canManageTotp = useAuthStore(
-    (state) => state.canWrite && state.passwordManagementEnabled && state.passwordSessionActive,
-  );
+  // Same predicate the Access card uses to mount the TOTP card: any fully
+  // signed-in account (a Viewer included) manages its own two-factor.
+  const canManageTotp = useAuthStore((state) => state.passwordManagementEnabled && state.passwordSessionActive);
   const canManageUsers = usePermission("users:manage");
   const logout = useAuthStore((state) => state.logout);
   const logoutEverywhere = useAuthStore((state) => state.logoutEverywhere);

@@ -7,6 +7,7 @@ import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AccessPeopleTab } from "@/features/settings/components/access/access-people-tab";
 import { renderAt, signInAsTeamAdmin } from "@/test/access-test-utils";
 import {
+  OPERATOR_PERMISSIONS,
   PRESET_ROLE_IDS,
   createDashboardSettings,
   createDashboardUser,
@@ -66,7 +67,7 @@ describe("AccessPeopleTab", () => {
 
     expect(screen.getByRole("button", { name: "Pending invites (1)" })).toBeInTheDocument();
     expect(screen.queryByText("View full page")).not.toBeInTheDocument();
-    expect(await screen.findByText("Two-factor is not required at sign-in.")).toBeInTheDocument();
+    expect(await screen.findByText("Two-factor is not required for everyone at sign-in.")).toBeInTheDocument();
   });
 
   it("reads the TOTP requirement from the configured policy, not the session flag", async () => {
@@ -75,7 +76,7 @@ describe("AccessPeopleTab", () => {
 
     renderTab();
 
-    expect(await screen.findByText("Two-factor is required at sign-in.")).toBeInTheDocument();
+    expect(await screen.findByText("Two-factor is required for everyone at sign-in.")).toBeInTheDocument();
   });
 
   it("fails closed while the TOTP policy is unknown: no statement, no compat reset, retry re-requests", async () => {
@@ -95,17 +96,92 @@ describe("AccessPeopleTab", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Could not load the sign-in requirements.");
-    expect(screen.queryByText("Two-factor is not required at sign-in.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Two-factor is required at sign-in.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Two-factor is not required for everyone at sign-in.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Two-factor is required for everyone at sign-in.")).not.toBeInTheDocument();
     expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual(["Log out everywhere"]);
     await user.keyboard("{Escape}");
 
     fail = false;
     const before = settingsRequests;
     await user.click(within(alert).getByRole("button", { name: "Retry" }));
-    expect(await screen.findByText("Two-factor is required at sign-in.")).toBeInTheDocument();
+    expect(await screen.findByText("Two-factor is required for everyone at sign-in.")).toBeInTheDocument();
     expect(settingsRequests).toBe(before + 1);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  describe("Require two-factor for administrators", () => {
+    const TOGGLE = { name: "Require two-factor for administrators" };
+
+    it("renders the toggle with the enrolment hint for security:write and saves the flag", async () => {
+      const user = userEvent.setup();
+      let settings = createDashboardSettings({ adminsWithoutTotpCount: 2 });
+      const puts: unknown[] = [];
+      server.use(
+        http.get("/api/settings", () => HttpResponse.json(settings)),
+        http.put("/api/settings", async ({ request }) => {
+          const body = (await request.json()) as Record<string, unknown>;
+          puts.push(body);
+          settings = createDashboardSettings({ ...settings, totpRequiredForAdminRole: body.totpRequiredForAdminRole as boolean });
+          return HttpResponse.json(settings);
+        }),
+      );
+      renderTab();
+
+      const toggle = await screen.findByRole("switch", TOGGLE);
+      expect(toggle).not.toBeChecked();
+      expect(screen.getByText(/2 administrators will have to set up two-factor before they can continue\./)).toBeInTheDocument();
+      // The global requirement line stays as it was, next to the new toggle.
+      expect(screen.getByText("Two-factor is not required for everyone at sign-in.")).toBeInTheDocument();
+
+      await user.click(toggle);
+
+      await waitFor(() => expect(screen.getByRole("switch", TOGGLE)).toBeChecked());
+      expect(puts).toHaveLength(1);
+      expect(puts[0]).toMatchObject({ totpRequiredForAdminRole: true, totpRequiredOnLogin: false });
+    });
+
+    it("is not rendered for a manager without security:write", async () => {
+      signInAsTeamAdmin({
+        permissions: [...OPERATOR_PERMISSIONS, "users:manage:all"],
+        user: createSessionUser({ id: "user_ops", username: "ops" }),
+      });
+      renderTab();
+
+      expect(await screen.findByText("Two-factor is not required for everyone at sign-in.")).toBeInTheDocument();
+      expect(screen.queryByRole("switch", TOGGLE)).not.toBeInTheDocument();
+    });
+
+    it("explains the enable guard inline when the acting admin has no two-factor of their own", async () => {
+      const user = userEvent.setup();
+      server.use(
+        http.put("/api/settings", () =>
+          HttpResponse.json(
+            { error: { code: "invalid_totp_config", message: "Set up your own TOTP before requiring it at sign-in" } },
+            { status: 400 },
+          ),
+        ),
+      );
+      renderTab();
+
+      await user.click(await screen.findByRole("switch", TOGGLE));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Set up your own two-factor first.");
+      expect(screen.getByRole("switch", TOGGLE)).not.toBeChecked();
+    });
+
+    it("shows other server refusals verbatim", async () => {
+      const user = userEvent.setup();
+      server.use(
+        http.put("/api/settings", () =>
+          HttpResponse.json({ error: { code: "settings_conflict", message: "Settings were modified" } }, { status: 409 }),
+        ),
+      );
+      renderTab();
+
+      await user.click(await screen.findByRole("switch", TOGGLE));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Settings were modified");
+    });
   });
 
   it("treats a still-loading TOTP policy as unknown", async () => {
@@ -150,7 +226,7 @@ describe("AccessPeopleTab", () => {
     signInAsTeamAdmin({ user: createSessionUser({ id: "user_ops", username: "ops" }) });
     renderTab();
 
-    await screen.findByText("Two-factor is required at sign-in.");
+    await screen.findByText("Two-factor is required for everyone at sign-in.");
     expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual(["Log out everywhere"]);
   });
 

@@ -21,7 +21,7 @@ import {
 	useApiKeyTrends,
 	useApiKeyUsage7Day,
 } from "@/features/apis/hooks/use-apis";
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -40,7 +40,9 @@ export function ApisPage() {
 	const { t } = useTranslation();
 	const [searchParams, setSearchParams] = useSearchParams();
 	// The backend answers every API-key read with 403 for principals without
-	// write access, so the queries stay idle and the page explains instead.
+	// `api_keys:read`, so the queries stay idle and the page explains instead.
+	// Mutations still run behind the coarse write alias, so the controls follow it.
+	const canReadKeys = usePermission("api_keys:read");
 	const canWrite = useAuthStore((state) => state.canWrite);
 	const {
 		apiKeysQuery,
@@ -48,7 +50,7 @@ export function ApisPage() {
 		updateMutation,
 		deleteMutation,
 		regenerateMutation,
-	} = useApiKeys({ enabled: canWrite });
+	} = useApiKeys({ enabled: canReadKeys });
 
 	const createDialog = useDialogState();
 	const editDialog = useDialogState<ApiKey>();
@@ -82,8 +84,8 @@ export function ApisPage() {
 		[apiKeys, resolvedSelectedKeyId],
 	);
 
-	const trendsQuery = useApiKeyTrends(selectedApiKey?.id ?? null, { enabled: canWrite });
-	const usage7DayQuery = useApiKeyUsage7Day(selectedApiKey?.id ?? null, { enabled: canWrite });
+	const trendsQuery = useApiKeyTrends(selectedApiKey?.id ?? null, { enabled: canReadKeys });
+	const usage7DayQuery = useApiKeyUsage7Day(selectedApiKey?.id ?? null, { enabled: canReadKeys });
 
 	const mutationBusy =
 		createMutation.isPending ||
@@ -110,7 +112,7 @@ export function ApisPage() {
 		await updateMutation.mutateAsync({ keyId: editDialog.data.id, payload });
 	};
 
-	if (!canWrite) {
+	if (!canReadKeys) {
 		return (
 			<div className="animate-fade-in-up space-y-6">
 				<div>
@@ -176,6 +178,7 @@ export function ApisPage() {
 								selectedKeyId={resolvedSelectedKeyId}
 								onSelect={handleSelectKey}
 								onOpenCreate={() => createDialog.show()}
+								readOnly={!canWrite}
 							/>
 						</div>
 
@@ -186,6 +189,7 @@ export function ApisPage() {
 							usage7DayLoading={usage7DayQuery.isPending}
 							usage7DayError={usage7DayError}
 							busy={mutationBusy}
+							readOnly={!canWrite}
 							onEdit={(apiKey) => editDialog.show(apiKey)}
 							onToggleActive={(apiKey) => {
 								void updateMutation

@@ -408,6 +408,7 @@ class DashboardAuthRepository:
             row.bootstrap_token_encrypted = None
             row.bootstrap_token_hash = None
             row.totp_required_on_login = False
+            row.totp_required_for_admin_role = False
             row.totp_secret_encrypted = None
             row.totp_last_verified_step = None
 

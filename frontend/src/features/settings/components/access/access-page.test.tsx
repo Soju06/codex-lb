@@ -20,7 +20,7 @@ describe("AccessPage (/settings/access)", () => {
     expect(screen.getByRole("link", { name: "Back to Settings" })).toHaveAttribute("href", "/settings");
     expect(screen.getByRole("link", { name: "Change in My sign-in" })).toHaveAttribute("href", "/settings#access");
     expect(screen.queryByText("View full page")).not.toBeInTheDocument();
-    expect(await screen.findByText("Two-factor is not required at sign-in.")).toBeInTheDocument();
+    expect(await screen.findByText("Two-factor is not required for everyone at sign-in.")).toBeInTheDocument();
   });
 
   it.each([

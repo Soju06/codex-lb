@@ -55889,10 +55889,9 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_surfaces_wit
 
 
 @pytest.mark.asyncio
-async def test_process_upstream_websocket_text_routes_anonymous_output_to_created_response():
-    """Issue #2350 at the direct WebSocket reader: an anonymous text delta is accounted
-    to the request whose response upstream already created, not to the pipelined
-    sibling still awaiting its own response.created."""
+@pytest.mark.parametrize("draining", [False, True], ids=["visible", "draining"])
+async def test_process_upstream_websocket_text_routes_anonymous_output_to_created_response(monkeypatch, draining):
+    """Archive and relay must agree on the owner, even after its downstream cancels."""
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_pipelined_output")
     active_request = proxy_service._WebSocketRequestState(
@@ -55904,6 +55903,8 @@ async def test_process_upstream_websocket_text_routes_anonymous_output_to_create
         started_at=0.0,
         response_id="resp_ws_active_created",
         awaiting_response_created=False,
+        archive_request_id="archive_ws_active_created",
+        draining_until_terminal=draining,
     )
     waiting_request = proxy_service._WebSocketRequestState(
         request_id="ws_req_waiting_created",
@@ -55914,6 +55915,7 @@ async def test_process_upstream_websocket_text_routes_anonymous_output_to_create
         started_at=0.0,
         response_id=None,
         awaiting_response_created=True,
+        archive_request_id="archive_ws_waiting_created",
     )
     payload = {
         "type": "response.output_text.delta",
@@ -55924,19 +55926,41 @@ async def test_process_upstream_websocket_text_routes_anonymous_output_to_create
         "delta": "Hello",
     }
 
-    await service._process_upstream_websocket_text(
-        json.dumps(payload, separators=(",", ":")),
+    archived: list[tuple[object, str | None]] = []
+
+    class _ArchivingUpstream:
+        def archive_received(self, message: object) -> None:
+            archived.append((message, get_request_id()))
+
+    send_downstream = AsyncMock()
+    monkeypatch.setattr(service, "_send_downstream_websocket_text", send_downstream)
+    text = json.dumps(payload, separators=(",", ":"))
+    message = SimpleNamespace(kind="text", text=text)
+    should_stop = await websocket_mixin_module._process_and_forward_upstream_websocket_text(
+        cast(Any, service),
+        cast(Any, SimpleNamespace()),
+        cast(Any, _ArchivingUpstream()),
+        message=message,
+        text=text,
         account=account,
         account_id_value=account.id,
         pending_requests=deque([active_request, waiting_request]),
         pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
         api_key=None,
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         response_create_gate=asyncio.Semaphore(1),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
         continuity_state=proxy_service._WebSocketContinuityState(),
+        codex_session_affinity=False,
     )
 
-    assert active_request.downstream_visible is True
-    assert active_request.response_event_count == 1
+    assert should_stop is False
     assert waiting_request.downstream_visible is False
     assert waiting_request.response_event_count == 0
+    assert active_request.downstream_visible is True
+    assert active_request.response_event_count == 1
+    send_downstream.assert_awaited_once()
+    assert send_downstream.await_args is not None
+    assert send_downstream.await_args.kwargs["text"] == text
+    assert archived == [(message, "archive_ws_active_created")]

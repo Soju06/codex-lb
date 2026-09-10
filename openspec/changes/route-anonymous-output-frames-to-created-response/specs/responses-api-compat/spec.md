@@ -4,6 +4,15 @@
 
 When more than one request is pending on a single upstream WebSocket (an HTTP bridge session or a direct WebSocket session) and an upstream `response.*` frame other than `response.failed` or `response.incomplete` arrives without a response id, the proxy MUST deliver that frame to the pending request whose response upstream has already created (its response id is known), when exactly one such request exists, regardless of whether that request is still visible or is draining after downstream cancellation. The proxy MUST NOT deliver such a frame to a sibling request that is still waiting for its own `response.created`. Anonymous `error`, `response.failed` and `response.incomplete` frames and vendor telemetry frames that are not `response.*` events (for example `codex.rate_limits`) MUST keep their existing ownership rules, including targeting the request whose `response.create` is still unacknowledged. When no pending request, or more than one pending request, already has a response id, the pre-existing ownership rules apply unchanged.
 
+When payload archiving is enabled on the direct WebSocket path, archive attribution MUST use the same anonymous output ownership rule as relay processing, including attribution to a draining created owner.
+
+#### Scenario: Archive and relay agree on the created owner
+
+- **GIVEN** a direct WebSocket with payload archiving enabled, request A with a known response id, and request B waiting for its own `response.created`
+- **WHEN** an anonymous `response.output_text.delta` arrives
+- **THEN** the frame is archived under A's archive request id, not B's
+- **AND** relay processing accounts the frame to A and forwards its bytes unchanged
+
 #### Scenario: Pipelined sibling does not receive the created response's output
 
 - **GIVEN** an HTTP bridge session with request A whose `response.created` has arrived

@@ -1,0 +1,49 @@
+## ADDED Requirements
+
+### Requirement: Anonymous upstream output frames belong to the created response
+
+When more than one request is pending on a single upstream WebSocket (an HTTP bridge session or a direct WebSocket session) and an upstream `response.*` frame other than `response.failed` or `response.incomplete` arrives without a response id, the proxy MUST deliver that frame to the pending request whose response upstream has already created (its response id is known), when exactly one such request exists, regardless of whether that request is still visible or is draining after downstream cancellation. The proxy MUST NOT deliver such a frame to a sibling request that is still waiting for its own `response.created`. Anonymous `error`, `response.failed` and `response.incomplete` frames and vendor telemetry frames that are not `response.*` events (for example `codex.rate_limits`) MUST keep their existing ownership rules, including targeting the request whose `response.create` is still unacknowledged. When two or more pending requests already have a response id, an anonymous output frame MUST remain unmatched and be recorded as unmatched upstream liveness rather than attributed by guess.
+
+#### Scenario: Pipelined sibling does not receive the created response's output
+
+- **GIVEN** an HTTP bridge session with request A whose `response.created` has arrived
+- **AND** request B on the same session has sent `response.create` and is waiting for its own `response.created`
+- **WHEN** upstream emits `response.output_item.added` and `response.output_text.delta` without a response id
+- **THEN** both frames are delivered to request A's downstream stream
+- **AND** request B's downstream stream receives nothing
+
+#### Scenario: Draining sibling that gave up does not swallow the created response's output
+
+- **GIVEN** request A's `response.created` has arrived on a shared bridge session
+- **AND** request B on the same session is draining after its downstream closed before its own `response.created`
+- **WHEN** upstream emits an anonymous output frame
+- **THEN** the frame is delivered to request A
+
+#### Scenario: Cancelled created response keeps its output away from a visible sibling
+
+- **GIVEN** request A's `response.created` has arrived and A is draining after downstream cancellation
+- **AND** request B on the same session is visible and waiting for its own `response.created`
+- **WHEN** upstream emits an anonymous output frame
+- **THEN** the frame is attributed to request A's drain
+- **AND** request B's downstream stream receives nothing
+
+#### Scenario: Anonymous error still targets the unacknowledged request
+
+- **GIVEN** request A's `response.created` has arrived on a shared bridge session
+- **AND** request B on the same session is waiting for its own `response.created`
+- **WHEN** upstream emits an `error` frame without a response id
+- **THEN** request B is failed with that error
+- **AND** request A remains pending and receives nothing
+
+#### Scenario: Leading telemetry still targets the unacknowledged request
+
+- **GIVEN** request A's `response.created` has arrived on a shared bridge session
+- **AND** request B on the same session has just sent `response.create`
+- **WHEN** upstream emits a `codex.rate_limits` frame without a response id
+- **THEN** the frame is attributed to request B
+
+#### Scenario: Two created responses leave an anonymous frame unmatched
+
+- **GIVEN** two pending requests on one upstream socket both have a response id
+- **WHEN** upstream emits an anonymous output frame
+- **THEN** the frame matches no request and is recorded as unmatched upstream liveness

@@ -1837,6 +1837,15 @@ def _draining_websocket_request_states(
     return [request_state for request_state in pending_requests if request_state.draining_until_terminal]
 
 
+def _is_response_output_event(event_type: str | None) -> bool:
+    """A ``response.*`` frame that is neither a terminal nor an error carries response output."""
+    return (
+        isinstance(event_type, str)
+        and event_type.startswith("response.")
+        and event_type not in {"response.failed", "response.incomplete"}
+    )
+
+
 def _match_websocket_request_state_for_anonymous_event(
     pending_requests: deque[_WebSocketRequestState],
     *,
@@ -1845,6 +1854,7 @@ def _match_websocket_request_state_for_anonymous_event(
     error_message: str | None = None,
     allow_unanchored_previous_response_error: bool = False,
     prefer_draining_requests: bool = True,
+    event_type: str | None = None,
 ) -> _WebSocketRequestState | None:
     if prefer_previous_response_not_found:
         return _match_websocket_request_state_for_previous_response_error(
@@ -1853,6 +1863,18 @@ def _match_websocket_request_state_for_anonymous_event(
             error_message=error_message,
             allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
+
+    if _is_response_output_event(event_type):
+        # Output frames carry no response id. On a pipelined socket they belong
+        # to the one response upstream has already created, whether that request
+        # is still visible or draining, never to a sibling still waiting for its
+        # own response.created (issue #2350). Vendor telemetry such as
+        # ``codex.rate_limits`` keeps the pre-created ownership below.
+        created_requests = [
+            request_state for request_state in pending_requests if request_state.response_id is not None
+        ]
+        if len(created_requests) == 1:
+            return created_requests[0]
 
     visible_requests = [
         request_state for request_state in pending_requests if _http_bridge_request_counts_against_queue(request_state)

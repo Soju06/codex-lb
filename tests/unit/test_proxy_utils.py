@@ -55886,3 +55886,57 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_surfaces_wit
     assert excinfo.value.retry_after_seconds == 5
     assert stream_once_calls == 2
     assert scheduler.sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_routes_anonymous_output_to_created_response():
+    """Issue #2350 at the direct WebSocket reader: an anonymous text delta is accounted
+    to the request whose response upstream already created, not to the pipelined
+    sibling still awaiting its own response.created."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_pipelined_output")
+    active_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_active_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_ws_active_created",
+        awaiting_response_created=False,
+    )
+    waiting_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_waiting_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id=None,
+        awaiting_response_created=True,
+    )
+    payload = {
+        "type": "response.output_text.delta",
+        "sequence_number": 3,
+        "item_id": "msg_ws_pipelined",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "Hello",
+    }
+
+    await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([active_request, waiting_request]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        continuity_state=proxy_service._WebSocketContinuityState(),
+    )
+
+    assert active_request.downstream_visible is True
+    assert active_request.response_event_count == 1
+    assert waiting_request.downstream_visible is False
+    assert waiting_request.response_event_count == 0

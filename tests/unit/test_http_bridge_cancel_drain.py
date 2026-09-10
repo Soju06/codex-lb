@@ -1523,6 +1523,43 @@ async def test_http_bridge_pipelined_sibling_still_owns_anonymous_error() -> Non
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_pipelined_sibling_still_owns_anonymous_completion(monkeypatch) -> None:
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_pipelined_bridge_session(active_request, waiting_request)
+    text = json.dumps({"type": "response.completed", "response": {"status": "completed", "output": []}})
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    assert list(session.pending_requests) == [active_request]
+    assert _queued_event_types(active_request.event_queue) == []
+    assert active_request.response_event_count == 0
+    assert waiting_request.response_event_count == 1
+    assert waiting_request.event_queue is not None
+    block = waiting_request.event_queue.get_nowait()
+    assert block is not None
+    assert json.loads(block.split("data: ", 1)[1]) == json.loads(text)
+    assert waiting_request.event_queue.get_nowait() is None
+    assert waiting_request.event_queue.empty()
+    finalize.assert_awaited_once()
+    assert finalize.await_args is not None
+    assert finalize.await_args.args[0] is waiting_request
+
+
+@pytest.mark.asyncio
 async def test_response_created_does_not_promote_in_progress_durable_anchor() -> None:
     """Undo/edit safety: an in-progress response must not become the auto-continuation anchor.
 

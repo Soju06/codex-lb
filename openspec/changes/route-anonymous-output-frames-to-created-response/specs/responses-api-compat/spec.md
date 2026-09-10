@@ -2,7 +2,7 @@
 
 ### Requirement: Anonymous upstream output frames belong to the created response
 
-When more than one request is pending on a single upstream WebSocket (an HTTP bridge session or a direct WebSocket session) and an upstream `response.*` frame other than `response.failed` or `response.incomplete` arrives without a response id, the proxy MUST deliver that frame to the pending request whose response upstream has already created (its response id is known), when exactly one such request exists, regardless of whether that request is still visible or is draining after downstream cancellation. The proxy MUST NOT deliver such a frame to a sibling request that is still waiting for its own `response.created`. Anonymous `error`, `response.failed` and `response.incomplete` frames and vendor telemetry frames that are not `response.*` events (for example `codex.rate_limits`) MUST keep their existing ownership rules, including targeting the request whose `response.create` is still unacknowledged. When no pending request, or more than one pending request, already has a response id, the pre-existing ownership rules apply unchanged.
+When more than one request is pending on a single upstream WebSocket (an HTTP bridge session or a direct WebSocket session) and an upstream `response.*` frame other than `response.completed`, `response.failed` or `response.incomplete` arrives without a response id, the proxy MUST deliver that frame to the pending request whose response upstream has already created (its response id is known), when exactly one such request exists, regardless of whether that request is still visible or is draining after downstream cancellation. The proxy MUST NOT deliver such a frame to a sibling request that is still waiting for its own `response.created`. Anonymous `error`, `response.completed`, `response.failed` and `response.incomplete` frames and vendor telemetry frames that are not `response.*` events (for example `codex.rate_limits`) MUST keep their existing ownership rules, including targeting the request whose `response.create` is still unacknowledged. When no pending request, or more than one pending request, already has a response id, the pre-existing ownership rules apply unchanged.
 
 When payload archiving is enabled on the direct WebSocket path, archive attribution MUST use the same anonymous output ownership rule as relay processing, including attribution to a draining created owner.
 
@@ -43,6 +43,14 @@ When payload archiving is enabled on the direct WebSocket path, archive attribut
 - **WHEN** upstream emits an `error` frame without a response id
 - **THEN** request B is failed with that error
 - **AND** request A remains pending and receives nothing
+
+#### Scenario: Anonymous completion keeps existing terminal ownership
+
+- **GIVEN** an HTTP bridge or direct WebSocket with two visible pending requests, A with a known response id and B waiting for its own `response.created`
+- **WHEN** an anonymous `response.completed` arrives
+- **THEN** B is removed and finalized while A remains pending and receives no event accounting
+- **AND** the HTTP bridge delivers the completion to B's queue
+- **AND** direct WebSocket archive attribution uses B's archive request id and forwards the frame unchanged
 
 #### Scenario: Leading telemetry still targets the unacknowledged request
 

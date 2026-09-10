@@ -1842,7 +1842,7 @@ def _is_response_output_event(event_type: str | None) -> bool:
     return (
         isinstance(event_type, str)
         and event_type.startswith("response.")
-        and event_type not in {"response.failed", "response.incomplete"}
+        and event_type not in {"response.completed", "response.failed", "response.incomplete"}
     )
 
 

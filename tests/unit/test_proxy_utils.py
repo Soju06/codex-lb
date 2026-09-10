@@ -55889,9 +55889,15 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_surfaces_wit
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("draining", [False, True], ids=["visible", "draining"])
-async def test_process_upstream_websocket_text_routes_anonymous_output_to_created_response(monkeypatch, draining):
-    """Archive and relay must agree on the owner, even after its downstream cancels."""
+@pytest.mark.parametrize(
+    ("draining", "event_type"),
+    [(False, "response.output_text.delta"), (True, "response.output_text.delta"), (False, "response.completed")],
+    ids=["visible", "draining", "anonymous-completion"],
+)
+async def test_process_upstream_websocket_text_routes_anonymous_output_to_created_response(
+    monkeypatch, draining, event_type
+):
+    """Archive and relay agree on output ownership without changing terminal ownership."""
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_pipelined_output")
     active_request = proxy_service._WebSocketRequestState(
@@ -55925,7 +55931,11 @@ async def test_process_upstream_websocket_text_routes_anonymous_output_to_create
         "content_index": 0,
         "delta": "Hello",
     }
-
+    if event_type == "response.completed":
+        payload = {"type": event_type, "response": {"status": "completed", "output": []}}
+    pending_requests = deque([waiting_request, active_request])
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
     archived: list[tuple[object, str | None]] = []
 
     class _ArchivingUpstream:
@@ -55944,7 +55954,7 @@ async def test_process_upstream_websocket_text_routes_anonymous_output_to_create
         text=text,
         account=account,
         account_id_value=account.id,
-        pending_requests=deque([active_request, waiting_request]),
+        pending_requests=pending_requests,
         pending_lock=anyio.Lock(),
         client_send_lock=anyio.Lock(),
         api_key=None,
@@ -55956,11 +55966,23 @@ async def test_process_upstream_websocket_text_routes_anonymous_output_to_create
     )
 
     assert should_stop is False
-    assert waiting_request.downstream_visible is False
-    assert waiting_request.response_event_count == 0
-    assert active_request.downstream_visible is True
-    assert active_request.response_event_count == 1
+    if event_type == "response.completed":
+        assert list(pending_requests) == [active_request]
+        assert active_request.downstream_visible is False
+        assert active_request.response_event_count == 0
+        assert waiting_request.latency_first_upstream_event_ms is not None
+        finalize.assert_awaited_once()
+        assert finalize.await_args is not None
+        assert finalize.await_args.args[0] is waiting_request
+        assert finalize.await_args.kwargs["event_type"] == "response.completed"
+        assert archived == [(message, "archive_ws_waiting_created")]
+    else:
+        assert waiting_request.downstream_visible is False
+        assert waiting_request.response_event_count == 0
+        assert active_request.downstream_visible is True
+        assert active_request.response_event_count == 1
+        finalize.assert_not_awaited()
+        assert archived == [(message, "archive_ws_active_created")]
     send_downstream.assert_awaited_once()
     assert send_downstream.await_args is not None
     assert send_downstream.await_args.kwargs["text"] == text
-    assert archived == [(message, "archive_ws_active_created")]

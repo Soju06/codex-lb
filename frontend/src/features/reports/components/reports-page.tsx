@@ -6,7 +6,7 @@ import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { listAccounts } from "@/features/accounts/api";
 import { getRequestLogOptions } from "@/features/dashboard/api";
-import { useReports } from "@/features/reports/hooks/use-reports";
+import { useReports, useReportsOptions } from "@/features/reports/hooks/use-reports";
 import { useReportChartVisibility } from "@/features/reports/hooks/use-report-chart-visibility";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { ReportsFilters, type ReportsFiltersState } from "./reports-filters";
@@ -118,11 +118,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   }, []);
 
   const reportsQuery = useReports(filters, reportsTimeZone);
-  const filterCatalogFilters = useMemo(
-    () => ({ ...filters, model: "", useragent: "" }),
-    [filters],
-  );
-  const filterCatalogQuery = useReports(filterCatalogFilters, reportsTimeZone);
+  const filterCatalogQuery = useReportsOptions(filters, reportsTimeZone);
   const {
     data: accountsData,
     error: accountsError,
@@ -165,18 +161,18 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const modelOptions = useMemo(
     () =>
-      (filterCatalogQuery.data?.byModel ?? []).map((entry) => ({
-        value: entry.model,
-        label: entry.model,
+      (filterCatalogQuery.data?.models ?? []).map((model) => ({
+        value: model,
+        label: model,
       })),
     [filterCatalogQuery.data],
   );
 
   const useragentOptions = useMemo(
     () =>
-      (filterCatalogQuery.data?.byUseragent ?? []).map((entry) => ({
-        value: entry.useragent,
-        label: entry.useragent,
+      (filterCatalogQuery.data?.useragents ?? []).map((useragent) => ({
+        value: useragent,
+        label: useragent,
       })),
     [filterCatalogQuery.data],
   );
@@ -304,6 +300,19 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         </div>
       ) : null}
 
+      <div className="flex items-center justify-end gap-3">
+        {reportsQuery.data?.generatedAt ? (
+          <span className="text-xs text-muted-foreground">{t("reports.asOf", { time: new Date(reportsQuery.data.generatedAt).toLocaleString() })}</span>
+        ) : null}
+        <Button variant="outline" size="sm"
+          disabled={reportsQuery.isFetching || filterCatalogQuery.isFetching || !isReportDateRangeValid(filters.startDate, filters.endDate)}
+          onClick={() => { void handleRetry(); }}>
+          {t("reports.refresh")}
+        </Button>
+      </div>
+      {reportsQuery.data?.speedMetricsAvailable === false ? (
+        <p className="text-sm text-muted-foreground">{t("reports.speedUnavailable", { days: reportsQuery.data.speedMetricsMaxDays ?? 7 })}</p>
+      ) : null}
       {reportsQuery.isLoading ? (
         <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">
           {t("common.loading")}
@@ -334,7 +343,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
                   />
                 </Suspense>
               ) : null}
-              {visibleChartIds.includes("timeToFirstToken") ? (
+              {reportsQuery.data.speedMetricsAvailable !== false && visibleChartIds.includes("timeToFirstToken") ? (
                 <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
                   <TimeToFirstTokenChart
                     startDate={filters.startDate}
@@ -343,7 +352,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
                   />
                 </Suspense>
               ) : null}
-              {visibleChartIds.includes("tokensPerSecond") ? (
+              {reportsQuery.data.speedMetricsAvailable !== false && visibleChartIds.includes("tokensPerSecond") ? (
                 <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
                   <TokensPerSecondChart
                     startDate={filters.startDate}
@@ -352,7 +361,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
                   />
                 </Suspense>
               ) : null}
-              {visibleChartIds.includes("queueWait") ? (
+              {reportsQuery.data.speedMetricsAvailable !== false && visibleChartIds.includes("queueWait") ? (
                 <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
                   <QueueWaitChart
                     startDate={filters.startDate}

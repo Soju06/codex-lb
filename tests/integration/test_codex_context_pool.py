@@ -372,10 +372,11 @@ async def test_unavailable_bound_owner_keeps_tombstone_and_never_moves_notes(asy
         assert binding is not None and binding.owner_account_id == a
 
 
+@pytest.mark.parametrize("forked", [False, True])
 @pytest.mark.parametrize("transport", ["websocket", "http_bridge"])
 @pytest.mark.parametrize("quota_rejection", [False, True])
 def test_context_dispatch_and_ciphertext_expansion_on_websocket_transports(
-    app_instance, monkeypatch, transport, quota_rejection
+    app_instance, monkeypatch, transport, quota_rejection, forked
 ):
     from fastapi.testclient import TestClient
     from httpx import ASGITransport, AsyncClient
@@ -460,7 +461,11 @@ def test_context_dispatch_and_ciphertext_expansion_on_websocket_transports(
         connect = AsyncMock(side_effect=[upstream, second])
         monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
         token = json.loads(
-            pack_history(key.id, SID, [HistoryPartition(account_id=a, result={"encrypted_output": "native-cipher"})])
+            pack_history(
+                key.id,
+                "00000000-0000-4000-8000-000000000012" if forked else SID,
+                [HistoryPartition(account_id=a, result={"encrypted_output": "native-cipher"})],
+            )
         )["encrypted_output"]
         body = envelope()
         body["input"] = [

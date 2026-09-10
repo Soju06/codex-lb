@@ -92,7 +92,7 @@
     },
     {
       "login": "dwnmf",
-      "name": "LYA⚚CAP⚚OCEAN",
+      "name": "LYA\u269aCAP\u269aOCEAN",
       "avatar_url": "https://avatars.githubusercontent.com/u/56194792?v=4",
       "profile": "https://github.com/dwnmf",
       "contributions": [
@@ -625,7 +625,7 @@
     },
     {
       "login": "mahirozdin",
-      "name": "Mahir Taha Özdin",
+      "name": "Mahir Taha \u00d6zdin",
       "avatar_url": "https://avatars.githubusercontent.com/u/9491185?v=4",
       "profile": "https://www.linkedin.com/in/mahir-ozdin/",
       "contributions": [
@@ -682,7 +682,7 @@
     },
     {
       "login": "diogenesc",
-      "name": "Diógenes Castro",
+      "name": "Di\u00f3genes Castro",
       "avatar_url": "https://avatars.githubusercontent.com/u/22321454?v=4",
       "profile": "https://github.com/diogenesc",
       "contributions": [
@@ -790,7 +790,7 @@
     },
     {
       "login": "rupebac",
-      "name": "Rubén Pérez Bachiller",
+      "name": "Rub\u00e9n P\u00e9rez Bachiller",
       "avatar_url": "https://avatars.githubusercontent.com/u/452231?v=4",
       "profile": "https://github.com/rupebac",
       "contributions": [
@@ -811,7 +811,7 @@
     },
     {
       "login": "ellentane",
-      "name": "Jonáš Sivek",
+      "name": "Jon\u00e1\u0161 Sivek",
       "avatar_url": "https://avatars.githubusercontent.com/u/70338266?v=4",
       "profile": "https://github.com/ellentane",
       "contributions": [
@@ -821,7 +821,7 @@
     },
     {
       "login": "LuoYe17",
-      "name": "落叶",
+      "name": "\u843d\u53f6",
       "avatar_url": "https://avatars.githubusercontent.com/u/191728117?v=4",
       "profile": "https://github.com/LuoYe17",
       "contributions": [
@@ -1028,7 +1028,7 @@
     },
     {
       "login": "fozbek",
-      "name": "Fatih Özbek",
+      "name": "Fatih \u00d6zbek",
       "avatar_url": "https://avatars.githubusercontent.com/u/17993880?v=4",
       "profile": "https://github.com/fozbek",
       "contributions": [
@@ -1136,7 +1136,7 @@
     },
     {
       "login": "yeongjun-cigro",
-      "name": "유영준",
+      "name": "\uc720\uc601\uc900",
       "avatar_url": "https://avatars.githubusercontent.com/u/260819931?v=4",
       "profile": "https://github.com/yeongjun-cigro",
       "contributions": [
@@ -1261,6 +1261,17 @@
       "profile": "https://github.com/Borealin",
       "contributions": [
         "code",
+        "test"
+      ]
+    },
+    {
+      "login": "NikitaMGrimm",
+      "name": "Nikita Maximilian Grimm",
+      "avatar_url": "https://avatars.githubusercontent.com/u/65914808?v=4",
+      "profile": "https://github.com/NikitaMGrimm",
+      "contributions": [
+        "code",
+        "doc",
         "test"
       ]
     },
@@ -1435,6 +1446,35 @@
         "code",
         "test",
         "doc"
+      ]
+    },
+    {
+      "login": "VictorStatko",
+      "name": "Victor Statko",
+      "avatar_url": "https://avatars.githubusercontent.com/u/34319599?v=4",
+      "profile": "https://github.com/VictorStatko",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "janaki-sasidhar",
+      "name": "flameboy",
+      "avatar_url": "https://avatars.githubusercontent.com/u/42799643?v=4",
+      "profile": "https://github.com/janaki-sasidhar",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "elmakus",
+      "name": "elmakus",
+      "avatar_url": "https://avatars.githubusercontent.com/u/76910687?v=4",
+      "profile": "https://github.com/elmakus",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
       ]
     },
     {

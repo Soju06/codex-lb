@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.balancer.logic import RoutingStrategy
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey, Base, ModelSource, RequestLog
@@ -535,3 +536,60 @@ async def test_top_upstream_errors_exclude_cancelled_terminals(async_session: As
     # High-volume disconnects (status='cancelled' with a retained
     # client_disconnected code) must not displace genuine upstream failures.
     assert snapshot.usage_7d.top_upstream_errors == ["server_error"]
+
+
+@pytest.mark.asyncio
+async def test_features_automations_reads_the_effective_dashboard_toggle(async_session: AsyncSession) -> None:
+    """M2 background jobs: a dashboard pause (column False, env True) turns the feature off."""
+    from app.db.models import AutomationJob, DashboardSettings
+    from app.modules.settings.repository import SettingsRepository
+
+    async_session.add(
+        AutomationJob(
+            id="job-1",
+            name="ping",
+            enabled=True,
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            model="gpt-5.6-sol",
+        )
+    )
+    await async_session.commit()
+    row = await SettingsRepository(async_session).get_or_create()
+
+    startup = get_settings().model_copy(update={"automations_scheduler_enabled": True})
+    enabled = await TelemetrySnapshotBuilder(async_session, settings=startup).build(
+        "00000000-0000-4000-8000-000000000002", consent="undecided"
+    )
+    assert enabled.features.automations is True
+
+    row.automations_scheduler_enabled = False
+    await async_session.commit()
+    paused = await TelemetrySnapshotBuilder(async_session, settings=startup).build(
+        "00000000-0000-4000-8000-000000000002", consent="undecided"
+    )
+    assert paused.features.automations is False
+    assert (await async_session.get(DashboardSettings, 1)) is row
+
+
+# M5 conversation archive
+@pytest.mark.asyncio
+async def test_features_conversation_archive_follows_the_dashboard_value(async_session: AsyncSession) -> None:
+    """The feature flag reports the effective toggle (dashboard column over the env alias)."""
+    from app.core.config.settings import get_settings
+    from app.modules.settings.repository import SettingsRepository
+
+    row = await SettingsRepository(async_session).get_or_create()
+    row.conversation_archive_enabled = True
+    await async_session.commit()
+    environment = get_settings().model_copy(update={"conversation_archive_enabled": False})
+
+    snapshot = await TelemetrySnapshotBuilder(async_session, settings=environment).build(
+        "00000000-0000-4000-8000-000000000001",
+        consent="enabled",
+    )
+
+    assert snapshot.features.conversation_archive is True
+
+
+# end M5 conversation archive

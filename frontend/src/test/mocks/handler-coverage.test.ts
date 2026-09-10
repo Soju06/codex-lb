@@ -46,7 +46,6 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/accounts/:accountId/trends",
 	"GET /api/accounts/:accountId/usage-reset-credits",
 	"POST /api/accounts/:accountId/usage-reset-credits/consume",
-	"POST /api/accounts/:accountId/export",
 	"POST /api/accounts/:accountId/export/auth",
 	"DELETE /api/accounts/:accountId",
 	// oauth
@@ -79,6 +78,9 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/settings/upstream-proxy/pools",
 	"POST /api/settings/upstream-proxy/pools/:poolId/members",
 	"PUT /api/settings/upstream-proxy/accounts/:accountId/binding",
+	"GET /api/settings/model-context-window-overrides",
+	"PUT /api/settings/model-context-window-overrides/:slug*",
+	"DELETE /api/settings/model-context-window-overrides/:slug*",
 	"GET /api/sticky-sessions",
 	"POST /api/sticky-sessions/delete",
 	"POST /api/sticky-sessions/delete-filtered",

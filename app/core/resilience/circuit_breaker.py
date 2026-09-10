@@ -7,13 +7,13 @@ from typing import Awaitable, TypeVar
 
 import aiohttp
 
-from app.core.config.settings import Settings
-
 T = TypeVar("T")
 
 # Breaker tuning (fixed; issue #1340 / PRINCIPLES.md P2). ``CircuitBreaker``
 # keeps both as constructor fields so tests can exercise state transitions
-# with small values. ``circuit_breaker_enabled`` remains the single switch.
+# with small values. ``circuit_breaker_enabled`` remains the single switch; it
+# is dashboard-managed (C2-3 resilience toggles) and gates *use* per request
+# in the callers, not construction here.
 _FAILURE_THRESHOLD = 5
 _RECOVERY_TIMEOUT_SECONDS = 60
 
@@ -127,14 +127,13 @@ def _is_server_error(exc: Exception) -> bool:
 _account_circuit_breakers: dict[str, CircuitBreaker] = {}
 
 
-def get_circuit_breaker_for_account(
-    account_id: str,
-    settings: Settings,
-) -> CircuitBreaker | None:
-    enabled = getattr(settings, "circuit_breaker_enabled", False)
-    if not enabled:
-        return None
+def get_circuit_breaker_for_account(account_id: str) -> CircuitBreaker:
+    """Return (creating on first use) the account's breaker.
 
+    Construction is unconditional so flipping the dashboard toggle takes effect
+    on the next request without a restart; callers consult
+    ``current_resilience_toggles().circuit_breaker_enabled`` before using it.
+    """
     breaker = _account_circuit_breakers.get(account_id)
     if breaker is None:
         breaker = CircuitBreaker(

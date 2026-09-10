@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from pydantic import Field
 
 from app.modules.shared.schemas import DashboardModel
@@ -70,7 +72,15 @@ class ReportComparison(DashboardModel):
     previous: ReportComparisonPrevious
 
 
+class ReportsOptionsResponse(DashboardModel):
+    models: list[str]
+    useragents: list[str]
+
+
 class ReportsResponse(DashboardModel):
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    speed_metrics_available: bool = True
+    speed_metrics_max_days: int = 7
     summary: ReportSummary
     comparison: ReportComparison
     daily: list[DailyReportRow] = Field(default_factory=list)

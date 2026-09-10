@@ -66,14 +66,23 @@ def pack_history(
     return json.dumps({"encrypted_output": token}, separators=(",", ":")).encode()
 
 
-def _unpack_history(token: str, api_key: ApiKeyData | None, session_id: str | None) -> list[JsonValue]:
+def _unpack_history(
+    token: str, api_key: ApiKeyData | None, session_id: str | None, *, allow_cross_session: bool
+) -> list[JsonValue]:
     if len(token) > MAX_CONTEXT_BYTES * 2 or api_key is None:
         raise context_error("context_result_invalid", 400)
     try:
         envelope = HistoryEnvelope.model_validate_json(TokenEncryptor().decrypt(token[len(PREFIX) :].encode()))
     except (InvalidToken, UnicodeError, ValidationError, ValueError):
         raise context_error("context_result_invalid", 400) from None
-    if envelope.api_key_id != api_key.id or envelope.session_id != session_id:
+    if context_session_id(envelope.session_id) is None:
+        raise context_error("context_result_invalid", 400)
+    if envelope.api_key_id != api_key.id or session_id is None:
+        raise context_error("context_scope_mismatch", 403)
+    # Codex forks copy already-issued results into a new session. Only a
+    # history-enabled request enforces that target's durable ownership before
+    # dispatch. Replaying a signed result grants no access to source-session APIs.
+    if envelope.session_id != session_id and not allow_cross_session:
         raise context_error("context_scope_mismatch", 403)
     if not 1 <= len(envelope.partitions) <= MAX_HISTORY_ACCOUNTS:
         raise context_error("context_result_invalid", 400)
@@ -119,7 +128,12 @@ def _unpack_history(token: str, api_key: ApiKeyData | None, session_id: str | No
 
 
 def expand_history_input(
-    input_value: JsonValue, metadata: JsonValue | None, api_key: ApiKeyData | None, *, trusted: set[str] | None = None
+    input_value: JsonValue,
+    metadata: JsonValue | None,
+    api_key: ApiKeyData | None,
+    *,
+    trusted: set[str] | None = None,
+    allow_cross_session: bool = False,
 ) -> JsonValue:
     if not isinstance(input_value, list):
         return input_value
@@ -144,7 +158,7 @@ def expand_history_input(
                 and isinstance(token, str)
                 and token.startswith(PREFIX)
             ):
-                expanded = _unpack_history(token, api_key, session_id)
+                expanded = _unpack_history(token, api_key, session_id, allow_cross_session=allow_cross_session)
                 if trusted is not None:
                     for content_part in expanded:
                         if isinstance(content_part, dict) and content_part.get("type") == "encrypted_content":

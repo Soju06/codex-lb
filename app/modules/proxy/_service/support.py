@@ -704,6 +704,8 @@ class _RefreshFailoverProxy(Protocol):
         http_status: int | None = None,
         *,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+        retry_after_seconds: float | None = None,
+        burst_cooldown_recorded: bool = False,
     ) -> Any: ...
 
 
@@ -871,6 +873,12 @@ class _StreamSettlement:
     downstream_text_visible: bool = False
     response_id: str | None = None
     usage_settlement_transferred: bool = False
+    # Monotonic instant the upstream terminal frame (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed by
+    # ``_stream_once``, before it is yielded downstream. The throughput cohort
+    # sample ends its generation span here; the row's ``latency_ms`` keeps
+    # measuring to the generator's close (downstream flush, upstream EOF).
+    upstream_terminal_at: float | None = None
 
     def reset(self) -> None:
         fresh = type(self)()
@@ -985,6 +993,12 @@ class _WebSocketRequestState:
     latency_first_upstream_event_ms: int | None = None
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
+    # Monotonic instant the upstream terminal event (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed for
+    # this turn, before terminal bookkeeping, API-key settlement and cleanup.
+    # The throughput cohort sample ends its generation span here; the row's
+    # ``latency_ms`` keeps measuring to the end of the finalizer.
+    upstream_terminal_at: float | None = None
     response_create_gate_wait_started_at: float | None = None
     # Monotonic time immediately before the current upstream response.create
     # send. Retries replace this value so admission wait and prior attempts do
@@ -1942,6 +1956,29 @@ def _selection_api_key_fair_share_threshold_pct(
     if lease_kind != "stream" or request_stage == "reattach":
         return 0
     return _api_key_fair_share_threshold_pct_from_settings(settings)
+
+
+def opportunistic_admission_account_scope(settings: object, api_key: ApiKeyData | None) -> set[str] | None:
+    """Account ids an opportunistic admission check may consider; ``None`` is the whole pool.
+
+    The API key's account-assignment scope applies first. Single-account
+    routing then narrows the scope to the selected account, or to nothing when
+    no account is selected or the selected one lies outside the key's scope.
+    This is the exact scope ``ProxyService.check_opportunistic_admission`` has
+    always applied, hoisted so read-only callers (the pool-exhaustion probe)
+    share one definition with the admission gate.
+    """
+    scoped_account_ids = (
+        set(api_key.assigned_account_ids) if api_key is not None and api_key.account_assignment_scope_enabled else None
+    )
+    if getattr(settings, "routing_strategy", None) != "single_account":
+        return scoped_account_ids
+    selected_account_id = (getattr(settings, "single_account_id", None) or "").strip()
+    if not selected_account_id:
+        return set()
+    if scoped_account_ids is None or selected_account_id in scoped_account_ids:
+        return {selected_account_id}
+    return set()
 
 
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:

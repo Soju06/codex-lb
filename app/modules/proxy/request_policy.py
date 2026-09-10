@@ -31,6 +31,7 @@ from app.db.models import ModelSource
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.model_sources.catalog import source_model_reasoning_levels
 from app.modules.proxy.context_codec import expand_history_input
+from app.modules.proxy.context_dispatch import context_dispatch_identity_for_request
 
 logger = logging.getLogger(__name__)
 
@@ -280,12 +281,14 @@ def apply_api_key_enforcement(
     equal the enforced value (including after ``fast`` canonicalizes to
     ``priority``).
     """
+    context_identity = context_dispatch_identity_for_request(payload) if isinstance(payload, ResponsesRequest) else None
     try:
         payload.input = expand_history_input(
             payload.input,
             (payload.model_extra or {}).get("client_metadata"),
             api_key,
             trusted=payload._codex_lb_context_ciphertexts,
+            allow_cross_session=context_identity is not None and context_identity.enabled,
         )
     except ProxyResponseError as exc:
         error = ProxyUpstreamError(
@@ -866,6 +869,12 @@ def normalize_responses_request_payload(
         responses = V1ResponsesRequest.model_validate(payload).to_responses_request()
     else:
         responses = ResponsesRequest.model_validate(payload)
+    # Both validators force ``store`` to ``False`` for the ChatGPT backend; the
+    # client's own value survives here for the overflow source body and the
+    # anchor rule (``app.modules.proxy.overflow``). A non-boolean is treated as
+    # omitted -- the validated field already rejected anything else.
+    client_store = payload.get("store")
+    responses._codex_lb_client_store = client_store if isinstance(client_store, bool) else None
     enforce_strict_text_format(responses)
     enforce_strict_function_tools_format(responses.tools)
     return responses

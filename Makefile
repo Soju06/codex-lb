@@ -4,8 +4,13 @@ INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_codex_context_pool.py \
 	tests/integration/test_codex_context_dispatch_cost.py \
+	tests/integration/test_codex_context_fork.py \
 	tests/integration/test_migrations.py::test_codex_context_migration_preserves_rows_and_round_trips \
 	tests/integration/test_migrations.py::test_codex_context_migration_rejects_unowned_tables_without_changes \
+	tests/integration/test_cost_backfill.py \
+	tests/integration/test_atomic_quota_warmup_claims.py \
+	tests/integration/test_report_rollup.py \
+	tests/integration/test_reports_performance_api.py \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
@@ -27,6 +32,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_account_deletion_background.py \
 	tests/integration/test_request_usage_time_rollup.py \
 	tests/integration/test_request_usage_rollup_parity.py \
+	tests/integration/test_conversation_presence_union.py \
 	tests/integration/test_migrations.py::test_request_usage_time_rollups_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_conversation_presence_rollup_migration_upgrade_and_downgrade \
 	tests/integration/test_data_retention.py \
@@ -51,7 +57,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_usage_history_bulk_covering_indexes_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql \
-	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql
+	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql \
+	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql
 SHELL := bash
 
 .PHONY: help

@@ -17,6 +17,7 @@ from typing import Protocol, cast
 from multidict import CIMultiDict
 
 from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.types import JsonValue
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,10 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "http_compact_sse_v1",
         "http_sse_v1",
         "http_responses_events_v1",
+        "http_responses_completion_v1",
         "websocket",
+        "websocket_responses_events_v1",
+        "websocket_responses_routing_v1",
         "websocket_send_ack",
     }
 )
@@ -66,7 +70,16 @@ def _event_payload_size(item: object) -> int:
     if isinstance(text, str):
         kind = item.get("event_type")
         metadata_size = len(kind.encode("utf-8")) if isinstance(kind, str) else 0
-        return len(text.encode("utf-8")) + metadata_size
+        response_id = item.get("payload_response_id")
+        if isinstance(response_id, str):
+            metadata_size += len(response_id.encode("utf-8", errors="surrogatepass"))
+        sequence = item.get("sequence_number")
+        if isinstance(sequence, int):
+            metadata_size += len(str(sequence))
+        # Responses WebSocket IPC embeds the original JSON a second time as
+        # payload. Charge both copies without reserializing the decoded object.
+        copies = 2 if item.get("type") == "websocket_responses_text" else 1
+        return copies * len(text.encode("utf-8")) + metadata_size
     return 0
 
 
@@ -176,6 +189,13 @@ class NativeWebSocketRequest:
     ping_interval_seconds: float | None = 20.0
     ping_timeout_seconds: float | None = None
     proxy_url: str | None = None
+    interpret_responses: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class NativeWebSocketRoutingMetadata:
+    payload_response_id: str | None
+    sequence_number: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +205,10 @@ class NativeWebSocketMessage:
     data: bytes | None = None
     close_code: int | None = None
     close_reason: str | None = None
+    responses_interpreted: bool = False
+    event_type: str | None = None
+    payload: dict[str, JsonValue] | None = None
+    routing: NativeWebSocketRoutingMetadata | None = None
 
 
 class NativeEgressClient(Protocol):
@@ -293,18 +317,29 @@ class NativeEgressResponse:
                 if event_type == "responses_event":
                     kind = event.get("event_type")
                     python_normalization = event.get("python_normalization")
+                    stream_complete = event.get("stream_complete", False)
                     if (
                         "event_type" not in event
                         or (kind is not None and not isinstance(kind, str))
                         or (isinstance(kind, str) and len(kind.encode("utf-8")) > 16 * 1024)
                         or type(python_normalization) is not bool
+                        or type(stream_complete) is not bool
                         or (more and (kind is not None or python_normalization))
+                        or (
+                            stream_complete
+                            and (more or kind not in {"response.completed", "response.failed", "response.incomplete"})
+                        )
                     ):
                         raise NativeEgressProtocolError("native Responses event has invalid metadata")
                     if not more:
                         text = "".join(fragments) + text
                         fragments.clear()
+                        if stream_complete:
+                            self._completed = True
+                            self._client._finish_request(self._request_id, self._generation, self._events)
                         yield NativeResponsesEvent(text, kind, python_normalization)
+                        if stream_complete:
+                            return
                         continue
                 if more:
                     fragments.append(text)
@@ -558,6 +593,34 @@ class NativeEgressWebSocket:
                     if not isinstance(text, str):
                         raise NativeEgressProtocolError("native websocket text event is invalid")
                     self._queue_message(NativeWebSocketMessage(kind="text", text=text))
+                    continue
+                if event_type == "websocket_responses_text":
+                    text = item.get("text")
+                    kind = item.get("event_type")
+                    payload = item.get("payload")
+                    response_id = item.get("payload_response_id")
+                    sequence = item.get("sequence_number")
+                    if (
+                        not isinstance(text, str)
+                        or "event_type" not in item
+                        or (kind is not None and not isinstance(kind, str))
+                        or not isinstance(payload, dict)
+                        or "payload_response_id" not in item
+                        or (response_id is not None and not isinstance(response_id, str))
+                        or "sequence_number" not in item
+                        or (sequence is not None and type(sequence) is not int)
+                    ):
+                        raise NativeEgressProtocolError("native Responses websocket event is invalid")
+                    self._queue_message(
+                        NativeWebSocketMessage(
+                            kind="text",
+                            text=text,
+                            responses_interpreted=True,
+                            event_type=kind,
+                            payload=cast(dict[str, JsonValue], payload),
+                            routing=NativeWebSocketRoutingMetadata(response_id, sequence),
+                        )
+                    )
                     continue
                 if event_type == "websocket_binary":
                     encoded = item.get("data")
@@ -843,6 +906,7 @@ class SubprocessNativeEgressClient:
                         else None
                     ),
                     "proxy_url": request.proxy_url,
+                    "interpret_responses": request.interpret_responses,
                 },
             )
             item = await asyncio.wait_for(events.get(), timeout=request.connect_timeout_seconds)

@@ -68,12 +68,12 @@ Authenticated Responses with `reasoning.context=all_turns` and a canonical `clie
 - **THEN** the selected account is recorded before that event reaches the client
 
 ### Requirement: Bounded history containers
-The proxy SHALL encrypt and authenticate each context result container using its persistent encryption key and include its API-key ID, session UUID and source account IDs. It SHALL validate integrity, session, key and current account scope before unfolding native encrypted content and images into a Responses tool output. Multi-account history SHALL include all successful partitions and model instructions to combine, deduplicate and apply the requested global order and limit. The proxy MUST NOT claim deterministic global sorting or pagination of opaque history results.
+The proxy SHALL encrypt and authenticate each context result container using its persistent encryption key and include its API-key ID, session UUID and source account IDs. It SHALL validate integrity, canonical source and target session UUIDs, the issuing API key and current account scope before unfolding native encrypted content and images into a Responses tool output. A result issued to the same key MAY be replayed in another canonical session only when the request retains `reasoning.context=all_turns`, which MUST enforce the target session ownership before dispatch. Such replay grants no authority to read or write the source session, does not copy its notes or participant bindings, and leaves subsequent context operations scoped to their explicit target session. Multi-account history SHALL include all successful partitions and model instructions to combine, deduplicate and apply the requested global order and limit. The proxy MUST NOT claim deterministic global sorting or pagination of opaque history results.
 
 Each operation SHALL admit at most 32 history accounts and at most four concurrent upstream history calls. Context request and decoded aggregate result sizes SHALL be limited to 2,000,000 bytes. Upstream operations SHALL use a 30-second deadline. Fan-out tasks MUST own separate database sessions and MUST cancel and await siblings on failure. No partial history result SHALL be returned.
 
 #### Scenario: Tampered or cross-key result is replayed
-- **WHEN** a tool output contains an invalid context container or one for another key, session or excluded account
+- **WHEN** a tool output contains an invalid context container, one for another key or excluded account, or cross-session replay without history-enabled target ownership enforcement
 - **THEN** Responses rejects it before upstream dispatch with HTTP 400 or 403, or the corresponding WebSocket error
 
 #### Scenario: One history participant fails
@@ -126,3 +126,17 @@ Context request deadlines, upstream timeout budgets and elapsed-time measurement
 #### Scenario: Virtual deadline expires during fan-out
 - **WHEN** the injected clock reaches the context deadline while history partitions remain pending
 - **THEN** the request times out and finishes cleanup of every partition without waiting for the wall clock
+
+### Requirement: Deployed context migration remains upgradeable
+The context ownership revision SHALL retain its original parent `20260830_000000_add_quota_warmup_claim_expiry`. A separate merge revision SHALL join that branch with the current upstream migration head. Upgrading an installation stamped at the deployed context revision MUST apply missing upstream revisions and preserve context owners and participants. A fresh upstream installation MUST still create the context tables and reach a single head without manual stamping or table adoption.
+
+#### Scenario: Existing context installation upgrades
+- **GIVEN** the deployed context revision has owners and participants and lacks later upstream columns
+- **WHEN** it upgrades to the merged head
+- **THEN** the upstream columns are added and the context rows remain unchanged
+
+#### Scenario: A fork replays a previous result
+- **GIVEN** an authenticated history-enabled request for a new canonical session carries an intact result issued to its API key in another session
+- **WHEN** the target session is unbound or belongs to that key and the source accounts remain in scope
+- **THEN** Responses forwards the native result and binds the target independently
+- **AND** a target owned by another key is rejected before dispatch even after a cache miss

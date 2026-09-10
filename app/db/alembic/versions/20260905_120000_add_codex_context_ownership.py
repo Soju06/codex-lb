@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260905_120000_add_codex_context_ownership"
-down_revision = "20260908_020000_merge_overflow_transport_heads"
+down_revision = "20260830_000000_add_quota_warmup_claim_expiry"
 branch_labels = None
 depends_on = None
 

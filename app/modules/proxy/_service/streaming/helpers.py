@@ -37,6 +37,7 @@ from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # 
 from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
 )
+from app.core.clock import Clock
 from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
@@ -70,7 +71,11 @@ from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
-from app.modules.proxy._load_balancer.overload_backoff import UPSTREAM_OVERLOAD_CODES, record_upstream_overload
+from app.modules.proxy._load_balancer.overload_backoff import (
+    UPSTREAM_OVERLOAD_CODES,
+    record_upstream_burst_rejection,
+    record_upstream_overload,
+)
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -743,6 +748,27 @@ def _mark_stream_settlement_interrupted(
     )
 
 
+def _stamp_terminal(settlement: _StreamSettlement, event_type: str | None, clock: Clock) -> bool:
+    """Return whether ``event_type`` is an upstream terminal frame, stamping its parse instant on the settlement.
+
+    Called at the HTTP stream's terminal-detection sites before the frame is
+    yielded downstream, so the throughput cohort sample's span ends when the
+    upstream finished generating, not when a slow downstream consumer drained
+    the frame or the upstream connection finally closed.
+    """
+    if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+        return False
+    settlement.upstream_terminal_at = clock.monotonic()
+    return True
+
+
+def _upstream_terminal_latency_ms(settlement: _StreamSettlement, started_at: float) -> int | None:
+    """Attempt-start-to-upstream-terminal latency for the request-log funnel; ``None`` without a terminal stamp."""
+    if settlement.upstream_terminal_at is None:
+        return None
+    return max(0, int((settlement.upstream_terminal_at - started_at) * 1000))
+
+
 def _mark_upstream_stream_incomplete(
     settlement: _StreamSettlement,
 ) -> tuple[str, str, str, _RequestLogFailureMetadata]:
@@ -1068,7 +1094,16 @@ async def _handle_stream_error(
     http_status: int | None = None,
     *,
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    retry_after_seconds: float | None = None,
+    burst_cooldown_recorded: bool = False,
 ) -> ClassifiedFailure:
+    """Write account health for a stream failure and return its classification.
+
+    ``burst_cooldown_recorded`` is set by a keyed stream whose health write was
+    deferred until after usage settlement: the replica-local burst cooldown
+    was already engaged at rejection time, so the deferred write must not
+    re-engage it (that would bench an account that has since succeeded).
+    """
     classified = classify_upstream_failure(
         error_code=code,
         error=error,
@@ -1130,6 +1165,18 @@ async def _handle_stream_error(
             await record_upstream_overload(
                 proxy._load_balancer,
                 account,
+                redact_account_id=privacy_policy.redacts_sensitive_details,
+            )
+        elif http_status == 429 and not burst_cooldown_recorded:
+            # A code-less HTTP 429 (rate_limit / quota classes returned above)
+            # is a per-account burst/concurrency rejection: keyed on the status
+            # so ``server_error`` rewrites and ``detail``-parsed bodies are
+            # covered. Short replica-local cooldown only -- never
+            # ``mark_rate_limit`` / persisted RATE_LIMITED.
+            await record_upstream_burst_rejection(
+                proxy._load_balancer,
+                account,
+                retry_after_seconds=retry_after_seconds,
                 redact_account_id=privacy_policy.redacts_sensitive_details,
             )
     return classified

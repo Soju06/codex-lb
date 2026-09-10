@@ -11,7 +11,7 @@ from collections.abc import Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Literal, Mapping, TypeVar, cast
+from typing import Any, Final, Literal, Mapping, TypeVar, cast
 from urllib.parse import urlparse
 
 from app.core import shutdown as shutdown_state
@@ -60,6 +60,7 @@ from app.core.metrics.prometheus import (
     bridge_instance_mismatch_total,
     bridge_reattach_total,
     bridge_unanchored_handoff_recovery_total,
+    http_bridge_connections_total,
     http_bridge_prewarm_total,
     http_bridge_stuck_retire_total,
 )
@@ -197,6 +198,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
+from app.modules.proxy.http_continuation import inferred_http_bridge_key
 from app.modules.proxy.ring_membership import (
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
@@ -211,8 +213,15 @@ _http_bridge_pending_count_warning_last_logged: dict[tuple[str, str, str], float
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 # A healthy upstream acknowledges response.create promptly. Keep the
 # Keep the owner-side watchdog within the client-safe contract while honoring
-# the configured stuck-gate threshold when it is shorter.
+# the fixed stuck-gate threshold when it is shorter.
 _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 60.0
+# Fixed bridge session lifecycle values (constantize-session-bridge-tunables).
+# These were never tuned in any deployment; tests monkeypatch the module
+# attribute, and every consumer reads it through this module at call time.
+HTTP_BRIDGE_IDLE_TTL_SECONDS: Final = 120.0
+HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS: Final = 900.0
+# Owner-side stuck handoff gate; anchored to the 300s wait Codex Desktop uses.
+HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS: Final = 300.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 # Keep process-local *uncaptured* entries bounded. A denied entry is retained
 # until the matching durable anchor is confirmed cleared; evicting it would let
@@ -766,8 +775,35 @@ def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    return cast(Callable[[Any | None], float], _service_global("_proxy_admission_wait_timeout_seconds"))(settings)
+def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether the one permitted server-side anchored replay is unused."""
+    settings = _service_get_settings()
+    return (
+        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
+        in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and (
+            request_state.replay_count == 0
+            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+            == "server_indefinite_recovery"
+        )
+    )
+
+
+def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    payload = openai_error(
+        "previous_response_not_found",
+        "Previous response was not found; retry without previous_response_id.",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+    return payload
+
+
+def _proxy_admission_wait_timeout_seconds() -> float:
+    return cast(Callable[[], float], _service_global("_proxy_admission_wait_timeout_seconds"))()
 
 
 def _http_bridge_stale_inflight_seconds() -> float:
@@ -2410,8 +2446,13 @@ def _make_http_bridge_session_key(
             affinity_kind = "session_header"
             strength = "hard"
         else:
-            affinity_key = affinity.key or request_id
-            affinity_kind = affinity.kind.value if affinity.kind is not None else "request"
+            inferred_key = (
+                inferred_http_bridge_key(payload) if payload.conversation or explicit_prompt_cache_key is None else None
+            )
+            affinity_key = inferred_key or affinity.key or request_id
+            affinity_kind = (
+                "prompt_cache" if inferred_key else affinity.kind.value if affinity.kind is not None else "request"
+            )
             strength = "soft"
     return _HTTPBridgeSessionKey(
         affinity_kind=affinity_kind,
@@ -3319,7 +3360,17 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
 
 
 def _http_bridge_prewarm_enabled(settings: Any) -> bool:
-    """Prewarm eligibility is the ``prewarm_enabled`` flag alone.
+    """Prewarm eligibility is the ``prewarm_enabled`` switch alone.
+
+    M3 codex prewarm: the switch is dashboard-managed, and it is folded into
+    ``settings`` before this is called. ``settings`` is the proxy service facade
+    value (``_service_get_settings()``), which applies the request-bound
+    dashboard overlay: the field is in ``DASHBOARD_OVERRIDE_SETTINGS``, so a
+    non-NULL ``dashboard_settings`` column has already won over the deprecated
+    ``CODEX_LB_*`` env alias by the time this reads it. Outside a bound request
+    context (startup, schedulers, unit tests) the env alias applies, and then
+    the code default (off) -- the same precedence ``resolve_inheritable``
+    applies for the settings API's provenance.
 
     The canary percent and allow/deny cohort scaffolding was one-time
     rollout tooling retired by ``reduce-settings-surface-phase-4``.
@@ -3630,8 +3681,8 @@ def _http_bridge_runtime_config(
 ) -> _HTTPBridgeRuntimeConfig:
     return _HTTPBridgeRuntimeConfig(
         enabled=app_settings.http_responses_session_bridge_enabled,
-        idle_ttl_seconds=app_settings.http_responses_session_bridge_idle_ttl_seconds,
-        codex_idle_ttl_seconds=app_settings.http_responses_session_bridge_codex_idle_ttl_seconds,
+        idle_ttl_seconds=HTTP_BRIDGE_IDLE_TTL_SECONDS,
+        codex_idle_ttl_seconds=HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS,
         max_sessions=app_settings.http_responses_session_bridge_max_sessions,
         queue_limit=app_settings.http_responses_session_bridge_queue_limit,
         prompt_cache_idle_ttl_seconds=float(
@@ -3657,18 +3708,16 @@ def _http_bridge_eventless_budget_seconds(settings: object, *, fallback_seconds:
     Before ``response.created`` the downstream event queue is silent by design,
     so ``stream_idle_timeout_seconds`` (a *post-start* inter-event budget) does
     not describe this phase at all. The honest bound is the owner-side stuck
-    gate: once ``http_responses_session_bridge_stuck_gate_retire_after_seconds``
-    retires the pending handoff there is nothing left for the client to wait
-    for. Clamp to the stream-idle and bridge-request budgets so the pre-response
-    watchdog can never outlive the request it guards.
+    gate: once ``HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS`` retires the
+    pending handoff there is nothing left for the client to wait for. Clamp to
+    the stream-idle and bridge-request budgets so the pre-response watchdog can
+    never outlive the request it guards.
 
     ``fallback_seconds`` is used when a caller's settings object does not carry
     ``stream_idle_timeout_seconds`` at all.
     """
 
-    stuck_gate_seconds = float(
-        getattr(settings, "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
-    )
+    stuck_gate_seconds = float(HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS)
     stream_idle_timeout_seconds = float(getattr(settings, "stream_idle_timeout_seconds", fallback_seconds))
     return max(
         0.001,
@@ -3782,6 +3831,8 @@ def _log_http_bridge_event(
     response_events_seen: int | None = None,
     transport_classification: str | None = None,
 ) -> None:
+    if event in {"create", "reuse", "reconnect", "close", "evict_idle"} and http_bridge_connections_total is not None:
+        http_bridge_connections_total.labels(event=event).inc()
     level = logging.INFO
     if event in {
         "queue_full",

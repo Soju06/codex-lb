@@ -67,6 +67,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -76,6 +77,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy._service.http_bridge.accepted_replay import (
     _claim_websocket_replay_create_gate,
     _http_bridge_accepted_replay_may_exclude_account,
@@ -87,6 +89,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _bind_http_bridge_proxy_injected_anchor,
     _build_http_bridge_prewarm_text,
     _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_client_full_history_recovery_error,
     _http_bridge_denied_anchor_fence_advanced,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
@@ -234,7 +237,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
-from app.modules.proxy.load_balancer import effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import effective_account_concurrency_caps, effective_routing_tunables
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -317,22 +320,6 @@ def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketR
     )
 
 
-def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
-    settings = _service_get_settings()
-    return (
-        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
-        in {"server_anchored_replay_once", "server_indefinite_recovery"}
-        and request_state.previous_response_id is not None
-        and request_state.response_id is None
-        and request_state.response_event_count == 0
-        and (
-            request_state.replay_count == 0
-            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
-            == "server_indefinite_recovery"
-        )
-    )
-
-
 def _http_bridge_operation_fence_for_hard_continuity_enabled(request_state: _WebSocketRequestState) -> bool:
     """Return whether a hard turn-state request may use the durable replay fence."""
     if not request_state.hard_continuity_anchor:
@@ -395,16 +382,6 @@ def _http_bridge_terminal_hard_turn_response_id(
         return None
     response_id = getattr(operation, "response_id", None)
     return response_id if isinstance(response_id, str) and response_id else None
-
-
-def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
-    payload = openai_error(
-        "previous_response_not_found",
-        "Previous response was not found; retry without previous_response_id.",
-        error_type="invalid_request_error",
-    )
-    payload["error"]["param"] = "previous_response_id"
-    return payload
 
 
 def _http_bridge_hard_continuity_full_history_recovery_error() -> OpenAIErrorEnvelope:
@@ -700,21 +677,7 @@ class _HTTPBridgeRequestSubmitMixin:
 
     @staticmethod
     def _http_bridge_clean_close_retry_jitter_seconds() -> float:
-        settings = _service_get_settings()
-        maximum = max(
-            0.0,
-            min(
-                30.0,
-                float(
-                    getattr(
-                        settings,
-                        "http_responses_session_bridge_clean_close_retry_jitter_max_seconds",
-                        _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS,
-                    )
-                ),
-            ),
-        )
-        return random.uniform(0.0, maximum) if maximum > 0 else 0.0
+        return random.uniform(0.0, _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS)
 
     def _prepare_http_bridge_request(
         self: Any,
@@ -967,8 +930,6 @@ class _HTTPBridgeRequestSubmitMixin:
         allowing the upstream to hang.
         """
         settings = _service_get_settings()
-        if not settings.image_inline_fetch_enabled:
-            return text_data
         # Quick string-level pre-check: skip the parse/fetch cycle when the
         # payload contains no ``input_image`` items with an ``http`` URL.
         if "input_image" not in text_data:
@@ -1372,14 +1333,10 @@ class _HTTPBridgeRequestSubmitMixin:
         # Apply and size-check it before recording the operation so a local
         # payload-too-large rejection cannot leave a submitted retry fence.
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
-        operation_ledger_enabled = bool(
-            getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
-        )
         operation_ledger_for_hard_continuity = _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
         record_operation = getattr(self._durable_bridge, "record_operation", None)
         if (
-            operation_ledger_enabled
-            and callable(record_operation)
+            callable(record_operation)
             and (
                 request_state.previous_response_id is not None
                 or operation_ledger_for_hard_continuity
@@ -1920,14 +1877,15 @@ class _HTTPBridgeRequestSubmitMixin:
             # critical section (issue #1971) — and only when the reacquire can
             # actually run: a session already holding its lease never depended
             # on a settings read to admit a turn.
-            fair_share_threshold_pct = (
-                await self._http_bridge_fair_share_threshold_pct(session) if needs_stream_lease else 0
+            fair_share_threshold_pct, routing_tunables = (
+                await self._http_bridge_reacquire_snapshot(session) if needs_stream_lease else (0, None)
             )
             async with session.pending_lock:
                 await self._ensure_http_bridge_session_stream_lease_locked(
                     session,
                     request_state=request_state,
                     fair_share_threshold_pct=fair_share_threshold_pct,
+                    routing_tunables=routing_tunables,
                 )
         except BaseException:
             # Recovery claims are made before admission. If reacquiring an
@@ -1998,6 +1956,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     session,
                     request_state=request_state,
                     fair_share_threshold_pct=fair_share_threshold_pct,
+                    routing_tunables=routing_tunables,
                 )
                 session.queued_request_count += 1
                 if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
@@ -2035,6 +1994,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state,
                 response_create_gate=session.response_create_gate,
                 account_id=session.account.id,
+                routing_tunables=routing_tunables,
                 surface="http_bridge",
                 bridge_session=session,
             )
@@ -2592,6 +2552,15 @@ class _HTTPBridgeRequestSubmitMixin:
         if not session.codex_session or session.prewarmed or request_state.previous_response_id is not None:
             request_state.prewarm_status = request_state.prewarm_status or "not_applicable"
             return
+        # M3 codex prewarm: the switch is dashboard-managed, and it reaches this
+        # path through the request-bound overlay already applied by
+        # ``_service_get_settings()`` above (the field is in
+        # ``DASHBOARD_OVERRIDE_SETTINGS``, and the entry-point middleware bound
+        # the snapshot once for this request). Resolving it is therefore a plain
+        # memory read that adds neither a settings read nor an ``await`` -- here
+        # or, more importantly, under ``prewarm_lock`` below, where a cache
+        # refresh could run a DB query and suspend (issues #1971 and #1972
+        # wedged every keyed submit on exactly that pattern).
         if not _http_bridge_prewarm_enabled(settings):
             request_state.prewarm_status = "not_applicable"
             return
@@ -2958,21 +2927,29 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         await self._maybe_release_idle_http_bridge_session_lease(session)
 
-    async def _http_bridge_fair_share_threshold_pct(
+    async def _http_bridge_reacquire_snapshot(
         self: Any,
         session: "_HTTPBridgeSession",
-    ) -> int:
-        """Resolve the keyed fair-share threshold WITHOUT holding pending_lock.
+    ) -> tuple[int, RoutingTunables | None]:
+        """Resolve the reacquire's settings inputs WITHOUT holding pending_lock.
 
-        The settings-cache refresh runs a DB query behind a process-global
-        lock; awaiting it while holding a session's ``pending_lock`` let one
-        stalled query wedge every keyed submit process-wide (issue #1971).
-        Callers resolve the snapshot first and pass it into
-        ``_ensure_http_bridge_session_stream_lease_locked``.
+        For a keyed session one cached dashboard row yields both the fair-share
+        threshold and the routing tunables the lease is judged against (C2-2
+        routing/overload: the lease TTL). An unkeyed session reads no settings
+        here, as before: its threshold is ``0`` and the balancer falls back to
+        the snapshot of its most recent request. The settings-cache refresh
+        runs a DB query behind a process-global lock; awaiting it while holding
+        a session's ``pending_lock`` let one stalled query wedge every keyed
+        submit process-wide (issue #1971). Callers resolve the snapshot first
+        and pass both values into ``_ensure_http_bridge_session_stream_lease_locked``.
         """
         if session.key.api_key_id is None:
-            return 0
-        return _api_key_fair_share_threshold_pct_from_settings(await _service_get_settings_cache().get())
+            return 0, None
+        dashboard_settings = await _service_get_settings_cache().get()
+        return (
+            _api_key_fair_share_threshold_pct_from_settings(dashboard_settings),
+            effective_routing_tunables(dashboard_settings),
+        )
 
     async def _ensure_http_bridge_session_stream_lease_locked(
         self: Any,
@@ -2980,17 +2957,18 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         fair_share_threshold_pct: int | None = None,
+        routing_tunables: RoutingTunables | None = None,
     ) -> None:
         """Reacquire the account stream lease for a session idled between turns.
 
-        Callers hold ``session.pending_lock`` and MUST pass
-        ``fair_share_threshold_pct`` (see
-        ``_http_bridge_fair_share_threshold_pct``) computed before acquiring
-        it: resolving the threshold reads the settings cache, whose refresh
-        runs a DB query behind a process-global lock — one stalled refresh
-        under ``pending_lock`` wedged every keyed submit for days
-        (issue #1971). The ``None`` fallback resolves it inline and exists
-        for lock-free callers only.
+        Callers hold ``session.pending_lock`` and MUST pass both
+        ``fair_share_threshold_pct`` and ``routing_tunables`` (see
+        ``_http_bridge_reacquire_snapshot``) computed before acquiring it:
+        resolving either reads the settings cache, whose refresh runs a DB
+        query behind a process-global lock — one stalled refresh under
+        ``pending_lock`` wedged every keyed submit for days (issue #1971).
+        The ``None`` fallback resolves them inline from one cached row and
+        exists for lock-free callers only.
 
         The lease is released when the
         session's last in-flight turn detaches, so an idle session does not
@@ -3019,13 +2997,17 @@ class _HTTPBridgeRequestSubmitMixin:
         if api_key_id is None:
             fair_share_threshold_pct = 0
         elif fair_share_threshold_pct is None:
-            fair_share_threshold_pct = _api_key_fair_share_threshold_pct_from_settings(
-                await _service_get_settings_cache().get()
-            )
+            # Lock-free callers only (see the docstring): one cached row serves
+            # both inputs.
+            dashboard_settings = await _service_get_settings_cache().get()
+            fair_share_threshold_pct = _api_key_fair_share_threshold_pct_from_settings(dashboard_settings)
+            if routing_tunables is None:
+                routing_tunables = effective_routing_tunables(dashboard_settings)
         try:
             lease = await load_balancer.acquire_account_lease(
                 session.account.id,
                 kind="stream",
+                routing_tunables=routing_tunables,
                 # Carry the turn's usage-budget estimate like initial selection
                 # and reconnect do, so capacity-weighted routing pressure still
                 # sees large turns on reused warm sessions.
@@ -3248,9 +3230,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 poison_episode, poison_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=consecutive_failures,
-                    configured_threshold=(
-                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                    ),
                 )
                 if poison_episode is None:
                     return
@@ -3338,9 +3317,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         now: float,
     ) -> _HTTPBridgeStaleGateSnapshot:
-        threshold_seconds = float(
-            getattr(_service_get_settings(), "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
-        )
+        threshold_seconds = float(_http_bridge_helpers.HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS)
         async with session.pending_lock:
             pending_states = list(session.pending_requests)
             stale_request_states, should_retire = self._classify_http_bridge_stale_gate_holders(
@@ -3635,9 +3612,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 poison_episode, poison_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=consecutive_failures,
-                    configured_threshold=(
-                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                    ),
                 )
             if poison_detail is not None and poison_episode is not None:
                 # Consecutive eventless failures on one bridge key are

@@ -48,6 +48,10 @@ maintained outside codex-lb:
   controls.
 - [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — a
   read-only SwiftBar/Bun monitor for account-pool status and quota headroom.
+- [Codex LB Status](https://github.com/VictorStatko/codex-lb-status) — a
+  read-only Ubuntu tray monitor for pooled quota, account health, reset credits,
+  and update state.
+- [Codex LB for Omarchy](https://github.com/janaki-sasidhar/omarchy-codex-lb) — a read-only Linux/Omarchy Quattro bar plugin with account quotas, usage totals, reset times, and optional desktop alerts. It supports guest sessions and dashboard password/TOTP login; see its authentication compatibility notes.
 
 Prefer a guest dashboard session for monitoring-only access when the companion
 supports it, and grant admin access only for Status Bar account controls.

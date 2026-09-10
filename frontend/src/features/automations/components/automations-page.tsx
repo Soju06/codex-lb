@@ -27,6 +27,7 @@ import {
   resolveAccountDisplay,
 } from "@/features/automations/account-display";
 import { AutomationJobDialog } from "@/features/automations/components/automation-job-dialog";
+import { AutomationsPauseToggle } from "@/features/automations/components/automations-pause-toggle";
 import {
   AutomationJobsFilters,
   AutomationRunsFilters,
@@ -38,6 +39,7 @@ import {
 } from "@/features/automations/components/run-status-utils";
 import { getAutomationRunDetails } from "@/features/automations/api";
 import { useAutomationListing } from "@/features/automations/hooks/use-automation-listing";
+import { useAutomationsPaused } from "@/features/automations/hooks/use-automations-paused";
 import { useAutomations } from "@/features/automations/hooks/use-automations";
 import { formatScheduleTimeForInput } from "@/features/automations/time-utils";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
@@ -182,6 +184,8 @@ export function AutomationsPage() {
     deleteMutation,
     runNowMutation,
   } = useAutomations(null, { enableQueries: false });
+  // M2 background jobs: the backend refuses Run now while the scheduler is paused.
+  const automationsPaused = useAutomationsPaused() === true;
   const runDetailsQuery = useQuery({
     queryKey: ["automations", "run-details", selectedRunId],
     queryFn: () => getAutomationRunDetails(selectedRunId ?? ""),
@@ -417,11 +421,14 @@ export function AutomationsPage() {
 
   return (
     <div className="animate-fade-in-up space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{t("automations.page.title")}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {t("automations.page.subtitle")}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">{t("automations.page.title")}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {t("automations.page.subtitle")}
+          </p>
+        </div>
+        <AutomationsPauseToggle />
       </div>
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
@@ -613,9 +620,13 @@ export function AutomationsPage() {
                                 size="icon"
                                 variant="ghost"
                                 className="h-8 w-8"
-                                disabled={busy}
+                                disabled={busy || automationsPaused}
 	                                aria-label={t("automations.jobs.runNowAria", { name: job.name })}
-	                                title={t("automations.jobs.runNowTitle")}
+	                                title={
+	                                  automationsPaused
+	                                    ? t("automations.jobs.runNowPausedTitle")
+	                                    : t("automations.jobs.runNowTitle")
+	                                }
                                 onClick={() => {
                                   runNowDialog.show(job);
                                 }}

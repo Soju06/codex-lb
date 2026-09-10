@@ -37,6 +37,7 @@ from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.quota_planner.repository import QuotaPlannerRepository
+from app.modules.reports.cache import ReportsCaches
 from app.modules.reports.repository import ReportsRepository
 from app.modules.reports.service import ReportsService
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -351,3 +352,7 @@ def get_automations_context(
         accounts_repository=accounts_repository,
         service=service,
     )
+
+
+async def get_reports_caches(request: Request) -> ReportsCaches:
+    return request.app.state.reports_caches

@@ -30,6 +30,7 @@ from app.core.clock import clock_for, scheduler_for
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
@@ -50,7 +51,11 @@ from app.modules.proxy.context_codec import (
 from app.modules.proxy.context_dispatch import get_context_dispatch_cache
 from app.modules.proxy.context_repository import ContextRepository
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
-from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import (
+    AccountSelection,
+    effective_account_concurrency_caps,
+    effective_routing_tunables,
+)
 from app.modules.proxy.selection_errors import selection_failure_response
 
 if TYPE_CHECKING:
@@ -437,6 +442,7 @@ class _CodexControlMixin(_ContextManagementMixin):
             else None
         )
         settings = await _service_get_settings_cache().get()
+        bind_resilience_toggles(settings)  # C2-3 resilience toggles
         if _routing_strategy(settings) == "single_account":
             selected_account_id = (settings.single_account_id or "").strip()
             if not selected_account_id:
@@ -445,6 +451,7 @@ class _CodexControlMixin(_ContextManagementMixin):
                 return None
             scoped_account_ids = {selected_account_id}
         selection = await proxy._load_balancer.select_account(
+            dashboard_settings=settings,  # C2-3 resilience toggles
             sticky_key=affinity.selection_key,
             sticky_kind=affinity.kind,
             reallocate_sticky=affinity.reallocate_sticky,
@@ -462,6 +469,7 @@ class _CodexControlMixin(_ContextManagementMixin):
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
             concurrency_caps=effective_account_concurrency_caps(settings),
+            routing_tunables=effective_routing_tunables(settings),
         )
         if selection.account is None:
             return None
@@ -493,6 +501,7 @@ class _CodexControlMixin(_ContextManagementMixin):
         base_settings = _service_get_settings()
         deadline = start + base_settings.proxy_request_budget_seconds
         settings = await _service_get_settings_cache().get()
+        bind_resilience_toggles(settings, startup_settings=base_settings)  # C2-3 resilience toggles
         affinity = _sticky_key_for_codex_control_request(
             headers,
             codex_session_affinity=codex_session_affinity,

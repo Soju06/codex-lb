@@ -5,8 +5,10 @@ Native Codex clients send history and notes operations to endpoints missing from
 
 ## What Changes
 - Add the ten explicit authenticated native history and notes routes.
-- Persist an immutable notes owner and observed history participants per session and proxy API key.
+- Bind each session to exactly one immutable proxy API key and notes owner, and record its history participants.
 - Keep notes on their owner and gather encrypted history from recorded participants; authenticate proxy envelopes before restoring native results to inference.
+- Allow history-enabled forks to replay already-issued context results under the same API key and current account scope, without granting access to the original session for later operations.
+- Preserve the deployed context migration ancestry and join it to current main with an explicit merge revision.
 - Preserve existing replay restrictions for all unverified account-specific state.
 - Accept context operations in dashboard request logs.
 - Integrate with current main's clock/scheduler seams and migration head.

@@ -52,6 +52,10 @@ maintained outside codex-lb:
   read-only Ubuntu tray monitor for pooled quota, account health, reset credits,
   and update state.
 - [Codex LB for Omarchy](https://github.com/janaki-sasidhar/omarchy-codex-lb) — a read-only Linux/Omarchy Quattro bar plugin with account quotas, usage totals, reset times, and optional desktop alerts. It supports guest sessions and dashboard password/TOTP login; see its authentication compatibility notes.
+- [Codex-LB Rates](https://github.com/uniskela/codex-lb-rates) — a
+  Home Assistant integration for pool and per-account 5h / weekly / monthly
+  remaining-% sensors (plus reset times and optional rich sensors). It supports
+  guest sessions and dashboard password/TOTP login; see its README for setup.
 
 Prefer a guest dashboard session for monitoring-only access when the companion
 supports it, and grant admin access only for Status Bar account controls.

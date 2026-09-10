@@ -124,6 +124,7 @@ for access guidance):
 - [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — read-only SwiftBar/Bun monitor for pool status and quota headroom
 - [Codex LB Status](https://github.com/VictorStatko/codex-lb-status) — read-only Ubuntu tray monitor for pooled quota, account health, reset credits, and update state
 - [Codex LB for Omarchy](https://github.com/janaki-sasidhar/omarchy-codex-lb) — read-only Linux/Omarchy Quattro bar plugin for account quotas, usage totals, reset times, and optional desktop alerts
+- [Codex-LB Rates](https://github.com/uniskela/codex-lb-rates) — Home Assistant integration for pool and per-account quota remaining sensors (5h / weekly / monthly)
 
 ## Development
 
@@ -328,6 +329,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/VictorStatko"><img src="https://avatars.githubusercontent.com/u/34319599?v=4?s=100" width="100px;" alt="Victor Statko"/><br /><sub><b>Victor Statko</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=VictorStatko" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/janaki-sasidhar"><img src="https://avatars.githubusercontent.com/u/42799643?v=4?s=100" width="100px;" alt="flameboy"/><br /><sub><b>flameboy</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=janaki-sasidhar" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/elmakus"><img src="https://avatars.githubusercontent.com/u/76910687?v=4?s=100" width="100px;" alt="elmakus"/><br /><sub><b>elmakus</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=elmakus" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=elmakus" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Aelmakus" title="Bug reports">🐛</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/uniskela"><img src="https://avatars.githubusercontent.com/u/104075208?v=4?s=100" width="100px;" alt="Uniskela"/><br /><sub><b>Uniskela</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=uniskela" title="Documentation">📖</a></td>
     </tr>
   </tbody>
 </table>

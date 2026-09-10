@@ -36,7 +36,7 @@ from app.modules.model_sources.forwarding import (
     SourceUsageHolder,
 )
 from app.modules.proxy import source_dispatch as dispatch_module
-from app.modules.proxy.model_source_pins import PinIntent, PinWrite, PinWriteExecutor
+from app.modules.proxy.model_source_pins import PinIntent, PinWrite, PinWriteExecutor, PinWriteOutcome
 from app.modules.proxy.source_admission import SourceAdmission, SourceBulkhead
 from app.modules.proxy.source_dispatch import (
     ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
@@ -2104,7 +2104,7 @@ class _IssueRecordingExecutor(PinWriteExecutor):
         super().__init__(session_factory=_unreachable_session_factory, writer_section=_unreachable_writer_section)
         self.issued: list[str] = []
 
-    async def _run(self, operation, verify, *, scheduler, action: str, kinds: str) -> str:  # type: ignore[override]
+    async def _run(self, operation: Any, verify: Any, *, scheduler: Any, action: str, kinds: str) -> PinWriteOutcome:
         self.issued.append(kinds)
         return "written"
 

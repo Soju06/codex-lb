@@ -14,6 +14,12 @@ from app.db.session import SessionLocal, engine
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(engine.dialect.name != "sqlite", reason="SQLite query plans")]
 
+_LIVE_FACET_INDEXES = {
+    "idx_logs_live_api_key",
+    "idx_logs_live_model_effort",
+    "idx_logs_live_status_error",
+}
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("live_facet_indexes", [False, True])
@@ -85,17 +91,14 @@ async def test_options_avoid_repeated_live_cohort_scans(
             ],
         )
         await session.commit()
-        if live_facet_indexes:
-            # The independently proposed partial indexes must remain compatible.
-            for name, columns in (
-                ("api_key", "api_key_id"),
-                ("model_effort", "model, reasoning_effort"),
-                ("status_error", "status, error_code"),
-            ):
-                await session.execute(
-                    text(f"CREATE INDEX idx_logs_live_{name} ON request_logs ({columns}) WHERE deleted_at IS NULL")
-                )
+        if not live_facet_indexes:
+            # db_setup creates the live facet indexes from ORM metadata.
+            # Remove them only for the case exercising the standard indexes alone.
+            for index_name in sorted(_LIVE_FACET_INDEXES):
+                await session.execute(text(f"DROP INDEX {index_name}"))
             await session.commit()
+        index_names = {row[1] for row in await session.execute(text("PRAGMA index_list('request_logs')"))}
+        assert index_names & _LIVE_FACET_INDEXES == (_LIVE_FACET_INDEXES if live_facet_indexes else set())
         assert not (await session.execute(text("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'"))).all()
 
     # Count SQLite VM work for the real HTTP endpoint, including its actual

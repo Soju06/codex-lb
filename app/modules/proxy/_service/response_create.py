@@ -17,6 +17,7 @@ from app.core.clients.proxy import (
     _AGENT_CONTROL_OUTPUT_ITEM_TYPES,
     _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE,
     CODEX_INSTALLATION_ID_HEADER,
+    UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
     ImageFetchSession,
     ProxyResponseError,
     _agent_control_tool_output_occurrences,
@@ -48,7 +49,7 @@ from app.modules.proxy._service.support import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 
-_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = UPSTREAM_RESPONSE_CREATE_MAX_BYTES
 _UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
 _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS = 10
 _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE = (

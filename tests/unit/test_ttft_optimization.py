@@ -61,20 +61,15 @@ def _make_proxy_settings() -> object:
         sticky_threads_enabled=False,
         upstream_stream_transport="auto",
         openai_cache_affinity_max_age_seconds=300,
-        openai_prompt_cache_key_derivation_enabled=True,
         routing_strategy="usage_weighted",
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         trace_channels=frozenset(),
         sticky_reallocation_budget_threshold_pct=95.0,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_account_stream_recovery_reserve=1,
         proxy_api_key_fair_share_congestion_threshold_pct=0,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
 
 

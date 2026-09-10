@@ -346,7 +346,7 @@ class AccountsService:
 
         usage_written = False
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
-            usage_written = await self._usage_updater.force_refresh(account, ignore_refresh_disabled=True)
+            usage_written = await self._usage_updater.force_refresh(account)
             get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
@@ -714,10 +714,7 @@ class AccountsService:
 
         usage_refresh_fetch_succeeded: bool | None = None
         if self._usage_repo and self._usage_updater:
-            usage_refresh_result = await self._usage_updater.force_refresh_result(
-                probe_account,
-                ignore_refresh_disabled=True,
-            )
+            usage_refresh_result = await self._usage_updater.force_refresh_result(probe_account)
             usage_refresh_fetch_succeeded = usage_refresh_result.fetch_succeeded
             # Forced refresh can still persist fresh OAuth credentials before a
             # later upstream usage fetch fails. Selection-cache rows carry

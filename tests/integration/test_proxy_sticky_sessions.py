@@ -93,7 +93,6 @@ def _install_proxy_settings_cache(
     prefer_earlier_reset_accounts: bool = False,
     openai_cache_affinity_max_age_seconds: int = 300,
     sticky_reallocation_budget_threshold_pct: float = 95.0,
-    openai_prompt_cache_key_derivation_enabled: bool = True,
     proxy_request_budget_seconds: float = 75.0,
 ) -> None:
     settings = SimpleNamespace(
@@ -101,28 +100,21 @@ def _install_proxy_settings_cache(
         sticky_threads_enabled=sticky_threads_enabled,
         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
         sticky_reallocation_budget_threshold_pct=sticky_reallocation_budget_threshold_pct,
-        openai_prompt_cache_key_derivation_enabled=openai_prompt_cache_key_derivation_enabled,
         routing_strategy="usage_weighted",
         proxy_request_budget_seconds=proxy_request_budget_seconds,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
         trace_channels=frozenset(),
         http_responses_session_bridge_enabled=False,
         http_responses_session_bridge_instance_id="sticky-session-test",
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
         http_responses_session_bridge_max_sessions=128,
         http_responses_session_bridge_queue_limit=8,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
         http_responses_session_bridge_gateway_safe_mode=False,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_account_stream_recovery_reserve=1,
         proxy_api_key_fair_share_congestion_threshold_pct=0,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)

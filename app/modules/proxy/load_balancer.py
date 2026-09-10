@@ -38,7 +38,6 @@ from app.core.balancer import (
 )
 from app.core.balancer.types import UpstreamError
 from app.core.clock import REAL_CLOCK, Clock
-from app.core.config import settings as config_settings
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -61,6 +60,7 @@ from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage.quota import apply_usage_quota
+from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
@@ -190,8 +190,6 @@ logger = logging.getLogger(__name__)
 _SIBLING_FETCH_MARGIN_SECONDS = 5.0
 
 _UsageWindowEntry = UsageHistory | AdditionalUsageHistory
-
-_DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
@@ -2903,14 +2901,9 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None, *, now: float) -
     if recorded_at is None:
         return False
     current_time = datetime.fromtimestamp(now, tz=timezone.utc)
-    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
+    interval_seconds = usage_freshness_horizon_seconds()
     recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
     return recorded_time >= current_time - timedelta(seconds=interval_seconds)
-
-
-def _usage_refresh_interval_seconds() -> int:
-    settings = config_settings.get_settings()
-    return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
 def _filter_accounts_for_model(
@@ -3003,8 +2996,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
 
 def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
     current_time = now or utcnow()
-    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
-    return current_time - timedelta(seconds=interval_seconds)
+    return current_time - timedelta(seconds=usage_freshness_horizon_seconds())
 
 
 def _is_upstream_circuit_breaker_open(circuit_breaker_enabled: bool) -> bool:

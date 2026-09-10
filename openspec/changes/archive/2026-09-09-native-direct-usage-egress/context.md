@@ -43,3 +43,11 @@ adapter/helper behavior, not production canary performance or upstream availabil
 - Independent read-only review found retry/fallback behavior correct and
   identified the response encoding gap. The final review after the fix had
   no remaining actionable findings.
+
+## Main integration (2026-09-10)
+
+Integrated main through `ef1af872d`. The native request now uses the same fixed
+`USAGE_FETCH_TIMEOUT_SECONDS` default as the Python and routed paths after main
+removed the corresponding setting. The native selection test covers both an
+omitted timeout and an explicit override. The scoped suite above passes 651
+cases after main's test updates; lint, types and all 64 strict specs also pass.

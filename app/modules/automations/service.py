@@ -17,6 +17,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy import compact_responses as core_compact_responses
+from app.core.config.background_jobs import resolve_background_job_toggle
 from app.core.config.dashboard_overrides import dashboard_overrides_bound
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -25,7 +26,7 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning
 from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
@@ -114,6 +115,13 @@ class AutomationValidationError(ValueError):
 
 class AutomationNotFoundError(LookupError):
     pass
+
+
+class AutomationsPausedError(RuntimeError):
+    """M2 background jobs: ``automations_scheduler_enabled`` is False, so no run may start."""
+
+    def __init__(self) -> None:
+        super().__init__("Automations are paused in the dashboard settings; resume them before running a job")
 
 
 @dataclass(frozen=True, slots=True)
@@ -703,6 +711,11 @@ class AutomationsService:
         job = await self._repository.get_job(job_id)
         if job is None:
             raise AutomationNotFoundError(job_id)
+        # M2 background jobs: a manual run while the scheduler is paused would
+        # make the "paused" label a lie, so refuse with the same toggle the
+        # scheduler tick reads.
+        if not resolve_background_job_toggle(await get_settings_cache().get(), "automations_scheduler_enabled"):
+            raise AutomationsPausedError()
         now = now_utc or utcnow()
         cycle_id = uuid4().hex
         cycle_key = _manual_cycle_key(job.id, cycle_id)
@@ -764,10 +777,20 @@ class AutomationsService:
             )
         raise RuntimeError("Failed to claim manual automation run")
 
-    async def run_due_jobs(self, *, now_utc: datetime | None = None) -> int:
+    async def run_due_jobs(
+        self, *, now_utc: datetime | None = None, dashboard_settings: DashboardSettings | None = None
+    ) -> int:
         # Scheduler entry: bind the dashboard snapshot so the compact budget the
         # runs use is the dashboard value (C2-1), as it is on the request path.
-        with dashboard_overrides_bound(await get_settings_cache().get()):
+        # M2 background jobs: the scheduler took that snapshot before its lock
+        # and passes it in, so the locked body never awaits the settings cache;
+        # only callers without one (tests, ad-hoc runs) read it here.
+        snapshot = dashboard_settings if dashboard_settings is not None else await get_settings_cache().get()
+        # The same snapshot carries the pause toggle; a paused scheduler
+        # dispatches nothing (scheduled cycles or manual runs).
+        if not resolve_background_job_toggle(snapshot, "automations_scheduler_enabled"):
+            return 0
+        with dashboard_overrides_bound(snapshot):
             return await self._run_due_jobs(now_utc=now_utc)
 
     async def _run_due_jobs(self, *, now_utc: datetime | None = None) -> int:

@@ -5,7 +5,7 @@ import codecs
 import contextlib
 import json
 import logging
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 import aiohttp
 from aiohttp_retry import ExponentialRetry, RetryClient
@@ -39,6 +39,11 @@ from app.core.utils.request_id import get_request_id
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 RETRY_START_TIMEOUT = 0.5
 RETRY_MAX_TIMEOUT = 2.0
+# Per-call total timeout and retry budget of the usage / reset-credits fetches
+# (fixed; issue #1340 / PRINCIPLES.md P2). Callers may still pass explicit
+# ``timeout_seconds`` / ``max_retries`` overrides.
+USAGE_FETCH_TIMEOUT_SECONDS: Final[float] = 10.0
+USAGE_FETCH_MAX_RETRIES: Final[int] = 2
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +94,8 @@ async def fetch_usage(
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
     url = _usage_url(usage_base)
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
-    retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS)
+    retries = max_retries if max_retries is not None else USAGE_FETCH_MAX_RETRIES
     headers = _usage_headers(access_token, account_id)
     retry_options = _retry_options(retries + 1)
     require_route_or_direct_egress_opt_in(
@@ -105,7 +110,7 @@ async def fetch_usage(
                 url=url,
                 route=route,
                 headers=headers,
-                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                 retries=retries,
                 codex_client=codex_client,
             )
@@ -116,7 +121,7 @@ async def fetch_usage(
                     client=native_client,
                     url=url,
                     headers=headers,
-                    timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                    timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                     retries=retries,
                 )
             except NativeEgressUnavailable:
@@ -216,8 +221,8 @@ async def consume_rate_limit_reset_credit(
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
     url = _rate_limit_reset_url(usage_base)
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
-    retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS)
+    retries = max_retries if max_retries is not None else USAGE_FETCH_MAX_RETRIES
     headers = _usage_headers(access_token, account_id)
     payload = {"redeem_request_id": redeem_request_id}
     retry_options = _retry_options(retries + 1)
@@ -234,7 +239,7 @@ async def consume_rate_limit_reset_credit(
                 route=route,
                 headers=headers,
                 payload=payload,
-                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                 retries=retries,
                 codex_client=codex_client,
             )

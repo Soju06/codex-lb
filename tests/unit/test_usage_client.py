@@ -252,7 +252,10 @@ async def test_fetch_usage_retries_and_returns_payload(usage_server):
 
 
 @pytest.mark.asyncio
-async def test_fetch_usage_prefers_native_direct_egress(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("timeout_seconds", [None, 2.0])
+async def test_fetch_usage_prefers_native_direct_egress(
+    monkeypatch: pytest.MonkeyPatch, timeout_seconds: float | None
+) -> None:
     native = StubNativeClient([StubNativeResponse(200, _usage_payload())])
     monkeypatch.setattr("app.core.clients.usage.discover_native_egress_client", lambda: native)
 
@@ -261,7 +264,7 @@ async def test_fetch_usage_prefers_native_direct_egress(monkeypatch: pytest.Monk
         account_id="acc_test",
         base_url="http://usage.test",
         max_retries=0,
-        timeout_seconds=2.0,
+        timeout_seconds=timeout_seconds,
         allow_direct_egress=True,
     )
 
@@ -271,6 +274,7 @@ async def test_fetch_usage_prefers_native_direct_egress(monkeypatch: pytest.Monk
     assert request.method == "GET"
     assert request.url == "http://usage.test/backend-api/wham/usage"
     assert request.headers["Authorization"] == "Bearer access-token"
+    assert request.timeout_seconds == (10.0 if timeout_seconds is None else timeout_seconds)
 
 
 @pytest.mark.asyncio

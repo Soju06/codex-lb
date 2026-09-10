@@ -441,7 +441,7 @@ When an account has an active proxy binding but route resolution returns `None` 
 
 ### Requirement: Upstream SSE framing scans each byte a bounded number of times
 
-The upstream SSE event reader MUST NOT rescan previously scanned buffer bytes on each network read; framing cost MUST be linear in event size so a single large event (up to the configured event-size cap) cannot stall the shared event loop. Framing semantics MUST be unchanged: all separator forms (`\r\n\r\n`, `\n\n`, `\r\r`) are honored, including separators straddling read boundaries, and event-size limits and idle timeouts apply as before.
+The upstream SSE event reader MUST NOT rescan previously scanned buffer bytes on each network read; framing cost MUST be linear in event size so a single large event (up to the fixed 16 MiB event-size cap) cannot stall the shared event loop. Framing semantics MUST be unchanged: all separator forms (`\r\n\r\n`, `\n\n`, `\r\r`) are honored, including separators straddling read boundaries, and event-size limits and idle timeouts apply as before.
 
 #### Scenario: Large event frames in linear time
 

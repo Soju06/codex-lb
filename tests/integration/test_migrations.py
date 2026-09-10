@@ -1056,6 +1056,45 @@ async def test_model_registry_snapshot_migration_upgrade_and_downgrade(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_model_context_window_overrides_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'model-context-window-overrides.sqlite'}"
+    revision = "20260909_110000_model_context_window_overrides"
+
+    def _table_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("model_context_window_overrides"):
+            return None
+        return {column["name"] for column in inspector.get_columns("model_context_window_overrides")}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(_table_state)
+        assert columns == {"slug", "context_window", "created_at", "updated_at"}
+        # The migration never seeds rows from the environment dict.
+        async with engine.connect() as conn:
+            count = (await conn.execute(text("SELECT COUNT(*) FROM model_context_window_overrides"))).scalar_one()
+        assert count == 0
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), f"{revision}-1"))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is None
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_account_refresh_claims_migration_upgrade_and_downgrade(tmp_path):
     """Upgrade creates the refresh-claim coordination table; downgrade drops it;
     a final walk to head proves the revision sits on a single-head graph."""
@@ -2543,6 +2582,46 @@ async def test_retired_prewarm_canary_columns_stay_insertable_for_legacy_replica
 
 
 @pytest.mark.asyncio
+async def test_dashboard_stream_bridge_budget_migration_upgrade_and_downgrade(tmp_path):
+    """M1: upgrade adds the two nullable ``dashboard_settings`` budget columns,
+    downgrade drops them, and a final walk to head proves a single-head graph."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-stream-bridge-budgets.sqlite'}"
+    parent_revision = "20260909_100000_dashboard_codex_prewarm"
+    budgets_revision = "20260909_080000_dashboard_stream_bridge_budgets"
+    columns = {
+        "http_responses_stream_request_budget_seconds",
+        "http_responses_session_bridge_request_budget_seconds",
+    }
+
+    async def _dashboard_settings_columns(engine) -> set[str]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            return {row[1] for row in rows}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert not columns & await _dashboard_settings_columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, budgets_revision, bootstrap_legacy=False))
+        assert columns <= await _dashboard_settings_columns(engine)
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert not columns & await _dashboard_settings_columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert columns <= await _dashboard_settings_columns(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_automation_run_claim_budget_migration_upgrade_and_downgrade(tmp_path):
     """Upgrade adds the nullable ``automation_runs.claim_budget_seconds`` column,
     downgrade drops it, and a final walk to head proves the revision sits on a
@@ -2577,3 +2656,149 @@ async def test_automation_run_claim_budget_migration_upgrade_and_downgrade(tmp_p
         assert "claim_budget_seconds" in await _automation_run_columns(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_codex_prewarm_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the nullable ``dashboard_settings.http_responses_session_bridge_codex_prewarm_enabled``
+    column (M3 codex prewarm), downgrade drops it, and a final walk to head proves
+    the revision sits on a single-head graph. The parent is read from the script
+    so re-chaining the revision at merge time does not break the test."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-codex-prewarm.sqlite'}"
+    prewarm_revision = "20260909_100000_dashboard_codex_prewarm"
+    column = "http_responses_session_bridge_codex_prewarm_enabled"
+    config = _build_alembic_config(db_url)
+    parent_revision = ScriptDirectory.from_config(config).get_revision(prewarm_revision).down_revision
+    assert isinstance(parent_revision, str)
+
+    async def _dashboard_settings_columns(engine) -> set[str]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            return {row[1] for row in rows}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert column not in await _dashboard_settings_columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, prewarm_revision, bootstrap_legacy=False))
+        assert column in await _dashboard_settings_columns(engine)
+
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert column not in await _dashboard_settings_columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert column in await _dashboard_settings_columns(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_background_job_toggles_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the three nullable background-job toggle columns to
+    ``dashboard_settings`` (M2 background jobs), downgrade drops them, and a
+    final walk to head proves the revision sits on a single-head graph. The
+    parent is read from the script directory so a re-chain at merge time does
+    not need a test edit."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-background-job-toggles.sqlite'}"
+    toggles_revision = "20260909_090000_dashboard_background_job_toggles"
+    toggle_columns = {
+        "auth_guardian_enabled",
+        "automations_scheduler_enabled",
+        "rate_limit_reset_credits_refresh_enabled",
+    }
+    config = _build_alembic_config(db_url)
+    parent_revision = ScriptDirectory.from_config(config).get_revision(toggles_revision).down_revision
+    assert isinstance(parent_revision, str)
+
+    async def _settings_columns(engine) -> set[str]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            return {row[1] for row in rows}
+
+    async def _toggle_column_shape(engine) -> dict[str, tuple[int, object]]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            # (notnull, dflt_value) per PRAGMA table_info.
+            return {row[1]: (row[3], row[4]) for row in rows if row[1] in toggle_columns}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert not (toggle_columns & await _settings_columns(engine))
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, toggles_revision, bootstrap_legacy=False))
+        assert toggle_columns <= await _settings_columns(engine)
+
+        # "Inherit" is the migrated state: the columns must be nullable with no
+        # server default, so an existing row keeps reading the environment alias
+        # instead of being seeded from it.
+        assert await _toggle_column_shape(engine) == {name: (0, None) for name in toggle_columns}
+
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert not (toggle_columns & await _settings_columns(engine))
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert toggle_columns <= await _settings_columns(engine)
+    finally:
+        await engine.dispose()
+
+
+# M5 conversation archive
+@pytest.mark.asyncio
+async def test_dashboard_conversation_archive_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the nullable ``conversation_archive_enabled`` column; downgrade drops it;
+    a final walk to head proves the revision sits on a single-head graph."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'conversation-archive.sqlite'}"
+    archive_revision = "20260909_120000_dashboard_conversation_archive"
+    # Read the parent from the graph, not from a literal: this revision is the
+    # tail of a stack whose merge order re-chains ``down_revision``.
+    parent_revision = (
+        ScriptDirectory.from_config(_build_alembic_config(db_url)).get_revision(archive_revision).down_revision
+    )
+    assert isinstance(parent_revision, str)
+
+    async def _columns(engine) -> dict[str, dict[str, object]]:
+        async with engine.connect() as conn:
+            result = await conn.execute(text("PRAGMA table_info(dashboard_settings)"))
+            return {row[1]: {"notnull": row[3], "default": row[4]} for row in result.fetchall()}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert "conversation_archive_enabled" not in await _columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, archive_revision, bootstrap_legacy=False))
+        columns = await _columns(engine)
+        # Nullable without a default: NULL = inherit the env alias / code default.
+        assert columns["conversation_archive_enabled"] == {"notnull": 0, "default": None}
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert "conversation_archive_enabled" not in await _columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert "conversation_archive_enabled" in await _columns(engine)
+    finally:
+        await engine.dispose()
+
+
+# end M5 conversation archive

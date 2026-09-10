@@ -5,6 +5,7 @@ import contextvars
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Final
 
 import aiohttp
 from pydantic import ValidationError
@@ -39,6 +40,9 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.time import to_utc_naive, utcnow
 
 TOKEN_REFRESH_INTERVAL_DAYS = 8
+# Total timeout of one refresh-token exchange (fixed; issue #1340 / PRINCIPLES.md
+# P2). Per-request budgets may only clamp it lower through the override below.
+TOKEN_REFRESH_TIMEOUT_SECONDS: Final[float] = 8.0
 
 logger = logging.getLogger(__name__)
 _TOKEN_REFRESH_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
@@ -211,7 +215,6 @@ async def refresh_access_token(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
 ) -> TokenRefreshResult:
-    settings = get_settings()
     url = f"{AUTH_BASE_URL}/oauth/token"
     payload = {
         "grant_type": "refresh_token",
@@ -219,7 +222,7 @@ async def refresh_access_token(
         "refresh_token": refresh_token,
         "scope": OAUTH_SCOPE,
     }
-    timeout = aiohttp.ClientTimeout(total=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds))
+    timeout = aiohttp.ClientTimeout(total=_effective_token_refresh_timeout())
 
     headers: dict[str, str] = {}
     request_id = get_request_id()
@@ -242,7 +245,7 @@ async def refresh_access_token(
                     route=route,
                     json=payload,
                     headers=headers,
-                    timeout=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds),
+                    timeout=_effective_token_refresh_timeout(),
                 )
                 data = await _safe_codex_json(resp)
                 status = int(getattr(resp, "status_code", getattr(resp, "status", 0)))
@@ -380,8 +383,8 @@ def _refresh_error_from_payload(payload: OAuthTokenPayload, status_code: int) ->
     return RefreshError(code, message, classify_refresh_error(code))
 
 
-def _effective_token_refresh_timeout(configured_timeout_seconds: float) -> float:
+def _effective_token_refresh_timeout() -> float:
     override = _TOKEN_REFRESH_TIMEOUT_OVERRIDE.get()
     if override is None:
-        return configured_timeout_seconds
-    return max(0.001, min(configured_timeout_seconds, override))
+        return TOKEN_REFRESH_TIMEOUT_SECONDS
+    return max(0.001, min(TOKEN_REFRESH_TIMEOUT_SECONDS, override))

@@ -605,6 +605,32 @@ describe("TelemetrySnapshotEnvelopeSchema", () => {
 });
 
 describe("TelemetryDaySchema", () => {
+  it.each(["latency_ms", "ttft_ms", "tps"] as const)("rejects a mismatched %s histogram count", (metric) => {
+    const day = structuredClone(createTelemetryDay());
+    day.dimensions.global[metric] = { sample_count: 4, buckets: { "1": 2, "2": 1 } };
+    expect(TelemetryDaySchema.safeParse(day).success).toBe(false);
+  });
+
+  it.each([
+    ["latency_ms", "14"], ["ttft_ms", "14"], ["tps", "11"],
+    ["latency_ms", "other"], ["latency_ms", "01"], ["tps", "-1"],
+    ["latency_ms", "13\n"], ["tps", " 1"],
+  ] as const)("rejects bucket index %s.%s", (metric, index) => {
+    const day = structuredClone(createTelemetryDay());
+    day.dimensions.models[0][metric] = { sample_count: 1, buckets: { [index]: 1 } };
+    expect(TelemetryDaySchema.safeParse(day).success).toBe(false);
+  });
+
+  it.each([["latency_ms", "13"], ["ttft_ms", "13"], ["tps", "10"]] as const)(
+    "accepts the final valid %s bucket %s and an empty histogram",
+    (metric, index) => {
+      const day = structuredClone(createTelemetryDay());
+      day.dimensions.global[metric] = { sample_count: 3, buckets: { "0": 1, [index]: 2 } };
+      day.dimensions.models[0][metric] = { sample_count: 0, buckets: {} };
+      expect(TelemetryDaySchema.safeParse(day).success).toBe(true);
+    },
+  );
+
   it("parses the completed-day body", () => {
     const parsed = TelemetryDaySchema.parse(createTelemetryDay());
 

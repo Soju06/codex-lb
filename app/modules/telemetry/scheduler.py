@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
@@ -80,13 +80,30 @@ class TelemetryScheduler:
                         identity.instance_id, acknowledged=acknowledged.date() if acknowledged else None
                     )
                     to_send = days[:7]
-                    skipped = days[7:8]
-                await self.sender.send_snapshot(snapshot)
-                results = [await self.sender.send_day(day) for day in to_send]
-                watermark = (
-                    skipped[0].utc_date if skipped else (to_send[-1].utc_date if to_send and all(results) else None)
-                )
-                if watermark is not None:
+                try:
+                    await self.sender.send_snapshot(snapshot)
+                except Exception as exc:
+                    logger.debug("Anonymous telemetry snapshot transmission failed", exc_info=exc)
+                results: list[bool] = []
+                for day in to_send:
+                    try:
+                        results.append(await self.sender.send_day(day))
+                    except Exception as exc:
+                        logger.debug("Anonymous telemetry day transmission failed", exc_info=exc)
+                        results.append(False)
+                if to_send:
+                    previous_date = acknowledged.date() if acknowledged else None
+                    oldest_in_window = to_send[-1].utc_date
+                    if all(results):
+                        watermark = to_send[0].utc_date
+                    else:
+                        watermark = oldest_in_window - timedelta(days=1)
+                        for day, succeeded in zip(reversed(to_send), reversed(results), strict=True):
+                            if not succeeded:
+                                break
+                            watermark = day.utc_date
+                    if previous_date is not None and watermark < previous_date:
+                        watermark = previous_date
                     async with get_background_session() as ack_session:
                         ack_store = TelemetryConsentStore(ack_session)
                         row = await ack_store._repository.get_or_create()

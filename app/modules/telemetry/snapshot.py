@@ -23,7 +23,7 @@ from app.core.config.background_jobs import resolve_background_job_toggle
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import resolve_archive_enabled
 from app.core.openai.model_registry import get_model_registry
-from app.core.usage.logs import NON_ERROR_STATUSES
+from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -607,13 +607,10 @@ def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog
         return [entry(name, subset) for name, subset in sorted(values)]
 
     statuses = {
-        "success": sum(r.status not in NON_ERROR_STATUSES and r.status != "cancelled" for r in rows),
-        "error": sum(r.status not in NON_ERROR_STATUSES and r.status != "cancelled" for r in rows),
-        "cancelled": sum(r.status == "cancelled" for r in rows),
+        "success": sum(r.status in NON_ERROR_STATUSES and r.status != CANCELLED_STATUS for r in rows),
+        "error": sum(r.status not in NON_ERROR_STATUSES for r in rows),
+        "cancelled": sum(r.status == CANCELLED_STATUS for r in rows),
     }
-    # Successful terminals are represented by the normal non-error status set; errors are explicit error terminals.
-    statuses["success"] = sum(r.status in NON_ERROR_STATUSES for r in rows)
-    statuses["error"] = sum(r.status not in NON_ERROR_STATUSES and r.status != "cancelled" for r in rows)
 
     def count_map(values: list[str | None], allowed: set[str]) -> dict[str, int]:
         out: defaultdict[str, int] = defaultdict(int)

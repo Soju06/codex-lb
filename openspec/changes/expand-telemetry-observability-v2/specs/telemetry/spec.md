@@ -33,8 +33,9 @@ MUST NOT retry more than once per interval, and MUST log failures at debug level
 ### Requirement: One-time consent dialog with exact payload preview
 
 The dashboard MUST present a one-time consent dialog on first entry while consent is
-`undecided`, and the dialog MUST display the exact snapshot envelope the instance would
-transmit at that moment. Preview and sender MUST use one shared envelope constructor. The
+`undecided`, and the dialog MUST display the combined heartbeat envelope plus one sample
+completed-day body the instance would transmit. Preview and sender MUST use the same
+constructors for both bodies, including one shared heartbeat envelope constructor. The
 preview timestamp MUST record preview generation time as a representative current timestamp;
 the actual send MUST regenerate that value at transmission time.
 
@@ -56,8 +57,8 @@ field and set it to `null` when the preview was not requested and is not dialog-
 #### Scenario: Undecided operator sees payload preview
 
 - **WHEN** an operator opens the dashboard while consent is `undecided`
-- **THEN** a dialog shows the live snapshot JSON with equally prominent enable and disable
-  actions
+- **THEN** a dialog shows the combined heartbeat envelope and one sample completed-day body,
+  built by the same constructors the sender uses, with equally prominent enable and disable actions
 
 #### Scenario: Dismissing without a decision keeps the undecided dialog reachable
 
@@ -79,7 +80,8 @@ field and set it to `null` when the preview was not requested and is not dialog-
 #### Scenario: Settings explicitly requests collected data
 
 - **WHEN** the settings view requests a preview for any consent state
-- **THEN** the response contains a current snapshot envelope built with the same schema as the sender
+- **THEN** the response contains the combined current heartbeat envelope and one sample completed-day
+  body, both built by the same constructors the sender uses
 
 #### Scenario: Schema expansion re-informs a decided operator
 

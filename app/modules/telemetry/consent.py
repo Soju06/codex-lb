@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import Settings, get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.exceptions import DashboardSettingsConflictError
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 
@@ -74,7 +75,13 @@ class TelemetryConsentStore:
     async def acknowledge_notice(self) -> None:
         row = await self._repository.get_or_create()
         row.telemetry_notice_version = TELEMETRY_NOTICE_VERSION
-        await self._repository.commit_refresh(row)
+        try:
+            await self._repository.commit_refresh(row)
+        except DashboardSettingsConflictError:
+            await self._session.rollback()
+            row = await self._repository.get_or_create()
+            if row.telemetry_notice_version is None or row.telemetry_notice_version < TELEMETRY_NOTICE_VERSION:
+                raise
 
     async def notice_version(self) -> int:
         row = await self._repository.get_or_create()

@@ -143,14 +143,15 @@ Field notes:
   `useragent_group` values never leave the instance.
 - `models[].name`: official model catalog allowlist match; custom/unknown model names fold
   into a single `{"name": "other"}` entry.
-- Exact `requests` / token counts are transmitted raw deliberately: they power the global
-  aggregate counter story and cannot identify an instance. Everything correlated with spend
-  or org size (accounts, keys, cost, DB size) is bucketed.
+- Exact `requests` / token counts support fleet aggregates. Account totals and their per-plan
+  and per-status counts are exact local row counts in v2, without account identifiers.
+  API key counts, cost, and database size remain bucketed.
 - `replicas`: size of the configured HTTP bridge instance ring (multi-replica adoption signal).
 
 ## Bucket sets
 
-- count buckets (accounts, api keys, plan mix): `0`, `1`, `2-5`, `6-20`, `21-100`, `100+`
+- count buckets (API keys): `0`, `1`, `2-5`, `6-20`, `21-100`, `100+`; account totals, per-plan
+  counts, and per-status counts are exact integers in v2.
 - `db_size_bucket`: `unknown`, `<100MB`, `100MB-1GB`, `1-5GB`, `5-10GB`, `10-50GB`, `50GB+`
 - `cost_usd_bucket` (7d): `<10`, `10-100`, `100-1k`, `1k-10k`, `10k-50k`, `50k+`
 - `avg_output_tokens_bucket`: `<250`, `250-1k`, `1k-4k`, `4k-16k`, `16k+`
@@ -201,7 +202,8 @@ and then deletes it. Non-identifying fleet aggregates may be retained beyond tha
 An instance with accounts `alice@corp.com` (workspace W1) + 12 others, a custom model source
 `corp-internal-gpt`, and traffic from an internal tool `senpi/1.0`:
 
-- payload has `pool_bucket: "6-20"`, `workspace_accounts: true`
+- payload has `accounts.total: 13`, exact `accounts.per_plan` and `accounts.per_status` counts,
+  and `workspace_accounts: true`, with no account identifiers
 - `corp-internal-gpt` traffic appears as `models[].name == "other"`
 - `senpi` traffic appears in `clients` under `other` and inflates `clients_other_ratio`
 - the strings `alice`, `corp.com`, `W1`, `corp-internal-gpt`, `senpi` appear nowhere in the

@@ -31,26 +31,24 @@ export function TelemetryConsentDialog() {
   const canWrite = useAuthStore((state) => state.canWrite);
   const [shown, setShown] = useState<ShownNotice | null>(null);
   const [dismissed, setDismissed] = useState(false);
-  // Read-only guests can never act on the dialog, so skip the preview
-  // aggregation request entirely instead of fetching and discarding it.
-  const { telemetryConsentQuery, updateTelemetryConsentMutation } = useTelemetryConsent({ enabled: canWrite });
+  const { telemetryConsentQuery, updateTelemetryConsentMutation } = useTelemetryConsent();
 
   const consent = telemetryConsentQuery.data;
   // The backend attaches the preview bodies only while a dialog is due: on
   // first entry while undecided, or once more when the transmitted schema grew
   // and this installation has not acknowledged the current notice version.
-  // Building that preview acknowledges the notice server-side, so any later
-  // refetch (reconnect, a second observer on /settings) returns null. The first
-  // preview is latched here so only the operator closes the dialog.
+  // A write-capable notice request acknowledges the version server-side. Latch
+  // the first preview so a refetch cannot close a decided operator's notice.
   if (shown === null && consent !== undefined && consent.source !== "env" && consent.preview !== null) {
     setShown({ preview: consent.preview, undecided: consent.state === "undecided" });
   }
 
-  if (!canWrite || dismissed || shown === null) {
+  if (dismissed || shown === null) {
     return null;
   }
 
   const { preview, undecided } = shown;
+  const canDecide = canWrite && undecided;
   const busy = updateTelemetryConsentMutation.isPending;
   // Dismissing without a decision (ESC, backdrop, close button) persists
   // nothing; the undecided dialog may reappear on the next dashboard entry.
@@ -63,12 +61,16 @@ export function TelemetryConsentDialog() {
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            {undecided
+            {!canWrite
+              ? t("settings.telemetry.previewDialog.title")
+              : undecided
               ? t("settings.telemetry.consentDialog.title")
               : t("settings.telemetry.noticeDialog.title")}
           </DialogTitle>
           <DialogDescription>
-            {undecided
+            {!canWrite
+              ? t("settings.telemetry.previewDialog.description")
+              : undecided
               ? t("settings.telemetry.consentDialog.description")
               : t("settings.telemetry.noticeDialog.description")}
           </DialogDescription>
@@ -77,7 +79,7 @@ export function TelemetryConsentDialog() {
           <p className="text-sm text-muted-foreground">
             {t("settings.telemetry.consentDialog.categories")}
           </p>
-          {undecided ? (
+          {canDecide ? (
             <p className="text-sm text-muted-foreground">{t("settings.telemetry.optOutNotice")}</p>
           ) : null}
           <p className="text-sm text-muted-foreground">{t("settings.telemetry.retentionNotice")}</p>
@@ -95,7 +97,7 @@ export function TelemetryConsentDialog() {
           </p>
         </div>
         <DialogFooter>
-          {undecided ? (
+          {canDecide ? (
             <>
               <Button type="button" variant="outline" disabled={busy} onClick={() => decide(false)}>
                 {t("settings.telemetry.consentDialog.disable")}

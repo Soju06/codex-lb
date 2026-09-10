@@ -262,24 +262,32 @@ describe("TelemetryConsentDialog", () => {
     },
   );
 
-  it("stays hidden for read-only sessions and never requests the preview aggregation", async () => {
+  it("shows read-only sessions an informational preview that closes without a PUT", async () => {
+    const user = userEvent.setup();
     useAuthStore.setState({ canWrite: false });
     let requested = false;
+    let putCalled = false;
     server.use(
       http.get("/api/settings/telemetry", () => {
         requested = true;
         return HttpResponse.json(undecidedConsent());
       }),
+      http.put("/api/settings/telemetry", () => {
+        putCalled = true;
+        return HttpResponse.json(undecidedConsent());
+      }),
     );
 
-    const { queryClient } = renderWithProviders(<TelemetryConsentDialog />);
+    renderWithProviders(<TelemetryConsentDialog />);
 
-    // Read-only guests can never act on the dialog, so the consent query is
-    // disabled entirely: no fetch fires and the query stays pending.
-    await waitFor(() =>
-      expect(queryClient.getQueryState(["settings", "telemetry"])?.fetchStatus).toBe("idle"),
-    );
-    expect(requested).toBe(false);
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "Collected telemetry data" });
+    expect(requested).toBe(true);
+    expect(within(dialog).getByRole("region", { name: "Heartbeat" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("region", { name: "Completed day" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Keep enabled" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Disable telemetry" })).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Got it" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(putCalled).toBe(false);
   });
 });

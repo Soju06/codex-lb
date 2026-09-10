@@ -71,15 +71,14 @@ class TelemetrySender:
             async with asyncio.timeout(_TIMEOUT_SECONDS):
                 timeout = aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS)
                 async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-                    await self._send_with_retry(lambda: self._transmit_day_once(session, day, identity))
-            return True
+                    return await self._send_with_retry(lambda: self._transmit_day_once(session, day, identity))
         except Exception as exc:
             logger.debug("Anonymous telemetry day transmission failed", exc_info=exc)
             return False
 
     async def _transmit_day_once(
         self, session: aiohttp.ClientSession, day: TelemetryDay, identity: TelemetryIdentity
-    ) -> None:
+    ) -> bool:
         await self._ensure_activated(
             session,
             identity,
@@ -87,7 +86,10 @@ class TelemetrySender:
             deployment_mode=deployment_method(),
             os_arch=f"{platform.system().lower()}/{platform.machine().lower()}",
         )
+        if not await self._consent_and_identity_still_match(identity):
+            return False
         await self._post_signed(session, "/v1/day", _json_bytes(day), identity, accepted={200, 202})
+        return True
 
     async def send_opt_out(
         self,
@@ -118,17 +120,15 @@ class TelemetrySender:
         except Exception as exc:
             logger.debug("Anonymous telemetry opt-out transmission failed", exc_info=exc)
 
-    async def _send_with_retry(self, operation: Callable[[], Awaitable[None]]) -> None:
-        last_error: Exception | None = None
+    async def _send_with_retry[T](self, operation: Callable[[], Awaitable[T]]) -> T:
         for attempt in range(_MAX_ATTEMPTS):
             try:
-                await operation()
-                return
+                return await operation()
             except Exception as exc:
-                last_error = exc
                 logger.debug("Anonymous telemetry attempt %d failed", attempt + 1, exc_info=exc)
-        if last_error is not None:
-            raise last_error
+                if attempt == _MAX_ATTEMPTS - 1:
+                    raise
+        raise AssertionError("telemetry retry requires at least one attempt")
 
     async def _transmit_once(
         self,
@@ -145,20 +145,23 @@ class TelemetrySender:
         )
 
         envelope = build_snapshot_envelope(snapshot)
+        if not await self._consent_and_identity_still_match(identity):
+            return
+
+        await self._post_signed(session, "/v1/snapshot", _json_bytes(envelope), identity, accepted={200, 202})
+
+    async def _consent_and_identity_still_match(self, identity: TelemetryIdentity) -> bool:
         try:
             active, current_identity = await self._context_provider()
-            identity_matches = (
-                current_identity is not None
+            return bool(
+                active
+                and current_identity is not None
                 and current_identity.instance_id == identity.instance_id
                 and current_identity.public_key_hex == identity.public_key_hex
             )
         except Exception as exc:
             logger.debug("Anonymous telemetry consent re-check failed", exc_info=exc)
-            return
-        if not active or not identity_matches:
-            return
-
-        await self._post_signed(session, "/v1/snapshot", _json_bytes(envelope), identity, accepted={200, 202})
+            return False
 
     async def _transmit_opt_out_once(
         self,

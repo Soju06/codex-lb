@@ -9,6 +9,7 @@ import pytest
 from app.core.auth.dashboard_access import guest_principal
 from app.core.auth.dependencies import validate_dashboard_session
 from app.core.config.settings import get_settings
+from app.core.exceptions import DashboardSettingsConflictError
 from app.db.models import DashboardSettings
 from app.db.session import get_background_session
 from app.modules.settings.repository import SettingsRepository
@@ -23,6 +24,44 @@ async def _notice_version() -> int:
 
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "winning_version", [TELEMETRY_NOTICE_VERSION - 1, TELEMETRY_NOTICE_VERSION, TELEMETRY_NOTICE_VERSION + 1]
+)
+async def test_concurrent_notice_acknowledgement_only_swallows_completed_notice_conflict(
+    async_client, monkeypatch, winning_version: int
+) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+    # Prepare identity and preview without consuming the notice before simulating a race.
+    response = await async_client.get("/api/settings/telemetry?include_preview=true")
+    assert response.status_code == 200
+    conflicts = 0
+
+    async def concurrent_acknowledgement(repository, row, **kwargs):
+        nonlocal conflicts
+        conflicts += 1
+        assert row.telemetry_notice_version == TELEMETRY_NOTICE_VERSION
+        await repository._session.rollback()
+        async with get_background_session() as other_session:
+            other_row = await other_session.get(DashboardSettings, 1)
+            assert other_row is not None
+            other_row.telemetry_notice_version = winning_version
+            await other_session.commit()
+        raise DashboardSettingsConflictError()
+
+    monkeypatch.setattr(SettingsRepository, "commit_refresh", concurrent_acknowledgement)
+    response = await async_client.get("/api/settings/telemetry")
+
+    assert conflicts == 1
+    if winning_version >= TELEMETRY_NOTICE_VERSION:
+        assert response.status_code == 200
+        assert response.json()["preview"] is not None
+    else:
+        assert response.status_code == 409
+    assert await _notice_version() == winning_version
 
 
 @pytest.fixture(autouse=True)

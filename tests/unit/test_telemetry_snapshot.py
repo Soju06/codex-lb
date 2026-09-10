@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from typing import get_args
 
@@ -504,6 +505,24 @@ async def test_success_rate_excludes_cancelled_terminals(async_session: AsyncSes
     # 1 success out of 4 requests: cancellations are neither successes nor
     # errors, so they must not inflate the numerator.
     assert snapshot.usage_7d.success_rate == 0.25
+
+
+@pytest.mark.asyncio
+async def test_completed_day_outcomes_partition_all_rows(async_session: AsyncSession) -> None:
+    requested_at = utcnow() - timedelta(days=1)
+    rows = [
+        _request_log(f"outcome-{index}", model="gpt-5.4", useragent_group="codex_exec", status=status)
+        for index, status in enumerate(["success", "success", "error", "cancelled", "cancelled"])
+    ]
+    for row in rows:
+        row.requested_at = requested_at
+    async_session.add_all(rows)
+    await async_session.commit()
+
+    day = await TelemetrySnapshotBuilder(async_session).build_day("instance", requested_at.date())
+
+    assert day.errors.outcomes.model_dump() == {"success": 2, "error": 1, "cancelled": 2}
+    assert sum(day.errors.outcomes.model_dump().values()) == len(rows)
 
 
 @pytest.mark.asyncio

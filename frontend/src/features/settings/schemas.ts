@@ -608,17 +608,26 @@ export const TelemetrySnapshotEnvelopeSchema = z.strictObject({
 });
 
 // Sparse fixed-edge histogram: bucket index -> count, zero buckets omitted.
-const TelemetryHistogramSchema = z.strictObject({
-  sample_count: z.number().int().min(0),
-  buckets: z.record(z.string(), z.number().int().min(0)),
-});
+function telemetryHistogramSchema(bucketCount: number) {
+  const bucketIndexes = new Set(Array.from({ length: bucketCount }, (_, index) => String(index)));
+  return z.strictObject({
+    sample_count: z.number().int().min(0),
+    buckets: z.record(z.string().refine((key) => bucketIndexes.has(key)), z.number().int().min(0)),
+  }).refine(
+    (histogram) => histogram.sample_count === Object.values(histogram.buckets).reduce((sum, count) => sum + count, 0),
+    { message: "Histogram sample_count must equal the bucket sum", path: ["sample_count"] },
+  );
+}
+
+const TelemetryLatencyHistogramSchema = telemetryHistogramSchema(14);
+const TelemetryTpsHistogramSchema = telemetryHistogramSchema(11);
 
 const TelemetryDimensionEntrySchema = z.strictObject({
   name: z.string(),
   requests: z.number().int().min(0),
-  latency_ms: TelemetryHistogramSchema,
-  ttft_ms: TelemetryHistogramSchema,
-  tps: TelemetryHistogramSchema,
+  latency_ms: TelemetryLatencyHistogramSchema,
+  ttft_ms: TelemetryLatencyHistogramSchema,
+  tps: TelemetryTpsHistogramSchema,
 });
 
 // Independent marginals of one day; no entry is keyed by two dimensions.

@@ -4135,6 +4135,9 @@ async def _list_enabled_source_catalog_models(
     *,
     require_responses: bool = False,
 ) -> list[UpstreamModel]:
+    from app.modules.model_sources.discovery import refresh_cpa_catalogs
+
+    await refresh_cpa_catalogs()
     async with get_background_session() as session:
         sources = await ModelSourcesRepository(session).list_enabled_sources()
         # ``close_session`` rolls back the read transaction, which would
@@ -5431,13 +5434,17 @@ def _shape_source_responses_payload(
             }
         else:
             source_payload["reasoning"] = {"effort": source_reasoning_effort}
-    strip_replayed_tool_call_namespaces_from_payload(source_payload)
+    if source.catalog_mode != "cli_proxy_api":
+        strip_replayed_tool_call_namespaces_from_payload(source_payload)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
-    _drop_unsupported_source_response_tools(
-        source_payload,
-        supported_tool_types=source_model_supported_tool_types(source, payload.model),
-    )
+    if source.catalog_mode == "cli_proxy_api":
+        _normalize_source_allowed_tool_choice_aliases(source_payload)
+    else:
+        _drop_unsupported_source_response_tools(
+            source_payload,
+            supported_tool_types=source_model_supported_tool_types(source, payload.model),
+        )
     return source_payload
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
@@ -32,6 +33,7 @@ class ModelSourceModelResponse(ModelSourceModelInput):
 
 class ModelSourceCreateRequest(DashboardModel):
     name: str = Field(min_length=1, max_length=128)
+    catalog_mode: Literal["manual", "cli_proxy_api"] = "manual"
     base_url: str = Field(min_length=1, max_length=2048)
     api_key: str | None = Field(default=None, min_length=1)
     supports_chat_completions: bool = True
@@ -45,6 +47,7 @@ class ModelSourceCreateRequest(DashboardModel):
 
 class ModelSourceUpdateRequest(DashboardModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
+    catalog_mode: Literal["manual", "cli_proxy_api"] | None = None
     base_url: str | None = Field(default=None, min_length=1, max_length=2048)
     api_key: str | None = Field(default=None, min_length=1)
     is_enabled: bool | None = None
@@ -61,6 +64,7 @@ class ModelSourceResponse(DashboardModel):
     id: str
     name: str
     kind: str
+    catalog_mode: str
     base_url: str
     is_enabled: bool
     health_status: str

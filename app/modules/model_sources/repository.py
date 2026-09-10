@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import ColumnElement, and_, delete, or_, select
+from sqlalchemy import ColumnElement, and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -190,6 +190,14 @@ class ModelSourcesRepository:
         if commit:
             await self._session.commit()
             await self._session.refresh(source, attribute_names=["models"])
+
+    async def disable_models(self, source: ModelSource) -> None:
+        # Flush the source's changed mode/token first, taking the same source
+        # lock as acquisition. Include models committed since the operator read.
+        await self._session.flush()
+        await self._session.execute(
+            update(ModelSourceModel).where(ModelSourceModel.source_id == source.id).values(is_enabled=False)
+        )
 
     async def refresh_models(self, source: ModelSource) -> None:
         await self._session.refresh(source, attribute_names=["models"])

@@ -1628,6 +1628,9 @@ class ModelSource(Base):
         server_default=text("'openai_compatible'"),
         nullable=False,
     )
+    catalog_mode: Mapped[str] = mapped_column(String, default="manual", server_default=text("'manual'"), nullable=False)
+    catalog_refresh_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    catalog_next_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     base_url: Mapped[str] = mapped_column(String, nullable=False)
     api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)

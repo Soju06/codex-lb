@@ -59,6 +59,20 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
 
     input_modalities = ("text", "image") if source_model.supports_vision else ("text",)
     display_name = source_model.display_name or source_model.model
+    description = display_name
+    support_verbosity = False
+    default_verbosity = None
+    if source.catalog_mode == "cli_proxy_api":
+        modalities = raw.get("input_modalities")
+        if is_json_list(modalities):
+            input_modalities = tuple(item for item in modalities if isinstance(item, str))
+        reported_description = raw.get("description")
+        if isinstance(reported_description, str):
+            description = reported_description
+        support_verbosity = raw.get("support_verbosity") is True
+        reported_verbosity = raw.get("default_verbosity")
+        if isinstance(reported_verbosity, str):
+            default_verbosity = reported_verbosity
     # The dashboard's single Reasoning switch is the master gate: it is the
     # only reasoning control an operator has in the UI, so a model with it off
     # must not advertise efforts it will never be allowed to use. Keeping the
@@ -73,14 +87,14 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     return UpstreamModel(
         slug=source_model.model,
         display_name=display_name,
-        description=display_name,
+        description=description,
         context_window=context_window,
         input_modalities=input_modalities,
         supported_reasoning_levels=reasoning_levels,
         default_reasoning_level=default_reasoning_level,
         supports_reasoning_summaries=reasoning_opted_in and raw.get("supports_reasoning_summaries") is True,
-        support_verbosity=False,
-        default_verbosity=None,
+        support_verbosity=support_verbosity,
+        default_verbosity=default_verbosity,
         prefer_websockets=False,
         supports_parallel_tool_calls=source_model.supports_tools,
         supported_in_api=True,

@@ -1087,7 +1087,9 @@ async def test_invites_migration_upgrades_and_downgrades(tmp_path) -> None:
         async with engine.connect() as conn:
             tables = {row[0] for row in await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
         assert "dashboard_user_invites" not in tables
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, _TARGET_REVISION, bootstrap_legacy=False))
+        assert result.current_revision == _TARGET_REVISION
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-        assert result.current_revision == _HEAD_REVISION == _TARGET_REVISION
+        assert result.current_revision == _HEAD_REVISION
     finally:
         await engine.dispose()

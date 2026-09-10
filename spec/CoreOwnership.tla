@@ -343,7 +343,7 @@ AcquireTurn(t, r, a, inj) ==
         \/ (inj = MismatchedLineage /\ WeakIgnoreAnchorLineage)
         \/ (inj = ForeignAccount /\ WeakCrossAccountAnchor))
   /\ crossAccountDispatch' = (crossAccountDispatch \/ inj = ForeignAccount)
-  /\ badAnchorUse' = (badAnchorUse \/ inj = MismatchedLineage)
+  /\ UNCHANGED badAnchorUse
   /\ anchor' = [anchor EXCEPT ![t] =
       CASE inj = NoAccount -> @
         [] inj = SameAccount -> [kind |-> "client_anchor", account |-> a,

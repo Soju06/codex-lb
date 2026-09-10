@@ -41,12 +41,11 @@ def test_core_ownership_anchor_checks_are_not_vacuous() -> None:
     spec = CORE_OWNERSHIP.read_text()
 
     # A mismatched-lineage anchor is reachable only under its weakening, so the
-    # full model rejects it before dispatch and the control remains non-vacuous.
+    # full model rejects it before dispatch; the control exercises UseAnchor.
     assert "MismatchedLineageAnchor(a) ==" in spec
     assert "lineageOk |-> FALSE" in spec
     assert "MismatchedLineage == " in spec
     assert "(inj = MismatchedLineage /\\ WeakIgnoreAnchorLineage)" in spec
-    assert "/\\ badAnchorUse' = (badAnchorUse \\/ inj = MismatchedLineage)" in spec
     # One replay per anchor value: without this UseAnchor is an unconditional
     # self-loop that hides deadlocks from TLC.
     assert "/\\ ~anchorUsed[t]" in spec

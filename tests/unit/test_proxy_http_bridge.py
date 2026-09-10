@@ -3727,6 +3727,64 @@ async def test_maybe_prewarm_http_bridge_session_success_path_reads_no_settings_
     session_factory.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_maybe_prewarm_http_bridge_session_reads_no_settings_for_an_ineligible_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A payload with no warm-up to send resolves no snapshot and reads nothing.
+
+    Neither reader the snapshot exists for -- the admission gate and the
+    reconnect -- is reached when there is nothing to send, so resolving it
+    would be pure cost and a needless failure surface on a request that is
+    served normally either way. Before the snapshot existed this path took no
+    settings read at all, and it still takes none.
+    """
+    from unittest.mock import MagicMock
+
+    import app.core.config.settings_cache as settings_cache_module
+    from app.core.config.settings_cache import SettingsCache
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    # ``generate: false`` already: nothing to warm up.
+    state, session = _make_prewarm_candidate(_PREWARM_SHAPED_TEXT)
+    lock = _SpyPrewarmLock()
+    session.prewarm_lock = cast(Any, lock)
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: with_dashboard_overrides(_make_app_settings()))
+
+    row = DashboardSettings()
+    row.http_responses_session_bridge_codex_prewarm_enabled = True
+    cache = SettingsCache()
+    cache._cached_settings = row
+    cache._cached_at = time.monotonic()
+    session_factory = MagicMock(side_effect=AssertionError("prewarm path must not open a DB session"))
+    monkeypatch.setattr(settings_cache_module, "SessionLocal", session_factory)
+    reads: list[str] = []
+    real_get = cache.get
+
+    async def spying_get() -> DashboardSettings:
+        reads.append(sys._getframe(1).f_code.co_name)
+        return await real_get()
+
+    monkeypatch.setattr(cache, "get", spying_get)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: cache)
+
+    with dashboard_overrides_bound(row):
+        await service._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=state,
+            text_data=state.request_text or "{}",
+        )
+
+    # The skip is recorded exactly as before -- under the lock, with the
+    # session marked prewarmed -- and no snapshot was resolved for it.
+    assert state.prewarm_status == "skipped"
+    assert session.prewarmed is True
+    assert lock.enter_count == 1
+    assert reads == []
+    session_factory.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("stale_row_available", "expected_status", "expected_prewarmed"),
     [(True, "success", True), (False, "skipped", False)],

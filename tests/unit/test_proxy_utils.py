@@ -8,6 +8,7 @@ import json
 import logging
 import socket
 import ssl
+import sys
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
@@ -49967,6 +49968,21 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_PREWARM_RESPONSE_TIMEOUT_SECONDS", 0.05)
+    # The one row the prewarm resolves before its lock. Both helpers under the
+    # lock must receive this exact object rather than reading their own, so the
+    # assertions below compare by identity and pin the read's call site.
+    expected_snapshot = settings
+    settings_reads: list[str] = []
+
+    async def snapshot_get() -> Any:
+        settings_reads.append(sys._getframe(1).f_code.co_name)
+        return expected_snapshot
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=snapshot_get, cached_row=lambda: expected_snapshot),
+    )
     reconnect_observations: list[dict[str, object]] = []
     admission_observations: list[dict[str, object]] = []
     original_acquire_admission = service._acquire_request_state_response_create_admission
@@ -49987,7 +50003,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
                 "account_id": account_id,
                 "surface": surface,
                 # The prewarm resolves this before its lock and threads it in.
-                "dashboard_settings_supplied": dashboard_settings is not None,
+                "dashboard_settings": dashboard_settings,
             }
         )
         await original_acquire_admission(
@@ -50015,7 +50031,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
                 "pending_request_ids": [state.request_id for state in reconnect_session.pending_requests],
                 "request_id": request_state.request_id,
                 "restart_reader": restart_reader,
-                "dashboard_settings_supplied": dashboard_settings is not None,
+                "dashboard_settings": dashboard_settings,
             }
         )
         reconnect_session.upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -50045,16 +50061,20 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
             "request_id": prewarm_admission["request_id"],
             "account_id": "acc_prewarm_timeout",
             "surface": "http_bridge_prewarm",
-            "dashboard_settings_supplied": True,
+            "dashboard_settings": expected_snapshot,
         }
     ]
     assert cast(str, prewarm_admission["request_id"]).startswith("http_prewarm_")
     observation = reconnect_observations[0]
     assert observation["request_id"] == "req_prewarm_timeout"
     assert observation["restart_reader"] is True
-    # Both helpers run under ``prewarm_lock`` and are handed the snapshot the
-    # prewarm resolved before taking it, so neither reads settings there.
-    assert observation["dashboard_settings_supplied"] is True
+    # Both helpers run under ``prewarm_lock`` and are handed the very snapshot
+    # the prewarm resolved before taking it ...
+    assert observation["dashboard_settings"] is expected_snapshot
+    assert admission_observations[0]["dashboard_settings"] is expected_snapshot
+    # ... which is the only settings read on the path, and it happened before
+    # the lock, in the prewarm helper itself.
+    assert settings_reads == ["_maybe_prewarm_http_bridge_session"]
     pending_request_ids = cast(list[str], observation["pending_request_ids"])
     assert len(pending_request_ids) == 1
     assert pending_request_ids[0].startswith("http_prewarm_")

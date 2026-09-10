@@ -191,7 +191,7 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` | T3 (dashboard) | `dict[str, int]` | `{}` |
-| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | T1 | `str` | `'0.153.4'` |
+| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | T1 | `str` | `'0.154.0'` |
 | `CODEX_LB_MODEL_REGISTRY_SNAPSHOT_MAX_AGE_SECONDS` | T1 | `int` | `86400` |
 
 ## Firewall

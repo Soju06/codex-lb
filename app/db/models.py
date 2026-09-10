@@ -2364,6 +2364,21 @@ Index(
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
+    "idx_logs_missing_cost",
+    RequestLog.model_source_id,
+    RequestLog.id,
+    postgresql_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+    sqlite_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+)
+Index(
     "idx_logs_deleted_at_requested_at_id",
     RequestLog.deleted_at,
     RequestLog.requested_at.desc(),

@@ -85,7 +85,9 @@ async def test_options_avoid_repeated_live_cohort_scans(
             ],
         )
         await session.commit()
-        # The schema creates these indexes now; exercise both query plans explicitly.
+        # Model metadata now creates these indexes by default (#2246).
+        # Build both parameterized layouts explicitly so the pre-index case
+        # stays covered and the indexed case cannot duplicate a schema index.
         for name, columns in (
             ("api_key", "api_key_id"),
             ("model_effort", "model, reasoning_effort"),

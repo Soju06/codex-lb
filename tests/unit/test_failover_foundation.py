@@ -70,6 +70,23 @@ class TestClassifyUpstreamFailure:
         )
         assert result["failure_class"] == "quota"
 
+    def test_model_not_found_can_fail_over_before_output(self) -> None:
+        result = classify_upstream_failure(
+            error_code="model_not_found",
+            error=UpstreamError(message="The model `gpt-5.5` does not exist or you do not have access to it."),
+            http_status=404,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "retryable_transient"
+        assert (
+            failover_decision(
+                failure_class=result["failure_class"],
+                downstream_visible=False,
+                candidates_remaining=1,
+            )
+            == "failover_next"
+        )
+
     def test_server_error(self) -> None:
         result = classify_upstream_failure(
             error_code="server_error",

@@ -592,6 +592,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -863,6 +864,7 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -994,6 +996,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -1162,6 +1165,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -1191,6 +1195,18 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
         stop=AsyncMock(),
     )
 
+    # This test owns the bridge-membership lifecycle only. Keep startup's
+    # unrelated database-backed seed and routing snapshot out of the mocked
+    # database lifecycle so they cannot race another test's SQLite writer.
+    routing_availability_cache = SimpleNamespace(refresh_from_db=AsyncMock())
+
+    class _AccountsRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def seed_hard_sticky_outage_grace_on_startup(self) -> int:
+            return 0
+
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
@@ -1207,6 +1223,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     monkeypatch.setattr(main, "build_api_key_limit_reset_scheduler", lambda: api_key_limit_reset_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
+    monkeypatch.setattr(main, "AccountsRepository", _AccountsRepository)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
     monkeypatch.setattr(main, "_wait_for_bridge_advertise_endpoint", AsyncMock())
     monkeypatch.setattr(main, "_validate_bridge_advertise_endpoint_for_multi_replica", AsyncMock())
@@ -1214,6 +1231,10 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     monkeypatch.setattr(
         "app.core.cache.invalidation.CacheInvalidationPoller",
         lambda session_factory: cache_poller,
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.account_cache.get_routing_availability_cache",
+        lambda: routing_availability_cache,
     )
 
     async with main.lifespan(main.app):
@@ -1242,7 +1263,11 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
         http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_advertise_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace()),
+        get=AsyncMock(return_value=SimpleNamespace()),
+    )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     api_key_limit_reset_scheduler = _DummyScheduler()
@@ -1332,7 +1357,11 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
         metrics_enabled=False,
         shutdown_drain_timeout_seconds=1,
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace()),
+        get=AsyncMock(return_value=SimpleNamespace()),
+    )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     api_key_limit_reset_scheduler = _DummyScheduler()
@@ -1376,7 +1405,9 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
         database_migrations_fail_fast=False,
     )
     settings_cache = SimpleNamespace(
-        invalidate=AsyncMock(), get=AsyncMock(return_value=SimpleNamespace(password_hash=None))
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
+        get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()

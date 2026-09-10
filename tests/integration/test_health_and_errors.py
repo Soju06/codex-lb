@@ -75,6 +75,31 @@ async def test_api_not_found_returns_dashboard_payload(async_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("/v1", id="v1-root"),
+        pytest.param("/v1/", id="v1-trailing-slash"),
+        pytest.param("/v1/does-not-exist", id="v1-child"),
+        pytest.param("/backend-api", id="backend-api-root"),
+        pytest.param("/backend-api/", id="backend-api-trailing-slash"),
+        pytest.param("/backend-api/does-not-exist", id="backend-api-child"),
+    ],
+)
+async def test_exact_openai_root_error_envelope_matches_equivalent_paths(async_client, path):
+    response = await async_client.get(path)
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "message": "Not Found",
+            "type": "invalid_request_error",
+            "code": "not_found",
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_spa_route_path_returns_index_html(async_client, tmp_path):
     index = _STATIC_DIR / "index.html"
     created = not index.exists()

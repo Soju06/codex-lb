@@ -87,6 +87,7 @@ class ResponseFailedResponse(TypedDict):
 class ResponseFailedEvent(TypedDict):
     type: Literal["response.failed"]
     response: ResponseFailedResponse
+    _codex_lb_synthetic_transport_failure: NotRequired[bool]
 
 
 PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE = "Upstream websocket closed before response.completed"
@@ -113,6 +114,10 @@ HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE = "bridge_eventless_timeout"
 PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"
 PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE = "Previous response was not found; retry without previous_response_id."
 PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON = "previous_response_not_found_malformed_param"
+SYNTHETIC_TRANSPORT_FAILURE_MARKER = "_codex_lb_synthetic_transport_failure"
+SYNTHETIC_TRANSPORT_FAILURE_CODES = frozenset(
+    {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+)
 
 
 def openai_error(
@@ -256,3 +261,33 @@ def response_failed_event(
     if created_at is not None:
         response["created_at"] = created_at
     return {"type": "response.failed", "response": response}
+
+
+def synthetic_transport_failure_event(event: ResponseFailedEvent) -> ResponseFailedEvent:
+    """Mark an LB-generated transport terminal for boundary-only handling."""
+    event[SYNTHETIC_TRANSPORT_FAILURE_MARKER] = True
+    return event
+
+
+def synthetic_stream_failure_event(
+    code: str,
+    message: str,
+    error_type: str = "server_error",
+    response_id: str | None = None,
+    created_at: int | None = None,
+    error_param: OpenAIErrorParam | JsonValue = None,
+    resets_at: int | float | None = None,
+    incomplete_details: dict[str, str] | None = None,
+) -> ResponseFailedEvent:
+    """Build a failed event and mark transport codes manufactured by codex-lb."""
+    event = response_failed_event(
+        code,
+        message,
+        error_type,
+        response_id,
+        created_at,
+        error_param,
+        resets_at,
+        incomplete_details,
+    )
+    return synthetic_transport_failure_event(event) if code in SYNTHETIC_TRANSPORT_FAILURE_CODES else event

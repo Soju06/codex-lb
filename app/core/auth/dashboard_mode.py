@@ -101,11 +101,11 @@ def _get_trusted_header_auth(request: Request) -> DashboardRequestAuth | None:
     if not _is_trusted_proxy_source(client_host, _trusted_proxy_networks()):
         return None
 
-    raw_actor = request.headers.get(settings.dashboard_auth_proxy_header)
-    if raw_actor is None:
+    raw_actors = request.headers.getlist(settings.dashboard_auth_proxy_header)
+    if len(raw_actors) != 1:
         return None
 
-    actor = raw_actor.strip()
+    actor = raw_actors[0].strip()
     if not actor:
         return None
     return DashboardRequestAuth(mode=DashboardAuthMode.TRUSTED_HEADER, actor=actor)

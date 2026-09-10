@@ -31,26 +31,39 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
+from app.core.clients.native_egress import (
+    NativeEgressError,
+    NativeEgressTransportError,
+    NativeEgressUnavailable,
+    NativeEgressWebSocket,
+    NativeWebSocketRequest,
+    NativeWebSocketRoutingMetadata,
+    discover_native_egress_client,
+)
 from app.core.clients.proxy import (
     _CHATGPT_ACCOUNT_ID_HEADER,
     _HOP_BY_HOP_HEADER_NAMES,
     CODEX_INSTALLATION_ID_HEADER,
+    CODEX_ROUTING_HINT_HEADER,
+    MAX_SSE_EVENT_BYTES,
     ProxyResponseError,
     _is_native_codex_request,
     _is_upstream_edge_challenge,
     _normalize_non_native_upstream_fingerprint,
+    _openai_error_detail,
     filter_inbound_headers,
 )
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
-from app.core.openai.models import OpenAIError
+from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.parsing import parse_error_payload
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
     process_network_error_code,
     rotate_shared_http_transport,
 )
+from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.proxy_env import resolve_websocket_proxy_from_env
 from app.core.utils.request_id import get_request_id
@@ -183,6 +196,10 @@ class UpstreamWebSocketMessage:
     close_reason: str | None = None
     error: str | None = None
     error_code: str | None = None
+    responses_interpreted: bool = False
+    event_type: str | None = None
+    payload: dict[str, JsonValue] | None = None
+    routing: NativeWebSocketRoutingMetadata | None = None
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
@@ -399,6 +416,71 @@ class WebsocketsUpstreamWebSocket:
         if value is None:
             return None
         return str(value)
+
+
+class NativeUpstreamWebSocket:
+    """Expose a native-helper WebSocket through the existing relay protocol."""
+
+    def __init__(self, websocket: NativeEgressWebSocket) -> None:
+        self._websocket = websocket
+
+    async def send_text(self, text: str) -> None:
+        try:
+            await self._websocket.send_text(text)
+        except NativeEgressError as exc:
+            raise _native_websocket_transport_error(exc, operation="send") from None
+
+    async def send_bytes(self, data: bytes) -> None:
+        try:
+            await self._websocket.send_bytes(data)
+        except NativeEgressError as exc:
+            raise _native_websocket_transport_error(exc, operation="send") from None
+
+    async def receive(self) -> UpstreamWebSocketMessage:
+        try:
+            message = await self._websocket.receive()
+        except NativeEgressError as exc:
+            error = _native_websocket_transport_error(exc, operation="receive")
+            return UpstreamWebSocketMessage(
+                kind="error",
+                error=str(error),
+                error_code=_relay_receive_error_code(error.error_code),
+            )
+        return UpstreamWebSocketMessage(
+            kind=message.kind,
+            text=message.text,
+            data=message.data,
+            close_code=message.close_code,
+            close_reason=message.close_reason,
+            responses_interpreted=message.responses_interpreted,
+            event_type=message.event_type,
+            payload=message.payload,
+            routing=message.routing,
+        )
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await self._websocket.close(code=code, reason=reason)
+
+    def response_header(self, name: str) -> str | None:
+        return self._websocket.response_header(name)
+
+
+def _native_websocket_transport_error(
+    exc: NativeEgressError,
+    *,
+    operation: str,
+) -> UpstreamWebSocketTransportError:
+    phase = exc.failure_phase if isinstance(exc, NativeEgressTransportError) else "protocol"
+    if phase == "liveness_timeout":
+        return UpstreamWebSocketTransportError(
+            f"Upstream websocket {operation} failed",
+            error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+        )
+    account_neutral = phase in {"helper_exit", "helper_read", "helper_write", "shutdown"}
+    return UpstreamWebSocketTransportError(
+        f"Upstream websocket {operation} failed",
+        error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if account_neutral else "upstream_unavailable",
+    )
 
 
 class CodexUpstreamWebSocket:
@@ -642,6 +724,7 @@ def _build_upstream_websocket_headers(
     *,
     include_responses_beta: bool = True,
     normalize_non_native_fingerprint: bool = True,
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> dict[str, str]:
     headers = filter_inbound_websocket_headers(inbound)
     # ``filter_inbound_websocket_headers`` strips ``x-codex-installation-id`` because it
@@ -678,6 +761,11 @@ def _build_upstream_websocket_headers(
             headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
     if include_responses_beta:
         _ensure_responses_websocket_beta_header(headers)
+    if routing_hint is not None:
+        model, service_tier = routing_hint
+        headers[CODEX_ROUTING_HINT_HEADER] = f"model={model}"
+        if service_tier is not None:
+            headers[CODEX_ROUTING_HINT_HEADER] += f";tier={service_tier}"
     return headers
 
 
@@ -811,10 +899,13 @@ async def _connect_upstream_websocket(
     allow_direct_egress: bool = False,
     policy: _UpstreamWebSocketPolicy,
     subprotocols: Sequence[str] = (),
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> UpstreamWebSocket:
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     if policy.include_responses_beta:
-        upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_websocket_headers(
+            headers, access_token, account_id, routing_hint=routing_hint
+        )
     else:
         upstream_headers = _build_upstream_live_websocket_headers(headers, access_token, account_id)
     require_route_or_direct_egress_opt_in(
@@ -840,8 +931,10 @@ async def _connect_upstream_websocket(
                     retry_network_errors=policy.retry_routed_network_errors,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=settings.max_sse_event_bytes,
+                    max_msg_size=MAX_SSE_EVENT_BYTES,
                     heartbeat=heartbeat,
+                    compress=15,
+                    native_interpret_responses=policy.include_responses_beta,
                     **protocol_kwargs,
                 )
                 context = result.context
@@ -849,20 +942,23 @@ async def _connect_upstream_websocket(
                 endpoint_id = result.route.endpoint_id
                 active_route = result.route
                 fallback_used = result.fallback_used
+                native_routed = bool(getattr(result, "native", False))
             else:
                 context = await active_codex_client.ws_connect(
                     url,
                     route=route,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=settings.max_sse_event_bytes,
+                    max_msg_size=MAX_SSE_EVENT_BYTES,
                     heartbeat=heartbeat,
+                    compress=15,
                     **protocol_kwargs,
                 )
                 websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
                 if not hasattr(context, "__aenter__"):
                     context = None
                 endpoint_id = route.endpoint_id
+                native_routed = False
         except asyncio.CancelledError:
             if owns_codex_client:
                 try:
@@ -908,6 +1004,24 @@ async def _connect_upstream_websocket(
             if owns_codex_client:
                 await active_codex_client.close()
             raise
+        if native_routed:
+            if owns_codex_client:
+                try:
+                    await active_codex_client.close()
+                except Exception:
+                    logger.warning(
+                        "Failed to close owned Codex client after native websocket connect",
+                        exc_info=True,
+                    )
+            return ArchivingUpstreamWebSocket(
+                NativeUpstreamWebSocket(cast(NativeEgressWebSocket, websocket)),
+                url=url,
+                headers=upstream_headers,
+                account_id=account_id,
+                route=active_route,
+                fallback_used=fallback_used,
+                archive_payloads=policy.archive_payloads,
+            )
         return ArchivingUpstreamWebSocket(
             CodexUpstreamWebSocket(
                 websocket,
@@ -924,17 +1038,64 @@ async def _connect_upstream_websocket(
             fallback_used=fallback_used,
             archive_payloads=policy.archive_payloads,
         )
+    # Ping/pong control frames verify transport liveness without treating valid
+    # application-frame silence as an idle response.
+    ping_timeout = (
+        settings.proxy_downstream_websocket_idle_timeout_seconds if policy.enable_direct_ping_timeout else None
+    )
+    native_client = discover_native_egress_client()
+    if native_client is not None:
+        native_headers = dict(upstream_headers)
+        if subprotocols:
+            native_headers["sec-websocket-protocol"] = ", ".join(subprotocols)
+        proxy_env = (
+            settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
+        )
+        proxy_url = resolve_websocket_proxy_from_env(url, proxy_env) if settings.upstream_websocket_trust_env else None
+        try:
+            native_websocket = await native_client.websocket(
+                NativeWebSocketRequest(
+                    url=url,
+                    headers=native_headers,
+                    connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+                    max_message_bytes=MAX_SSE_EVENT_BYTES,
+                    ping_interval_seconds=20.0,
+                    ping_timeout_seconds=ping_timeout,
+                    proxy_url=proxy_url,
+                    interpret_responses=policy.include_responses_beta,
+                )
+            )
+        except NativeEgressUnavailable:
+            # Startup failed before the handshake command could be dispatched;
+            # retain zero-configuration behavior for non-container installs.
+            pass
+        except NativeEgressTransportError as exc:
+            raise _native_websocket_handshake_error(exc, policy=policy) from exc
+        except NativeEgressError as exc:
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "upstream_unavailable",
+                    "Invalid upstream websocket handshake",
+                    error_type="server_error",
+                ),
+                failure_phase="connect",
+            ) from exc
+        else:
+            return ArchivingUpstreamWebSocket(
+                NativeUpstreamWebSocket(native_websocket),
+                url=url,
+                headers=native_headers,
+                account_id=account_id,
+                direct_egress=allow_direct_egress,
+                archive_payloads=policy.archive_payloads,
+            )
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
     proxy_env = (
         settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
     )
     proxy_url = resolve_websocket_proxy_from_env(url, proxy_env) if settings.upstream_websocket_trust_env else None
-    # Ping/pong control frames verify transport liveness without treating valid
-    # application-frame silence as an idle response.
-    ping_timeout = (
-        settings.proxy_downstream_websocket_idle_timeout_seconds if policy.enable_direct_ping_timeout else None
-    )
     try:
         subprotocol_kwargs = {"subprotocols": cast(Sequence[Subprotocol], subprotocols)} if subprotocols else {}
         response = await websocket_connect(
@@ -944,15 +1105,12 @@ async def _connect_upstream_websocket(
             user_agent_header=user_agent,
             open_timeout=settings.upstream_connect_timeout_seconds,
             ping_timeout=ping_timeout,
-            max_size=settings.max_sse_event_bytes,
+            max_size=MAX_SSE_EVENT_BYTES,
             proxy=proxy_url,
-            # Do not offer permessage-deflate upstream: the websockets library
-            # enables it by default, but the sibling upstream transports (the
-            # routed aiohttp path and the raw-handshake transport) already run
-            # uncompressed, and per-frame zlib decode on high-rate event
-            # streams burns CPU on the proxy host. The client-facing socket
-            # keeps negotiating permessage-deflate per responses-api-compat.
-            compression=None,
+            # Codex offers permessage-deflate on its upstream handshake. Keep
+            # the direct path's default offer aligned with the routed aiohttp
+            # path (``compress=15`` above).
+            compression="deflate",
             **subprotocol_kwargs,
         )
     except asyncio.TimeoutError as exc:
@@ -998,14 +1156,17 @@ async def _connect_upstream_websocket(
             ),
         ) from exc
     except InvalidProxy as exc:
-        message = (
-            "Invalid upstream websocket proxy configuration"
-            if policy.credential_safe_connect_errors
-            else (str(exc) or "Invalid upstream websocket proxy configuration")
-        )
+        # str(exc) embeds the full proxy URL including userinfo; the URL is
+        # operator configuration, never actionable for the API client. The
+        # websockets reason (``exc.msg``) never contains the URL.
+        logger.warning("%s rejected upstream websocket proxy configuration: %s", policy.operation, exc.msg)
         raise ProxyResponseError(
             502,
-            openai_error("upstream_unavailable", message, error_type="server_error"),
+            openai_error(
+                "upstream_unavailable",
+                "Invalid upstream websocket proxy configuration",
+                error_type="server_error",
+            ),
         ) from exc
     except InvalidHandshake as exc:
         message = (
@@ -1056,6 +1217,48 @@ async def _connect_upstream_websocket(
     )
 
 
+def _native_websocket_handshake_error(
+    exc: NativeEgressTransportError,
+    *,
+    policy: _UpstreamWebSocketPolicy,
+) -> ProxyResponseError:
+    status_code = exc.status_code if exc.status_code is not None and 400 <= exc.status_code <= 599 else 502
+    if policy.credential_safe_connect_errors:
+        message = (
+            f"Upstream websocket handshake failed with HTTP {status_code}"
+            if exc.status_code is not None
+            else "Upstream websocket connection failed"
+        )
+        payload = openai_error(
+            "upstream_websocket_handshake_failed" if exc.status_code is not None else "upstream_unavailable",
+            message,
+            error_type="server_error",
+        )
+    elif exc.status_code is not None:
+        headers = Headers(exc.headers)
+        payload = _handshake_error_payload(
+            status_code,
+            f"Upstream websocket error: HTTP {status_code}",
+            headers,
+            exc.body,
+        )
+    else:
+        message = (
+            "Request to upstream timed out"
+            if exc.failure_phase == "timeout"
+            else "Upstream websocket connection failed"
+        )
+        payload = openai_error("upstream_unavailable", message, error_type="server_error")
+    return ProxyResponseError(
+        status_code if policy.preserve_handshake_status else 502,
+        payload,
+        failure_phase="connect",
+        retryable_same_contract=exc.retryable_same_contract,
+        failure_detail="native_websocket_pre_dispatch" if exc.retryable_same_contract else "transport_error",
+        failure_exception_type=type(exc).__name__,
+    )
+
+
 async def connect_responses_websocket(
     headers: dict[str, str],
     access_token: str,
@@ -1065,6 +1268,7 @@ async def connect_responses_websocket(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
+    routing_hint: tuple[str, str | None] | None = None,
 ) -> UpstreamWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -1077,6 +1281,7 @@ async def connect_responses_websocket(
         codex_client=codex_client,
         allow_direct_egress=allow_direct_egress,
         policy=_RESPONSES_WEBSOCKET_POLICY,
+        routing_hint=routing_hint,
     )
 
 
@@ -1201,22 +1406,3 @@ def _try_parse_handshake_error_payload(
     if error is None:
         return None
     return {"error": _openai_error_detail(error)}
-
-
-def _openai_error_detail(error: OpenAIError) -> OpenAIErrorDetail:
-    detail: OpenAIErrorDetail = {}
-    if error.message is not None:
-        detail["message"] = error.message
-    if error.type is not None:
-        detail["type"] = error.type
-    if error.code is not None:
-        detail["code"] = error.code
-    if error.param is not None:
-        detail["param"] = error.param
-    if error.plan_type is not None:
-        detail["plan_type"] = error.plan_type
-    if error.resets_at is not None:
-        detail["resets_at"] = error.resets_at
-    if error.resets_in_seconds is not None:
-        detail["resets_in_seconds"] = error.resets_in_seconds
-    return detail

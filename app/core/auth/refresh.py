@@ -5,6 +5,7 @@ import contextvars
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Final
 
 import aiohttp
 from pydantic import ValidationError
@@ -24,7 +25,8 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
-from app.core.clients.http import lease_http_session
+from app.core.clients.http import _safe_json, lease_http_session
+from app.core.clients.oauth import _extract_error_code, _extract_error_message
 from app.core.config.settings import AUTH_BASE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPE, get_settings
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
@@ -38,6 +40,9 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.time import to_utc_naive, utcnow
 
 TOKEN_REFRESH_INTERVAL_DAYS = 8
+# Total timeout of one refresh-token exchange (fixed; issue #1340 / PRINCIPLES.md
+# P2). Per-request budgets may only clamp it lower through the override below.
+TOKEN_REFRESH_TIMEOUT_SECONDS: Final[float] = 8.0
 
 logger = logging.getLogger(__name__)
 _TOKEN_REFRESH_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
@@ -210,7 +215,6 @@ async def refresh_access_token(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
 ) -> TokenRefreshResult:
-    settings = get_settings()
     url = f"{AUTH_BASE_URL}/oauth/token"
     payload = {
         "grant_type": "refresh_token",
@@ -218,7 +222,7 @@ async def refresh_access_token(
         "refresh_token": refresh_token,
         "scope": OAUTH_SCOPE,
     }
-    timeout = aiohttp.ClientTimeout(total=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds))
+    timeout = aiohttp.ClientTimeout(total=_effective_token_refresh_timeout())
 
     headers: dict[str, str] = {}
     request_id = get_request_id()
@@ -241,7 +245,7 @@ async def refresh_access_token(
                     route=route,
                     json=payload,
                     headers=headers,
-                    timeout=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds),
+                    timeout=_effective_token_refresh_timeout(),
                 )
                 data = await _safe_codex_json(resp)
                 status = int(getattr(resp, "status_code", getattr(resp, "status", 0)))
@@ -344,15 +348,6 @@ def get_token_refresh_timeout_override() -> float | None:
     return _TOKEN_REFRESH_TIMEOUT_OVERRIDE.get()
 
 
-async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
-    try:
-        data = await resp.json(content_type=None)
-    except Exception:
-        text = await resp.text()
-        return {"error": {"message": text.strip()}}
-    return data if isinstance(data, dict) else {"error": {"message": str(data)}}
-
-
 async def _safe_codex_json(resp: object) -> JsonObject:
     json_method = getattr(resp, "json", None)
     try:
@@ -388,28 +383,8 @@ def _refresh_error_from_payload(payload: OAuthTokenPayload, status_code: int) ->
     return RefreshError(code, message, classify_refresh_error(code))
 
 
-def _effective_token_refresh_timeout(configured_timeout_seconds: float) -> float:
+def _effective_token_refresh_timeout() -> float:
     override = _TOKEN_REFRESH_TIMEOUT_OVERRIDE.get()
     if override is None:
-        return configured_timeout_seconds
-    return max(0.001, min(configured_timeout_seconds, override))
-
-
-def _extract_error_code(payload: OAuthTokenPayload) -> str | None:
-    error = payload.error
-    if isinstance(error, dict):
-        code = error.get("code") or error.get("error")
-        return code if isinstance(code, str) else None
-    if isinstance(error, str):
-        return error
-    return payload.error_code or payload.code
-
-
-def _extract_error_message(payload: OAuthTokenPayload) -> str | None:
-    error = payload.error
-    if isinstance(error, dict):
-        message = error.get("message") or error.get("error_description")
-        return message if isinstance(message, str) else None
-    if isinstance(error, str):
-        return payload.error_description or error
-    return payload.message
+        return TOKEN_REFRESH_TIMEOUT_SECONDS
+    return max(0.001, min(TOKEN_REFRESH_TIMEOUT_SECONDS, override))

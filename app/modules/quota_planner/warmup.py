@@ -11,12 +11,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import usage as usage_core
 from app.core.clients.proxy import stream_responses
+from app.core.config.dashboard_overrides import dashboard_overrides_bound, effective_settings
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
+from app.core.resilience.toggles import bind_resilience_toggles
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus, QuotaPlannerDecision
+from app.db.models import Account, AccountStatus, DashboardSettings, QuotaPlannerDecision
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
@@ -52,8 +56,12 @@ def _warmup_request_id(decision_id: str) -> str:
     return f"quota-warmup-{decision_id}"
 
 
-def _warmup_claim_ttl_seconds() -> float:
-    settings = get_settings()
+def _warmup_claim_ttl_seconds(dashboard_settings: DashboardSettings) -> float:
+    # M1 stream/bridge budgets: the stream request budget is dashboard-managed,
+    # so the claim lease floors at the *effective* budget (dashboard column,
+    # else environment, else default) resolved from the snapshot the caller
+    # already holds — never a bare ``get_settings()`` read.
+    settings = effective_settings(dashboard_settings, get_settings())
     budget_seconds = float(getattr(settings, "http_responses_stream_request_budget_seconds", 0.0) or 0.0)
     return max(WARMUP_EXECUTION_CLAIM_TTL_SECONDS, budget_seconds)
 
@@ -93,6 +101,7 @@ class QuotaWarmupService:
         api_key_id: str | None = None,
         force_probe: bool = False,
         decision_id: str | None = None,
+        dashboard_settings: DashboardSettings | None = None,
     ) -> WarmupExecutionResult:
         decision = await self._planner.get_decision(decision_id) if decision_id is not None else None
         if decision is not None and decision.status not in {"planned", "executing"}:
@@ -157,12 +166,16 @@ class QuotaWarmupService:
             )
         assert account is not None
 
+        # One dashboard snapshot per warm-up: the scheduler passes its per-tick
+        # snapshot; the dashboard API path (request context) takes one here.
+        if dashboard_settings is None:
+            dashboard_settings = await get_settings_cache().get()
         claimed = await self._planner.claim_warmup_decision(
             decision.id,
             since=_local_midnight(),
             max_warmups=settings.max_warmups_per_day,
             max_credits=settings.max_warmup_credits_per_day,
-            claim_ttl_seconds=_warmup_claim_ttl_seconds(),
+            claim_ttl_seconds=_warmup_claim_ttl_seconds(dashboard_settings),
         )
         if claimed is None:
             return await self._resolve_refused_claim(decision_id=decision.id, settings=settings)
@@ -246,20 +259,33 @@ class QuotaWarmupService:
                 )
 
         started = time.monotonic()
+        reservation_finalized = False
         try:
-            usage = await self._send_warmup_probe(
-                account=account,
-                model=resolved_model,
-                request_id=request_id,
-            )
-            if reservation_id is not None:
-                await self._api_keys.finalize_usage_reservation(
-                    reservation_id,
+            # The probe must run under the same effective stream budget the
+            # claim lease floors at (``_warmup_claim_ttl_seconds``); otherwise a
+            # dashboard budget below the environment value would expire the
+            # lease while the probe is still streaming and let another replica
+            # reclaim the decision. Same binding as the proxy warm-up path
+            # (``proxy/_service/warmup.py``).
+            with dashboard_overrides_bound(dashboard_settings):
+                usage = await self._send_warmup_probe(
+                    account=account,
                     model=resolved_model,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cached_input_tokens=usage.cached_input_tokens,
+                    request_id=request_id,
                 )
+            if reservation_id is not None:
+                settlement_cancellation = await _await_cleanup_deferring_cancellation(
+                    self._api_keys.finalize_usage_reservation(
+                        reservation_id,
+                        model=resolved_model,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cached_input_tokens=usage.cached_input_tokens,
+                    )
+                )
+                reservation_finalized = True
+                if settlement_cancellation is not None:
+                    raise settlement_cancellation
             await self._request_logs.add_log(
                 account_id=account_id,
                 api_key_id=api_key_id,
@@ -298,7 +324,7 @@ class QuotaWarmupService:
                 request_id=request_id,
             )
         except asyncio.CancelledError:
-            if reservation_id is not None:
+            if reservation_id is not None and not reservation_finalized:
                 await self._api_keys.fail_usage_reservation(
                     reservation_id,
                     model=resolved_model,
@@ -576,6 +602,9 @@ class QuotaWarmupService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         upstream_account_id = account.chatgpt_account_id
         usage = WarmupUsage(input_tokens=0, output_tokens=0, cached_input_tokens=0, reasoning_tokens=None)
+        # C2-3 resilience toggles: background probe, no request snapshot to
+        # inherit; take one here so the breaker gate follows the dashboard.
+        bind_resilience_toggles(await get_settings_cache().get())
         async for event_block in stream_responses(
             payload,
             headers,

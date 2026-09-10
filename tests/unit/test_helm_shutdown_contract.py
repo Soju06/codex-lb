@@ -69,3 +69,18 @@ def test_shutdown_values_are_typed_in_chart_schema() -> None:
         "minimum": 1,
         "maximum": 300,
     }
+
+
+def test_metrics_port_and_log_format_are_constrained_in_chart_schema() -> None:
+    schema = json.loads((_CHART_DIR / "values.schema.json").read_text())
+    properties = schema["properties"]
+
+    assert properties["metrics"]["properties"]["port"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+    }
+    assert properties["config"]["properties"].get("logFormat") == {
+        "type": "string",
+        "enum": ["text", "json"],
+    }

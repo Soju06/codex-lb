@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from threading import RLock
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 from anyio import to_thread
 from sqlalchemy import (
     Integer,
     String,
     and_,
+    case,
     column,
     delete,
     func,
@@ -43,6 +44,7 @@ from app.modules.usage.additional_quota_keys import (
 )
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
+NormalizedUsageWindow = Literal["primary", "secondary"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,61 +428,6 @@ def _additional_scope_sqlite_clause(scope: AdditionalQuotaQueryScope) -> tuple[s
     return f"({' or '.join(clauses)})", params
 
 
-def _additional_latest_by_account_sqlite(
-    db_path: str,
-    scope: AdditionalQuotaQueryScope,
-    window: str,
-    account_ids: list[str] | None,
-    since: datetime | None,
-) -> dict[str, AdditionalUsageHistory]:
-    scope_clause, scope_params = _additional_scope_sqlite_clause(scope)
-    account_filter = ""
-    account_params: list[object] = []
-    if account_ids is not None:
-        if not account_ids:
-            return {}
-        account_filter = f"and account_id in ({','.join('?' for _ in account_ids)})"
-        account_params = list(account_ids)
-    since_filter = ""
-    since_params: list[object] = []
-    if since is not None:
-        since_filter = "and recorded_at >= ?"
-        since_params = [since.isoformat(sep=" ")]
-
-    accounts_sql = f"""
-        select distinct account_id
-        from additional_usage_history
-        where {scope_clause}
-          and window = ?
-          {account_filter}
-          {since_filter}
-    """
-    latest_sql = f"""
-        select id, account_id, quota_key, limit_name, metered_feature, window,
-               used_percent, reset_at, window_minutes, recorded_at
-        from additional_usage_history
-        where account_id = ?
-          and {scope_clause}
-          and window = ?
-          {since_filter}
-        order by recorded_at desc, used_percent desc, id desc
-        limit 1
-    """
-
-    latest: dict[str, AdditionalUsageHistory] = {}
-    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
-        conn.execute("PRAGMA query_only=ON")
-        conn.execute("PRAGMA busy_timeout=30000")
-        accounts_params = [*scope_params, window, *account_params, *since_params]
-        accounts = [str(row[0]) for row in conn.execute(accounts_sql, accounts_params)]
-        for account_id in accounts:
-            row = conn.execute(latest_sql, [account_id, *scope_params, window, *since_params]).fetchone()
-            if row is not None:
-                entry = _additional_usage_history_from_sqlite_row(row)
-                latest[entry.account_id] = entry
-    return latest
-
-
 def _bulk_history_since_sqlite(
     db_path: str,
     account_ids: list[str],
@@ -858,6 +805,45 @@ class UsageRepository:
             for row in rows
         ]
 
+    async def positive_used_percent_deltas_by_account(
+        self,
+        account_windows: Mapping[str, NormalizedUsageWindow],
+        *,
+        since: datetime,
+        until: datetime,
+    ) -> dict[str, float]:
+        if not account_windows:
+            return {}
+        account_window_pairs = tuple(account_windows.items())
+        samples = (
+            select(
+                UsageHistory.account_id.label("account_id"),
+                UsageHistory.used_percent.label("used_percent"),
+                func.lag(UsageHistory.used_percent)
+                .over(
+                    partition_by=UsageHistory.account_id,
+                    order_by=(UsageHistory.recorded_at, UsageHistory.id),
+                )
+                .label("previous_used_percent"),
+            )
+            .where(
+                tuple_(UsageHistory.account_id, _normalized_window_expr()).in_(account_window_pairs),
+                UsageHistory.recorded_at >= since,
+                UsageHistory.recorded_at <= until,
+            )
+            .subquery("weekly_demand_samples")
+        )
+        delta = samples.c.used_percent - samples.c.previous_used_percent
+        statement = select(
+            samples.c.account_id,
+            func.coalesce(
+                func.sum(case((delta > 0, delta), else_=0.0)),
+                0.0,
+            ).label("positive_delta"),
+        ).group_by(samples.c.account_id)
+        rows = (await self._session.execute(statement)).all()
+        return {str(row.account_id): float(row.positive_delta) for row in rows}
+
     async def latest_by_account(
         self,
         window: str | None = None,
@@ -1034,16 +1020,16 @@ class UsageRepository:
         )
         result = await self._session.execute(stmt)
         grouped: dict[str, list[UsageHistorySnapshot]] = {}
-        for row in result.all():
+        for id_, account_id, used_percent, recorded_at, reset_at, window_minutes in result.tuples():
             snapshot = UsageHistorySnapshot(
-                id=int(row.id),
-                account_id=row.account_id,
-                used_percent=float(row.used_percent),
-                recorded_at=row.recorded_at,
-                reset_at=float(row.reset_at) if row.reset_at is not None else None,
-                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+                id=int(id_),
+                account_id=account_id,
+                used_percent=float(used_percent),
+                recorded_at=recorded_at,
+                reset_at=float(reset_at) if reset_at is not None else None,
+                window_minutes=int(window_minutes) if window_minutes is not None else None,
             )
-            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+            grouped.setdefault(account_id, []).append(snapshot)
         return grouped
 
     async def _bulk_history_since_capped_postgresql(
@@ -1129,16 +1115,19 @@ class UsageRepository:
         stmt = select(recent).select_from(account_cutoffs.join(recent, true()))
         result = await self._session.execute(stmt)
         grouped: dict[str, list[UsageHistorySnapshot]] = {}
-        for row in result.all():
+        # Positional unpacking: Row attribute lookups dominated the per-row
+        # cost of this loop on dense deployments (dashboard polls hydrate
+        # thousands of rows per call). Column order follows snapshot_columns.
+        for id_, account_id, used_percent, recorded_at, reset_at, window_minutes in result.tuples():
             snapshot = UsageHistorySnapshot(
-                id=int(row.id),
-                account_id=row.account_id,
-                used_percent=float(row.used_percent),
-                recorded_at=row.recorded_at,
-                reset_at=float(row.reset_at) if row.reset_at is not None else None,
-                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+                id=int(id_),
+                account_id=account_id,
+                used_percent=float(used_percent),
+                recorded_at=recorded_at,
+                reset_at=float(reset_at) if reset_at is not None else None,
+                window_minutes=int(window_minutes) if window_minutes is not None else None,
             )
-            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+            grouped.setdefault(account_id, []).append(snapshot)
         for snapshots in grouped.values():
             snapshots.sort(key=lambda snapshot: (snapshot.recorded_at, snapshot.id))
         return grouped

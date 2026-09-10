@@ -63,7 +63,7 @@ async def test_validate_dashboard_session_blocks_passwordless_guest_fallback_in_
 
 @pytest.mark.asyncio
 async def test_require_dashboard_admin_access_rejects_guest(monkeypatch):
-    request = _build_request("/api/conversation-archive/files")
+    request = _build_request("/api/conversation-archive/records")
     monkeypatch.setattr(
         auth_dependencies,
         "validate_dashboard_session",
@@ -78,7 +78,7 @@ async def test_require_dashboard_admin_access_rejects_guest(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_require_dashboard_admin_access_allows_admin(monkeypatch):
-    request = _build_request("/api/conversation-archive/files")
+    request = _build_request("/api/conversation-archive/records")
     principal = admin_principal(auth_mode=DashboardAuthMode.STANDARD)
     monkeypatch.setattr(
         auth_dependencies,

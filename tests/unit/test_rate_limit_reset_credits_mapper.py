@@ -76,10 +76,7 @@ def test_account_summary_returns_zero_and_null_when_no_snapshot() -> None:
     assert summary.reset_credit_nearest_expires_at is None
 
 
-@pytest.mark.parametrize(
-    "status",
-    [AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED],
-)
+@pytest.mark.parametrize("status", [AccountStatus.PAUSED, AccountStatus.DEACTIVATED])
 def test_account_summary_suppresses_cached_reset_credits_for_ineligible_status(status: AccountStatus) -> None:
     store = RateLimitResetCreditsStore()
     store._snapshots["acc_ineligible"] = RateLimitResetCreditsSnapshot(  # type: ignore[attr-defined]
@@ -92,6 +89,21 @@ def test_account_summary_suppresses_cached_reset_credits_for_ineligible_status(s
 
     assert summary.available_reset_credits == 0
     assert summary.reset_credit_nearest_expires_at is None
+
+
+def test_account_summary_preserves_cached_reset_credits_for_reauth_required() -> None:
+    store = RateLimitResetCreditsStore()
+    nearest = datetime(2026, 6, 20, 0, 0, 0)
+    store._snapshots["acc_reauth"] = RateLimitResetCreditsSnapshot(  # type: ignore[attr-defined]
+        available_count=3,
+        nearest_expires_at=nearest,
+        credits=[],
+    )
+
+    [summary] = _summaries([_account("acc_reauth", status=AccountStatus.REAUTH_REQUIRED)], store)
+
+    assert summary.available_reset_credits == 3
+    assert summary.reset_credit_nearest_expires_at == nearest
 
 
 def test_account_summary_suppresses_cached_reset_credits_without_chatgpt_account_id() -> None:

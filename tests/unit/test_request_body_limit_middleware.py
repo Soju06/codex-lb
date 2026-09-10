@@ -10,7 +10,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException
 from httpx import ASGITransport, AsyncByteStream, AsyncClient
 from starlette.types import Message, Receive, Scope, Send
 
-from app.core.config.settings import get_settings
+import app.core.middleware.request_body_limit as request_body_limit_module
 from app.core.handlers import add_exception_handlers
 from app.core.middleware.path_rewrite import BackendApiCodexV1AliasMiddleware
 from app.core.middleware.request_body_limit import RequestBodyLimitMiddleware, add_request_body_limit_middleware
@@ -24,9 +24,8 @@ pytestmark = pytest.mark.unit
 
 
 def _configure_limits(monkeypatch: pytest.MonkeyPatch, *, general: int, responses: int | None = None) -> None:
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", str(general))
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", str(responses or general))
-    get_settings.cache_clear()
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", general)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", responses or general)
 
 
 def _http_scope(

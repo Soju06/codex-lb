@@ -207,6 +207,10 @@
     "config": {
       "type": "object",
       "properties": {
+        "logFormat": {
+          "type": "string",
+          "enum": ["text", "json"]
+        },
         "shutdownDrainTimeoutSeconds": {
           "type": "integer",
           "minimum": 1,

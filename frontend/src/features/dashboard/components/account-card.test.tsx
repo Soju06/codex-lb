@@ -22,6 +22,31 @@ describe("AccountCard", () => {
     expect(screen.getByText("Weekly")).toBeInTheDocument();
   });
 
+  it("keeps the last quota visible while a refreshed value is temporarily unknown", () => {
+    const account = createAccountSummary({
+      usage: { primaryRemainingPercent: 64, secondaryRemainingPercent: 73 },
+      windowMinutesPrimary: 300,
+      windowMinutesSecondary: 10_080,
+    });
+    const { rerender } = render(<AccountCard account={account} />);
+
+    expect(screen.getByText("64%")).toBeInTheDocument();
+
+    rerender(
+      <AccountCard
+        account={{
+          ...account,
+          usage: { primaryRemainingPercent: null, secondaryRemainingPercent: 73 },
+          windowMinutesPrimary: null,
+          resetAtPrimary: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("64%")).toBeInTheDocument();
+    expect(screen.getByText("5h")).toBeInTheDocument();
+  });
+
   it("hides 5h quota bar for weekly-only accounts", () => {
     const account = createAccountSummary({
       planType: "free",

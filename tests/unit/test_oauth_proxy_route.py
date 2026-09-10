@@ -208,6 +208,9 @@ class _DummyRepo:
     async def get_by_id(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
 
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        return self.accounts_by_id.get(account_id)
+
     async def update_status(
         self,
         account_id: str,
@@ -323,6 +326,7 @@ async def test_refresh_fails_closed_when_binding_exists_but_route_returns_none(
         await session.commit()
 
     repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
     manager = AuthManager(cast(AccountsRepositoryPort, repo))
 
     # Without fix: refresh silently uses direct egress (route=None, allow_direct_egress=True).

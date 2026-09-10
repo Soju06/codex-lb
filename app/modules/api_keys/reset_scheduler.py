@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Protocol, TypeVar, cast
 
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import utcnow
 from app.db.session import get_background_session
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -23,18 +21,6 @@ _STALE_USAGE_RESERVATION_AGE = timedelta(hours=6)
 # exempt its reservation from the stale cutoff above. No legitimate request
 # holds a usage reservation anywhere near this long.
 _MAX_USAGE_RESERVATION_AGE = timedelta(hours=24)
-
-
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 @dataclass(slots=True)

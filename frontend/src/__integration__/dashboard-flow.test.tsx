@@ -284,6 +284,74 @@ describe("dashboard flow integration", () => {
     expect(optionsCalls).toBe(optionsCallsBeforeRetry);
   });
 
+  it("keeps retained request-log rows through failed refresh and Retry recovery", async () => {
+    const user = userEvent.setup({ delay: null });
+    let requestLogsAvailable = true;
+    let recovered = false;
+    let requestLogCalls = 0;
+    const retainedLog = createRequestLogEntry({
+      requestId: "req_retained_refresh",
+      apiKeyName: "Retained API Key",
+    });
+    const recoveredLog = createRequestLogEntry({
+      requestId: "req_recovered_refresh",
+      apiKeyName: "Recovered API Key",
+    });
+
+    server.use(
+      http.get("/api/request-logs", () => {
+        requestLogCalls += 1;
+        if (!requestLogsAvailable) {
+          return HttpResponse.json(
+            {
+              error: {
+                code: "forced_background_refresh_failure",
+                message: REQUEST_LOG_OUTAGE_MESSAGE,
+              },
+            },
+            { status: 503 },
+          );
+        }
+        return HttpResponse.json(
+          createRequestLogsResponse([recovered ? recoveredLog : retainedLog], 1, false),
+        );
+      }),
+    );
+
+    window.history.pushState({}, "", "/dashboard");
+    const { queryClient: testQueryClient } = renderWithProviders(<App />);
+
+    expect(await screen.findByText("Retained API Key")).toBeInTheDocument();
+    const section = screen.getByRole("heading", { name: "Request Logs" }).closest("section");
+    expect(section).not.toBeNull();
+    const requestLogs = within(section as HTMLElement);
+    expect(requestLogs.getByRole("table")).toBeVisible();
+
+    const callsBeforeRefresh = requestLogCalls;
+    requestLogsAvailable = false;
+    await act(async () => {
+      await testQueryClient.invalidateQueries({
+        queryKey: ["dashboard", "request-logs"],
+      });
+    });
+    await waitFor(() => expect(requestLogCalls).toBeGreaterThan(callsBeforeRefresh));
+    const alert = await requestLogs.findByRole("alert");
+
+    expect(alert).toHaveTextContent(REQUEST_LOG_OUTAGE_MESSAGE);
+    expect(requestLogs.getByRole("table")).toBeVisible();
+    expect(requestLogs.getByText("Retained API Key")).toBeVisible();
+
+    requestLogsAvailable = true;
+    recovered = true;
+    const retry = requestLogs.getByRole("button", { name: "Retry" });
+    retry.focus();
+    await user.keyboard("{Enter}");
+
+    expect(await requestLogs.findByText("Recovered API Key")).toBeVisible();
+    expect(requestLogs.queryByText("Retained API Key")).not.toBeInTheDocument();
+    expect(requestLogs.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("switches to conversations without reinterpreting request-log URL state", async () => {
     const user = userEvent.setup({ delay: null });
     server.use(

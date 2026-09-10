@@ -88,6 +88,7 @@ class LimitWarmupAttemptsRepository(Protocol):
         attempted_at,
         status: str = "pending",
         reset_at_tolerance_seconds: int = 0,
+        require_no_prior_attempt: bool = False,
     ) -> AccountLimitWarmup | None: ...
 
     async def complete_attempt(
@@ -401,6 +402,14 @@ class LimitWarmupService:
                         refresh_started_at=refresh_started_at,
                         min_available_percent=settings.limit_warmup_min_available_percent,
                     )
+                if candidate is None and window == "secondary":
+                    candidate = _build_initial_free_quota_candidate(
+                        account=account,
+                        previous_plan_type=(previous_plan_types or {}).get(account.id),
+                        latest_attempt=latest_attempt,
+                        after_secondary=after_secondary,
+                        refresh_started_at=refresh_started_at,
+                    )
                 if (
                     candidate is None
                     and _account_is_safe_candidate(account)
@@ -433,6 +442,7 @@ class LimitWarmupService:
                         model="auto",
                         attempted_at=utcnow(),
                         reset_at_tolerance_seconds=_attempt_reset_at_tolerance(candidate),
+                        require_no_prior_attempt=candidate.require_no_prior_attempt,
                     )
                     if skipped is not None:
                         completed = await self._warmup_repo.complete_attempt(
@@ -442,7 +452,10 @@ class LimitWarmupService:
                             error_code="model_unavailable",
                             error_message="No eligible priced text model was available for warm-up",
                         )
-                        latest_attempts[account.id] = completed or skipped
+                        latest_attempt = completed or skipped
+                        latest_attempts[account.id] = latest_attempt
+                    elif candidate.require_no_prior_attempt:
+                        break
                     continue
 
                 attempt = await self._warmup_repo.try_create_attempt(
@@ -452,9 +465,14 @@ class LimitWarmupService:
                     model=model,
                     attempted_at=utcnow(),
                     reset_at_tolerance_seconds=_attempt_reset_at_tolerance(candidate),
+                    require_no_prior_attempt=candidate.require_no_prior_attempt,
                 )
                 if attempt is None:
+                    if candidate.require_no_prior_attempt:
+                        break
                     continue
+                latest_attempt = attempt
+                latest_attempts[account.id] = attempt
 
                 send_task = asyncio.create_task(
                     self._send_warmup(
@@ -674,6 +692,7 @@ class LimitWarmupService:
 class _WarmupCandidate:
     reset_at: int
     window: str
+    require_no_prior_attempt: bool = False
 
 
 def _selected_windows(value: str) -> tuple[str, ...]:
@@ -784,6 +803,36 @@ def _build_paid_to_free_transition_candidate(
     if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None
     return _WarmupCandidate(reset_at=after.reset_at, window="monthly")
+
+
+def _build_initial_free_quota_candidate(
+    *,
+    account: Account,
+    previous_plan_type: str | None,
+    latest_attempt: AccountLimitWarmup | None,
+    after_secondary: dict[str, UsageHistory],
+    refresh_started_at: datetime | None,
+) -> _WarmupCandidate | None:
+    if latest_attempt is not None:
+        return None
+    if normalize_account_plan_type(account.plan_type) != "free":
+        return None
+    if normalize_account_plan_type(previous_plan_type) != "free":
+        return None
+    if refresh_started_at is None:
+        return None
+    after = after_secondary.get(account.id)
+    if after is None or after.window != "monthly" or after.reset_at is None:
+        return None
+    if after.recorded_at < refresh_started_at:
+        return None
+    if after.used_percent != 0.0:
+        return None
+    return _WarmupCandidate(
+        reset_at=after.reset_at,
+        window="monthly",
+        require_no_prior_attempt=True,
+    )
 
 
 def _build_staggered_idle_candidate(

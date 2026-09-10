@@ -1,0 +1,68 @@
+name: Update upstream metadata
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: update-upstream-metadata
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    if: github.repository == 'Soju06/codex-lb'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Prepare update branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git show-ref --verify --quiet refs/remotes/origin/chore/upstream-metadata; then
+            git switch --track origin/chore/upstream-metadata
+            git merge --no-edit origin/main
+          else
+            git switch -c chore/upstream-metadata
+          fi
+      - name: Refresh and verify snapshots
+        run: |
+          uv sync --locked --dev
+          uv run python scripts/update_upstream_metadata.py
+          uv run python scripts/generate_settings_reference.py
+          uv run pytest tests/unit/test_pricing_catalog.py tests/unit/test_codex_version.py \
+            tests/unit/test_update_upstream_metadata.py tests/unit/test_settings_reference.py -q
+          uv run ruff check app/core/clients/codex_version_snapshot.py
+      - name: Propose changed metadata
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          git add app/core/usage/pricing_snapshot.json app/core/clients/codex_version_snapshot.py docs/reference/settings.md
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(metadata): refresh model pricing and Codex version"
+          fi
+          if git diff --quiet origin/main -- app/core/usage/pricing_snapshot.json app/core/clients/codex_version_snapshot.py docs/reference/settings.md; then
+            exit 0
+          fi
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push --set-upstream origin chore/upstream-metadata
+          if [ -z "$(gh pr list --head chore/upstream-metadata --state open --json number --jq '.[0].number // empty')" ]; then
+            cat > /tmp/upstream-metadata-pr.md <<'BODY'
+          Refreshes the bundled offline pricing fallback from models.dev plus compatible LiteLLM tier data and the stable Codex version from GitHub/npm. Runtime refresh and missing-cost repair remain governed by `openspec/specs/upstream-metadata/spec.md`.
+
+          Validation: catalog and Codex-version regression tests, snapshot generation with both pricing sources available. The existing release automation token allows normal PR CI and review to run. No auto-merge.
+          BODY
+            gh pr create --base main --head chore/upstream-metadata \
+              --title "chore(metadata): refresh model pricing and Codex version" \
+              --body-file /tmp/upstream-metadata-pr.md
+          fi

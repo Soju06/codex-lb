@@ -293,6 +293,10 @@ _HOP_BY_HOP_HEADER_NAMES = frozenset(
         "upgrade",
     }
 )
+# ``Accept`` and ``Content-Type`` are included above because the WebSocket
+# handshake policy rejects them. They are end-to-end HTTP fields, so filter
+# caller supplied copies while the builder regenerates their canonical values.
+_HTTP_HOP_BY_HOP_HEADER_NAMES = _HOP_BY_HOP_HEADER_NAMES - frozenset({"accept", "content-type"})
 _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({426})
 _WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS = frozenset({"background", "stream"})
 _WEBSOCKET_HANDSHAKE_ERROR_HINTS = (
@@ -940,6 +944,17 @@ def _native_responses_header_order(headers: Mapping[str, str]) -> tuple[str, ...
     return tuple(order)
 
 
+def _connection_named_header_names(headers: Mapping[str, str]) -> set[str]:
+    """Return header names explicitly scoped to the inbound connection."""
+
+    named: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() != "connection" or not isinstance(value, str):
+            continue
+        named.update(token.strip().lower() for token in value.split(",") if token.strip())
+    return named
+
+
 def _build_upstream_headers(
     inbound: Mapping[str, str],
     access_token: str,
@@ -947,11 +962,18 @@ def _build_upstream_headers(
     accept: str = "text/event-stream",
     routing_hint: tuple[str, str | None] | None = None,
 ) -> dict[str, str]:
-    native = _is_native_codex_request(inbound)
+    connection_named_header_names = _connection_named_header_names(inbound)
+    blocked_header_names = _HTTP_HOP_BY_HOP_HEADER_NAMES | connection_named_header_names
+    sanitized_identity_headers = {
+        key: value for key, value in inbound.items() if key.lower() not in blocked_header_names
+    }
+    native = _is_native_codex_request(sanitized_identity_headers)
     if native:
         headers = {}
         for key, value in inbound.items():
             lowered = key.lower()
+            if lowered in blocked_header_names:
+                continue
             if lowered == "authorization":
                 if not any(existing.lower() == lowered for existing in headers):
                     headers[key] = f"Bearer {access_token}"
@@ -961,7 +983,11 @@ def _build_upstream_headers(
             elif not _should_drop_inbound_header(key):
                 headers[key] = value
     else:
-        headers = filter_inbound_headers(inbound)
+        headers = {
+            key: value
+            for key, value in filter_inbound_headers(inbound).items()
+            if key.lower() not in blocked_header_names
+        }
     lower_keys = {key.lower() for key in headers}
     if not native and "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()

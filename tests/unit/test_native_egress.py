@@ -19,6 +19,7 @@ from app.core.clients.native_egress import (
     NativeSseOptions,
     NativeWebSocketMessage,
     NativeWebSocketRequest,
+    NativeWebSocketRoutingMetadata,
     SubprocessNativeEgressClient,
     close_discovered_native_egress_client,
     discover_native_egress_client,
@@ -49,6 +50,7 @@ print(json.dumps({
         "http_responses_completion_v1",
         "websocket",
         "websocket_responses_events_v1",
+        "websocket_responses_routing_v1",
         "websocket_send_ack",
     ],
 }), flush=True)
@@ -584,7 +586,8 @@ for line in sys.stdin:
             "request_id": request_id,
             "text": command["text"] if request_id in interpreted else "echo:" + command["text"],
             **({"event_type": "response.text.delta",
-                "payload": json.loads(command["text"])}
+                "payload": json.loads(command["text"]),
+                "payload_response_id": "r1", "sequence_number": 17}
                if request_id in interpreted else {}),
         }), flush=True)
         print(json.dumps({
@@ -649,14 +652,40 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid_metadata", [False, True], ids=["valid", "missing-payload"])
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        None,
+        ('"payload": json.loads(command["text"])', '"invalid_payload": None'),
+        ('"payload_response_id": "r1"', '"missing_response_id": None'),
+        ('"sequence_number": 17', '"missing_sequence_number": None'),
+        ('"payload_response_id": "r1"', '"payload_response_id": 17'),
+        ('"payload_response_id": "r1"', '"payload_response_id": True'),
+        ('"sequence_number": 17', '"sequence_number": True'),
+        ('"sequence_number": 17', '"sequence_number": 17.0'),
+        ('"sequence_number": 17', '"sequence_number": "17"'),
+        ('"sequence_number": 17', '"sequence_number": []'),
+    ],
+    ids=[
+        "valid",
+        "missing-payload",
+        "missing-id",
+        "missing-sequence",
+        "int-id",
+        "bool-id",
+        "bool",
+        "float",
+        "str",
+        "list",
+    ],
+)
 async def test_native_responses_websocket_preserves_interpretation_metadata(
-    tmp_path: Path, invalid_metadata: bool
+    tmp_path: Path, replacement: tuple[str, str] | None
 ) -> None:
     helper = tmp_path / "native-helper"
     source = _websocket_helper_source()
-    if invalid_metadata:
-        source = source.replace('"payload": json.loads(command["text"])', '"invalid_payload": None')
+    if replacement is not None:
+        source = source.replace(*replacement)
     _write_helper(helper, source)
     client = SubprocessNativeEgressClient(helper)
     websocket = await client.websocket(
@@ -669,10 +698,12 @@ async def test_native_responses_websocket_preserves_interpretation_metadata(
         )
     )
 
-    if invalid_metadata:
+    process = client._process
+    if replacement is not None:
         with pytest.raises(NativeEgressProtocolError, match="Responses websocket event is invalid"):
             await websocket.send_text('{"type":"response.text.delta","delta":"hi"}')
             await websocket.receive()
+        assert not client._streams
     else:
         await websocket.send_text('{"type":"response.text.delta","delta":"hi"}')
         assert await websocket.receive() == NativeWebSocketMessage(
@@ -681,8 +712,23 @@ async def test_native_responses_websocket_preserves_interpretation_metadata(
             responses_interpreted=True,
             event_type="response.text.delta",
             payload={"type": "response.text.delta", "delta": "hi"},
+            routing=NativeWebSocketRoutingMetadata("r1", 17),
         )
         await websocket.close()
+    peer = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={"user-agent": "codex-cli", "sec-websocket-protocol": "openai"},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+        )
+    )
+    await peer.send_text("healthy")
+    assert await peer.receive() == NativeWebSocketMessage(kind="text", text="echo:healthy")
+    await peer.close()
+    assert client._process is process
+    assert client._request_sequence == 2
+    assert not client._streams
     await client.aclose()
 
 
@@ -968,6 +1014,7 @@ async def test_native_sse_failure_releases_owned_stream(
         "http_compact_collect_v1",
         "http_responses_events_v1",
         "http_responses_completion_v1",
+        "websocket_responses_routing_v1",
     ],
 )
 async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path, capability: str) -> None:
@@ -1163,6 +1210,13 @@ def test_bounded_event_queue_trips_on_bytes_or_events_and_releases_bytes_on_get(
     with pytest.raises(asyncio.QueueFull):
         queue.put_nowait(websocket_event)
     queue.get_nowait()
+    queue.get_nowait()
+    assert queue.queued_bytes == 0
+    routed_event = {**websocket_event, "payload_response_id": "é", "sequence_number": -17}
+    queue.put_nowait(routed_event)
+    assert queue.queued_bytes == 9
+    with pytest.raises(asyncio.QueueFull):
+        queue.put_nowait(websocket_event)
     queue.get_nowait()
     assert queue.queued_bytes == 0
     # A lone event larger than the whole budget is accepted at an empty queue

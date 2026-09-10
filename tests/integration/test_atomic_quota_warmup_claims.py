@@ -14,17 +14,26 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountLimitWarmup, AccountStatus, QuotaPlannerDecision, RequestLog
+from app.db.models import (
+    Account,
+    AccountLimitWarmup,
+    AccountStatus,
+    DashboardSettings,
+    QuotaPlannerDecision,
+    RequestLog,
+    UsageHistory,
+)
 from app.db.session import SessionLocal
 from app.modules.limit_warmup import repository as limit_warmup_repository_module
 from app.modules.limit_warmup.repository import LimitWarmupRepository
+from app.modules.limit_warmup.service import LimitWarmupService
 from app.modules.quota_planner import repository as quota_planner_repository_module
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
@@ -751,3 +760,161 @@ async def test_limit_warmup_attempt_outside_tolerance_still_inserts(db_setup):
     assert duplicate is None
     assert far is not None
     assert far.id != first.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_window", ["monthly", "primary", "primary_idle", "secondary"])
+@pytest.mark.parametrize("initial", [True, False])
+async def test_postgres_warmup_claim_waits_for_older_replica(
+    monkeypatch: pytest.MonkeyPatch, db_setup, old_window: str, initial: bool
+) -> None:
+    """A committed older-replica attempt must be visible to the new claim guard."""
+    del db_setup
+    async with SessionLocal() as session:
+        if session.get_bind().dialect.name != "postgresql":
+            pytest.skip("requires PostgreSQL advisory locks")
+        session.add(_account("acc-rolling-warmup"))
+        await session.commit()
+    _simulate_separate_processes(monkeypatch)
+    reset_at = 2_000_000_000
+
+    async with SessionLocal() as older, SessionLocal() as newer, SessionLocal() as observer:
+        # Model the released protocol, with an attempt not yet visible to others.
+        await older.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+            {"key": f"limit_warmup:acc-rolling-warmup:{old_window}"},
+        )
+        older.add(
+            AccountLimitWarmup(
+                account_id="acc-rolling-warmup",
+                window=old_window,
+                reset_at=reset_at,
+                status="pending",
+                model="gpt-5.4-mini",
+                attempted_at=utcnow(),
+            )
+        )
+        await older.flush()
+        newer_pid = await newer.scalar(text("SELECT pg_backend_pid()"))
+        claim = asyncio.create_task(
+            LimitWarmupRepository(newer).try_create_attempt(
+                account_id="acc-rolling-warmup",
+                window="monthly" if initial else old_window,
+                reset_at=reset_at + (3600 if initial else 2),
+                model="gpt-5.4-mini",
+                attempted_at=utcnow(),
+                reset_at_tolerance_seconds=60,
+                require_no_prior_attempt=initial,
+            )
+        )
+        try:
+            # Release the old transaction only once the claim blocks (fixed)
+            # or finishes prematurely (the regression), not after a fixed delay.
+            async with asyncio.timeout(10):
+                while not claim.done():
+                    blocked = await observer.scalar(
+                        text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                        {"pid": newer_pid},
+                    )
+                    if blocked:
+                        break
+                    await asyncio.sleep(0)
+            await older.commit()
+            assert await asyncio.wait_for(claim, timeout=10) is None
+        finally:
+            if not claim.done():
+                claim.cancel()
+            await asyncio.gather(claim, return_exceptions=True)
+
+    async with SessionLocal() as session:
+        count = await session.scalar(
+            select(func.count(AccountLimitWarmup.id)).where(AccountLimitWarmup.account_id == "acc-rolling-warmup")
+        )
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_initial_free_quota_claims_allow_one_sliding_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+) -> None:
+    del db_setup
+    _simulate_separate_processes(monkeypatch)
+    async with SessionLocal() as session:
+        account = _account("acc-initial-free-warmup")
+        account.plan_type = "free"
+        account.limit_warmup_enabled = True
+        session.add(account)
+        await session.commit()
+
+    barrier = asyncio.Barrier(2)
+    sends: list[str] = []
+    refresh_started_at = utcnow()
+    first_reset_at = int(refresh_started_at.timestamp()) + 43_200 * 60
+    settings = DashboardSettings(
+        id=1,
+        limit_warmup_enabled=True,
+        limit_warmup_windows="secondary",
+        limit_warmup_model="gpt-5.1-codex-mini",
+        limit_warmup_prompt="Say OK.",
+        limit_warmup_cooldown_seconds=3600,
+        limit_warmup_exhausted_threshold_percent=99.0,
+        limit_warmup_idle_threshold_percent=1.0,
+        limit_warmup_min_available_percent=100.0,
+        limit_warmup_staggered_idle_enabled=False,
+    )
+
+    class BarrierWarmupRepository(LimitWarmupRepository):
+        async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
+            attempts = await super().latest_by_account(account_ids)
+            await self._session.rollback()
+            await barrier.wait()
+            return attempts
+
+    class FailingSender:
+        async def send(self, account: Account, *, model: str, prompt: str):
+            del model, prompt
+            sends.append(account.id)
+            raise RuntimeError("stop after claim")
+
+    class UnusedRequestLogsRepository:
+        async def add_log(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("failed sends must not be logged")
+
+    async def replica(observed_reset_at: int) -> None:
+        candidate = _account("acc-initial-free-warmup")
+        candidate.plan_type = "free"
+        candidate.limit_warmup_enabled = True
+        monthly = UsageHistory(
+            account_id=candidate.id,
+            used_percent=0.0,
+            reset_at=observed_reset_at,
+            window="monthly",
+            window_minutes=43_200,
+            recorded_at=refresh_started_at,
+        )
+        async with SessionLocal() as session:
+            service = LimitWarmupService(
+                BarrierWarmupRepository(session),
+                UnusedRequestLogsRepository(),
+                sender=FailingSender(),
+            )
+            await service.run_after_usage_refresh(
+                accounts=[candidate],
+                settings=settings,
+                before_primary={},
+                before_secondary={},
+                after_primary={},
+                after_secondary={candidate.id: monthly},
+                previous_plan_types={candidate.id: "free"},
+                refresh_started_at=refresh_started_at,
+            )
+
+    await asyncio.gather(replica(first_reset_at), replica(first_reset_at + 60))
+
+    assert sends == ["acc-initial-free-warmup"]
+    async with SessionLocal() as session:
+        row_count = await session.scalar(
+            select(func.count(AccountLimitWarmup.id)).where(AccountLimitWarmup.account_id == "acc-initial-free-warmup")
+        )
+    assert row_count == 1

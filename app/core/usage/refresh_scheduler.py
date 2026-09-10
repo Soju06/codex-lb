@@ -90,6 +90,7 @@ class _BackgroundLimitWarmupRepository:
         attempted_at: datetime,
         status: str = "pending",
         reset_at_tolerance_seconds: int = 0,
+        require_no_prior_attempt: bool = False,
     ) -> AccountLimitWarmup | None:
         async with get_background_session() as session:
             attempt = await LimitWarmupRepository(session).try_create_attempt(
@@ -100,6 +101,7 @@ class _BackgroundLimitWarmupRepository:
                 attempted_at=attempted_at,
                 status=status,
                 reset_at_tolerance_seconds=reset_at_tolerance_seconds,
+                require_no_prior_attempt=require_no_prior_attempt,
             )
             detach_session_objects(session)
             return attempt

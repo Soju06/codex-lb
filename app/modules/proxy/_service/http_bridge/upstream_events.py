@@ -2512,9 +2512,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             # Preserve its SSE-field semantics for whitespace/multiline text.
             payload = message.payload
             event_type = message.event_type
+            routing = message.routing
         else:
             payload = parse_sse_data_json_text(text)
             event_type = classify_event_type(payload)
+            routing = None
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []
@@ -2526,6 +2528,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 payload=payload,
                 event=event,
                 event_type=event_type,
+                response_id=_websocket_response_id(event, payload, routing=routing),
                 completed_delivery_scope=completed_delivery_scope,
                 claimed_terminal_request_states=claimed_terminal_request_states,
                 scheduler=scheduler,
@@ -2641,13 +2644,13 @@ class _HTTPBridgeUpstreamEventsMixin:
         payload: dict[str, JsonValue] | None,
         event: OpenAIEvent | None,
         event_type: str | None,
+        response_id: str | None,
         completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None,
         claimed_terminal_request_states: list[_WebSocketRequestState],
         scheduler: Scheduler,
         clock: Clock,
     ) -> None:
         original_text = text
-        response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
             isinstance(payload, dict)

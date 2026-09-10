@@ -19,7 +19,9 @@
 
 ## 4. Validation
 
-- [ ] 4.1 Re-run the route regression on the current upstream baseline and the
+- [x] 4.1 Re-run the route regression on the current upstream baseline and the
       rebased candidate to confirm baseline failure and candidate success.
-- [ ] 4.2 Run focused compact/header tests, Ruff, and strict OpenSpec
+- [x] 4.2 Run focused compact/header tests, Ruff, and strict OpenSpec
       validation on the rebased candidate.
+
+Validation on current main 43a45f78: the route regression fails without sanitation (forwarded `transfer-encoding`), and all six focused header/route tests pass with it. Ruff, formatting, contributor coverage, and strict change validation pass.

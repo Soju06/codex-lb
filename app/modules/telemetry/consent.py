@@ -78,7 +78,7 @@ class TelemetryConsentStore:
 
     async def notice_version(self) -> int:
         row = await self._repository.get_or_create()
-        return int(row.telemetry_notice_version)
+        return int(row.telemetry_notice_version or 0)
 
     async def resolve(self) -> ResolvedConsent:
         row = await self._repository.get_or_create()

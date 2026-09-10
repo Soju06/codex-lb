@@ -30,8 +30,6 @@ class SettingsRepository:
 
         row = DashboardSettings(
             id=_SETTINGS_ID,
-            # Fresh installations have not seen a notice; delivery records its version.
-            telemetry_notice_version=0,
             sticky_threads_enabled=True,
             upstream_stream_transport="auto",
             prohibit_fast_mode=False,

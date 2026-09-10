@@ -26,14 +26,7 @@ def upgrade() -> None:
     columns = _columns()
     with op.batch_alter_table("dashboard_settings") as batch_op:
         if "telemetry_notice_version" not in columns:
-            batch_op.add_column(
-                sa.Column(
-                    "telemetry_notice_version",
-                    sa.Integer(),
-                    server_default=sa.text("0"),
-                    nullable=False,
-                )
-            )
+            batch_op.add_column(sa.Column("telemetry_notice_version", sa.Integer(), nullable=True))
         if "telemetry_day_acknowledged_date" not in columns:
             batch_op.add_column(sa.Column("telemetry_day_acknowledged_date", sa.DateTime(timezone=True), nullable=True))
 

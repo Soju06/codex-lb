@@ -19,7 +19,7 @@ async def _notice_version() -> int:
     async with get_background_session() as session:
         row = await session.get(DashboardSettings, 1)
         assert row is not None
-        return int(row.telemetry_notice_version)
+        return int(row.telemetry_notice_version or 0)
 
 
 pytestmark = pytest.mark.unit
@@ -350,7 +350,8 @@ async def test_undecided_default_dialog_remains_available_after_notice_acknowled
     async with get_background_session() as session:
         row = await SettingsRepository(session).get_or_create()
         assert row.telemetry_consent == "undecided"
-        assert row.telemetry_notice_version == 0
+        assert row.telemetry_notice_version is None
+    assert await _notice_version() == 0
 
     # Dismissal saves no decision, so another dashboard entry must still have a preview.
     for _ in range(2):

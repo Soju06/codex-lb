@@ -5619,6 +5619,12 @@ class _WebSocketMixin:
                         "error",
                     },
                 )
+                if request_state is not None:
+                    # Upstream generation ends here; everything after (affinity
+                    # refresh, settlement, cleanup) is local and must not stretch
+                    # the throughput sample's span. A later terminal for the same
+                    # turn (retry / replay) replaces it; those rows are not sampled.
+                    request_state.upstream_terminal_at = clock.monotonic()
                 if request_state is None and (
                     is_previous_response_not_found_matching_event or is_missing_tool_output_event
                 ):
@@ -6417,6 +6423,22 @@ class _WebSocketMixin:
             request_state.terminal_settlement_phase = None
             return
 
+        # Throughput clock stop: the terminal frame's parse stamp when the reader
+        # set one, else now -- either way before the gate release, the API-key
+        # settlement and the deferred health writes below, so local DB
+        # contention is never counted as generation time.
+        upstream_terminal_at = request_state.upstream_terminal_at
+        if upstream_terminal_at is None:
+            upstream_terminal_at = clock_for(proxy).monotonic()
+        # First-token clock start: the TTFT cohort sample is measured from the
+        # ``response.create`` send, so bridge pre-send work (session lookup,
+        # reconnect, prewarm, image inlining, slimming) that ``started_at``
+        # precedes is never attributed to the account. A turn without a send
+        # stamp cannot anchor a sample and the funnel drops it.
+        upstream_sent_at = request_state.response_create_sent_at
+        latency_upstream_send_ms = (
+            None if upstream_sent_at is None else max(0, int((upstream_sent_at - request_state.started_at) * 1000))
+        )
         if request_state.latency_first_token_ms is None:
             ttft_visible_at = _finalize_ttft_reasoning_deltas(
                 request_state.ttft_reasoning_deltas, now=clock_for(proxy).monotonic()
@@ -6591,6 +6613,17 @@ class _WebSocketMixin:
                     latency_first_upstream_event_ms=request_state.latency_first_upstream_event_ms,
                     latency_response_create_gate_wait_ms=request_state.latency_response_create_gate_wait_ms,
                     latency_bridge_queue_wait_ms=request_state.latency_bridge_queue_wait_ms,
+                    latency_upstream_send_ms=latency_upstream_send_ms,
+                    latency_upstream_terminal_ms=max(0, int((upstream_terminal_at - request_state.started_at) * 1000)),
+                    # TTFT is measured from started_at, so a retried send, a
+                    # transparent direct-WebSocket replay (replay_count; the
+                    # bridge counts attempts instead) or a capacity wait leaves
+                    # the failed attempt inside it.
+                    upstream_retried=(
+                        request_state.response_create_attempt_count > 1
+                        or request_state.replay_count > 0
+                        or request_state.account_capacity_wait_started_at is not None
+                    ),
                     prewarm_status=request_state.prewarm_status,
                     prewarm_latency_ms=request_state.prewarm_latency_ms,
                     session_previous_gap_ms=request_state.session_previous_gap_ms,

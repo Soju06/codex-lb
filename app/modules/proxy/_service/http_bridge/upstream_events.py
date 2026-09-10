@@ -2827,6 +2827,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                         allow_precreated_terminal_fallback=True,
                         prefer_draining_requests=anonymous_event_prefers_draining,
                     )
+                if terminal_request_state is not None:
+                    # Upstream generation ends here; the durable alias, operation,
+                    # recovery and circuit-settlement writes below and the
+                    # finalizer's settlement are local and must not stretch the
+                    # throughput sample's span. A later terminal for the same turn
+                    # (capacity retry) replaces it; those rows are not sampled.
+                    terminal_request_state.upstream_terminal_at = clock.monotonic()
                 if (
                     matched_request_state is None
                     and terminal_request_state is not None

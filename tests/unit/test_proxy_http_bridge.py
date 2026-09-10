@@ -47955,3 +47955,74 @@ def test_http_bridge_runtime_config_reads_idle_ttl_constant_at_call_time(monkeyp
 
     assert runtime_config.idle_ttl_seconds == 45.0
     assert runtime_config.codex_idle_ttl_seconds == 900.0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_stamps_the_upstream_terminal_when_it_parses_the_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bridge reader, not the finalizer, stops the throughput clock.
+
+    The HTTP-to-WebSocket bridge consumes upstream events through
+    ``_process_parsed_http_bridge_upstream_event``; the terminal frame must be
+    stamped on the matched request state the moment it is parsed, before the
+    durable alias / operation / circuit-settlement writes and the finalizer's
+    settlement, so none of that local time lands in the throughput sample.
+    """
+    clock = VirtualClock(monotonic_value=100.0)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock)
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock(return_value=True))
+    observed: dict[str, float | None] = {}
+
+    async def fake_finalize(request_state: proxy_service._WebSocketRequestState, **_kwargs: object) -> None:
+        # Local bookkeeping between the parse and the finalizer entry.
+        clock.advance(10.0)
+        observed["terminal_at"] = request_state.upstream_terminal_at
+        observed["finalizer_entered_at"] = clock.monotonic()
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", fake_finalize)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-terminal-stamp",
+        response_id="resp_bridge_terminal_stamp",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=clock.monotonic(),
+        transport="http",
+        response_create_sent_at=clock.monotonic(),
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-terminal-stamp",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {"type": "response.created", "response": {"id": "resp_bridge_terminal_stamp"}}, separators=(",", ":")
+        ),
+    )
+    assert request_state.upstream_terminal_at is None
+    clock.advance(12.0)
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_bridge_terminal_stamp",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {"input_tokens": 3_000, "output_tokens": 400},
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert observed == {"terminal_at": 112.0, "finalizer_entered_at": 122.0}
+    assert request_state.upstream_terminal_at == 112.0

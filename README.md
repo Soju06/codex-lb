@@ -122,6 +122,7 @@ for access guidance):
 
 - [Codex LB Status Bar](https://github.com/sm1ee/codex-lb-statusbar) — native macOS app: account status, quota details, account controls
 - [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — read-only SwiftBar/Bun monitor for pool status and quota headroom
+- [Codex LB Status](https://github.com/VictorStatko/codex-lb-status) — read-only Ubuntu tray monitor for pooled quota, account health, reset credits, and update state
 
 ## Development
 
@@ -322,6 +323,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/hongzexin"><img src="https://avatars.githubusercontent.com/u/136784169?v=4?s=100" width="100px;" alt="Jason HONG"/><br /><sub><b>Jason HONG</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=hongzexin" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/msmahdinejad"><img src="https://avatars.githubusercontent.com/u/154900233?v=4?s=100" width="100px;" alt="Mohammad Saleh Mahdinejad"/><br /><sub><b>Mohammad Saleh Mahdinejad</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=msmahdinejad" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=msmahdinejad" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Amsmahdinejad" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=msmahdinejad" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/MIlhamDedi"><img src="https://avatars.githubusercontent.com/u/29776899?v=4?s=100" width="100px;" alt="Muhammad Ilham Dedi"/><br /><sub><b>Muhammad Ilham Dedi</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=MIlhamDedi" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3AMIlhamDedi" title="Bug reports">🐛</a> <a href="https://github.com/Soju06/codex-lb/commits?author=MIlhamDedi" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/VictorStatko"><img src="https://avatars.githubusercontent.com/u/34319599?v=4?s=100" width="100px;" alt="Victor Statko"/><br /><sub><b>Victor Statko</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=VictorStatko" title="Documentation">📖</a></td>
     </tr>
   </tbody>
 </table>

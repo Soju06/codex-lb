@@ -777,6 +777,19 @@ class ResetCreditRedeemRequest(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
+class DesktopResetCreditRedemption(Base):
+    """Immutable pool selection, retained even if its owner is deleted."""
+
+    __tablename__ = "desktop_reset_credit_redemptions"
+
+    caller_account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    redeem_request_id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_account_id: Mapped[str] = mapped_column(String, nullable=False)
+    owner_chatgpt_account_id: Mapped[str] = mapped_column(String, nullable=False)
+    credit_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ResetCreditRedeemClaim(Base):
     """Cross-process per-account redeem serialization claim for SQLite.
 
@@ -1178,6 +1191,12 @@ class DashboardSettings(Base):
         nullable=False,
     )
     auto_redeem_reset_credits_before_expiry: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    desktop_reset_pool_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
         server_default=false(),

@@ -335,6 +335,8 @@ These rules are intentionally lightweight. They don't require:
 uv run pytest tests/unit/test_proxy_api_responses_contract.py -q
 ```
 
+PostgreSQL tests use a dedicated disposable database named `codex_lb_test`. Set `CODEX_LB_DATABASE_URL` and `CODEX_LB_TEST_DATABASE_URL` to that same database before running tests. Migration tests reset its `public` schema; never use a service database.
+
 ## Release process
 
 Releases are automated via [release-please](https://github.com/googleapis/release-please):

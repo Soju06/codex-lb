@@ -1,0 +1,13 @@
+## Decisions
+
+Desktop uses GET /wham/rate-limit-reset-credits and POST /wham/rate-limit-reset-credits/consume. The consume body contains an optional credit_id and a stable redeem_request_id, and the installed UI preserves both after a transport failure. The relay can route these calls without changing the installed app. The separate app-server reset tool remains original-account scoped.
+
+Pool redemption is an explicit operator opt-in stored in dashboard settings. It allows an authenticated imported ChatGPT account to redeem from the eligible pool. Disabled behavior retains the signed-in account's view and redemption scope. Existing quota, account identity, billing and subscription controls remain unchanged.
+
+Use existing per-account polling and reset clients. Add freshness metadata to the cache without changing existing dashboard reads. Pool reads require complete fresh inventory; refresh missing/stale snapshots with bounded concurrency and owned sessions. Reject inconsistent credit IDs/counts and exclude expired/ineligible credits. Unknown expiry sorts last. Missing pooled inventory removes the optional reset summary without fabricating a zero count or breaking valid quota.
+
+For a new redemption, refresh the pool and choose earliest expiry, then stable owner/credit order. An explicit credit_id selects only that listed credit. Persist caller identity + redeem_request_id -> owner + credit before consumption. Keep the binding after account deletion and without TTL so an old request cannot be reassigned. Preserve native idempotency keys for original-account requests and namespace cross-account keys by caller. Finish pre-adapter pending attempts before first enabling the pool. Use the existing per-owner serializer and idempotent upstream request, constrain the fresh recheck to the pinned credit, and return the actual upstream outcome. Never try another credit after an uncertain result. Recheck operator policy and owner eligibility at mutation admission. Pool inventory stays request-independent from account-owned billing.
+
+The new durable ledger has no foreign key to account rows: deleted owners remain tombstones for retry safety. The migration also adds the default-off dashboard policy column. No credentials enter the ledger. Local verification uses synthetic reset clients and isolated SQLite/PostgreSQL. A real-credit redemption requires a separate explicit user action.
+
+Disabling pooling retains every redemption binding. Downgrade refuses to remove a nonempty ledger. Do not roll back to a relay version that bypasses this adapter after pooling has accepted redemptions, because a pending automatic request must not be reinterpreted as a different original-account reset.

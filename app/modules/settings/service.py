@@ -57,6 +57,7 @@ class DashboardSettingsData:
     prefer_earlier_reset_window: str
     show_reset_credit_badges: bool
     auto_redeem_reset_credits_before_expiry: bool
+    desktop_reset_pool_enabled: bool
     show_reset_credit_expiry_badge: bool
     routing_strategy: str
     relative_availability_power: float
@@ -173,6 +174,7 @@ class DashboardSettingsUpdateData:
     prefer_earlier_reset_window: str
     show_reset_credit_badges: bool
     auto_redeem_reset_credits_before_expiry: bool
+    desktop_reset_pool_enabled: bool
     show_reset_credit_expiry_badge: bool
     routing_strategy: str
     relative_availability_power: float
@@ -322,6 +324,7 @@ class SettingsService:
             prefer_earlier_reset_window=payload.prefer_earlier_reset_window,
             show_reset_credit_badges=payload.show_reset_credit_badges,
             auto_redeem_reset_credits_before_expiry=payload.auto_redeem_reset_credits_before_expiry,
+            desktop_reset_pool_enabled=payload.desktop_reset_pool_enabled,
             show_reset_credit_expiry_badge=payload.show_reset_credit_expiry_badge,
             routing_strategy=payload.routing_strategy,
             relative_availability_power=payload.relative_availability_power,
@@ -559,6 +562,7 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         prefer_earlier_reset_window=row.prefer_earlier_reset_window,
         show_reset_credit_badges=row.show_reset_credit_badges,
         auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
+        desktop_reset_pool_enabled=row.desktop_reset_pool_enabled,
         show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
         routing_strategy=row.routing_strategy,
         relative_availability_power=row.relative_availability_power,

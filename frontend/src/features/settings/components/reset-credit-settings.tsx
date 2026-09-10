@@ -55,6 +55,14 @@ export function ResetCreditSettings({ settings, busy, onSave }: ResetCreditSetti
           disabled={busy}
           onCheckedChange={(checked) => save({ autoRedeemResetCreditsBeforeExpiry: checked })}
         />
+        <ResetCreditSwitchRow
+          label={t("settings.resetCredits.desktopPool.label")}
+          description={t("settings.resetCredits.desktopPool.description")}
+          ariaLabel={t("settings.resetCredits.desktopPool.ariaLabel")}
+          checked={settings.desktopResetPoolEnabled}
+          disabled={busy}
+          onCheckedChange={(checked) => save({ desktopResetPoolEnabled: checked })}
+        />
       </div>
     </section>
   );

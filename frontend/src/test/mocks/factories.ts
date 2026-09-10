@@ -513,6 +513,7 @@ export function createDashboardSettings(
 		preferEarlierResetWindow: "secondary",
 		showResetCreditBadges: true,
 		autoRedeemResetCreditsBeforeExpiry: false,
+		desktopResetPoolEnabled: false,
 		showResetCreditExpiryBadge: true,
 		routingStrategy: "usage_weighted",
 		relativeAvailabilityPower: 2,

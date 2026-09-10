@@ -35,6 +35,7 @@ TIERS: Final[tuple[Tier, ...]] = ("T0", "T1", "T2", "T3", "T4")
 # "may this value differ between two replicas / must it exist before the DB?".
 SETTING_TIERS: Final[dict[str, Tier]] = {
     "data_dir": "T0",
+    "desktop_relay_mode": "T1",
     "database_url": "T0",
     "database_pool_size": "T1",
     "database_max_overflow": "T1",

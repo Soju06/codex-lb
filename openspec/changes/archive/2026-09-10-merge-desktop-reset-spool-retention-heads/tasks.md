@@ -1,0 +1,4 @@
+- [x] Reproduce multiple heads through the public upgrade-head CLI after composition.
+- [x] Verify populated upgrades from both parents preserve settings and bindings.
+- [x] Add a no-op merge and verify merge-only downgrade and re-upgrade.
+- [x] Run affected controls and independent review; keep hosted proof bound to its candidate.

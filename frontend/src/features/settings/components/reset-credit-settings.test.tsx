@@ -32,10 +32,16 @@ describe("ResetCreditSettings", () => {
       "Show reset-credit badges",
       "Show reset action expiry",
       "Auto-redeem reset credits before expiry",
+      "Pool resets in Codex Desktop",
     ]);
   });
 
   it.each([
+    {
+      name: "Pool resets in Codex Desktop",
+      settings: createDashboardSettings({ desktopResetPoolEnabled: false }),
+      patch: { desktopResetPoolEnabled: true },
+    },
     {
       name: "Show reset-credit badges",
       settings: createDashboardSettings({ showResetCreditBadges: true }),
@@ -79,5 +85,6 @@ describe("ResetCreditSettings", () => {
     expect(screen.getByRole("switch", { name: "Show reset-credit badges" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Auto-redeem reset credits before expiry" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Show reset action expiry" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "Pool resets in Codex Desktop" })).toBeDisabled();
   });
 });

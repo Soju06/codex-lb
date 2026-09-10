@@ -82,6 +82,7 @@ class DashboardSettingsResponse(DashboardModel):
     prefer_earlier_reset_window: str = Field(pattern=r"^(primary|secondary)$")
     show_reset_credit_badges: bool
     auto_redeem_reset_credits_before_expiry: bool
+    desktop_reset_pool_enabled: bool
     show_reset_credit_expiry_badge: bool
     routing_strategy: str = Field(
         pattern=r"^(usage_weighted|round_robin|capacity_weighted|relative_availability|fill_first|sequential_drain|reset_drain|single_account)$"
@@ -248,6 +249,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     prefer_earlier_reset_window: str | None = Field(default=None, pattern=r"^(primary|secondary)$")
     show_reset_credit_badges: bool | None = None
     auto_redeem_reset_credits_before_expiry: bool | None = None
+    desktop_reset_pool_enabled: bool | None = None
     show_reset_credit_expiry_badge: bool | None = None
     routing_strategy: str | None = Field(
         default=None,

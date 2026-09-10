@@ -1,0 +1,5 @@
+- [x] 1. Add pool selection, fresh inventory and durable owner/credit binding with concurrency and failure coverage.
+- [x] 2. Add the default-off policy, migration and existing settings UI control with API/UI tests.
+- [x] 3. Wire native inventory, consume and usage-summary paths; prove disabled compatibility, explicit selection and retry safety with real route tests.
+- [x] 4. Verify source-bound tests, migration, UI and installed-client request contracts without consuming real credits.
+- [x] 5. Archive verified artifacts, publish a non-draft follow-up PR in the established format, and inspect current-head checks/review.

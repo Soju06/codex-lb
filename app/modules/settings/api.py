@@ -246,6 +246,7 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         prefer_earlier_reset_window=settings.prefer_earlier_reset_window,
         show_reset_credit_badges=settings.show_reset_credit_badges,
         auto_redeem_reset_credits_before_expiry=settings.auto_redeem_reset_credits_before_expiry,
+        desktop_reset_pool_enabled=settings.desktop_reset_pool_enabled,
         show_reset_credit_expiry_badge=settings.show_reset_credit_expiry_badge,
         routing_strategy=settings.routing_strategy,
         relative_availability_power=settings.relative_availability_power,
@@ -1277,6 +1278,11 @@ async def update_settings(
                     if payload.auto_redeem_reset_credits_before_expiry is not None
                     else current.auto_redeem_reset_credits_before_expiry
                 ),
+                desktop_reset_pool_enabled=(
+                    payload.desktop_reset_pool_enabled
+                    if payload.desktop_reset_pool_enabled is not None
+                    else current.desktop_reset_pool_enabled
+                ),
                 show_reset_credit_expiry_badge=(
                     payload.show_reset_credit_expiry_badge
                     if payload.show_reset_credit_expiry_badge is not None
@@ -1553,6 +1559,7 @@ async def update_settings(
             "prefer_earlier_reset_window",
             "show_reset_credit_badges",
             "auto_redeem_reset_credits_before_expiry",
+            "desktop_reset_pool_enabled",
             "show_reset_credit_expiry_badge",
             "routing_strategy",
             "relative_availability_power",

@@ -1407,6 +1407,7 @@ async def test_consume_handler_audits_live_available_count_before_when_cache_mis
     async def _redeem(**kwargs: Any) -> Any:
         return reset_credits_api._RedeemResetCreditOutcome(
             response=ConsumeResetCreditResponseSchema(code="reset", windows_reset=1, redeemed_at=None),
+            upstream=ConsumeResetCreditResponse.model_validate({"code": "reset", "windows_reset": 1, "credit": {}}),
             available_count_before=3,
             available_count_after=2,
         )

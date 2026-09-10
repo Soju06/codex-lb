@@ -17,6 +17,7 @@ export function buildSettingsUpdateRequest(
     preferEarlierResetWindow: settings.preferEarlierResetWindow,
     showResetCreditBadges: settings.showResetCreditBadges,
     autoRedeemResetCreditsBeforeExpiry: settings.autoRedeemResetCreditsBeforeExpiry,
+    desktopResetPoolEnabled: settings.desktopResetPoolEnabled,
     showResetCreditExpiryBadge: settings.showResetCreditExpiryBadge,
     routingStrategy: settings.routingStrategy,
     relativeAvailabilityPower: settings.relativeAvailabilityPower,

@@ -257,6 +257,32 @@ def _configured_http_port() -> int:
     return 2455
 
 
+def record_http_listener(*, host: str, port: int, ssl_certfile: str | None, ssl_keyfile: str | None) -> None:
+    # Preserve the CLI-selected listener in the process configuration that
+    # startup validation reads, including explicit CLI overrides of env values.
+    os.environ["PORT"] = str(port)
+    os.environ["HOST"] = host
+    os.environ["SSL_CERTFILE"] = ssl_certfile or ""
+    os.environ["SSL_KEYFILE"] = ssl_keyfile or ""
+
+
+def desktop_relay_lb_origin(mode: Literal["off", "loopback", "container"]) -> str | None:
+    if mode == "off":
+        return None
+    message = "Embedded Desktop relay requires a fixed main HTTP port from 1 to 65535, except 8000"
+    try:
+        port = int(os.getenv("PORT", "2455"))
+    except ValueError:
+        raise ValueError(message) from None
+    if not 1 <= port <= 65535 or port == 8000:
+        raise ValueError(message)
+    if os.getenv("HOST", "127.0.0.1") not in {"127.0.0.1", "0.0.0.0", "localhost"}:
+        raise ValueError("Embedded Desktop relay requires main HOST 127.0.0.1, localhost or 0.0.0.0")
+    if os.getenv("SSL_CERTFILE") or os.getenv("SSL_KEYFILE"):
+        raise ValueError("Embedded Desktop relay requires local HTTP; TLS listeners are unsupported")
+    return f"http://127.0.0.1:{port}"
+
+
 def _normalize_cidr_list(value: StringListInput, *, field_name: str, invalid_label: str) -> list[str]:
     if value is None:
         return []
@@ -291,6 +317,7 @@ class Settings(BaseSettings):
     )
 
     data_dir: Path = Field(default_factory=_default_home_dir)
+    desktop_relay_mode: Literal["off", "loopback", "container"] = "off"
     database_url: str = DEFAULT_DATABASE_URL
     # Pool timeout and recycle are fixed constants in ``app/db/session.py``;
     # the background-task engine always derives its pool sizing from the two

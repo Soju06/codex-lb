@@ -362,7 +362,7 @@ def _usage_payload_or_raise(data: JsonObject, status: int) -> UsagePayload:
         )
         raise UsageFetchError(status, message, code=code)
     try:
-        return UsagePayload.model_validate(data)
+        return UsagePayload.from_upstream(data)
     except ValidationError as exc:
         logger.warning(
             "Usage fetch invalid payload request_id=%s",

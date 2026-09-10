@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 import anyio
@@ -22,6 +23,7 @@ class RateLimitResetCreditsStore:
 
     def __init__(self) -> None:
         self._snapshots: dict[str, RateLimitResetCreditsSnapshot] = {}
+        self._observed_at: dict[str, float] = {}
         self._lock = anyio.Lock()
         self._clear_generation = 0
         self._account_generations: dict[str, int] = {}
@@ -29,6 +31,7 @@ class RateLimitResetCreditsStore:
     async def set(self, account_id: str, snapshot: RateLimitResetCreditsSnapshot) -> None:
         async with self._lock:
             self._snapshots[account_id] = snapshot
+            self._observed_at[account_id] = time.monotonic()
             self._bump_account_generation(account_id)
 
     def generation(self, account_id: str) -> int:
@@ -44,6 +47,7 @@ class RateLimitResetCreditsStore:
             if self._generation_for(account_id) != expected_generation:
                 return False
             self._snapshots[account_id] = snapshot
+            self._observed_at[account_id] = time.monotonic()
             self._bump_account_generation(account_id)
             return True
 
@@ -74,10 +78,17 @@ class RateLimitResetCreditsStore:
     def get(self, account_id: str) -> RateLimitResetCreditsSnapshot | None:
         return self._snapshots.get(account_id)
 
+    def get_fresh(self, account_id: str, *, max_age_seconds: float) -> RateLimitResetCreditsSnapshot | None:
+        observed = self._observed_at.get(account_id)
+        if observed is None or time.monotonic() - observed >= max_age_seconds:
+            return None
+        return self._snapshots.get(account_id)
+
     async def invalidate(self, account_id: str | None = None) -> None:
         async with self._lock:
             if account_id is None:
                 self._snapshots.clear()
+                self._observed_at.clear()
                 self._clear_generation += 1
                 return
             self._snapshots.pop(account_id, None)

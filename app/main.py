@@ -35,6 +35,7 @@ from app.core.config.settings import (
     Settings,
     _bridge_advertise_hostname_is_replica_specific,
     _parse_port_value,
+    desktop_relay_lb_origin,
     get_settings,
     warn_removed_settings,
 )
@@ -99,6 +100,9 @@ from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
 from app.modules.dashboard_roles import api as dashboard_roles_api
 from app.modules.dashboard_users import api as dashboard_users_api
+from app.modules.desktop_relay.lifecycle import serve_relay
+from app.modules.desktop_resets import api as desktop_resets_api
+from app.modules.desktop_usage import api as desktop_usage_api
 from app.modules.firewall import api as firewall_api
 from app.modules.fleet import api as fleet_api
 from app.modules.health import api as health_api
@@ -505,6 +509,7 @@ async def lifespan(app: FastAPI):
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
     settings = get_settings()
+    desktop_relay_origin = desktop_relay_lb_origin(settings.desktop_relay_mode)
     warn_removed_settings()
     validate_runtime_timeout_invariants(settings)
     # Anchor round-robin tie-break decorrelation to this replica's stable bridge
@@ -806,10 +811,10 @@ async def lifespan(app: FastAPI):
                 warn_threshold_seconds=settings.event_loop_lag_warn_threshold_seconds,
             )
         )
-    startup_module._startup_complete = True
-
     try:
-        yield
+        async with serve_relay(settings.desktop_relay_mode, desktop_relay_origin):
+            startup_module._startup_complete = True
+            yield
     finally:
         shutdown_state.commit_shutdown(timeout_seconds=settings.shutdown_drain_timeout_seconds)
         remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
@@ -1028,6 +1033,8 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.transcribe_router)
     app.include_router(proxy_api.files_router)
     app.include_router(proxy_api.usage_router)
+    app.include_router(desktop_usage_api.router)
+    app.include_router(desktop_resets_api.router)
     app.include_router(audit_api.router)
     app.include_router(accounts_api.router)
     app.include_router(rate_limit_reset_credits_api.router)

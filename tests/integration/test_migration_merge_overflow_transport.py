@@ -182,16 +182,14 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     assert result.current_revision == head
     assert _revisions(database.engine) == (head,)
     merged = _state(database.engine)
-    # Revisions after the merge add dashboard_settings columns (the resilience
-    # toggles, the guest session counter, ...). Whether nullable or NOT NULL
-    # with a server default, each is backfilled uniformly, so it carries no
-    # per-row state: assert one value across rows and compare the rest
-    # separately, so this test keeps covering the two original branches.
+    # Later nullable overrides inherit; the two nonnullable policies have
+    # explicit zero defaults. Preserve those values and the original rows.
     merged_settings = [dict(row) for row in merged["settings"]]
     added_columns = set(merged_settings[0]) - set(expected_settings[0])
-    for column in added_columns:
-        backfilled = {row.pop(column) for row in merged_settings}
-        assert len(backfilled) == 1, (column, backfilled)
+    for row in merged_settings:
+        for column in added_columns:
+            expected_default = 0 if column in {"desktop_reset_pool_enabled", "guest_session_generation"} else None
+            assert row.pop(column) == expected_default
     assert merged_settings == expected_settings
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
     assert merged["pins"] == (before["pins"] if before["pins"] is not None else [])

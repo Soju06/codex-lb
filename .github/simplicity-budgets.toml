@@ -53,8 +53,8 @@ max_items = 5
 # K2 bridge: constantize-session-bridge-tunables fixed seven never-tuned
 # HTTP session bridge tunables; 96 -> 95 drop-bridge-recovery-modes deleted
 # the ambiguous-continuation recovery mode selector (fail-closed is the only
-# behaviour now).
-max = 95
+# behaviour now); 95 -> 96 adds the opt-in Desktop relay topology.
+max = 96
 
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and

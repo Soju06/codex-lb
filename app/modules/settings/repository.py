@@ -54,6 +54,7 @@ class SettingsRepository:
             prefer_earlier_reset_window="secondary",
             show_reset_credit_badges=True,
             auto_redeem_reset_credits_before_expiry=False,
+            desktop_reset_pool_enabled=False,
             show_reset_credit_expiry_badge=True,
             routing_strategy="capacity_weighted",
             relative_availability_power=2.0,
@@ -149,6 +150,7 @@ class SettingsRepository:
         prefer_earlier_reset_window: str | None = None,
         show_reset_credit_badges: bool | None = None,
         auto_redeem_reset_credits_before_expiry: bool | None = None,
+        desktop_reset_pool_enabled: bool | None = None,
         show_reset_credit_expiry_badge: bool | None = None,
         routing_strategy: str | None = None,
         relative_availability_power: float | None = None,
@@ -310,6 +312,8 @@ class SettingsRepository:
             settings.show_reset_credit_badges = show_reset_credit_badges
         if auto_redeem_reset_credits_before_expiry is not None:
             settings.auto_redeem_reset_credits_before_expiry = auto_redeem_reset_credits_before_expiry
+        if desktop_reset_pool_enabled is not None:
+            settings.desktop_reset_pool_enabled = desktop_reset_pool_enabled
         if show_reset_credit_expiry_badge is not None:
             settings.show_reset_credit_expiry_badge = show_reset_credit_expiry_badge
         if routing_strategy is not None:

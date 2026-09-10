@@ -223,9 +223,14 @@ async def test_unrelated_settings_save_keeps_guest_sessions(app_instance: FastAP
                 await guest.post("/api/dashboard-auth/guest/login", json={"password": GUEST_PASSWORD})
             ).status_code == 200
 
+            denied = await guest.put("/api/settings", json={"desktopResetPoolEnabled": True})
+            assert denied.status_code == 403, denied.text
+            assert denied.json()["error"]["code"] == "read_only_access"
+
             async with _local(app_instance) as local_client:
                 current = (await local_client.get("/api/settings")).json()
                 await _put_settings(local_client, stickyThreadsEnabled=not current["stickyThreadsEnabled"])
+                await _put_settings(local_client, desktopResetPoolEnabled=not current["desktopResetPoolEnabled"])
                 # Re-saving guestAccessEnabled=True (no transition) is not a bump either.
                 await _put_settings(local_client, guestAccessEnabled=True)
 

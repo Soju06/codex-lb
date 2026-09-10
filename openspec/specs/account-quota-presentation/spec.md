@@ -70,4 +70,3 @@ unchanged.
 - **GIVEN** the user prefers reduced motion
 - **WHEN** a fresh valid percentage replaces the displayed percentage
 - **THEN** the quota surface displays the fresh percentage without animation
-

@@ -473,4 +473,3 @@ model.
   separate reasoning control
 - **THEN** the source receives model `gpt-5.6-sol`
 - **AND** it receives `reasoning_effort: "xhigh"`
-

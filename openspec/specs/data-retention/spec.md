@@ -186,4 +186,3 @@ validation error.
 - **WHEN** the application starts and the retention job runs
 - **THEN** startup logs the removed-settings warning naming `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS`
 - **AND** the effective usage-history retention is `0` and no rows are deleted
-

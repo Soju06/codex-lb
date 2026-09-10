@@ -264,4 +264,3 @@ Recovery-settlement cleanup runs after the drain barrier, so it MUST be bounded 
 
 - **WHEN** configuration supplies zero, a negative value, or a value above 300
 - **THEN** settings validation fails
-

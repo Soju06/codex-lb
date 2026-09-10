@@ -73,4 +73,3 @@ The system SHALL store an API key's visible usage sections in a `usage_sections`
 - **WHEN** an API key has `usage_sections` set to `""`
 - **AND** a client calls `GET /v1/usage`
 - **THEN** `upstream_limits` is an empty list AND `account_pool_usage` is `null`
-

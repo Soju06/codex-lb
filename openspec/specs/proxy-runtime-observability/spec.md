@@ -1333,4 +1333,3 @@ The dashboard request-log API MUST return request rows and non-identifying opera
 - **WHEN** an admin principal requests `GET /api/request-logs` with that `conversation_id`
 - **THEN** only matching request rows are returned
 - **AND** the response retains the matching request count and aggregated conversation cost
-

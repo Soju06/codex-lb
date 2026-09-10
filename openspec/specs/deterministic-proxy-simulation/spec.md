@@ -162,4 +162,3 @@ rot.
   a pending task
 - **THEN** the checker fails each planted implementation by the invariant it
   violates
-

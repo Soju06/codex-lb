@@ -120,4 +120,3 @@ The system MUST apply the same `validate_proxy_api_key` and dashboard `apiKeyAut
 
 - **WHEN** a file-create or file-finalize request omits the required-capability carrier
 - **THEN** the existing authentication, validation, reservation, routing, and response behavior remains in effect
-

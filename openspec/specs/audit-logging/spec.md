@@ -75,4 +75,3 @@ Enabling the conversation archive turns the proxy into a full recorder of prompt
 - **WHEN** an admin flips the archive switch on in the dashboard
 - **THEN** a confirmation dialog states that all prompt/response bodies will be written to each replica's local archive directory
 - **AND** no request is sent until the dialog's confirm action is used; cancelling leaves the setting unchanged
-

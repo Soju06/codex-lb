@@ -75,4 +75,3 @@ The system SHALL NOT serve the predecessor routes `POST /api/accounts/{id}/expor
 - **WHEN** a client calls `POST /api/accounts/acct-123/export/opencode-auth`
 - **THEN** the request is rejected as an unmatched route (`404`, or `405` when a catch-all partially matches the path)
 - **AND** no credential material is returned
-

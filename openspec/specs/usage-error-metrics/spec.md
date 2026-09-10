@@ -248,4 +248,3 @@ copy and a visual treatment distinct from error.
 - **THEN** the status filter includes a localized Cancelled option
 - **AND** the row and request details use the localized cancelled label
 - **AND** the cancelled badge is visually distinct from the error badge
-

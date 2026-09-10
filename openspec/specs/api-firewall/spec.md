@@ -153,4 +153,3 @@ The application MUST fail settings validation when `firewall_trust_proxy_headers
 - **AND** `firewall_trusted_proxy_cidrs` normalizes to an empty list
 - **THEN** settings validation succeeds
 - **AND** forwarded client-IP headers remain untrusted
-

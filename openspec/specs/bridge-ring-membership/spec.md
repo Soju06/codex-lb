@@ -40,4 +40,3 @@ The background cleanup loop MUST delete `bridge_ring_members` rows whose heartbe
 - **AND** one ring row's heartbeat is older than 24 hours while another's is recent
 - **THEN** the old row is deleted
 - **AND** the recent row is preserved
-

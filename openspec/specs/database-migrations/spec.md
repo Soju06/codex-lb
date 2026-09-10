@@ -510,4 +510,3 @@ remain for operator recovery.
 - **WHEN** recovery is invoked in either replace or non-replace mode
 - **THEN** recovery MUST fail before deleting sidecars, writing output, or
   moving the source
-

@@ -89,4 +89,3 @@ The dashboard OAuth client MUST isolate in-flight status polls and start continu
 - **THEN** the client completes flow A
 - **AND** it marks the live flow success
 - **AND** it invalidates account and dashboard caches
-

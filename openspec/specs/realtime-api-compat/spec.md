@@ -194,4 +194,3 @@ Capability-bearing private Realtime requests MUST authenticate and fail closed o
 
 - **WHEN** a Realtime call or sideband request omits the required-capability carrier
 - **THEN** the existing registered-key, immutable-owner, and transport behavior remains in effect
-

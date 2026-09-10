@@ -116,4 +116,3 @@ Warmup request rows SHALL be excluded from aggregate dashboard request/error/cos
 
 - **WHEN** a warmup request omits the required-capability carrier
 - **THEN** the existing authentication, mode, account-scope, and fan-out behavior remains in effect
-

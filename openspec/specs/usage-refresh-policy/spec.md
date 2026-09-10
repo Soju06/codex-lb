@@ -2206,4 +2206,3 @@ with zero configuration and MUST NOT require an operator setting.
 - **GIVEN** an active workspace-less account with stored `plan_type` `plus`
 - **WHEN** two refreshes of that account observe `plan_type` `free` concurrently
 - **THEN** the recorded observation count reflects both observations rather than one
-

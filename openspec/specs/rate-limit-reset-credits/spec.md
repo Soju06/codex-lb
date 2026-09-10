@@ -330,4 +330,3 @@ The dashboard setting `rate_limit_reset_credits_refresh_enabled` (a nullable `da
 - **GIVEN** `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED=false` and no dashboard value
 - **WHEN** an operator sets `rate_limit_reset_credits_refresh_enabled` to `true` in the dashboard
 - **THEN** refresh cycles fetch again and `provenance.rate_limit_reset_credits_refresh_enabled.source` is `dashboard`
-

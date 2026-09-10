@@ -22,4 +22,3 @@ suppressed.
 
 - **WHEN** the loopback OAuth callback server suppresses its access record
 - **THEN** global application and proxy access-logging configuration remains unchanged
-

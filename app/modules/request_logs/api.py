@@ -80,6 +80,12 @@ async def list_request_logs(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    # Repeated ``source`` values, matched as an opaque equality set. Not
+    # validated server-side (same contract as ``status``/``accountId``); the
+    # closed two-value domain the dashboard offers lives in the UI. Deliberately
+    # absent from ``/options``: a two-value domain does not justify a fifth
+    # ``DISTINCT`` pass over the history on every panel load.
+    source: list[str] | None = Query(default=None),
     timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
@@ -107,6 +113,7 @@ async def list_request_logs(
         models=model,
         reasoning_efforts=reasoning_effort,
         status=status,
+        sources=source,
         cache_mode="timeframe" if cache_timeframe is not None else "since",
         timeframe=cache_timeframe,
         include_sensitive_metadata=principal.role == DashboardRole.ADMIN,

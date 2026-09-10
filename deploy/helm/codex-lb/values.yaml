@@ -134,9 +134,8 @@ config:
   # @param config.upstreamBaseUrl Override OpenAI upstream base URL (empty = default)
   upstreamBaseUrl: ""
   # @param config.upstreamConnectTimeout Upstream connection timeout seconds
+  # (deprecated env alias since 1.25: a value saved in Settings -> Advanced -> Upstream timeouts wins)
   upstreamConnectTimeout: 10
-  # @param config.upstreamStreamTransport Upstream streaming transport (auto|websocket|http)
-  upstreamStreamTransport: auto
   # @param config.logFormat Log output format (json|text)
   logFormat: json
   # @param config.leaderElectionEnabled Enable DB-based leader election
@@ -144,7 +143,8 @@ config:
   # @param config.leaderElectionTtlSeconds Leader election TTL in seconds
   leaderElectionTtlSeconds: 30
   # @param config.circuitBreakerEnabled Enable circuit breaker for upstream requests
-  # (failure threshold and recovery timeout are fixed application constants)
+  # (failure threshold and recovery timeout are fixed application constants;
+  # deprecated env alias since 1.25: a value saved in Settings -> Advanced -> Resilience wins)
   circuitBreakerEnabled: true
   # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
   backpressureMaxConcurrentRequests: 0
@@ -154,16 +154,9 @@ config:
   httpConnectorLimit: 100
   # @param config.httpConnectorLimitPerHost Per-host HTTP connection pool limit
   httpConnectorLimitPerHost: 50
-  # @param config.cacheAffinityMaxAgeSeconds TTL for prompt cache sticky sessions (account affinity)
-  cacheAffinityMaxAgeSeconds: 1800
-  # @param config.promptCacheKeyDerivationEnabled Auto-derive prompt cache keys when client omits them
-  promptCacheKeyDerivationEnabled: true
   # @param config.sessionBridgeEnabled Enable in-memory upstream WebSocket session reuse
+  # (idle TTLs are fixed application constants: 120s for API sessions, 900s for Codex sessions)
   sessionBridgeEnabled: true
-  # @param config.sessionBridgeIdleTtlSeconds Idle TTL for general API session bridge sessions
-  sessionBridgeIdleTtlSeconds: 120
-  # @param config.sessionBridgeCodexIdleTtlSeconds Idle TTL for Codex session bridge sessions
-  sessionBridgeCodexIdleTtlSeconds: 900
   # @param config.sessionBridgeCodexPrewarmEnabled Proactively open upstream WebSocket for Codex sessions (off by default; matches Settings / OpenSpec)
   sessionBridgeCodexPrewarmEnabled: false
   # @param config.sessionBridgeMaxSessions Max in-memory bridge sessions per pod
@@ -174,9 +167,6 @@ config:
   sessionBridgeInstanceRing: ""
   # @param config.sessionBridgeAdvertiseBaseUrl Optional explicit owner-handoff base URL. Empty = auto-advertise headless-service DNS for the current pod
   sessionBridgeAdvertiseBaseUrl: ""
-  # @param config.stickySessionCleanupEnabled Enable periodic cleanup of stale sticky sessions
-  # (the cleanup interval is a fixed application constant)
-  stickySessionCleanupEnabled: true
 
 # @section Authentication parameters
 auth:
@@ -494,6 +484,9 @@ migration:
   # @param migration.enabled Run database migration Job on install/upgrade
   enabled: true
   # @param migration.serviceSelectorMode Public Service selector mode during controller migration (auto keeps legacy during first upgrade/cutover and workload after cutover)
+  # DEPRECATED: part of the pre-1.13 Deployment -> StatefulSet migration shim (with the
+  # legacy-deployment-*-hook.yaml Jobs). Planned removal in the first minor release after
+  # 1.26; the Service will then always select the StatefulSet pods. See README "Upgrading".
   serviceSelectorMode: auto
   # @param migration.backoffLimit Maximum retries before marking Job failed
   backoffLimit: 3

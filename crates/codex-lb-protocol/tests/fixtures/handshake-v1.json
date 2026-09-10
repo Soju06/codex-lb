@@ -11,7 +11,13 @@
       "failure_provenance_v1",
       "http",
       "http2_profile_v1",
+      "http_compact_collect_v1",
+      "http_compact_sse_v1",
+      "http_sse_v1",
+      "http_responses_events_v1",
+      "http_responses_completion_v1",
       "websocket",
+      "websocket_responses_events_v1",
       "websocket_send_ack"
     ]
   }

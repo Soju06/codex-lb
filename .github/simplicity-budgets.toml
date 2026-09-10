@@ -27,6 +27,33 @@ path = "frontend/src/components/layout/app-header.tsx"
 array = "CORE_NAV_ITEMS"
 max_items = 5
 
+[settings_fields]
+# Ratchet on len(Settings.model_fields) (issue #1340, PRINCIPLES.md P2).
+# Enforced by scripts/check_settings_tiers.py via `make lint` (counting the
+# fields needs the app importable, which the stdlib-only budgets script above
+# cannot do), and read by tests/unit/test_settings_reference.py. Lower it when
+# removing fields; raising it must happen in the same diff that adds the field,
+# with a why-not-a-default justification in the PR body (the
+# simplicity-budget-approved label override does not apply to this section;
+# `make lint` enforces the number as written).
+# History (pre-toml, from tests/unit/test_settings_reference.py):
+# 115 -> 116 clean_close_retry_jitter (#1394); 116 -> 117 fair-share gate
+# (#1535); 117 -> 126 durable bridge continuity controls (#1657);
+# 126 -> 127 reset-credit polling toggle (#1701); 127 -> 129 telemetry
+# (#1618); 129 -> 130 timeout_invariant_validation_strict (#1622);
+# 131 -> 132 operation_spool_format; 132 -> 133 server_recovery_max_attempts
+# (#1633); 133 -> 135 (2026-09 audit baseline, 04-config-inventory Table 1);
+# 135 -> 134 upstream_stream_transport removed (dashboard row is the only
+# source); 134 -> 137 connect_address, additional_quota_registry_file,
+# forwarded_allow_ips promoted from ad-hoc os.environ reads (slop-removal
+# 0908); 137 -> 130 remove-dead-env-settings dropped the deprecated retention
+# aliases, four dashboard-owned env fields and workers_per_instance (#2190);
+# 130 -> 103 constantize-core-tunables turned 27 never-tuned core tunables
+# into fixed constants (#1340 precedent, slop-removal 0908 K1); 103 -> 96
+# K2 bridge: constantize-session-bridge-tunables fixed seven never-tuned
+# HTTP session bridge tunables.
+max = 96
+
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and
 # directories), compared against `git ls-tree --name-only HEAD`. A new root
@@ -36,6 +63,7 @@ allowed = [
   ".agents",
   ".all-contributorsrc",
   ".claude",
+  ".coderabbit.yaml",
   ".dockerignore",
   ".env.example",
   ".gitattributes",

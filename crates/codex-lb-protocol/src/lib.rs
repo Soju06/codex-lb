@@ -10,7 +10,13 @@ pub const CAPABILITIES: &[&str] = &[
     "failure_provenance_v1",
     "http",
     "http2_profile_v1",
+    "http_compact_collect_v1",
+    "http_compact_sse_v1",
+    "http_sse_v1",
+    "http_responses_events_v1",
+    "http_responses_completion_v1",
     "websocket",
+    "websocket_responses_events_v1",
     "websocket_send_ack",
 ];
 
@@ -51,9 +57,23 @@ pub struct NativeRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
-    pub timeout_ms: u64,
+    pub timeout_ms: Option<u64>,
     pub connect_timeout_ms: Option<u64>,
     pub proxy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse: Option<NativeSseOptions>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+pub struct NativeSseOptions {
+    pub idle_timeout_ms: u64,
+    pub max_event_bytes: usize,
+    #[serde(default)]
+    pub content_type_aware: bool,
+    #[serde(default)]
+    pub collect_compact: bool,
+    #[serde(default)]
+    pub interpret_responses: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -66,6 +86,12 @@ pub struct NativeWebSocketRequest {
     pub ping_interval_ms: Option<u64>,
     pub ping_timeout_ms: Option<u64>,
     pub proxy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interpret_responses: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Deserialize, Serialize)]
@@ -85,6 +111,30 @@ pub enum NativeEvent {
         request_id: String,
         data: String,
     },
+    Sse {
+        request_id: String,
+        text: String,
+        more: bool,
+    },
+    ResponsesEvent {
+        request_id: String,
+        text: String,
+        more: bool,
+        event_type: Option<String>,
+        python_normalization: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        stream_complete: bool,
+    },
+    SseEventTooLarge {
+        request_id: String,
+        size_bytes: usize,
+        limit_bytes: usize,
+    },
+    Compact {
+        request_id: String,
+        text: String,
+        more: bool,
+    },
     End {
         request_id: String,
     },
@@ -96,6 +146,12 @@ pub enum NativeEvent {
     WebsocketText {
         request_id: String,
         text: String,
+    },
+    WebsocketResponsesText {
+        request_id: String,
+        text: String,
+        event_type: Option<String>,
+        payload: Box<serde_json::value::RawValue>,
     },
     WebsocketBinary {
         request_id: String,

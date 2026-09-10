@@ -6,12 +6,19 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, select
 
-from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.metrics.prometheus import model_source_live_pins
 from app.core.utils.time import utcnow
 from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.usage_rollup import FOLD_LAG
+from app.modules.proxy.model_source_pins import (
+    PIN_KIND_ANCHOR,
+    PIN_KIND_BOUNCE,
+    PIN_KIND_THREAD,
+    ModelSourcePinRepository,
+    drain_deadline_from_settings,
+)
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 logger = logging.getLogger(__name__)
@@ -19,6 +26,10 @@ logger = logging.getLogger(__name__)
 # Rows deleted per transaction; a large backlog drains across many short
 # transactions instead of holding one long one.
 BATCH_SIZE = 10_000
+
+# Every ``kind`` label of ``codex_lb_model_source_live_pins`` is published on each
+# sample (``0`` when absent) so a kind that emptied never lingers at its last value.
+LIVE_PIN_KINDS: tuple[str, ...] = (PIN_KIND_THREAD, PIN_KIND_ANCHOR, PIN_KIND_BOUNCE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,33 +43,30 @@ class EffectiveRetention:
 
 
 async def get_effective_retention() -> EffectiveRetention:
-    """Resolve the retention windows with dashboard-first precedence.
+    """Resolve the retention windows from the dashboard runtime settings.
 
-    A non-NULL dashboard value (SettingsCache-backed, so a dashboard change
-    takes effect without restart) wins; while the dashboard value is unset the
-    deprecated env alias applies; 0 means disabled at either layer.
+    The dashboard value (SettingsCache-backed, so a change takes effect
+    without restart) is the only source: NULL means never configured, which
+    is disabled, and 0 means explicitly disabled.
     """
-    env = get_settings()
     dashboard = await get_settings_cache().get()
     return EffectiveRetention(
-        request_log_days=(
-            env.request_log_retention_days
-            if dashboard.request_log_retention_days is None
-            else dashboard.request_log_retention_days
-        ),
-        usage_history_days=(
-            env.usage_history_retention_days
-            if dashboard.usage_history_retention_days is None
-            else dashboard.usage_history_retention_days
-        ),
+        request_log_days=dashboard.request_log_retention_days or 0,
+        usage_history_days=dashboard.usage_history_retention_days or 0,
     )
 
 
 async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
-    """Prune aged rows per the effective retention settings. Returns rows deleted per table."""
+    """Prune aged rows per the effective retention settings. Returns rows deleted per table.
+
+    The request-log and usage-history windows are opt-in; the model-source pin
+    purge is not (every pin row carries its own ``purge_at``, design §8.8), so
+    it runs on every pass whatever the windows say. The live-pin gauge is
+    sampled right after the purge on the same (leader-gated, hourly) tick.
+    """
     retention = await get_effective_retention()
     now = now or utcnow()
-    deleted = {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    deleted = {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 0}
     if retention.request_log_days:
         cutoff = now - timedelta(days=retention.request_log_days)
         deleted["request_logs"] = await _prune_request_logs(cutoff, now=now)
@@ -66,15 +74,82 @@ async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
         cutoff = now - timedelta(days=retention.usage_history_days)
         deleted["usage_history"] = await _prune_usage_history(cutoff)
         deleted["additional_usage_history"] = await _prune_additional_usage_history(cutoff)
+    deleted["model_source_pins"] = await prune_model_source_pins()
+    await sample_model_source_live_pins(now=now)
     total = sum(deleted.values())
     if total:
         logger.info(
-            "Retention pruned rows request_logs=%s usage_history=%s additional_usage_history=%s",
+            "Retention pruned rows request_logs=%s usage_history=%s additional_usage_history=%s model_source_pins=%s",
             deleted["request_logs"],
             deleted["usage_history"],
             deleted["additional_usage_history"],
+            deleted["model_source_pins"],
         )
     return deleted
+
+
+async def prune_model_source_pins(*, batch_size: int = BATCH_SIZE) -> int:
+    """Delete model-source pin rows whose ``purge_at`` has passed on the database clock.
+
+    ``pin_key``-keyed batches, one short transaction each under the SQLite
+    writer section, until a batch comes back short. Independent of the
+    retention opt-in: a purged pin answers no lookup any more (its tombstone
+    grace is over), so keeping the row buys nothing. Afterwards the drain
+    invariant is checked: while a drain deadline is armed every row must have
+    ``purge_at < drain_until`` (the drain cap), so a later ``purge_at`` is a bug
+    worth a WARN, never something to repair here.
+    """
+    total = 0
+    while True:
+        async with get_background_session() as session:
+            async with sqlite_writer_section():
+                deleted = await ModelSourcePinRepository(session).prune_purged(batch_size=batch_size)
+                await session.commit()
+        total += deleted
+        if deleted < batch_size:
+            break
+    await _warn_on_model_source_pin_drain_invariant()
+    return total
+
+
+async def sample_model_source_live_pins(*, now: datetime) -> dict[str, int]:
+    """Publish ``codex_lb_model_source_live_pins{kind}`` from one ``COUNT ... GROUP BY kind``.
+
+    Rides the hourly retention tick instead of a dedicated task (owner decision
+    2026-09-09): the pass already runs leader-gated once an hour, so the gauge
+    is an hourly sample scraped from whichever replica holds the lease. Every
+    kind in ``LIVE_PIN_KINDS`` is published; a failure is logged and never
+    fails the pass. Returns the sample (empty on failure).
+    """
+    try:
+        async with get_background_session() as session:
+            counts = await ModelSourcePinRepository(session).count_live_by_kind(now=now)
+    except Exception:
+        logger.exception("Retention: model-source live-pin sample failed")
+        return {}
+    sample = {kind: counts.get(kind, 0) for kind in LIVE_PIN_KINDS}
+    if model_source_live_pins is not None:
+        for kind, count in sample.items():
+            model_source_live_pins.labels(kind=kind).set(count)
+    return sample
+
+
+async def _warn_on_model_source_pin_drain_invariant() -> None:
+    try:
+        drain_until = drain_deadline_from_settings(await get_settings_cache().get())
+        if drain_until is None:
+            return
+        async with get_background_session() as session:
+            latest_purge_at = await ModelSourcePinRepository(session).max_purge_at()
+    except Exception:
+        logger.exception("Retention: model-source pin drain invariant check failed")
+        return
+    if latest_purge_at is not None and latest_purge_at >= drain_until:
+        logger.warning(
+            "model_source_pins_drain_invariant_violated max_purge_at=%s drain_until=%s",
+            latest_purge_at.isoformat(),
+            drain_until.isoformat(),
+        )
 
 
 async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
@@ -85,8 +160,8 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
     lifetime account totals. No watermark (fold never ran) means skip.
 
     The effective watermark is the MIN of the lifetime fold watermark and the
-    hourly and conversation time-axis watermarks: a raw row is only prunable
-    once EVERY rollup that must outlive it has folded it. While either
+    hourly, conversation and report time-axis watermarks: a raw row is only prunable
+    once EVERY rollup that must outlive it has folded it. While any
     time-axis backfill is catching up (each watermark starts at the epoch),
     the min fails the currency check below and pruning pauses entirely — the
     pre-existing "never delete what is not folded" invariant extended to the
@@ -123,6 +198,7 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                             AccountUsageRollupState.folded_through,
                             AccountUsageRollupState.hourly_folded_through,
                             AccountUsageRollupState.conversation_folded_through,
+                            AccountUsageRollupState.reports_folded_through,
                         )
                         .where(AccountUsageRollupState.id == 1)
                         .with_for_update()

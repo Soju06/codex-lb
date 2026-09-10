@@ -19,3 +19,117 @@ Before the `perf-shared-ssl-context` change each of those call sites built a fre
 The one operational consequence: updates to the certifi bundle or system CA store on disk are picked up only after a process restart. Per-call sessions previously re-read the bundle on every upstream call; the shared client had always behaved this way per generation, and there is no supported flow that swaps CA bundles under a running codex-lb, so no requirement changes. `close_http_client()` clears the cache during shutdown, and `_reset_shared_ssl_context()` exists for test isolation (tests that patch `_build_ssl_context` rely on the cache being empty when they start).
 
 Deferred on purpose: sharing one routed `TCPConnector`/`ClientSession` across per-call Codex clients (connection reuse through the proxy) is a separate change with connection-lifetime semantics of its own; on Docker deployments the native egress helper already pools routed connections.
+
+## Native Responses SSE ownership (2026-09-08)
+
+The `http_sse_v1` capability moves byte framing for direct and account-routed streaming Responses
+into the existing Rust egress library. Python supplies the configured idle
+interval and event byte limit; Rust applies them while reading the body.
+For example, an event split over several active body reads must not time out
+just because Python has not yet received a complete event. Python retains
+terminal detection, archives, selection, health, and replay policy.
+
+Complete events cross IPC as UTF-8 text fragments of at most 16 KiB, with a
+`more` flag. This bounds line/queue expansion for control characters and invalid
+UTF-8 while avoiding Python byte scanning and base64 decoding. Shared fixtures
+pin the legacy framing behavior, including CR/LF splits, whitespace, EOF
+residue, and limits measured in original body bytes. The adapter only joins
+text fragments. An incomplete IPC event at clean EOF fails the protocol.
+
+HTTP error bodies and requests without SSE options retain raw body delivery.
+Compact requests use separate content-aware framing and collection capabilities. Missing helpers
+keep the pre-dispatch Python fallback; installed helpers without the capability
+fail before dispatch. No dispatched request is replayed through that fallback.
+Response close finishes its owned cancellation handshake even inside an already
+cancelled Starlette/AnyIO scope, then propagates cancellation. Other requests
+sharing the helper continue normally.
+
+Routed streaming uses typed `native_sse` options with unbuffered consumption
+through `CodexClient`. Each endpoint attempt receives the same options; the
+options never reach aiohttp keyword arguments. Keeping the native response
+type avoids the raw-body wrapper hiding its framed-event interface. Endpoint
+fallback and trace metadata remain Python-owned. The locally created client
+finishes asynchronous session close before propagating cancellation; borrowed
+clients retain their caller's lifecycle ownership.
+
+## Native HTTP stream interpretation
+
+`http_responses_events_v1` adds `interpret_responses` to framing options and a
+`responses_event` IPC result. The final text fragment includes `event_type` and
+`python_normalization`; intermediate fragments have no type and a false marker.
+Both text and type metadata are bounded at 16 KiB of UTF-8 and count toward the
+queue byte budget. A longer type uses a Python handoff with no type metadata.
+Missing or malformed metadata, mixed compact/stream options, and truncated
+fragments fail before an event is trusted.
+
+For example, a `response.text.delta` payload with ordinary text becomes
+`response.output_text.delta` in Rust; Python can use the attached classification
+without scanning SSE or parsing that payload. Error conversion needs request
+context and stays in Python. An alias payload containing a float, oversized
+integer, or escaped surrogate uses Python serialization to preserve its exact
+legacy representation. Neither handoff starts a second HTTP request. Unchanged
+mixed-line-ending events preserve their text; JSON arrays never become objects.
+The Python transport remains the missing-helper implementation.
+
+## Native Responses WebSocket ownership
+
+`websocket_responses_events_v1` classifies Responses WebSocket JSON objects in
+Rust and embeds their JSON payload in IPC. The Python WebSocket relay and HTTP
+bridge reuse that decoded object for request matching, sequence tracking,
+tool-call handling and lifecycle validation. Original text, numeric tokens,
+duplicate-key precedence and WebSocket aliases stay unchanged. A string `type`
+wins; otherwise an object `error` classifies as `error`. Public errors and
+HTTP-specific normalization retain their Python policy owners.
+
+For example, an integer larger than 64 bits crosses IPC without Rust numeric
+conversion and remains a Python integer. Whitespace outside strings is removed
+only in the embedded IPC object to preserve JSON-line framing; original frame
+text is untouched. Invalid/non-object/unsupported JSON and frames over 1 MiB
+remain opaque. Live calls do not opt in. The HTTP bridge preserves its legacy
+SSE-field parsing for multiline or whitespace-prefixed frames.
+
+The Python fallback is still supported, so its parser is active code. Retired
+native-path branches must be removed in the migration that replaces them. Before
+removal, audit intervening Python commits and extend shared Rust/Python fixtures
+for applicable fixes. The ownership table and audit through `d3f63331d` are in
+[the archived change](../../changes/archive/2026-09-08-native-websocket-event-interpretation/context.md).
+That change includes a tracked benchmark script/result; the final synthetic
+measurement shows no speedup (640 ms raw versus 674 ms interpreted).
+
+## Native SSE output writes
+
+The helper coalesces already framed SSE records into writes of at most 32 records
+and 64 KiB of encoded JSON lines, flushing each existing 16 KiB body-read slice
+before processing more input. A single protocol record that expands beyond the
+byte budget through JSON escaping is emitted alone. There is no batching timer:
+one ready event reaches the consumer even if upstream waits indefinitely for the
+consumer's next action. Valid records also precede a framing failure from the
+same read.
+
+Accepted output bytes and their write offset live in the shared writer. If a
+producer is cancelled during a partial write or buffered flush, the next writer
+finishes those bytes before emitting its own record. For example, cancellation
+of a large SSE event cannot splice a sibling request's JSON line into that event.
+Compact, raw HTTP and WebSocket messages keep immediate writes through this same
+cancellation-safe owner. Python queue fairness, bounds and replay policy are
+unchanged. Benchmark methodology and limitations are recorded in the archived
+`batch-ready-native-sse-output` change.
+
+## Direct usage GET transport
+
+Direct usage queries without an injected Python client prefer the existing
+native helper after the direct-egress admission check. Python owns routes,
+retry policy and UsagePayload validation; Rust owns each HTTP attempt and body.
+Only a missing/unstartable helper on the initial request permits Python fallback.
+
+For example, a 503 response whose body never ends closes before the next attempt
+and uses the existing ExponentialRetry delay (1, 2, then 2 seconds). A truncated
+200 body remains a transport error instead of becoming an invalid-payload 502.
+Cancellation retires one exchange without closing the shared helper.
+
+The adapter explicitly forwards aiohttp's default Accept-Encoding value because
+the helper enables decompression only for requests that negotiate it. Charset,
+empty-body and JSON-syntax handling follow the default Python session. Usage
+credit consumption remains a separate call, and resolved routes retain
+CodexClient ownership. Loopback probes validate these semantics; they do not
+measure production performance.

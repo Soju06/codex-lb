@@ -3,16 +3,16 @@ name: CI
 on:
   push:
     branches: ["main"]
-  # `edited` must stay: release-guard evidence (validation checklist + exact
-  # head SHA) is added by editing the release PR body, and CI Required only
-  # reruns for that PR via an `edited` event (scripts/guard_beta_release.py).
-  # Known cost: a body edit right after a push starts a duplicate run for the
-  # same head SHA and concurrency cancels the older one. Do NOT "fix" this by
-  # skipping edited runs for non-release PRs: skipped or all-skipped
-  # "CI Required" check runs still satisfy branch protection, so a body-only
-  # edit could mint a passing check for a red or untested head.
+  # No `edited`: a PR title/body edit (agents finalizing descriptions, review
+  # bots rewriting summaries) must not cancel the in-flight matrix and re-queue
+  # ~30 jobs for an unchanged head. The only jobs that read PR metadata are the
+  # release guards; they live in release-guards.yml, which does handle `edited`.
+  # Do NOT bring `edited` back here with `if: github.event.action != 'edited'`
+  # on the heavy jobs: skipped check runs still satisfy branch protection, so a
+  # body-only edit could mint a passing check for a red or untested head. Not
+  # triggering at all leaves the head's existing check runs authoritative.
   pull_request:
-    types: [opened, reopened, synchronize, edited, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review]
   merge_group:
 
 concurrency:
@@ -77,59 +77,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python .github/scripts/check_all_contributors.py
-
-  beta-release-guard:
-    name: Beta release guard
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Fetch PR base branch
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" --force
-
-      - name: Require validated canonical beta release PRs
-        env:
-          BASE_REF: ${{ github.base_ref || 'main' }}
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          python -m scripts.guard_beta_release \
-            --mode pr \
-            --base-ref "origin/${BASE_REF}" \
-            --head-ref "${HEAD_REF}"
-
-  stable-release-guard:
-    name: Stable release guard
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Fetch PR base branch
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" --force
-
-      - name: Require complete release-please stable promotions
-        env:
-          BASE_REF: ${{ github.base_ref || 'main' }}
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          python -m scripts.guard_stable_release \
-            --base-ref "origin/${BASE_REF}" \
-            --head-ref "${HEAD_REF}"
 
   openspec:
     name: OpenSpec validation
@@ -403,13 +350,13 @@ jobs:
       - name: Check formatting, lints, tests, and release build
         run: make rust-check
 
-      - name: Run native routed wire probe
+      - name: Run native routed and SSE wire probes
         env:
           CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress
         run: |
           uv sync --dev --frozen
           cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress
-          uv run pytest -q -ra tests/integration/test_native_routed_egress.py
+          uv run pytest -q -ra tests/integration/test_native_routed_egress.py tests/integration/test_native_sse_egress.py tests/integration/test_native_websocket_events.py tests/integration/test_native_usage_egress.py
 
       - name: Audit Rust dependencies and licenses
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
@@ -932,7 +879,6 @@ jobs:
     needs:
       - changes
       - contributors
-      - beta-release-guard
       - openspec
       - frontend-lint
       - frontend-typecheck

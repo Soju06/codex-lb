@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Awaitable, Callable
 from typing import TypeAlias, cast
 
@@ -8,6 +7,7 @@ from fastapi import FastAPI
 from starlette.types import ASGIApp, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from app.core.config.settings import get_settings
 from app.core.socket_peer import _capture_raw_socket_peer
 
 _UvicornASGIApp: TypeAlias = Callable[..., Awaitable[None]]
@@ -17,11 +17,12 @@ class TrustedProxyHeadersMiddleware:
     """Preserve the raw socket peer, then apply Uvicorn's proxy projection."""
 
     def __init__(self, app: ASGIApp) -> None:
+        trusted_hosts = get_settings().forwarded_allow_ips
         self._proxy_headers = cast(
             ASGIApp,
             ProxyHeadersMiddleware(
                 cast(_UvicornASGIApp, app),
-                trusted_hosts=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+                trusted_hosts="127.0.0.1" if trusted_hosts is None else trusted_hosts,
             ),
         )
 

@@ -13,6 +13,7 @@ import uvicorn
 
 from app.core import server as core_server
 from app.core import shutdown as shutdown_state
+from app.core.clock import RealScheduler
 from app.core.config.settings import Settings
 from app.modules.proxy import service as proxy_service
 
@@ -170,23 +171,29 @@ def test_h14_settings_rejects_absurd_drain_timeout() -> None:
 async def test_h17_terminal_settlement_gets_post_drain_reserve_grace() -> None:
     """Exhausted drain still leaves the terminal settlement its reserve."""
 
-    service = proxy_service.ProxyService(cast(Any, lambda: None))
     release = asyncio.Event()
     finalize_started = asyncio.Event()
     wait_timeout: list[float] = []
-    real_wait = asyncio.wait
 
     async def blocked_finalize(*_args: Any, **_kwargs: Any) -> None:
         finalize_started.set()
         await release.wait()
 
-    async def traced_wait(fs: Any, *, timeout: float | None = None, **kwargs: Any) -> Any:
-        wait_timeout.append(float(timeout or 0.0))
-        return await real_wait(fs, timeout=0, **kwargs)
+    class _TracingWaitScheduler(RealScheduler):
+        """The settlement wait runs through the service's scheduler seam.
 
+        ``RealScheduler.wait`` is ``asyncio.wait`` itself (bound at import), so
+        a process-wide ``asyncio.wait`` patch would not observe it; override
+        the seam on the injected scheduler instead.
+        """
+
+        async def wait(self, fs: Any, *, timeout: float | None = None, return_when: str = asyncio.ALL_COMPLETED) -> Any:
+            wait_timeout.append(float(timeout or 0.0))
+            return await asyncio.wait(fs, timeout=0, return_when=return_when)
+
+    service = proxy_service.ProxyService(cast(Any, lambda: None), scheduler=_TracingWaitScheduler())
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(service, "_finalize_claimed_websocket_requests", blocked_finalize)
-    monkeypatch.setattr(asyncio, "wait", traced_wait)
     shutdown_state.commit_shutdown(timeout_seconds=0.0)
     shutdown_state.set_post_drain_cleanup_timeout_seconds(core_server.POST_DRAIN_CLEANUP_TIMEOUT_SECONDS)
     caller = asyncio.create_task(

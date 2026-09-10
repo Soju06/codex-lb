@@ -17,12 +17,21 @@ FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60
 # duration metadata are not plannable.
 SHORT_WINDOW_MAX_MINUTES = 24 * 60
 EXPIRING_WINDOW_SECONDS = 60 * 60
-STALE_USAGE_SECONDS = 15 * 60
 DEFAULT_SLOT_SECONDS = 15 * 60
 DEFAULT_PLANNING_HORIZON_HOURS = 36
 DEFAULT_ACCOUNT_WINDOW_CAPACITY = 100.0
 MIN_PEAK_EXCESS_UNITS = 1.0
 _FORECAST_DEMAND_REQUEST_KINDS = frozenset({"normal", "real"})
+
+# Demand-unit formula coefficients (``_bin_demand_units``). The planner
+# repository compiles the same formula into SQL so folded history can be
+# summed per slot inside the database; keep the two in sync through these
+# constants only.
+DEMAND_TOKENS_PER_UNIT = 1000.0
+DEMAND_CACHED_INPUT_TOKEN_WEIGHT = 0.25
+DEMAND_OUTPUT_TOKEN_WEIGHT = 4.0
+DEMAND_UNITS_PER_COST_USD = 100.0
+DEMAND_UNITS_PER_REQUEST = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +87,24 @@ class DemandBinLike(Protocol):
 
     @property
     def request_count(self) -> int: ...
+
+
+class DemandSlotUnitsLike(Protocol):
+    """Demand already reduced to units per ``(slot_epoch, request_kind)``.
+
+    Produced by the repository's SQL aggregation: ``_bin_demand_units`` is
+    applied per legacy-grain row inside the query and summed per slot, so
+    the forecast never materializes one Python object per grain row.
+    """
+
+    @property
+    def slot_epoch(self) -> int: ...
+
+    @property
+    def request_kind(self) -> str: ...
+
+    @property
+    def demand_units(self) -> float: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,10 +300,36 @@ def plan_shadow_actions(
     return actions[: max(0, settings.max_warmups_per_day or 0)]
 
 
+def demand_units_by_slot_epoch(
+    bins: Sequence[DemandBinLike] = (),
+    slot_units: Sequence[DemandSlotUnitsLike] = (),
+) -> dict[int, float]:
+    """Sum forecast demand units per slot from either input shape.
+
+    ``bins`` carry the legacy grain and get ``_bin_demand_units`` applied per
+    row; ``slot_units`` arrive already reduced (the SQL path). Both feed the
+    same map, so a caller can combine folded slot units with a raw-tail bin
+    list without double counting as long as the two cover disjoint windows.
+    """
+    units_by_slot_epoch: dict[int, float] = {}
+    for row in bins:
+        if not _is_forecast_demand_request(row.request_kind):
+            continue
+        slot_epoch = int(row.slot_epoch)
+        units_by_slot_epoch[slot_epoch] = units_by_slot_epoch.get(slot_epoch, 0.0) + _bin_demand_units(row)
+    for slot in slot_units:
+        if not _is_forecast_demand_request(slot.request_kind):
+            continue
+        slot_epoch = int(slot.slot_epoch)
+        units_by_slot_epoch[slot_epoch] = units_by_slot_epoch.get(slot_epoch, 0.0) + max(0.0, float(slot.demand_units))
+    return units_by_slot_epoch
+
+
 def build_demand_forecast(
     *,
     settings: PlannerSettings,
-    bins: Sequence[DemandBinLike],
+    bins: Sequence[DemandBinLike] = (),
+    slot_units: Sequence[DemandSlotUnitsLike] = (),
     now: datetime | None = None,
     horizon_hours: int = DEFAULT_PLANNING_HORIZON_HOURS,
     slot_seconds: int = DEFAULT_SLOT_SECONDS,
@@ -284,14 +337,9 @@ def build_demand_forecast(
     current = _floor_datetime(now or datetime.now(timezone.utc), slot_seconds)
     history_by_weekday_slot: dict[tuple[int, int], list[float]] = {}
     history_by_work_hour: dict[int, list[float]] = {}
-    units_by_slot_epoch: dict[int, float] = {}
+    units_by_slot_epoch = demand_units_by_slot_epoch(bins, slot_units)
     recent_units = 0.0
     recent_cutoff = current.timestamp() - 24 * 60 * 60
-    for row in bins:
-        if not _is_forecast_demand_request(row.request_kind):
-            continue
-        slot_epoch = int(row.slot_epoch)
-        units_by_slot_epoch[slot_epoch] = units_by_slot_epoch.get(slot_epoch, 0.0) + _bin_demand_units(row)
 
     for slot_epoch, units in units_by_slot_epoch.items():
         slot = datetime.fromtimestamp(slot_epoch, tz=timezone.utc)
@@ -609,10 +657,12 @@ def _parse_hhmm(raw: str, fallback: dt_time) -> dt_time:
 
 def _bin_demand_units(row: DemandBinLike) -> float:
     token_units = (
-        max(0, row.input_tokens) + 0.25 * max(0, row.cached_input_tokens) + 4.0 * max(0, row.output_tokens)
-    ) / 1000.0
-    cost_units = max(0.0, row.cost_usd) * 100.0
-    request_units = max(0, row.request_count) * 5.0
+        max(0, row.input_tokens)
+        + DEMAND_CACHED_INPUT_TOKEN_WEIGHT * max(0, row.cached_input_tokens)
+        + DEMAND_OUTPUT_TOKEN_WEIGHT * max(0, row.output_tokens)
+    ) / DEMAND_TOKENS_PER_UNIT
+    cost_units = max(0.0, row.cost_usd) * DEMAND_UNITS_PER_COST_USD
+    request_units = max(0, row.request_count) * DEMAND_UNITS_PER_REQUEST
     return max(token_units, cost_units, request_units)
 
 

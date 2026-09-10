@@ -48,11 +48,20 @@ def test_aiohttp_proxy_kwargs_move_credentials_into_proxy_authorization() -> Non
 
 
 @pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])
-def test_aiohttp_proxy_kwargs_reject_plaintext_credentials(scheme: str) -> None:
+def test_plaintext_scheme_credentials_are_flagged_but_usable(scheme: str) -> None:
     endpoint = ResolvedProxyEndpoint("ep_1", scheme, "proxy.test", 8080, "u", "p")
 
-    with pytest.raises(ValueError, match="plaintext proxy URLs are forbidden"):
-        endpoint.aiohttp_proxy_kwargs()
+    assert endpoint.plaintext_credentials is True
+    assert endpoint.proxy_url.startswith(("http://u:p@", "socks5h://u:p@"))
+    assert endpoint.proxy_url_without_credentials in {"http://proxy.test:8080", "socks5h://proxy.test:8080"}
+    kwargs = endpoint.aiohttp_proxy_kwargs()
+    assert "@" not in kwargs["proxy"]
+    assert kwargs["proxy_headers"]["Proxy-Authorization"].startswith("Basic ")
+
+
+def test_https_credentials_are_not_flagged_as_plaintext() -> None:
+    assert _credentialed_endpoint().plaintext_credentials is False
+    assert ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080).plaintext_credentials is False
 
 
 def test_aiohttp_proxy_kwargs_reject_colon_in_username() -> None:

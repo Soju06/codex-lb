@@ -60,6 +60,15 @@
 - Emergency toggle:
   - `CODEX_LB_DATABASE_ALEMBIC_AUTO_REMAP_ENABLED=false` disables auto-remap.
 
+## September overflow and transport merge
+
+The subscription-overflow and transport-sentinel revisions both descended from
+the quota-warmup revision. A forward merge joins them without changing their
+operations. An upgrade from one parent applies the other parent normally;
+downgrading only the merge restores both parent stamps while preserving both
+schemas and their data. This is not a rollback to a build that knows only one
+branch. See the [repair context](../../changes/merge-overflow-transport-migration-heads/context.md).
+
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.

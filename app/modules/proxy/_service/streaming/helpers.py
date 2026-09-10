@@ -70,6 +70,11 @@ from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
+from app.modules.proxy._load_balancer.overload_backoff import (
+    UPSTREAM_OVERLOAD_CODES,
+    record_upstream_burst_rejection,
+    record_upstream_overload,
+)
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -257,6 +262,9 @@ from app.modules.proxy._service.observability import (
     _interesting_header_keys as _interesting_header_keys,
 )
 from app.modules.proxy._service.observability import (
+    _is_reasoning_replay_rejection as _is_reasoning_replay_rejection,
+)
+from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_payload as _maybe_log_proxy_request_payload,
 )
 from app.modules.proxy._service.observability import (
@@ -266,10 +274,16 @@ from app.modules.proxy._service.observability import (
     _maybe_log_proxy_service_tier_trace as _maybe_log_proxy_service_tier_trace,
 )
 from app.modules.proxy._service.observability import (
+    _observe_terminal_stream_error_frame as _observe_terminal_stream_error_frame,
+)
+from app.modules.proxy._service.observability import (
     _record_continuity_fail_closed as _record_continuity_fail_closed,
 )
 from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
+)
+from app.modules.proxy._service.observability import (
+    _record_upstream_reasoning_replay_rejection as _record_upstream_reasoning_replay_rejection,
 )
 from app.modules.proxy._service.observability import (
     _summarize_input as _summarize_input,
@@ -405,6 +419,8 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
+from app.modules.usage.updater import UsageUpdater
 
 
 def _facade() -> Any:
@@ -484,12 +500,6 @@ def _stream_iterator_after_capacity_admission(
 
 
 _REQUEST_TRANSPORT_HTTP = "http"
-
-
-def _resolve_upstream_stream_transport(upstream_stream_transport: str) -> str | None:
-    if upstream_stream_transport == "default":
-        return None
-    return upstream_stream_transport
 
 
 def _should_penalize_stream_error(code: str | None) -> bool:
@@ -696,6 +706,24 @@ def _raw_stream_error_code_or_upstream(
     ):
         return "upstream_error"
     return error_code
+
+
+def _classify_terminal_stream_error_frame(
+    event_type: str | None,
+    event_payload: dict[str, JsonValue] | None,
+    error_code: str,
+    error_message: str | None,
+) -> str:
+    """Resolve a terminal frame's error code and record its observability in one step.
+
+    ``streaming/mixin.py`` sits at its line ceiling, so the two parsed
+    terminal-frame sites resolve the code (``_raw_stream_error_code_or_upstream``)
+    and observe the frame (``_observe_terminal_stream_error_frame``) through
+    this single call instead of one statement each.
+    """
+    resolved_code = _raw_stream_error_code_or_upstream(event_type, event_payload, error_code)
+    _observe_terminal_stream_error_frame(resolved_code, error_message)
+    return resolved_code
 
 
 def _mark_stream_settlement_interrupted(
@@ -1019,6 +1047,23 @@ def _is_model_scoped_rejection(
     return is_model_scoped_upstream_rejection(message)
 
 
+def _request_usage_refresh(proxy: Any, account_id: str) -> None:
+    """Schedule a tracked, coalesced usage refresh after a streamed ``usage_limit_reached``.
+
+    ``mark_rate_limit`` persists status only, while the pool-exhaustion
+    predicate also needs a >= 100 % usage row that would otherwise wait for
+    the next scheduler tick. The refresh runs on its own background session
+    and never touches this request's ``Account``.
+    """
+    schedule = getattr(proxy, "_schedule_cancel_safe_cleanup", None)
+    if schedule is None:
+        return
+    refresh = UsageUpdater.request_refresh(account_id)
+    if refresh is None:
+        return
+    schedule(refresh, action="request_usage_refresh", request_id=get_request_id() or "unknown")
+
+
 async def _handle_stream_error(
     proxy: Any,
     account: Account,
@@ -1027,13 +1072,29 @@ async def _handle_stream_error(
     http_status: int | None = None,
     *,
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    retry_after_seconds: float | None = None,
+    burst_cooldown_recorded: bool = False,
 ) -> ClassifiedFailure:
+    """Write account health for a stream failure and return its classification.
+
+    ``burst_cooldown_recorded`` is set by a keyed stream whose health write was
+    deferred until after usage settlement: the replica-local burst cooldown
+    was already engaged at rejection time, so the deferred write must not
+    re-engage it (that would bench an account that has since succeeded).
+    """
     classified = classify_upstream_failure(
         error_code=code,
         error=error,
         http_status=http_status,
         phase="first_event",
     )
+    # Terminal frames are counted where they are classified
+    # (``_observe_terminal_stream_error_frame``); only HTTP status rejections
+    # reach the counter from here, so a failure is never counted twice.
+    if http_status is not None and _is_reasoning_replay_rejection(
+        code=code, http_status=http_status, message=error.get("message")
+    ):
+        _record_upstream_reasoning_replay_rejection()
     if _facade()._is_account_neutral_error_code(code):
         return classified
     if _is_account_neutral_request_rejection(
@@ -1061,6 +1122,8 @@ async def _handle_stream_error(
         return classified
     if classified["failure_class"] == "rate_limit":
         await proxy._load_balancer.mark_rate_limit(account, error)
+        if code == USAGE_LIMIT_REACHED:
+            _request_usage_refresh(proxy, account.id)
     elif classified["failure_class"] == "quota":
         await proxy._load_balancer.mark_quota_exceeded(account, error)
     elif code in PERMANENT_FAILURE_CODES:
@@ -1073,6 +1136,27 @@ async def _handle_stream_error(
             get_request_id(),
             code,
         )
+        if code in UPSTREAM_OVERLOAD_CODES:
+            # Overload is an admission rejection that successes on the same
+            # account's warm sessions keep masking from ``error_count``; feed
+            # the dedicated sliding window so fresh selection can deprioritize.
+            await record_upstream_overload(
+                proxy._load_balancer,
+                account,
+                redact_account_id=privacy_policy.redacts_sensitive_details,
+            )
+        elif http_status == 429 and not burst_cooldown_recorded:
+            # A code-less HTTP 429 (rate_limit / quota classes returned above)
+            # is a per-account burst/concurrency rejection: keyed on the status
+            # so ``server_error`` rewrites and ``detail``-parsed bodies are
+            # covered. Short replica-local cooldown only -- never
+            # ``mark_rate_limit`` / persisted RATE_LIMITED.
+            await record_upstream_burst_rejection(
+                proxy._load_balancer,
+                account,
+                retry_after_seconds=retry_after_seconds,
+                redact_account_id=privacy_policy.redacts_sensitive_details,
+            )
     return classified
 
 

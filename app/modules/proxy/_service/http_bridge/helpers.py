@@ -11,7 +11,7 @@ from collections.abc import Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Literal, Mapping, TypeVar, cast
+from typing import Any, Final, Literal, Mapping, TypeVar, cast
 from urllib.parse import urlparse
 
 from app.core import shutdown as shutdown_state
@@ -38,6 +38,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clock import REAL_SCHEDULER, Scheduler, clock_for, scheduler_for
 from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import (
@@ -59,6 +60,7 @@ from app.core.metrics.prometheus import (
     bridge_instance_mismatch_total,
     bridge_reattach_total,
     bridge_unanchored_handoff_recovery_total,
+    http_bridge_connections_total,
     http_bridge_prewarm_total,
     http_bridge_stuck_retire_total,
 )
@@ -196,6 +198,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
+from app.modules.proxy.http_continuation import inferred_http_bridge_key
 from app.modules.proxy.ring_membership import (
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
@@ -210,8 +213,15 @@ _http_bridge_pending_count_warning_last_logged: dict[tuple[str, str, str], float
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 # A healthy upstream acknowledges response.create promptly. Keep the
 # Keep the owner-side watchdog within the client-safe contract while honoring
-# the configured stuck-gate threshold when it is shorter.
+# the fixed stuck-gate threshold when it is shorter.
 _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 60.0
+# Fixed bridge session lifecycle values (constantize-session-bridge-tunables).
+# These were never tuned in any deployment; tests monkeypatch the module
+# attribute, and every consumer reads it through this module at call time.
+HTTP_BRIDGE_IDLE_TTL_SECONDS: Final = 120.0
+HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS: Final = 900.0
+# Owner-side stuck handoff gate; anchored to the 300s wait Codex Desktop uses.
+HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS: Final = 300.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 # Keep process-local *uncaptured* entries bounded. A denied entry is retained
 # until the matching durable anchor is confirmed cleared; evicting it would let
@@ -382,7 +392,7 @@ def _schedule_http_bridge_background_cleanup(
         if inspect.iscoroutine(awaitable):
             awaitable.close()
         return None
-    task = asyncio.create_task(awaitable, name=name)
+    task = scheduler_for(service).create_task(awaitable, name=name)
     if attribute is not None:
         setattr(task, attribute[0], attribute[1])
     cleanup_tasks.add(task)
@@ -712,6 +722,13 @@ _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR = "http_bridge_prepared_continuity_anchor"
 # which is overload or host-network evidence and must not be replayed.
 _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR = "http_bridge_cooldown_suppression"
 _HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS = 120.0
+# Upper bound for the per-request fail-safe sweep's wait on a detached
+# session's ``pending_lock``. The sweep runs on every bridge request, so a
+# single detached generation whose lock never frees (2026-09-07: an anyio 4.13
+# Lock lost-wakeup left ~100 live request tasks queued behind one detached
+# session) must not park every request; a skipped pass is revisited by the
+# next request's sweep and by the session's own close/drain paths.
+_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS = 5.0
 _HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER = 6.0
 
 
@@ -758,12 +775,35 @@ def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
 
 
-def _service_time() -> Any:
-    return _service_global_or("time", time)
+def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether the one permitted server-side anchored replay is unused."""
+    settings = _service_get_settings()
+    return (
+        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
+        in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and (
+            request_state.replay_count == 0
+            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+            == "server_indefinite_recovery"
+        )
+    )
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    return cast(Callable[[Any | None], float], _service_global("_proxy_admission_wait_timeout_seconds"))(settings)
+def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    payload = openai_error(
+        "previous_response_not_found",
+        "Previous response was not found; retry without previous_response_id.",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+    return payload
+
+
+def _proxy_admission_wait_timeout_seconds() -> float:
+    return cast(Callable[[], float], _service_global("_proxy_admission_wait_timeout_seconds"))()
 
 
 def _http_bridge_stale_inflight_seconds() -> float:
@@ -854,7 +894,7 @@ def _http_bridge_pending_count_nowait(
 
 
 def _cleanup_http_bridge_inflight_sessions_nowait(service: Any) -> dict[str, int]:
-    now = _service_time().monotonic()
+    now = clock_for(service).monotonic()
     stale_after_seconds = _http_bridge_stale_inflight_seconds()
     cleaned = 0
     stale = 0
@@ -1590,6 +1630,7 @@ async def _close_http_bridge_session_resources(
                 upstream_reader,
                 label="http bridge upstream reader",
                 cleanup_tasks=service._background_cleanup_tasks,
+                scheduler=scheduler_for(service),
             )
             if session.upstream_reader is upstream_reader:
                 session.upstream_reader = None
@@ -1641,7 +1682,7 @@ async def _close_http_bridge_session(
             not existing.done() or (not existing.cancelled() and existing.exception() is None)
         ):
             return existing
-        created = asyncio.create_task(
+        created = scheduler_for(service).create_task(
             _close_http_bridge_session_resources(
                 service,
                 session,
@@ -1676,7 +1717,7 @@ async def _close_http_bridge_session(
                 if service._http_bridge_detached_sessions.get(id(session)) is session:
                     service._http_bridge_detached_sessions.pop(id(session), None)
 
-    ownership_task = asyncio.create_task(
+    ownership_task = scheduler_for(service).create_task(
         finalize_detached_ownership(),
         name=f"http-bridge-detached-finalize-{_hash_identifier(session.key.affinity_key)}",
     )
@@ -1695,7 +1736,7 @@ async def _close_http_bridge_session_bounded(
     if session.upstream_reader is asyncio.current_task():
         session.upstream_reader = None
 
-    close_task = asyncio.create_task(
+    close_task = scheduler_for(service).create_task(
         service._close_http_bridge_session(session),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
     )
@@ -1745,6 +1786,7 @@ async def _close_http_bridge_session_bounded(
         await wait_on_shared_future(
             close_task,
             timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+            scheduler=scheduler_for(service),
         )
     except TimeoutError:
         track_after_interruption(interruption="timeout")
@@ -2073,6 +2115,26 @@ def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -
     return session.upstream_turn_state
 
 
+def _http_bridge_reconnect_turn_state(
+    session: "_HTTPBridgeSession",
+    account_id: str,
+    owner_rebind_affinity: _AffinityPolicy | None,
+) -> str | None:
+    """Return the turn state the replacement handshake for ``account_id`` may carry.
+
+    The turn state was learned from the retired socket and belongs to the
+    account that issued it. Only a reconnect to that same account offers it
+    again; a replacement account (or an owner rebind) opens its socket with no
+    turn state -- the same condition under which the reconnect clears the
+    session's turn state once the replacement socket is open, so the handshake
+    cannot leak what the session-side cleanup is about to drop
+    (``responses-api-compat``: "Cross-account bridge retries clear turn-state").
+    """
+    if owner_rebind_affinity is not None or account_id != session.account.id:
+        return None
+    return _preferred_http_bridge_reconnect_turn_state(session)
+
+
 def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -> tuple[str, str | None]:
     return (turn_state, api_key_id)
 
@@ -2384,8 +2446,13 @@ def _make_http_bridge_session_key(
             affinity_kind = "session_header"
             strength = "hard"
         else:
-            affinity_key = affinity.key or request_id
-            affinity_kind = affinity.kind.value if affinity.kind is not None else "request"
+            inferred_key = (
+                inferred_http_bridge_key(payload) if payload.conversation or explicit_prompt_cache_key is None else None
+            )
+            affinity_key = inferred_key or affinity.key or request_id
+            affinity_kind = (
+                "prompt_cache" if inferred_key else affinity.kind.value if affinity.kind is not None else "request"
+            )
             strength = "soft"
     return _HTTPBridgeSessionKey(
         affinity_kind=affinity_kind,
@@ -2671,10 +2738,11 @@ def _cancel_and_track_cancelled_task(
     label: str,
     cleanup_tasks: set[asyncio.Task[None]] | None,
     cancel_task: bool = True,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> None:
     if cancel_task:
         task.cancel()
-    cleanup_task = asyncio.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
+    cleanup_task = scheduler.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
     if cleanup_tasks is not None:
         cleanup_tasks.add(cleanup_task)
         cleanup_task.add_done_callback(cleanup_tasks.discard)
@@ -2687,6 +2755,7 @@ async def _await_cancelled_task(
     label: str,
     cancel: bool = True,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> bool:
     effective_timeout = max(float(timeout_seconds), 0.0)
     remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
@@ -2699,19 +2768,31 @@ async def _await_cancelled_task(
         try:
             await asyncio.sleep(0)
         except asyncio.CancelledError:
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks)
+            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, scheduler=scheduler)
             raise
     if cancel:
         task.cancel()
     try:
-        done, _ = await asyncio.wait({task}, timeout=effective_timeout)
+        done, _ = await scheduler.wait({task}, timeout=effective_timeout)
     except asyncio.CancelledError:
         if not task.done():
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
+            _cancel_and_track_cancelled_task(
+                task,
+                label=label,
+                cleanup_tasks=cleanup_tasks,
+                cancel_task=False,
+                scheduler=scheduler,
+            )
         raise
     if task not in done:
         logger.warning("Timed out waiting for %s cancellation", label)
-        _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
+        _cancel_and_track_cancelled_task(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            cancel_task=False,
+            scheduler=scheduler,
+        )
         return False
     try:
         task.result()
@@ -2769,7 +2850,12 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
         # cannot leave a fully drained predecessor owning a socket and cap slot.
         detached_sessions = tuple(service._http_bridge_detached_sessions.values())
     for session in detached_sessions:
-        await service._retire_http_bridge_after_drain_if_ready(session)
+        # Bounded: this sweep is on every request's path, so one detached
+        # session whose lock stays busy (or wedged) must not stall the fleet.
+        await service._retire_http_bridge_after_drain_if_ready(
+            session,
+            lock_wait_timeout_seconds=_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS,
+        )
 
 
 def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_state: bool) -> int:
@@ -3111,7 +3197,7 @@ async def _reconcile_durable_http_bridge_ownership(service: _HTTPBridgeServicePr
 
     current_instance = _service_get_settings().http_responses_session_bridge_instance_id
     lease_ttl_seconds = _http_bridge_durable_lease_ttl_seconds()
-    now = _service_time().monotonic()
+    now = clock_for(service).monotonic()
     async with service._http_bridge_lock:
         candidates = [
             (key, session)
@@ -3274,7 +3360,17 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
 
 
 def _http_bridge_prewarm_enabled(settings: Any) -> bool:
-    """Prewarm eligibility is the ``prewarm_enabled`` flag alone.
+    """Prewarm eligibility is the ``prewarm_enabled`` switch alone.
+
+    M3 codex prewarm: the switch is dashboard-managed, and it is folded into
+    ``settings`` before this is called. ``settings`` is the proxy service facade
+    value (``_service_get_settings()``), which applies the request-bound
+    dashboard overlay: the field is in ``DASHBOARD_OVERRIDE_SETTINGS``, so a
+    non-NULL ``dashboard_settings`` column has already won over the deprecated
+    ``CODEX_LB_*`` env alias by the time this reads it. Outside a bound request
+    context (startup, schedulers, unit tests) the env alias applies, and then
+    the code default (off) -- the same precedence ``resolve_inheritable``
+    applies for the settings API's provenance.
 
     The canary percent and allow/deny cohort scaffolding was one-time
     rollout tooling retired by ``reduce-settings-surface-phase-4``.
@@ -3585,8 +3681,8 @@ def _http_bridge_runtime_config(
 ) -> _HTTPBridgeRuntimeConfig:
     return _HTTPBridgeRuntimeConfig(
         enabled=app_settings.http_responses_session_bridge_enabled,
-        idle_ttl_seconds=app_settings.http_responses_session_bridge_idle_ttl_seconds,
-        codex_idle_ttl_seconds=app_settings.http_responses_session_bridge_codex_idle_ttl_seconds,
+        idle_ttl_seconds=HTTP_BRIDGE_IDLE_TTL_SECONDS,
+        codex_idle_ttl_seconds=HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS,
         max_sessions=app_settings.http_responses_session_bridge_max_sessions,
         queue_limit=app_settings.http_responses_session_bridge_queue_limit,
         prompt_cache_idle_ttl_seconds=float(
@@ -3612,18 +3708,16 @@ def _http_bridge_eventless_budget_seconds(settings: object, *, fallback_seconds:
     Before ``response.created`` the downstream event queue is silent by design,
     so ``stream_idle_timeout_seconds`` (a *post-start* inter-event budget) does
     not describe this phase at all. The honest bound is the owner-side stuck
-    gate: once ``http_responses_session_bridge_stuck_gate_retire_after_seconds``
-    retires the pending handoff there is nothing left for the client to wait
-    for. Clamp to the stream-idle and bridge-request budgets so the pre-response
-    watchdog can never outlive the request it guards.
+    gate: once ``HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS`` retires the
+    pending handoff there is nothing left for the client to wait for. Clamp to
+    the stream-idle and bridge-request budgets so the pre-response watchdog can
+    never outlive the request it guards.
 
     ``fallback_seconds`` is used when a caller's settings object does not carry
     ``stream_idle_timeout_seconds`` at all.
     """
 
-    stuck_gate_seconds = float(
-        getattr(settings, "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
-    )
+    stuck_gate_seconds = float(HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS)
     stream_idle_timeout_seconds = float(getattr(settings, "stream_idle_timeout_seconds", fallback_seconds))
     return max(
         0.001,
@@ -3665,15 +3759,19 @@ def _http_bridge_admission_timeout_seconds(
     request_state: _WebSocketRequestState,
     admission_timeout_seconds: float,
     settings: object,
+    *,
+    now: float,
 ) -> float:
     # Bridged requests may retry response-create gate acquisition within one
     # bridge request budget, so every wait must be clamped to the remaining
     # time. Re-prepared retry states reset started_at but deliberately retain
     # the original deadline; using started_at alone would extend the budget.
+    # ``now`` comes from the owner's clock so the deadline (also owner-clock
+    # based) and the sample share one time domain.
     deadline = request_state.bridge_request_deadline
     if deadline is None:
         deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
-    remaining_budget_seconds = deadline - time.monotonic()
+    remaining_budget_seconds = deadline - now
     return max(0.0, min(admission_timeout_seconds, remaining_budget_seconds))
 
 
@@ -3733,6 +3831,8 @@ def _log_http_bridge_event(
     response_events_seen: int | None = None,
     transport_classification: str | None = None,
 ) -> None:
+    if event in {"create", "reuse", "reconnect", "close", "evict_idle"} and http_bridge_connections_total is not None:
+        http_bridge_connections_total.labels(event=event).inc()
     level = logging.INFO
     if event in {
         "queue_full",
@@ -3802,6 +3902,7 @@ for _helper_name in (
     "_http_bridge_session_retiring_with_visible_requests",
     "_http_bridge_payload_looks_like_full_resend",
     "_preferred_http_bridge_reconnect_turn_state",
+    "_http_bridge_reconnect_turn_state",
     "_http_bridge_turn_state_alias_key",
     "_http_bridge_previous_response_alias_key",
     "_http_bridge_session_allows_api_key",

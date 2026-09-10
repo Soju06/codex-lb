@@ -134,6 +134,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_event_error_message,
     _websocket_event_error_param,
     _websocket_event_error_type,
+    _websocket_event_incomplete_reason,
     _websocket_owner_pinned_quota_error_code,
     _websocket_precreated_auth_error_code,
     _websocket_precreated_retry_error_code,
@@ -4269,6 +4270,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             elif settlement_event and settlement_event.response:
                 error = settlement_event.response.error
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                if (
+                    error is None
+                    and _websocket_event_incomplete_reason(settlement_event_type, settlement_payload)
+                    == "stream_incomplete"
+                ):
+                    error_code = "stream_incomplete"
             _log_http_bridge_event(
                 "terminal_error",
                 session.key,

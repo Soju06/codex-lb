@@ -710,6 +710,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_event_error_param,  # noqa: F401
     _websocket_event_error_payload,  # noqa: F401
     _websocket_event_error_type,  # noqa: F401
+    _websocket_event_incomplete_reason,  # noqa: F401
     _websocket_full_resend_conflicts_with_visible_pending,  # noqa: F401
     _websocket_input_item_type,  # noqa: F401
     _websocket_owner_pinned_quota_error_code,  # noqa: F401

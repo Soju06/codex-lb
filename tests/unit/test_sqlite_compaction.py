@@ -41,6 +41,7 @@ def _remaining_rows(path: Path) -> int:
 def test_compaction_dry_run_reports_without_mutation(tmp_path: Path) -> None:
     source = tmp_path / "store.db"
     _create_fragmented_database(source)
+    before_contents = source.read_bytes()
     before_stat = source.stat()
     before_names = {path.name for path in tmp_path.iterdir()}
 
@@ -57,7 +58,13 @@ def test_compaction_dry_run_reports_without_mutation(tmp_path: Path) -> None:
         page_count=plan.page_count,
     )
     assert plan.required_free_bytes == plan.source_bytes + 2 * expected_output_bytes + compact._MIN_FREE_SPACE_RESERVE
-    assert source.stat() == before_stat
+    after_stat = source.stat()
+    # A read-only SQLite open can update atime under relatime. Identity,
+    # permissions and write timestamps must remain unchanged.
+    assert after_stat[:7] == before_stat[:7]
+    assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
+    assert after_stat.st_ctime_ns == before_stat.st_ctime_ns
+    assert source.read_bytes() == before_contents
     assert {path.name for path in tmp_path.iterdir()} == before_names
 
 

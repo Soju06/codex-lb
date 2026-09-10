@@ -31,8 +31,13 @@ stale-operation abandonment window, and the lifetime of a retry circuit that
 has already admitted a claim. That floor
 MUST be derived from those terms rather than fixed, because two of them are
 themselves operator-tunable, and the settings API MUST refuse an update that
-would leave the effective window below it, naming the binding term. The floor
-is a steady-state bound on the configuration, not a retroactive one: a bridge
+would leave the effective window below it, naming the binding term. A
+deployment can already be below the floor without any update having passed that
+check, because the environment alias alone decides the window while the
+dashboard column is NULL; startup MUST warn about that state (warn-only,
+naming the binding term and both values) so the first refusal is not a
+surprise. The floor is a steady-state bound on the configuration, not a
+retroactive one: a bridge
 session already open keeps the longer idle TTL it captured, so shortening a
 reuse window can still outlive the transcripts of sessions opened under the
 previous window — the same non-retroactive behaviour the abandoned-row
@@ -88,6 +93,15 @@ retention derived from those windows already has.
 - **WHEN** the next leader-gated retention pass runs
 - **THEN** it cuts at the dashboard window, not the environment alias
 - **AND** no replica was restarted
+
+#### Scenario: A window already below the floor is reported at startup
+
+- **GIVEN** the environment alias sets a window below the floor and no
+  dashboard value has been stored
+- **WHEN** the application starts
+- **THEN** it logs a warning naming the binding term, the effective window and
+  the floor
+- **AND** startup continues
 
 #### Scenario: Unset dashboard window keeps inheriting
 

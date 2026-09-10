@@ -951,26 +951,46 @@ def _validate_spool_retention_floor(payload: DashboardSettingsUpdateRequest, cur
     """Reject a PUT that would leave the operation spool shorter than its replay floor.
 
     The spool holds the raw request payload and the response events that
-    durable bridge recovery replays, so it must outlive every window in which
-    a spooled operation may still be read. Both the retention window and the
-    floor are evaluated on the effective values (dashboard column, else
-    environment, else code default) before and after the change, and only a
-    violation the change introduces is rejected -- an environment alias that is
-    already below the floor must not block unrelated edits.
+    durable bridge recovery replays, so it must outlive every window in which a
+    spooled operation may still be read. Both the retention window and the floor
+    are evaluated on the effective values (dashboard column, else environment,
+    else code default) before and after the change.
+
+    A configuration can already be below the floor without ever passing through
+    here -- the environment alias alone decides it while the column is NULL --
+    and that state must not make the dashboard read-only. The rule is therefore
+    "no worse", not "bypass": while below the floor an update is accepted only
+    when it leaves the retention no shorter and the floor no higher than it
+    found them, so unrelated edits go through but deepening the violation does
+    not. Startup warns about the state (``_report_dashboard_timeout_overrides``)
+    so the first refusal is never a surprise.
     """
     if not {OPERATION_SPOOL_RETENTION_SETTING, *SPOOL_RETENTION_FLOOR_INPUTS} & payload.model_fields_set:
         return
+    before_retention = float(getattr(current, OPERATION_SPOOL_RETENTION_SETTING))
     before_floor = operation_spool_retention_floor_seconds(current, startup_settings=startup_settings)
-    if float(getattr(current, OPERATION_SPOOL_RETENTION_SETTING)) < before_floor:
-        return
     after_inputs = _ProposedSpoolRetentionInputs(payload, current, startup_settings)
     after_retention = _proposed_spool_retention_seconds(payload, current, startup_settings)
-    term, floor = binding_spool_retention_floor_term(after_inputs, startup_settings=startup_settings)
-    if after_retention >= floor:
+    term, after_floor = binding_spool_retention_floor_term(after_inputs, startup_settings=startup_settings)
+    if after_retention >= after_floor:
         return
+    if after_retention >= before_retention and after_floor <= before_floor:
+        # Neither side got worse. Only reachable from an already-violating
+        # state: a healthy one has before_retention >= before_floor >=
+        # after_floor > after_retention >= before_retention, a contradiction.
+        return
+    if before_retention < before_floor:
+        raise DashboardBadRequestError(
+            f"{OPERATION_SPOOL_RETENTION_SETTING} is already below its replay floor "
+            f"({before_retention:g}s < {before_floor:g}s) and this change would deepen it "
+            f"({before_retention:g}s -> {after_retention:g}s against a floor of "
+            f"{before_floor:g}s -> {after_floor:g}s, bound by {term}); raise the retention to at least "
+            f"{after_floor:g}s, or leave both no worse than they are",
+            code="spool_retention_below_floor",
+        )
     raise DashboardBadRequestError(
-        f"{OPERATION_SPOOL_RETENTION_SETTING} must be at least {floor:g}s: the operation spool is replayed "
-        f"for as long as {term} ({floor:g}s), so a shorter window deletes transcripts a recovery still needs",
+        f"{OPERATION_SPOOL_RETENTION_SETTING} must be at least {after_floor:g}s: the operation spool is replayed "
+        f"for as long as {term} ({after_floor:g}s), so a shorter window deletes transcripts a recovery still needs",
         code="spool_retention_below_floor",
     )
 

@@ -2609,6 +2609,76 @@ async def test_settings_api_floor_keeps_claimed_retry_circuit_grace_under_a_lowe
 
 
 @pytest.mark.asyncio
+async def test_settings_api_below_floor_state_allows_no_worse_updates_only(async_client, monkeypatch):
+    """An env alias below the floor must not make the dashboard read-only *or* a free-for-all.
+
+    The column is NULL, so this state was never validated by the API; it must
+    still refuse anything that deepens the violation.
+    """
+    from app.modules.settings import service as settings_service
+
+    below = settings_service.get_settings().model_copy(
+        update={"http_responses_session_bridge_operation_spool_retention_seconds": 60.0}
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: below)
+
+    initial = await async_client.get("/api/settings")
+    assert initial.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 60.0
+    assert initial.json()["httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds"] == 7200.0
+
+    # Unrelated edits still go through while below the floor.
+    unrelated = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unrelated.status_code == 200
+    # ... including one that touches a floor input without raising the floor.
+    lowered_input = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800}
+    )
+    assert lowered_input.status_code == 200
+
+    # Lowering the retention further is refused, naming the deepening.
+    deeper = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 1}
+    )
+    assert deeper.status_code == 400
+    body = deeper.json()
+    assert body["error"]["code"] == "spool_retention_below_floor"
+    assert "already below its replay floor" in body["error"]["message"]
+
+    # Raising a floor input while below the floor is refused too.
+    raised_floor = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 86400}
+    )
+    assert raised_floor.status_code == 400
+    assert raised_floor.json()["error"]["code"] == "spool_retention_below_floor"
+
+    # Raising the retention toward (but not to) the floor is an improvement.
+    toward = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 3600}
+    )
+    assert toward.status_code == 200
+    assert toward.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 3600.0
+
+    # And clearing back to the below-floor env alias is refused: that would
+    # lower the effective retention again.
+    cleared = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": None}
+    )
+    assert cleared.status_code == 400
+    assert cleared.json()["error"]["code"] == "spool_retention_below_floor"
+
+    # Reaching the floor is accepted and restores the ordinary rule.
+    at_floor = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7200}
+    )
+    assert at_floor.status_code == 200
+    back_below = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 3600}
+    )
+    assert back_below.status_code == 400
+    assert "must be at least 7200s" in back_below.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_settings_api_rejects_raising_a_reuse_window_above_the_spool_retention(async_client):
     """Raising a reuse window past the stored spool retention introduces the same violation."""
     configured = await async_client.put(

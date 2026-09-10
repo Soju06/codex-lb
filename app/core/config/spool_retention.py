@@ -22,27 +22,35 @@ runtime lock and never per operation.
 
 from __future__ import annotations
 
+import logging
 from typing import Final
 
 from app.core.config.inheritable import resolve_inheritable
 from app.core.config.settings import Settings, get_settings
 
+logger = logging.getLogger(__name__)
+
 # ``dashboard_settings`` column, ``Settings`` field and provenance key share
 # one name (configuration-tiers).
 OPERATION_SPOOL_RETENTION_SETTING: Final = "http_responses_session_bridge_operation_spool_retention_seconds"
 
+# NOT NULL ``dashboard_settings`` columns; no environment layer.
+_DASHBOARD_REUSE_WINDOW_COLUMNS: Final[tuple[str, ...]] = (
+    "openai_cache_affinity_max_age_seconds",
+    "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
+)
+_BRIDGE_REQUEST_BUDGET_SETTING: Final = "http_responses_session_bridge_request_budget_seconds"
+
 # Settings whose value moves the floor, so a PUT touching any of them is
 # re-checked against it.
 SPOOL_RETENTION_FLOOR_INPUTS: Final[tuple[str, ...]] = (
-    "openai_cache_affinity_max_age_seconds",
-    "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
-    "http_responses_session_bridge_request_budget_seconds",
+    *_DASHBOARD_REUSE_WINDOW_COLUMNS,
+    _BRIDGE_REQUEST_BUDGET_SETTING,
 )
 
 _OPERATION_SPOOL_RETENTION_DEFAULT: Final[float] = float(
     Settings.model_fields[OPERATION_SPOOL_RETENTION_SETTING].default
 )
-_BRIDGE_REQUEST_BUDGET_SETTING: Final = "http_responses_session_bridge_request_budget_seconds"
 _BRIDGE_REQUEST_BUDGET_DEFAULT: Final[float] = float(Settings.model_fields[_BRIDGE_REQUEST_BUDGET_SETTING].default)
 # Floor of the stale-operation abandonment sweep's inactivity window
 # (``session_registry.abandon_stale_http_bridge_operations``).
@@ -76,15 +84,24 @@ def bridge_session_reuse_window_seconds(dashboard_settings: object) -> float:
     monkeypatching the attribute is honoured here too; the import is lazy
     because this module is configuration and that module is the request-path
     implementation owning them.
+
+    Both column terms are NOT NULL on ``dashboard_settings``, so a real row
+    always carries them; a term is skipped only for the partial snapshot fakes
+    the startup and scheduler tests build, the same tolerance
+    ``warn_environment_shadowed_by_dashboard`` and ``effective_settings`` apply
+    to that row.
     """
     from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 
-    return max(
-        float(getattr(dashboard_settings, "openai_cache_affinity_max_age_seconds")),
-        float(getattr(dashboard_settings, "http_responses_session_bridge_prompt_cache_idle_ttl_seconds")),
+    terms = [
         float(_http_bridge_helpers.HTTP_BRIDGE_IDLE_TTL_SECONDS),
         float(_http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
-    )
+    ]
+    for name in _DASHBOARD_REUSE_WINDOW_COLUMNS:
+        value = getattr(dashboard_settings, name, None)
+        if value is not None:
+            terms.append(float(value))
+    return max(terms)
 
 
 def spool_retention_floor_terms_seconds(
@@ -169,3 +186,32 @@ def resolve_operation_spool_retention_seconds(
         float(getattr(startup, OPERATION_SPOOL_RETENTION_SETTING, _OPERATION_SPOOL_RETENTION_DEFAULT)),
         _OPERATION_SPOOL_RETENTION_DEFAULT,
     )
+
+
+def warn_spool_retention_below_floor(
+    dashboard_settings: object,
+    startup_settings: object | None = None,
+) -> tuple[str, float, float] | None:
+    """Warn once at startup when the effective spool retention is below its floor.
+
+    The environment alias alone can put a deployment below the floor while the
+    dashboard column is NULL, and the settings API never saw that value. Warning
+    here means the operator learns about it before a dashboard edit is refused.
+    Returns ``(binding term, effective retention, floor)`` when it warned, so the
+    caller can assert on it; ``None`` otherwise. Only these two numbers and the
+    term name are logged -- never the value of any other setting.
+    """
+    retention = resolve_operation_spool_retention_seconds(dashboard_settings, startup_settings=startup_settings)
+    term, floor = binding_spool_retention_floor_term(dashboard_settings, startup_settings=startup_settings)
+    if retention >= floor:
+        return None
+    logger.warning(
+        "HTTP bridge operation spool retention is below its replay floor: %s=%gs < %gs (bound by %s). "
+        "Expired transcripts can be deleted while a recovery can still replay them; "
+        "raise the value in Settings -> Data retention. Dashboard updates that lower it further are refused.",
+        OPERATION_SPOOL_RETENTION_SETTING,
+        retention,
+        floor,
+        term,
+    )
+    return term, retention, floor

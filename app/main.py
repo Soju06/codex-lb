@@ -38,7 +38,10 @@ from app.core.config.settings import (
     warn_removed_settings,
 )
 from app.core.config.settings_cache import get_settings_cache
-from app.core.config.spool_retention import resolve_operation_spool_retention_seconds
+from app.core.config.spool_retention import (
+    resolve_operation_spool_retention_seconds,
+    warn_spool_retention_below_floor,
+)
 from app.core.handlers import add_exception_handlers
 from app.core.metrics.middleware import MetricsMiddleware
 from app.core.metrics.prometheus import MULTIPROCESS_MODE, PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
@@ -468,6 +471,10 @@ async def _report_dashboard_timeout_overrides(settings: Settings) -> None:
         return
     warn_environment_shadowed_by_dashboard(dashboard_settings_row, settings)
     validate_timeout_invariants(effective_settings(dashboard_settings_row, settings), strict=False, log=True)
+    # R2 spool retention: same warn-only shape. The environment alias alone can
+    # sit below the replay floor with the dashboard column NULL, a state the
+    # settings API never validated, so say so before an edit is refused.
+    warn_spool_retention_below_floor(dashboard_settings_row, settings)
 
 
 @asynccontextmanager

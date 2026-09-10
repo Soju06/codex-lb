@@ -19,10 +19,16 @@ window in which a spooled operation can still be read, and the rejection MUST
 name the binding term. That floor MUST be derived from the reuse windows in
 force — not a fixed number — because operators can raise some of them, and the
 same check MUST therefore also reject raising a reuse window past a stored
-spool window. Only a violation the update introduces may be rejected, so a
-deployment whose environment alias is already below the floor can still edit
-unrelated settings. The API MUST report the current floor so the dashboard can
-state it and mirror the check before submitting.
+spool window.
+
+A deployment can already be below the floor without any update having passed
+that check, because the environment alias alone decides the window while the
+column is NULL. That state MUST NOT make the settings surface read-only, and it
+MUST NOT suspend the check either: while below the floor an update MUST be
+accepted only when it leaves the effective window no shorter and the floor no
+higher than it found them, and MUST be rejected when it would deepen the
+violation. The API MUST report the current floor so the dashboard can state it
+and mirror the check before submitting.
 
 #### Scenario: Card manages the spool window with its provenance
 
@@ -47,6 +53,15 @@ state it and mirror the check before submitting.
   without also raising the spool window
 - **THEN** the API rejects the update
 - **AND** the same update is accepted when it raises both together
+
+#### Scenario: A configuration already below the floor may only improve
+
+- **GIVEN** an effective spool window below the floor that no update stored
+- **WHEN** an update changes an unrelated setting, or raises the window toward
+  the floor
+- **THEN** the API accepts it
+- **AND** an update that lowers the window further, or raises one of the terms
+  the floor is derived from, is rejected
 
 #### Scenario: Present-null returns the spool window to inheriting
 

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.config.settings import Settings
+from app.core.config.settings import Settings, get_settings
 from app.core.config.spool_retention import (
     OPERATION_SPOOL_RETENTION_SETTING,
     binding_spool_retention_floor_term,
@@ -14,6 +14,7 @@ from app.core.config.spool_retention import (
     operation_spool_retention_floor_seconds,
     resolve_operation_spool_retention_seconds,
     spool_retention_floor_terms_seconds,
+    warn_spool_retention_below_floor,
 )
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
 from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
@@ -112,3 +113,54 @@ def test_reuse_window_reads_the_bridge_idle_ttls_at_call_time(monkeypatch: pytes
     """The two idle TTLs are module constants; a raised value must move the floor."""
     monkeypatch.setattr(http_bridge_helpers, "HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS", 99999.0)
     assert bridge_session_reuse_window_seconds(_row()) == 99999.0
+
+
+def test_warn_below_floor_logs_the_binding_term_and_both_numbers(caplog: pytest.LogCaptureFixture) -> None:
+    environment = _environment(**{OPERATION_SPOOL_RETENTION_SETTING: 60.0})
+    with caplog.at_level("WARNING", logger="app.core.config.spool_retention"):
+        reported = warn_spool_retention_below_floor(_row(), environment)
+
+    assert reported == ("stale_operation_abandonment_window", 60.0, 7200.0)
+    assert "below its replay floor" in caplog.text
+    assert "60s < 7200s" in caplog.text
+    assert "stale_operation_abandonment_window" in caplog.text
+    # Only the two numbers and the term name; no other setting's value leaks.
+    assert "3600" not in caplog.text
+
+
+def test_warn_below_floor_is_silent_at_the_shipped_default(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING", logger="app.core.config.spool_retention"):
+        assert warn_spool_retention_below_floor(_row(), _environment()) is None
+    assert caplog.text == ""
+
+
+@pytest.mark.asyncio
+async def test_startup_report_warns_when_the_env_alias_sits_below_the_floor(monkeypatch, caplog) -> None:
+    """The warn-only startup pass (#2221) also reports the spool floor."""
+    import app.main as main_module
+
+    dashboard_row = _row()
+
+    class _Cache:
+        async def get(self) -> object:
+            return dashboard_row
+
+    monkeypatch.setattr(main_module, "get_settings_cache", lambda: _Cache())
+    monkeypatch.setattr(main_module, "warn_environment_shadowed_by_dashboard", lambda *args, **kwargs: [])
+    monkeypatch.setattr(main_module, "effective_settings", lambda _row_, base: base)
+    monkeypatch.setattr(main_module, "validate_timeout_invariants", lambda *args, **kwargs: [])
+
+    environment = get_settings().model_copy(update={OPERATION_SPOOL_RETENTION_SETTING: 60.0})
+    with caplog.at_level("WARNING", logger="app.core.config.spool_retention"):
+        await main_module._report_dashboard_timeout_overrides(environment)
+
+    assert "below its replay floor" in caplog.text
+    assert "60s < 7200s" in caplog.text
+
+
+def test_partial_snapshot_degrades_to_the_constant_reuse_terms() -> None:
+    """Startup and scheduler tests build partial snapshots; a missing column is skipped, not fatal."""
+    assert bridge_session_reuse_window_seconds(SimpleNamespace()) == max(
+        float(http_bridge_helpers.HTTP_BRIDGE_IDLE_TTL_SECONDS),
+        float(http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
+    )

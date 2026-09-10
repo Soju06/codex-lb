@@ -23,8 +23,7 @@ const REQUIRED_API_PATHS = [
   "/api/settings/telemetry",
 ] as const;
 
-async function installMobileContainmentFixtures(page: Page): Promise<void> {
-  const accounts = [
+async function installMobileContainmentFixtures(page: Page, accounts = [
     createAccountSummary({
       accountId: "acc_primary",
       email: "primary-operator@northstar",
@@ -37,7 +36,7 @@ async function installMobileContainmentFixtures(page: Page): Promise<void> {
       displayName: "secondary-operator@northstar",
       usage: { primaryRemainingPercent: 45, secondaryRemainingPercent: 12 },
     }),
-  ];
+  ]): Promise<void> {
   const fixtures: Record<string, unknown> = {
     "/api/dashboard-auth/session": createDashboardAuthSession({ authenticated: true, passwordRequired: true }),
     "/api/dashboard/overview": createDashboardOverview({ accounts }),
@@ -379,4 +378,42 @@ test("the API key create dialog stays inside supported viewports", async ({ page
   await expect(dialog).toBeVisible();
   await page.mouse.click(8, Math.floor(viewportCases[0].size.height / 2));
   await expect(dialog).toBeHidden();
+});
+
+
+test("deactivated account actions stay inside list cells and responsive cards", async ({ page }) => {
+  const accounts = [
+    createAccountSummary({ accountId: "acc_recover", displayName: "Recovery account", status: "deactivated", availableResetCredits: 1 }),
+    createAccountSummary({ accountId: "acc_reauth", displayName: "Reauth account", status: "reauth_required" }),
+    createAccountSummary({ accountId: "acc_paused", displayName: "Paused account", status: "paused" }),
+  ];
+  await installMobileContainmentFixtures(page, accounts);
+  await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
+  await page.getByRole("radio", { name: "View accounts as list" }).click();
+  const row = page.getByTestId("account-list-row").filter({ hasText: "Recovery account" });
+  await expect(row.getByRole("button", { name: "Resume Recovery account", exact: true })).toBeVisible();
+  await expect(row.getByRole("button", { name: "Re-authenticate Recovery account", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Resume Reauth account", exact: true })).toHaveCount(0);
+  const actions = row.locator(":scope > div").last();
+  await expect.poll(() => actions.evaluate((el) => {
+    const parent = el.getBoundingClientRect();
+    return Array.from(el.querySelectorAll("button")).every((button) => {
+      const box = button.getBoundingClientRect();
+      return box.left >= parent.left - 1 && box.right <= parent.right + 1 && box.top >= parent.top - 1 && box.bottom <= parent.bottom + 1;
+    });
+  })).toBe(true);
+  for (const width of [640, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.getByRole("radio", { name: "View accounts as cards" }).click();
+    const card = page.getByTestId("dashboard-account-cards").locator(":scope > div").filter({ hasText: "Recovery account" });
+    await expect(card.getByRole("button", { name: "Resume", exact: true })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Re-auth", exact: true })).toBeVisible();
+    await expect.poll(() => card.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return Array.from(el.querySelectorAll("button")).every((button) => {
+        const action = button.getBoundingClientRect();
+        return action.left >= box.left - 1 && action.right <= box.right + 1;
+      });
+    })).toBe(true);
+  }
 });

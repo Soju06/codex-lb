@@ -217,7 +217,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
       </div>
 
       {/* Actions */}
-      <div className="mt-3 flex items-center gap-1.5 border-t pt-3">
+      <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t pt-3">
         <Button
           type="button"
           size="sm"

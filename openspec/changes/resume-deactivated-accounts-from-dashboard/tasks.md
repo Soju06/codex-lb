@@ -15,4 +15,4 @@
 - [x] 3.1 Run the accounts and dashboard component tests.
 - [x] 3.2 Run the frontend typecheck and lint.
 - [x] 3.3 Validate the scoped OpenSpec change with strict validation.
-- [ ] 3.4 Capture dashboard before/after screenshots.
+- [x] 3.4 Capture dashboard before/after screenshots.

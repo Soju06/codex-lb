@@ -18,7 +18,11 @@ from app.core.balancer.logic import (
 )
 from app.core.balancer.types import FailureClass, UpstreamError
 from app.db.models import AccountStatus
-from app.modules.proxy.helpers import classify_upstream_failure, is_upstream_burst_rejection
+from app.modules.proxy.helpers import (
+    classify_upstream_failure,
+    is_model_scoped_upstream_rejection,
+    is_upstream_burst_rejection,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -85,6 +89,16 @@ class TestClassifyUpstreamFailure:
                 candidates_remaining=1,
             )
             == "failover_next"
+        )
+
+    def test_model_not_found_is_model_scoped_but_ordinary_invalid_request_is_not(self) -> None:
+        assert is_model_scoped_upstream_rejection(
+            "The model `gpt-5.5` does not exist or you do not have access to it.",
+            error_code="model_not_found",
+        )
+        assert not is_model_scoped_upstream_rejection(
+            "The request body is invalid.",
+            error_code="invalid_request_error",
         )
 
     def test_server_error(self) -> None:

@@ -764,6 +764,66 @@ def test_backend_responses_websocket_preserves_recorded_previous_response_accoun
     assert not any("model_source_requires_http_transport" in event for event in upstream.sent_text)
 
 
+def test_backend_responses_websocket_owner_bound_model_not_found_surfaces_original_404(app_instance, monkeypatch):
+    """A continuation owner cannot be excluded and replaced after its own rejection."""
+    account = SimpleNamespace(id="acct_ws_model_not_found_owner", security_work_authorized=False)
+    selection_calls: list[str | None] = []
+
+    async def recorded_owner(self, **kwargs):
+        del self, kwargs
+        return account.id
+
+    async def select_owner(self, *args, preferred_account_id=None, **kwargs):
+        del self, args, kwargs
+        selection_calls.append(preferred_account_id)
+        if len(selection_calls) > 1:
+            pytest.fail("owner-bound model rejection must not select a replacement account")
+        return account
+
+    async def reject_owner(self, selected_account, headers, **kwargs):
+        del self, headers, kwargs
+        assert selected_account.id == account.id
+        raise proxy_module.ProxyResponseError(
+            404,
+            proxy_module.openai_error(
+                "model_not_found",
+                "The model `gpt-5.5` does not exist or you do not have access to it.",
+                error_type="invalid_request_error",
+            ),
+            failure_phase="connect",
+        )
+
+    async def classify_connect_error(self, selected_account, exc):
+        del self, selected_account, exc
+        return {"failure_class": "retryable_transient"}
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", recorded_owner)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_websocket_connect_account", select_owner)
+    monkeypatch.setattr(proxy_module.ProxyService, "_try_open_websocket_connect_attempt", reject_owner)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_websocket_connect_error", classify_connect_error)
+
+    response_create = _websocket_response_create("continue the owner-bound turn")
+    response_create.update({"model": "gpt-5.5", "previous_response_id": "resp_ws_model_not_found_owner"})
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(response_create))
+            event = json.loads(websocket.receive_text())
+
+    assert selection_calls == [account.id]
+    assert event["type"] == "error"
+    assert event["status"] == 404
+    assert event["error"]["code"] == "model_not_found"
+
+
 def test_backend_responses_websocket_canonical_source_previous_response_requires_http(
     app_instance,
     monkeypatch,
@@ -10265,6 +10325,78 @@ def test_backend_responses_websocket_retries_stale_account_model_route_on_anothe
     assert _without_installation_metadata(json.loads(first_upstream.sent_text[0])) == _without_installation_metadata(
         json.loads(second_upstream.sent_text[0])
     )
+
+
+def test_backend_responses_websocket_retries_precreated_model_not_found_on_another_account(app_instance, monkeypatch):
+    """The public WebSocket route retries only an unaccepted model rejection."""
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 404,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "model_not_found",
+                            "message": "The model `gpt-5.5` does not exist or you do not have access to it.",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        ]
+    )
+    second_upstream = _FakeUpstreamWebSocket(_websocket_response_batch("resp_ws_model_not_found_retried"))
+    upstreams = [first_upstream, second_upstream]
+    account_ids = ["acct_ws_model_not_found_a", "acct_ws_model_not_found_b"]
+    selected_accounts: list[str] = []
+    excluded_snapshots: list[set[str]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self, headers, *, request_state, model, api_key, client_send_lock, websocket, **kwargs
+    ):
+        del self, headers, model, api_key, client_send_lock, websocket, kwargs
+        index = len(selected_accounts)
+        selected_accounts.append(account_ids[index])
+        excluded_snapshots.append(set(request_state.excluded_account_ids))
+        return SimpleNamespace(id=account_ids[index]), upstreams[index]
+
+    async def fake_handle_stream_error(self, account, error, code):
+        del self, account, error
+        assert code == "model_not_found"
+
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fake_handle_stream_error)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(_websocket_response_create("retry model rejection")))
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    assert selected_accounts == account_ids
+    assert excluded_snapshots == [set(), {account_ids[0]}]
 
 
 def test_backend_responses_websocket_previous_response_usage_limit_returns_upstream_unavailable(

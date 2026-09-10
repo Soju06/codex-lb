@@ -488,6 +488,7 @@ async def _report_dashboard_timeout_overrides(settings: Settings) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Own application startup and shutdown, draining persistence before releasing durable bridge leases."""
     import app.core.startup as startup_module
 
     app.state.reports_caches = ReportsCaches()
@@ -832,12 +833,12 @@ async def lifespan(app: FastAPI):
 
         proxy_service = getattr(app.state, "proxy_service", None)
         recovery_settlements_drained = True
-        # Settle detached recovery journals while their origin leases are
+        # Settle detached recovery journals and snapshots while their origin leases are
         # still held; bridge teardown below may release those owner fences.
         recovery_settlements_drained = await _drain_proxy_persistence_tasks(
             proxy_service,
             shutdown_state.remaining_post_drain_cleanup_timeout_seconds() or 0.0,
-            task_name_prefixes=("http-bridge-recovery-settlement-",),
+            task_name_prefixes=("http-bridge-recovery-settlement-", "http-bridge-transcript-snapshot-"),
             failure_message="Failed to pre-drain proxy settlement tasks during shutdown",
         )
         # An in-flight request can still own a database session after the

@@ -1,0 +1,3 @@
+- [x] Retain failed fence compensation ownership and retry only unfinished work.
+- [x] Admit nonempty string input through the root recovery gate.
+- [ ] Verify regression, static, specification, CI, and bot review gates.

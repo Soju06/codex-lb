@@ -559,6 +559,7 @@ async def _sleep_for_account_selection_recovery(
     scheduler: Scheduler,
     clock: Clock,
 ) -> bool:
+    """Wait within the recovery budget using injected time, emitting heartbeats and clearing wait state on exit."""
     sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
     if sleep_seconds is None:
         return False
@@ -571,7 +572,9 @@ async def _sleep_for_account_selection_recovery(
         request_state.account_capacity_waiting = True
         request_state.account_capacity_wait_reason = selection.error_message
         request_state.account_capacity_wait_started_at = (
-            request_state.account_capacity_wait_started_at or clock.monotonic()
+            request_state.account_capacity_wait_started_at
+            if request_state.account_capacity_wait_started_at is not None
+            else clock.monotonic()
         )
         request_state.account_capacity_wait_retry_after_seconds = sleep_seconds
 
@@ -1068,9 +1071,28 @@ class _WebSocketRequestState:
     # replay when the replacement upstream socket also closes cleanly before
     # producing any response event.
     clean_close_replay_count: int = 0
+    # Complete-transcript recovery may run once after an initial fresh replay
+    # has already been attempted.  Keep this separate from ``replay_count`` so
+    # the ordinary retry budget remains visible to the existing safety gates.
+    complete_transcript_recovery_count: int = 0
+    complete_transcript_recovery_anchor: str | None = None
+    complete_transcript_recovery_retry_authorized: bool = False
+    # Number of turns represented by the unanchored replay body installed by
+    # a recovery attempt. This preserves snapshot bounds after the stale
+    # parent anchor is cleared.
+    recovery_replay_turn_count: int = 0
+    # Explicitly opt-in partial-turn recovery may replace one interrupted
+    # response with a fresh root built from completed durable turns. Keep its
+    # one-shot fence separate from safe complete-transcript recovery.
+    unsafe_partial_replay_count: int = 0
+    unsafe_partial_replay_retry_authorized: bool = False
     clean_close_retry_in_progress: bool = False
     clean_close_retry_result: bool | None = None
     clean_close_retry_close_generation: int | None = None
+    # Parked recovery may consume one half-open circuit probe after the
+    # cooldown. Keep the probe permission on the request state so it cannot
+    # turn repeated ambiguous failures into an immediate replay loop.
+    parked_recovery_probe_allowed: bool = False
     auth_replay_count: int = 0
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
@@ -1194,6 +1216,20 @@ class _WebSocketRequestState:
     operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
+    # True after an existing UNKNOWN operation is claimed for this attempt.
+    # The submit/recovery path clears it when a pre-dispatch claim is rolled
+    # back, so cancellation cannot leave a stale in-memory claim marker.
+    operation_recovery_claimed: bool = False
+    # Immutable durable attempt generation. Recovery claims increment the
+    # operation's dispatch count before sending a replacement attempt.
+    operation_attempt_generation: int = 0
+    # Generation observed before a transcript-recovery rebind. Cleanup uses
+    # this compare-and-set value to avoid rolling back a concurrent winner.
+    operation_recovery_expected_generation: int | None = None
+    operation_rebind_claim_id: str | None = None
+    # Durable compensation is single-use. Retain its exact completed claim
+    # while an in-memory fence rollback still needs retrying.
+    operation_rollback_completed_claim_id: str | None = None
     # Last response identity successfully written to the durable operation.
     # Retry setup may clear the active response before a replacement is
     # acknowledged, but fallback settlement must still fence against this ID.
@@ -1254,7 +1290,24 @@ class _WebSocketRequestState:
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
     added_tool_call_types: dict[str, str] = field(default_factory=dict)
+    added_tool_call_item_ids: set[str] = field(default_factory=set)
     tool_call_manifest_invalid: bool = False
+    # The terminal response output is retained independently of the SSE event
+    # spool.  It is the assistant side of the durable replay transcript.
+    response_output_items: list[JsonValue] = field(default_factory=list)
+    # Some Codex streams put the canonical output only on output_item.done
+    # events and leave response.completed.response.output empty. Keep the
+    # completed items keyed by output_index until the terminal event arrives.
+    response_output_items_by_index: dict[int, JsonValue] = field(default_factory=dict)
+    # Keep output_item.added indexes so a missing output_item.done cannot be
+    # mistaken for a complete replay transcript at response.completed.
+    response_output_item_added_indexes: set[int] = field(default_factory=set)
+    # Keep the stable identity observed on each added item so a later done
+    # frame cannot replace it with a different output item at the same index.
+    response_output_item_added_identities: dict[int, dict[str, str]] = field(default_factory=dict)
+    response_output_items_event_invalid: bool = False
+    response_output_items_complete: bool = False
+    response_output_items_bytes: int = 0
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -1297,6 +1350,7 @@ class _WebSocketRequestState:
     # duplicate prelude frame is dropped and the lifecycle stays single.
     suppress_next_in_progress_downstream: bool = False
     replay_downstream_response_id: str | None = None
+    replay_downstream_sequence_offset: int | None = None
     draining_until_terminal: bool = False
     completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
     # Exactly-once reservation settlement for terminal HTTP bridge events
@@ -1756,6 +1810,19 @@ def _websocket_request_can_replay_before_visible_output(
     if precreated_pending and request_state.response_event_count > 0:
         return False
     return precreated_pending or accepted_lifecycle_only_pending
+
+
+def _reset_websocket_output_item_tracking(request_state: _WebSocketRequestState) -> None:
+    """Start a replay's output lifecycle without retaining prior-attempt validation."""
+    request_state.response_output_items = []
+    request_state.response_output_items_by_index = {}
+    request_state.response_output_items_bytes = 0
+    request_state.response_output_item_added_indexes = set()
+    request_state.response_output_item_added_identities = {}
+    request_state.added_tool_call_item_ids = set()
+    request_state.tool_call_manifest_invalid = False
+    request_state.response_output_items_event_invalid = False
+    request_state.response_output_items_complete = False
 
 
 def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketRequestState) -> bool:

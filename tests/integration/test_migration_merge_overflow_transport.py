@@ -22,6 +22,8 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+_HEAD = "20260910_030000_merge_recovery_and_request_log_indexes"
+_RECOVERY = "20260906_000000_add_http_bridge_rebind_claim"
 
 
 @dataclass
@@ -149,13 +151,14 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
         engine.dispose()
 
 
-def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tmp_path: Path) -> None:
+def test_overflow_transport_merge_retains_original_parents_below_combined_head(tmp_path: Path) -> None:
+    """The combined migration head preserves the original overflow and transport branch ancestry."""
     config = _build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}")
     script = ScriptDirectory.from_config(config)
     # Later revisions build on the merge; the graph must still have one head
     # and the merge must be on its ancestry.
     heads = script.get_heads()
-    assert len(heads) == 1
+    assert heads == [_HEAD]
     assert _MERGE in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
@@ -167,6 +170,7 @@ def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tm
 def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     branch_database: _MigrationDatabase,
 ) -> None:
+    """Populated upgrades and direct merge downgrades preserve data and both parent schemas."""
     database = branch_database
     before = _state(database.engine)
     expected_settings = [dict(row) for row in before["settings"]]
@@ -211,7 +215,9 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     # (and their own drift against the ORM), while the merge itself must stay a
     # no-op in both directions.
     command.downgrade(_build_alembic_config(database.url), _MERGE)
-    assert _revisions(database.engine) == (_MERGE,)
+    assert _revisions(database.engine) == tuple(
+        sorted((_MERGE, "20260908_020000_merge_http_bridge_and_transport_default"))
+    )
     at_merge = _state(database.engine)
     merge_drift = check_schema_drift(database.url)
 
@@ -220,7 +226,12 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
         # A direct downgrade to either immediate parent executes only the
         # no-op merge downgrade. Alembic records both unmerged parent heads;
         # it does not execute either parent's schema-removing downgrade.
-        assert _revisions(database.engine) == tuple(sorted(_PARENTS))
+        expected_stamps = (
+            (*_PARENTS, _RECOVERY)
+            if parent == _OVERFLOW
+            else (_TRANSPORT, "20260908_010000_merge_http_bridge_and_subscription_overflow")
+        )
+        assert _revisions(database.engine) == tuple(sorted(expected_stamps))
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
 

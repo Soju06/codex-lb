@@ -69,6 +69,53 @@ async def _empty_rest() -> AsyncIterator[str]:
         yield ""
 
 
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_cancelled_probe_teardown_preserves_cancellation_and_logs_unexpected_failure(
+    caplog: pytest.LogCaptureFixture,
+    cleanup_fails: bool,
+) -> None:
+    """Probe teardown preserves cancellation while logging unexpected child-task failures."""
+    started = asyncio.Event()
+
+    async def probe() -> str:
+        """Hold probe teardown across cancellation and inject the configured unexpected cleanup failure."""
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if cleanup_fails:
+                raise ValueError("probe cleanup failed") from None
+            raise
+        return "unused"
+
+    first_task = asyncio.create_task(probe())
+    await started.wait()
+    stream = _prepend_first_task(first_task, _empty_rest())
+
+    async def consume() -> str:
+        """Drive the prepended probe stream in a task whose cancellation exercises deferred teardown."""
+        return await anext(stream)
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(consumer, timeout=1)
+    assert first_task.done()
+    assert first_task.cancelling() == 1
+    records = [
+        record for record in caplog.records if record.message == "Failed to settle cancelled Responses probe task"
+    ]
+    if cleanup_fails:
+        assert isinstance(first_task.exception(), ValueError)
+        assert len(records) == 1
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[0] is ValueError
+    else:
+        assert first_task.cancelled()
+        assert records == []
+
+
 async def test_level_cancelled_response_does_not_respin_startup_probe_task():
     release = asyncio.Event()
     cleanup_task: asyncio.Task[None] | None = None

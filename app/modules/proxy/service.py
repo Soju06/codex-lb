@@ -746,7 +746,7 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
     _upstream_error_from_openai,
 )
-from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher
+from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher as EventSpool
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
 )
@@ -948,7 +948,7 @@ class ProxyService(
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
-        self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher.from_settings(self._durable_bridge)
+        self._http_bridge_operation_event_batcher = EventSpool.from_settings(self._durable_bridge, scheduler=scheduler)
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
         self._initialize_http_bridge_session_registry()
         _initialize_http_bridge_retry_circuit(self, _clear_websocket_stale_previous_response_cache)

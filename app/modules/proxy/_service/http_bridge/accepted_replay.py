@@ -28,6 +28,7 @@ from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_WEBSOCKET,
     _affinity_may_resolve_hard_owner,
     _HTTPBridgeSession,
+    _reset_websocket_output_item_tracking,
     _websocket_request_is_accepted_lifecycle_only,
     _WebSocketRequestState,
 )
@@ -293,7 +294,8 @@ async def _stage_websocket_request_state_for_replay(
     first is what leaks a second ``response.created``), marks the shared work
     admission for re-acquisition, and re-claims the session create gate when
     one is supplied. Returns ``False`` without touching the state when the gate
-    is held by another request. Pre-created requests pass through unchanged.
+    is held by another request. Pre-created requests keep their admission and
+    downstream identity state. Every admitted replay clears output tracking.
 
     ``terminal_settlement_phase`` is deliberately left alone: the settlement
     claim belongs to the bridge terminal bookkeeping, not to staging. The
@@ -328,4 +330,5 @@ async def _stage_websocket_request_state_for_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    _reset_websocket_output_item_tracking(request_state)
     return True

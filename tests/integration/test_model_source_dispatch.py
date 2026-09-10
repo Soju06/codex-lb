@@ -84,8 +84,24 @@ _DELTA = _sse(
     }
 )
 
+_ITEM_DONE = _sse(
+    {
+        "type": "response.output_item.done",
+        "sequence_number": 3,
+        "output_index": 0,
+        "item": {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "hello from the source", "annotations": []}],
+        },
+    }
+)
+
 
 def _completed(usage: dict[str, int] | None, response_id: str = "resp_dispatch_1") -> bytes:
+    """Build a terminal source response with the usage payload needed by settlement tests."""
     response: dict[str, Any] = {
         "id": response_id,
         "object": "response",
@@ -102,7 +118,7 @@ def _completed(usage: dict[str, int] | None, response_id: str = "resp_dispatch_1
     }
     if usage is not None:
         response["usage"] = usage
-    return _sse({"type": "response.completed", "sequence_number": 3, "response": response})
+    return _sse({"type": "response.completed", "sequence_number": 4, "response": response})
 
 
 _USAGE = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
@@ -112,6 +128,7 @@ _USAGE = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
 class _StubState:
     requests: list[dict[str, Any]] = field(default_factory=list)
     headers: list[dict[str, str]] = field(default_factory=list)
+    request_received: asyncio.Event = field(default_factory=asyncio.Event)
     cancelled: int = 0
     finished: int = 0
 
@@ -124,9 +141,13 @@ def _sse_handler(
     after_hold: list[bytes] | None = None,
     delay_headers: asyncio.Event | None = None,
 ) -> _UpstreamHandler:
+    """Serve controlled SSE events so tests can observe output, cancellation, and usage settlement."""
+
     async def handler(request: web.Request) -> web.StreamResponse:
+        """Serve barrier-controlled source SSE while recording requests, completion, and cancellation."""
         state.requests.append(await request.json())
         state.headers.append(dict(request.headers))
+        state.request_received.set()
         try:
             if delay_headers is not None:
                 await delay_headers.wait()
@@ -220,11 +241,14 @@ def _request_body(model: str, **extra: Any) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_limited_key_streams_live_and_settles_from_source_usage(async_client, source_upstream) -> None:
+    """Limited keys receive live output and settle their reservation using reported source usage."""
     await _enable_api_key_auth(async_client)
     state = _StubState()
     hold = asyncio.Event()
     base_url = await source_upstream(
-        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA], hold=hold, after_hold=[_completed(_USAGE)])
+        _sse_handler(
+            state, before_hold=[_created(), _ITEM_ADDED, _DELTA], hold=hold, after_hold=[_ITEM_DONE, _completed(_USAGE)]
+        )
     )
     model = "dispatch-live-limited"
     source_id = await _create_model_source(
@@ -299,10 +323,11 @@ async def test_limited_key_streams_live_and_settles_from_source_usage(async_clie
 async def test_limited_key_missing_usage_settles_at_the_estimate(
     async_client, source_upstream, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Missing terminal usage settles a limited key at its estimate rather than releasing used capacity."""
     await _enable_api_key_auth(async_client)
     state = _StubState()
     base_url = await source_upstream(
-        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _completed(None)])
+        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _ITEM_DONE, _completed(None)])
     )
     model = "dispatch-missing-usage"
     source_id = await _create_model_source(
@@ -332,11 +357,14 @@ async def test_limited_key_missing_usage_settles_at_the_estimate(
 async def test_limited_key_cancel_after_the_first_output_item_settles_at_the_estimate(
     async_client, source_upstream
 ) -> None:
+    """Cancellation after visible output charges the estimated reservation despite missing final usage."""
     await _enable_api_key_auth(async_client)
     state = _StubState()
     hold = asyncio.Event()
     base_url = await source_upstream(
-        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA], hold=hold, after_hold=[_completed(_USAGE)]),
+        _sse_handler(
+            state, before_hold=[_created(), _ITEM_ADDED, _DELTA], hold=hold, after_hold=[_ITEM_DONE, _completed(_USAGE)]
+        ),
         handler_cancellation=True,
         shutdown_timeout=1.0,
     )
@@ -435,7 +463,7 @@ async def test_limited_key_cancel_after_a_vendor_event_the_public_contract_dropp
             state,
             before_hold=[_created(), vendor_event, in_progress],
             hold=hold,
-            after_hold=[_ITEM_ADDED, _completed(_USAGE)],
+            after_hold=[_ITEM_ADDED, _ITEM_DONE, _completed(_USAGE)],
         ),
         handler_cancellation=True,
         shutdown_timeout=1.0,
@@ -530,7 +558,7 @@ async def test_limited_key_disconnect_after_the_relayed_success_terminal_is_a_su
     state = _StubState()
     hold = asyncio.Event()
     base_url = await source_upstream(
-        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _completed(_USAGE)], hold=hold),
+        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _ITEM_DONE, _completed(_USAGE)], hold=hold),
         handler_cancellation=True,
         shutdown_timeout=1.0,
     )
@@ -572,11 +600,14 @@ async def test_limited_key_disconnect_after_the_relayed_success_terminal_is_a_su
 
 @pytest.mark.asyncio
 async def test_limited_key_cancel_before_the_first_output_item_releases(async_client, source_upstream) -> None:
+    """Cancellation before output releases the unused limited-key reservation."""
     await _enable_api_key_auth(async_client)
     state = _StubState()
     hold = asyncio.Event()
     base_url = await source_upstream(
-        _sse_handler(state, before_hold=[_created()], hold=hold, after_hold=[_ITEM_ADDED, _completed(_USAGE)]),
+        _sse_handler(
+            state, before_hold=[_created()], hold=hold, after_hold=[_ITEM_ADDED, _ITEM_DONE, _completed(_USAGE)]
+        ),
         handler_cancellation=True,
         shutdown_timeout=1.0,
     )
@@ -632,7 +663,7 @@ async def test_limited_key_cancel_after_bare_cr_framed_bookkeeping_releases(
             state,
             before_hold=[_cr_framed(created), _cr_framed(in_progress)],
             hold=hold,
-            after_hold=[_ITEM_ADDED, _completed(_USAGE)],
+            after_hold=[_ITEM_ADDED, _ITEM_DONE, _completed(_USAGE)],
         ),
         handler_cancellation=True,
         shutdown_timeout=1.0,
@@ -857,6 +888,7 @@ async def test_client_leaving_after_the_stall_window_is_a_stall_abandonment(
         body=json.dumps(_request_body(model)).encode(),
     )
     runner = asyncio.create_task(stream.run())
+    await asyncio.wait_for(state.request_received.wait(), timeout=10)
     await asyncio.sleep(0.6)
     stream.disconnect()
     await asyncio.wait_for(runner, timeout=10)
@@ -919,7 +951,9 @@ async def test_client_leaving_after_the_heartbeat_releases_everything(async_clie
     state = _StubState()
     hold = asyncio.Event()
     base_url = await source_upstream(
-        _sse_handler(state, before_hold=[_created()], hold=hold, after_hold=[_ITEM_ADDED, _completed(_USAGE)]),
+        _sse_handler(
+            state, before_hold=[_created()], hold=hold, after_hold=[_ITEM_ADDED, _ITEM_DONE, _completed(_USAGE)]
+        ),
         handler_cancellation=True,
         shutdown_timeout=1.0,
     )
@@ -1018,7 +1052,7 @@ async def test_admission_estimate_failure_after_the_claim_releases_the_bulkhead_
     await _enable_api_key_auth(async_client)
     state = _StubState()
     base_url = await source_upstream(
-        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _completed(_USAGE)])
+        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _ITEM_DONE, _completed(_USAGE)])
     )
     model = "dispatch-estimate-raises"
     source_id = await _create_model_source(
@@ -1055,6 +1089,8 @@ async def test_admission_estimate_failure_after_the_claim_releases_the_bulkhead_
         "/v1/responses", headers={"Authorization": f"Bearer {key}"}, json=_request_body(model)
     )
     assert follow_up.status_code == 200, follow_up.text
+    assert "response.completed" in follow_up.text
+    assert "response.failed" not in follow_up.text
     assert get_source_bulkhead().in_flight(source_id) == 0
 
 
@@ -1341,7 +1377,7 @@ async def test_typed_event_trailing_a_rewritten_terminal_keeps_the_error_and_the
 ) -> None:
     """The source keeps emitting a typed event after the ``response.completed`` the wrapper rewrote into
     ``response.failed invalid_json``; the client-visible terminal is latched, so the trailing frame does not turn the
-    attempt into a ``success`` settled at the estimate."""
+    attempt into a ``success`` settled at the estimate or reach the client."""
 
     await _enable_api_key_auth(async_client)
     state = _StubState()
@@ -1372,7 +1408,9 @@ async def test_typed_event_trailing_a_rewritten_terminal_keeps_the_error_and_the
         text = "".join([chunk async for chunk in response.aiter_text()])
 
     assert "response.failed" in text and "invalid_json" in text
-    assert text.index("response.failed") < text.index('"late"')
+    assert text.count("event: response.failed") == 1
+    assert '"late"' not in text
+    assert "response.completed" not in text
     reservations = await _reservations(key_id)
     assert [reservation.status for reservation in reservations] == ["released"]
     rows = await _source_rows(source_id)
@@ -1382,10 +1420,11 @@ async def test_typed_event_trailing_a_rewritten_terminal_keeps_the_error_and_the
 
 @pytest.mark.asyncio
 async def test_unlimited_key_streams_live_without_a_settlement(async_client, source_upstream) -> None:
+    """Unlimited keys stream normally without creating a usage-limit settlement obligation."""
     await _enable_api_key_auth(async_client)
     state = _StubState()
     base_url = await source_upstream(
-        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _completed(None)])
+        _sse_handler(state, before_hold=[_created(), _ITEM_ADDED, _DELTA, _ITEM_DONE, _completed(None)])
     )
     model = "dispatch-unlimited"
     source_id = await _create_model_source(

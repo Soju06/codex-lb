@@ -30,6 +30,7 @@ _PERSISTENCE_TASK_NAME_PREFIXES = (
     "proxy-websocket-transport-end-",
     "proxy-websocket-finalization-",
     "http-bridge-recovery-settlement-",
+    "http-bridge-transcript-snapshot-",
 )
 
 

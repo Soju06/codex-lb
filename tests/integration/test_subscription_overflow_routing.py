@@ -94,6 +94,7 @@ from tests.integration.model_source_helpers import (
 from tests.integration.test_model_source_dispatch import (
     _DELTA,
     _ITEM_ADDED,
+    _ITEM_DONE,
     _USAGE,
     _app,
     _completed,
@@ -521,7 +522,8 @@ async def test_overflow_dispatch_streams_through_the_source_route_with_the_decis
         async_client,
         source_upstream,
         _sse_handler(
-            state, before_hold=[_created("resp_double"), _ITEM_ADDED, _DELTA, _completed(_USAGE, "resp_double")]
+            state,
+            before_hold=[_created("resp_double"), _ITEM_ADDED, _DELTA, _ITEM_DONE, _completed(_USAGE, "resp_double")],
         ),
         name=source_model,
         model=source_model,
@@ -1213,7 +1215,7 @@ async def test_fresh_overflow_serves_v1_requests_from_the_designated_source(
         body = await request.json()
         if body.get("stream"):
             return await _sse_handler(
-                _StubState(), before_hold=[_created("resp_v1"), _ITEM_ADDED, _completed(_USAGE, "resp_v1")]
+                _StubState(), before_hold=[_created("resp_v1"), _ITEM_ADDED, _ITEM_DONE, _completed(_USAGE, "resp_v1")]
             )(request)
         return web.json_response(
             {

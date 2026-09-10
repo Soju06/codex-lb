@@ -2,8 +2,8 @@
 
 ### Requirement: Unsafe fresh-response recovery is explicitly bounded
 
-When the unsafe new-response recovery flag is enabled together with
-`server_indefinite_recovery`, the HTTP bridge MUST replace an invalid
+When the complete-transcript recovery and unsafe new-response recovery flags
+are both enabled, the HTTP bridge MUST replace an invalid
 `previous_response_id` with one fresh, anchor-free response only when the upstream
 error matches the shared previous-response-not-found classifier with normalized
 error identifier `invalid_request_error` (from `error.code`, or `error.type` when
@@ -17,7 +17,8 @@ requests MUST remain fail-closed. The flag MUST remain disabled by default.
 
 - **GIVEN** an anchored request has a complete durable full-history body
 - **AND** the upstream returns the classified invalid-anchor error described above
-- **AND** the unsafe recovery flag and `server_indefinite_recovery` are enabled
+- **AND** the complete-transcript recovery and unsafe fresh-response recovery
+  flags are enabled
 - **AND** the durable one-shot fence is claimed successfully
 - **WHEN** the bridge retries the request
 - **THEN** it sends the verified body without `previous_response_id`
@@ -34,7 +35,8 @@ requests MUST remain fail-closed. The flag MUST remain disabled by default.
 
 #### Scenario: Missing or consumed fence fails closed
 
-- **GIVEN** the unsafe recovery flag is enabled
+- **GIVEN** the complete-transcript recovery and unsafe fresh-response recovery
+  flags are enabled
 - **AND** the durable one-shot fence is unavailable or already consumed
 - **WHEN** an anchored request encounters an explicit invalid-anchor error
 - **THEN** the bridge does not dispatch a fresh response

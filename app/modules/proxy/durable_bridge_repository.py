@@ -2902,7 +2902,12 @@ class DurableBridgeRepository:
                         DurableBridgeTranscriptTurn(
                             operation=synthetic_operation,
                             events=(),
-                            response_output_items_json=snapshot.response_output_items_json or "[]",
+                            # The snapshot input is self-contained and already
+                            # includes the terminal output.  Do not attach the
+                            # raw stored output to the synthetic turn: replay
+                            # construction would otherwise parse and carry an
+                            # unbounded duplicate payload.
+                            response_output_items_json="[]",
                             replay_input_includes_response_output=True,
                             represented_turn_count=snapshot_turn_count,
                         )

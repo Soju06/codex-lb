@@ -6,10 +6,11 @@ behavior cannot continue those sessions without a client restart.
 
 ## What Changes
 
-- Add an explicitly disabled operator flag for unsafe fresh-response recovery.
-- When enabled with `server_indefinite_recovery`, replay only a verified full
-  history request without the stale anchor and bind the upstream-minted new
-  response ID to the existing downstream session.
+- Add explicitly disabled operator flags for complete-transcript recovery and
+  unsafe fresh-response recovery.
+- When both flags are enabled, replay only a verified full-history request
+  without the stale anchor and bind the upstream-minted new response ID to the
+  existing downstream session.
 - Recognize the upstream's terse `Invalid previous_response_id` error only in
   this opt-in path.
 - Keep delta-only requests, incomplete history, ambiguous matches, and repeats

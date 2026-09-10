@@ -57,6 +57,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Confirm that Codex/Codex CLI is closed and allow a non-interactive write.",
     )
 
+    from app.codex_session_metadata_cli import add_metadata_commands
+
+    add_metadata_commands(codex_sessions_subparsers)
+
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
     parser.add_argument("--port", default=os.getenv("PORT", "2455"))
     parser.add_argument("--ssl-certfile", default=os.getenv("SSL_CERTFILE"))
@@ -94,6 +98,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "codex-sessions":
         if args.codex_sessions_command == "retag":
             _run_codex_sessions_retag(args)
+            return
+        if args.codex_sessions_command in {"metadata-mismatches", "repair-metadata"}:
+            from app.codex_session_metadata_cli import run_metadata_command
+
+            run_metadata_command(args)
             return
         raise SystemExit("codex-sessions requires a subcommand")
 

@@ -51,3 +51,11 @@ docker run --rm \
   codex-lb codex-sessions retag --from openai --to codex-lb \
     --codex-home /codex-home --yes
 ```
+
+## Targeted session metadata repair
+
+The targeted CLI implements the repair slice of #1636. Whole-home retag optimization remains outside that slice. See [the operator guide](../../../docs/session-metadata.md) for commands and recovery limits.
+
+For example, JSONL tag `openai` and SQLite tag `codex-lb` for the same ID produce a mismatch. `repair-metadata --provider codex-lb --session-id ID --yes` changes only that selected session's tags. It does not change `config.toml` or provider selection. Discovery also includes archived sessions and supports legacy top-level metadata headers.
+
+The CLI builds a fresh plan for each call. It caps header reads at 1 MiB, rejects ambiguous metadata and unsupported selected tags, preserves opaque transcript bodies, takes backups before mutation and checks selected targets afterward. Codex must be closed. File identity and provider comparisons detect stale plans but cannot make independent files and databases one transaction. Backups survive failure; automatic rollback could overwrite newer work and is not attempted.

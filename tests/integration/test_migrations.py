@@ -1947,6 +1947,45 @@ async def test_quota_warmup_claim_expiry_migration_upgrade_and_downgrade(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_quota_failover_setting_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'quota-failover-setting.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    failover_revision = "20260908_030000_add_quota_failover_setting"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        await to_thread.run_sync(lambda: run_upgrade(db_url, failover_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("dashboard_settings")}
+            )
+            enabled = (
+                await conn.execute(text("SELECT quota_failover_enabled FROM dashboard_settings WHERE id = 1"))
+            ).scalar_one()
+        assert "quota_failover_enabled" in columns
+        assert enabled == 1
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            columns_after = await conn.run_sync(
+                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("dashboard_settings")}
+            )
+        assert "quota_failover_enabled" not in columns_after
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert check_schema_drift(db_url) == ()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_conversation_presence_rollup_migration_upgrade_and_downgrade(tmp_path):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect

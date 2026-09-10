@@ -1,4 +1,8 @@
 {
+  "settings.resilience.quotaContinuity.label": "Quota continuity recovery",
+  "settings.resilience.quotaContinuity.description": "Release soft affinity on quota exhaustion and recover verified full-history continuations. Uses existing failover decisions and retry limits; does not add retries or delays.",
+  "settings.resilience.quotaContinuity.default": "Default (on)",
+  "settings.resilience.quotaContinuity.ariaLabel": "Quota continuity recovery",
   "accounts.actions.disableWarmup": "Disable Warmup",
   "accounts.actions.enableWarmup": "Enable Warmup",
   "accounts.actions.forceProbe": "Force probe",
@@ -1255,7 +1259,7 @@
   "settings.inherit.reset": "Reset to inherited",
   "settings.inherit.resetBlockedByReserve": "Reset is blocked: the stream recovery reserve would exceed the stream limit. Adjust the other cap first.",
   "settings.resilience.title": "Resilience",
-  "settings.resilience.description": "Failover safety nets. Each switch inherits its environment variable (or the default) until you flip it here; changes apply to the next request on every replica.",
+  "settings.resilience.description": "Failover safety nets and continuity recovery. Changes apply to the next request on every replica.",
   "settings.resilience.softDrain.label": "Soft drain",
   "settings.resilience.softDrain.description": "Move accounts near their quota into a draining tier and probe them back gradually instead of using them until they hit the limit.",
   "settings.resilience.softDrain.ariaLabel": "Soft drain",

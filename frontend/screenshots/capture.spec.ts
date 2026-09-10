@@ -377,6 +377,29 @@ test("settings — dark", async ({ page }) => {
   await capture(page, { file: "settings-dark.jpg", theme: "dark", route: "/settings", fullPage: true });
 });
 
+test("quota continuity recovery — resilience", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await applyTheme(page, "light");
+  await interceptApi(page);
+  await page.goto(`${BASE_URL}/settings`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Show advanced settings" }).click();
+  const recovery = page.getByRole("switch", { name: "Quota continuity recovery" });
+  await expect(recovery).toBeVisible();
+  await expect(recovery).toBeChecked();
+  const section = page.locator("section").filter({ has: recovery });
+  const labels = await section.getByRole("switch").evaluateAll((elements) =>
+    elements.map((element) => element.getAttribute("aria-label")),
+  );
+  expect(labels).toEqual([
+    "Soft drain", "Deterministic failover", "Quota continuity recovery", "Circuit breaker",
+  ]);
+  await expect(section).toContainText("does not add retries or delays");
+  await section.scrollIntoViewIfNeeded();
+  await section.screenshot({ path: path.join(SCREENSHOT_DIR, "quota-continuity-recovery.png") });
+  expect(pageErrors).toEqual([]);
+});
+
 test("login", async ({ page }) => {
   await capture(page, {
     file: "login.jpg",

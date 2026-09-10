@@ -116,6 +116,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _maybe_rewrite_websocket_previous_response_not_found_event,
     _pop_matching_websocket_request_states,
     _pop_terminal_websocket_request_state,
+    _prepare_websocket_quota_continuation_replay,
     _prepare_websocket_request_state_for_account_switch,
     _previous_response_id_from_not_found_message,
     _release_websocket_response_create_gate,
@@ -126,6 +127,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _rewrite_websocket_suppressed_duplicate_tool_call_completion_event,
     _security_work_advisory_event,
     _service_get_settings,
+    _service_get_settings_cache,
     _service_tier_from_event_payload,
     _upstream_websocket_disconnect_message,
     _websocket_auth_request_can_switch_account,
@@ -159,6 +161,7 @@ from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS,
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _LIMIT_FAILOVER_ERROR_CODES,
     _MODEL_OUTPUT_EVENT_TYPES,
     _PENDING_TOOL_CALL_ITEM_TYPES,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
@@ -3413,6 +3416,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         wait_for_model_capacity_retry = bool(
             retry_error_code is not None
             and retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+            and retry_error_code not in _LIMIT_FAILOVER_ERROR_CODES
             and not is_previous_response_not_found_event
             and status_request_state is not None
             and is_upstream_model_capacity_error(retry_error_message)
@@ -3554,7 +3558,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                 and status_request_state.previous_response_id is not None
                 and status_request_state.preferred_account_id is not None
             ):
-                safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
+                quota_failure = owner_pinned_quota_error in _LIMIT_FAILOVER_ERROR_CODES
+                if quota_failure:
+                    quota_settings = await _service_get_settings_cache().get()
+                    quota_enabled = getattr(quota_settings, "quota_failover_enabled", True)
+                    can_detach = (
+                        quota_enabled
+                        and getattr(quota_settings, "routing_strategy", None) != "single_account"
+                        and retry_error_code is not None
+                        and not has_other_pending_requests
+                        and _prepare_websocket_quota_continuation_replay(status_request_state)
+                    )
+                    safe_request_text = status_request_state.request_text if can_detach else None
+                else:
+                    safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
                 if safe_request_text is not None:
                     previous_upstream_turn_state = session.upstream_turn_state
                     previous_downstream_turn_state = session.downstream_turn_state
@@ -3573,7 +3590,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                             session.queued_request_count += 1
                         status_request_state.awaiting_response_created = True
                         status_request_state.response_id = None
-                    retried = await self._retry_http_bridge_precreated_request(session)
+                    if quota_failure:
+                        status_request_state.precreated_replay_reason = owner_pinned_quota_error
+                        status_request_state.precreated_replay_account_id = session.account.id
+                    retried = (
+                        await self._retry_http_bridge_precreated_request(session, quota_failure=True)
+                        if quota_failure
+                        else await self._retry_http_bridge_precreated_request(session)
+                    )
                     if retried:
                         return
                     session.upstream_turn_state = previous_upstream_turn_state
@@ -3582,14 +3606,22 @@ class _HTTPBridgeUpstreamEventsMixin:
                         if status_request_state in session.pending_requests:
                             session.pending_requests.remove(status_request_state)
                             session.queued_request_count = max(0, session.queued_request_count - 1)
-                    status_request_state.error_http_status_override = 502
-                    (
-                        _downstream_text,
-                        event_block,
-                        event,
-                        payload,
-                        event_type,
-                    ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+                    if quota_failure and session.account.id == status_request_state.precreated_replay_account_id:
+                        # No replacement connection was established. Preserve
+                        # the upstream quota terminal (including reset metadata).
+                        _clear_websocket_request_error_overrides(status_request_state)
+                        status_request_state.error_http_status_override = (
+                            _http_error_status_from_payload(payload) or 429
+                        )
+                    else:
+                        status_request_state.error_http_status_override = 502
+                        (
+                            _downstream_text,
+                            event_block,
+                            event,
+                            payload,
+                            event_type,
+                        ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
                 else:
                     status_request_state.error_http_status_override = 502
                     session.upstream_control.reconnect_requested = True
@@ -3674,6 +3706,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 {"message": retry_error_message or "Upstream error"},
                 retry_error_code,
             )
+            limit_error = retry_error_code in _LIMIT_FAILOVER_ERROR_CODES
+            quota_error = limit_error and getattr(
+                (await _service_get_settings_cache().get()),
+                "quota_failover_enabled",
+                True,
+            )
+            quota_rejected_account_id: str | None = None
             # Pre-created anchored requests belong to the owner-pinned branch
             # above; an accepted anchored follow-up with a proxy-injected
             # anchor and a retry-safe fresh body is replayed here exactly as
@@ -3682,6 +3721,23 @@ class _HTTPBridgeUpstreamEventsMixin:
                 status_request_state.previous_response_id is None
                 or _http_bridge_accepted_anchored_replay_candidate(status_request_state)
             ):
+                if (
+                    quota_error
+                    and status_request_state.previous_response_id is None
+                    and not status_request_state.hard_continuity_anchor
+                ):
+                    # A quota rejection is pre-visible and account-local. Move
+                    # only this soft bridge request off the exhausted owner;
+                    # hard continuity remains fail-closed above.
+                    quota_rejected_account_id = session.account.id
+                    await self._release_request_state_account_response_create_lease(status_request_state)
+                    status_request_state.excluded_account_ids.add(session.account.id)
+                    status_request_state.affinity_policy = replace(
+                        status_request_state.affinity_policy,
+                        reallocate_sticky=True,
+                    )
+                    status_request_state.precreated_replay_reason = retry_error_code
+                    status_request_state.precreated_replay_account_id = quota_rejected_account_id
                 async with session.pending_lock:
                     if status_request_state not in session.pending_requests:
                         session.pending_requests.appendleft(status_request_state)
@@ -3692,14 +3748,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                         surface="http_bridge",
                         trigger="capacity_error",
                     )
-                retried = staged and await self._retry_http_bridge_precreated_request(session)
+                retried = staged and await self._retry_http_bridge_precreated_request(
+                    session,
+                    quota_failure=quota_error,
+                )
                 if retried:
                     return
                 async with session.pending_lock:
                     if status_request_state in session.pending_requests:
                         session.pending_requests.remove(status_request_state)
                         session.queued_request_count = max(0, session.queued_request_count - 1)
-                if staged:
+                replacement_session_selected = (
+                    quota_rejected_account_id is not None and session.account.id != quota_rejected_account_id
+                )
+                if staged and (quota_rejected_account_id is None or replacement_session_selected):
                     # A busy create gate forwards the upstream terminal as-is;
                     # only a replay that was attempted and failed is rewritten.
                     status_request_state.error_http_status_override = 502
@@ -3710,6 +3772,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                         payload,
                         event_type,
                     ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+                elif quota_rejected_account_id is not None:
+                    # No eligible replacement was selected. Preserve the
+                    # original quota response and its reset metadata instead
+                    # of replacing it with a proxy-generated reconnect error.
+                    _clear_websocket_request_error_overrides(status_request_state)
 
         completed_usage = (
             event.response.usage if event_type == "response.completed" and event and event.response else None

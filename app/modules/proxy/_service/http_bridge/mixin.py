@@ -1986,7 +1986,7 @@ class _HTTPBridgeMixin(
     ) -> None:
         request_state.response_create_sent_at = None
         goal_restart = request_state.affinity_policy.abandon_unavailable_legacy_owner
-        if selection_affinity is None and goal_restart:
+        if selection_affinity is None and (goal_restart or request_state.quota_failover_detached_continuity):
             selection_affinity = request_state.affinity_policy
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind, key=session.key.affinity_key

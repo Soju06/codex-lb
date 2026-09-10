@@ -3651,6 +3651,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
+        quota_failure: bool = False,
     ) -> bool:
         # The admitted body's admission gate can claim the half-open probe;
         # any exit that never advances a send attempt past its baseline must
@@ -3664,6 +3665,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 request_state=request_state,
                 restart_reader=restart_reader,
+                quota_failure=quota_failure,
                 admission_claimed_leases=admission_claimed_leases,
                 retry_send_baselines=retry_send_baselines,
             )
@@ -3689,6 +3691,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
+        quota_failure: bool = False,
         admission_claimed_leases: list[float] | None = None,
         retry_send_baselines: list[tuple[_WebSocketRequestState, int]] | None = None,
     ) -> bool:
@@ -3714,7 +3717,9 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             if transport_only_unanchored_replay:
                 return False
-            if _websocket_request_can_replay_before_visible_output(request_state):
+            if _websocket_request_can_replay_before_visible_output(
+                request_state,
+            ):
                 return True
             if (
                 clean_close_retry_max_count <= 0
@@ -3751,7 +3756,10 @@ class _HTTPBridgeRequestSubmitMixin:
                         and not candidate.proxy_injected_previous_response_id
                         and not candidate.file_required_preferred_account
                         and candidate.response_event_count == 0
-                        and candidate.replay_count == 0
+                        and (
+                            candidate.replay_count == 0
+                            or (quota_failure and candidate.quota_failover_detached_continuity)
+                        )
                     )
                     proof_gated_continuity_replay_candidate = (
                         candidate.previous_response_id is not None

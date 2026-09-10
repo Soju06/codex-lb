@@ -10,6 +10,7 @@ export function buildSettingsUpdateRequest(
   const payload: SettingsUpdateRequest = {
     expectedVersion: settings.version,
     stickyThreadsEnabled: settings.stickyThreadsEnabled,
+    quotaFailoverEnabled: settings.quotaFailoverEnabled,
     upstreamStreamTransport: settings.upstreamStreamTransport,
     prohibitFastMode: settings.prohibitFastMode,
     httpDownstreamTransportPolicy: settings.httpDownstreamTransportPolicy,

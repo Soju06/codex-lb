@@ -333,6 +333,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _LIMIT_FAILOVER_ERROR_CODES,
     _MODEL_OUTPUT_EVENT_TYPES,
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
@@ -342,6 +343,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
     _finalize_ttft_reasoning_deltas,
+    _is_usage_exhaustion_error,
     _PreparedWebSocketRequest,
     _record_response_event,
     _record_websocket_route_metadata,
@@ -414,6 +416,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_matching_websocket_request_states,
     _pop_replayable_precreated_websocket_request_state,
     _pop_terminal_websocket_request_state,
+    _prepare_websocket_quota_continuation_replay,
     _prepare_websocket_request_state_for_account_switch,
     _prepare_websocket_request_state_for_auth_replay,
     _record_or_defer_websocket_accepted_replay_health,
@@ -485,7 +488,7 @@ from app.modules.proxy.capability_routing import (
     reject_capability_signal_outside_response_create,
     strip_capability_metadata,
 )
-from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.continuity import resolve_required_account_id, without_http_bridge_session_affinity_headers
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -539,6 +542,41 @@ _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
 )
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_ACTION = "fail_closed_capability_routing"
+
+
+async def _retire_failed_websocket_soft_affinity(
+    proxy: _WebSocketServiceProtocol,
+    request_state: _WebSocketRequestState,
+    account_id: str,
+) -> None:
+    affinity = request_state.affinity_policy
+    if affinity.kind not in (StickySessionKind.PROMPT_CACHE, StickySessionKind.STICKY_THREAD):
+        return
+    if not affinity.key:
+        return
+    try:
+        async with proxy._repo_factory() as repos:
+            retired = await repos.sticky_sessions.restore_if_current(
+                affinity.key,
+                kind=affinity.kind,
+                expected_account_id=account_id,
+                restore_account_id=None,
+            )
+        if retired:
+            logger.info(
+                "Retired websocket soft sticky owner after usage exhaustion request_id=%s account_id=%s kind=%s",
+                request_state.request_log_id or request_state.request_id,
+                account_id,
+                affinity.kind.value,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to retire websocket soft sticky owner after usage exhaustion request_id=%s account_id=%s kind=%s",
+            request_state.request_log_id or request_state.request_id,
+            account_id,
+            affinity.kind.value,
+            exc_info=True,
+        )
 
 
 @dataclass(slots=True)
@@ -1632,6 +1670,16 @@ class _WebSocketMixin:
                 if replay_request_state is not None:
                     request_state = replay_request_state
                     replay_request_state = None
+                    if request_state.quota_failover_detached_continuity:
+                        # The full body replaces the old account's continuation,
+                        # not its durable identity. Never mutate its cached
+                        # history or forward its token to the replacement.
+                        headers = without_http_bridge_session_affinity_headers(headers)
+                        filtered_headers = without_http_bridge_session_affinity_headers(filtered_headers)
+                        client_turn_state_header = None
+                        synthesized_turn_state = None
+                        upstream_turn_state = None
+                        continuity_state = _WebSocketContinuityState()
                     # This state now belongs to a fresh transport attempt. The
                     # next reader may classify a close as post-send replayable
                     # only after this attempt reaches its own send boundary.
@@ -5914,6 +5962,11 @@ class _WebSocketMixin:
             and request_state.response_id is not None
             and not request_state.awaiting_response_created
         )
+        if retry_error_code in _LIMIT_FAILOVER_ERROR_CODES and not accepted_lifecycle_replay:
+            quota_settings = await _facade().get_settings_cache().get()
+            quota_enabled = getattr(quota_settings, "quota_failover_enabled", True)
+            if quota_enabled and getattr(quota_settings, "routing_strategy", None) != "single_account":
+                _prepare_websocket_quota_continuation_replay(request_state)
         retry_safe_owner_replay = bool(
             not accepted_lifecycle_replay
             and retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
@@ -6016,6 +6069,27 @@ class _WebSocketMixin:
                 )
                 return downstream_text
             retry_error_code = None
+        if retry_error_code in _LIMIT_FAILOVER_ERROR_CODES:
+            quota_failover_enabled = getattr(
+                (await _facade().get_settings_cache().get()),
+                "quota_failover_enabled",
+                True,
+            )
+            quota_replay_can_switch_account = _websocket_accepted_replay_may_exclude_account(request_state)
+            if quota_failover_enabled and quota_replay_can_switch_account:
+                await proxy._release_request_state_account_response_create_lease(request_state)
+                request_state.excluded_account_ids.add(account.id)
+                request_state.affinity_policy = replace(
+                    request_state.affinity_policy,
+                    reallocate_sticky=True,
+                )
+                request_state.precreated_replay_reason = retry_error_code
+                request_state.precreated_replay_account_id = account.id
+                if _is_usage_exhaustion_error(
+                    retry_error_code,
+                    _websocket_event_error_message(event_type, payload),
+                ):
+                    await _retire_failed_websocket_soft_affinity(proxy, request_state, account.id)
         if retry_error_code is not None:
             if retry_is_previous_response_not_found:
                 if not (

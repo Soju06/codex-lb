@@ -679,6 +679,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_matching_websocket_request_states,  # noqa: F401
     _pop_replayable_precreated_websocket_request_state,  # noqa: F401
     _pop_terminal_websocket_request_state,  # noqa: F401
+    _prepare_websocket_quota_continuation_replay,  # noqa: F401
     _prepare_websocket_request_state_for_account_switch,  # noqa: F401
     _prepare_websocket_request_state_for_auth_replay,  # noqa: F401
     _prepare_websocket_request_state_for_visible_output_replay,  # noqa: F401

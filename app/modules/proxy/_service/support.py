@@ -119,6 +119,20 @@ _LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset(
     {"account_response_create_cap", "account_stream_cap", "api_key_stream_fair_share"}
 )
 _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
+# Explicit account-local quota responses that may release verified continuity.
+# Existing transport retry budgets remain authoritative.
+_LIMIT_FAILOVER_ERROR_CODES = frozenset(
+    {
+        "rate_limit_exceeded",
+        "usage_limit_reached",
+        "insufficient_quota",
+        "usage_not_included",
+        "quota_exceeded",
+    }
+)
+_USAGE_EXHAUSTION_ERROR_CODES = frozenset(
+    {"usage_limit_reached", "insufficient_quota", "usage_not_included", "quota_exceeded"}
+)
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",
     default=None,
@@ -127,6 +141,17 @@ _PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVa
     "propagated_capacity_startup_ready",
     default=None,
 )
+
+
+def _is_usage_exhaustion_error(code: str | None, message: str | None = None) -> bool:
+    if code in _USAGE_EXHAUSTION_ERROR_CODES:
+        return True
+    if code != "rate_limit_exceeded" or not message:
+        return False
+    normalized_message = " ".join(message.lower().split())
+    return "usage limit" in normalized_message or "quota" in normalized_message
+
+
 _PROPAGATED_RESPONSES_SERVICE_CLEANUP_READY: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_responses_service_cleanup_ready",
     default=None,
@@ -1045,6 +1070,7 @@ class _WebSocketRequestState:
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
+    quota_failover_detached_continuity: bool = False
     # Counts only the one extra replay permitted after the initial recovery
     # replay when the replacement upstream socket also closes cleanly before
     # producing any response event.

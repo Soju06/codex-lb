@@ -20,6 +20,16 @@ function renderSettings(settings: DashboardSettings) {
 }
 
 describe("ResilienceSettings", () => {
+  it("saves quota continuity recovery independently from deterministic failover", async () => {
+    const user = userEvent.setup();
+    const settings = createDashboardSettings({ quotaFailoverEnabled: true, deterministicFailoverEnabled: true });
+    const onSave = renderSettings(settings);
+    await user.click(screen.getByRole("switch", { name: "Quota continuity recovery" }));
+    const expected = buildSettingsUpdateRequest(settings, { quotaFailoverEnabled: false });
+    expect(expected.deterministicFailoverEnabled).toBeUndefined();
+    expect(onSave).toHaveBeenCalledWith(expected);
+  });
+
   it("renders the three switches with their effective values and inheritance badges", () => {
     renderSettings(
       createDashboardSettings({
@@ -35,7 +45,7 @@ describe("ResilienceSettings", () => {
     expect(screen.getByRole("switch", { name: "Deterministic failover" })).not.toBeChecked();
     expect(screen.getByRole("switch", { name: "Circuit breaker" })).toBeChecked();
     // Booleans are labelled on/off in the inheritance badge.
-    expect(screen.getByText("Default (on)")).toBeInTheDocument();
+    expect(screen.getAllByText("Default (on)").length).toBeGreaterThan(0);
     expect(screen.getByText("Inherited from environment (off)")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reset to inherited" })).toBeInTheDocument();
   });

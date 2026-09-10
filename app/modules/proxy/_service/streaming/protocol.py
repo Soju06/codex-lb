@@ -16,6 +16,7 @@ class _StreamingServiceProtocol(Protocol):
     _raise_for_unsupported_input_image_references: Any
     _release_unsettled_stream_api_key_usage: Any
     _remaining_budget_seconds: Any
+    _repo_factory: Any
     _resolve_file_account_for_responses: Any
     _resolve_compact_turn_state_owner: Any
     _resolve_upstream_route_for_account: Any

@@ -22,6 +22,7 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+_QUOTA_FAILOVER = "20260908_030000_add_quota_failover_setting"
 
 
 @dataclass
@@ -157,6 +158,8 @@ def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tm
     heads = script.get_heads()
     assert len(heads) == 1
     assert _MERGE in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
+    quota_failover = script.get_revision(_QUOTA_FAILOVER)
+    assert quota_failover is not None and quota_failover.down_revision == _MERGE
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
     for revision in _PARENTS:
@@ -176,6 +179,7 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
         if _OVERFLOW not in database.starting_revisions:
             row["subscription_overflow_source_id"] = None
             row["subscription_overflow_drain_until"] = None
+        row["quota_failover_enabled"] = 1
 
     result = run_upgrade(database.url, "head", bootstrap_legacy=False)
     (head,) = ScriptDirectory.from_config(_build_alembic_config(database.url)).get_heads()
@@ -216,8 +220,9 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     for parent in _PARENTS:
         command.downgrade(_build_alembic_config(database.url), parent)
         # A direct downgrade to either immediate parent executes only the
-        # no-op merge downgrade. Alembic records both unmerged parent heads;
-        # it does not execute either parent's schema-removing downgrade.
+        # no-op merge downgrade after removing the quota setting. Alembic
+        # records both unmerged parent heads; it does not execute either
+        # parent's schema-removing downgrade.
         assert _revisions(database.engine) == tuple(sorted(_PARENTS))
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift

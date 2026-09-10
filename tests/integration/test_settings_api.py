@@ -50,6 +50,7 @@ async def test_settings_api_get_and_update(async_client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["stickyThreadsEnabled"] is True
+    assert payload["quotaFailoverEnabled"] is True
     assert payload["upstreamStreamTransport"] == "auto"
     assert payload["prohibitFastMode"] is False
     # A fresh settings row seeds NULL overrides: the effective value inherits
@@ -109,6 +110,7 @@ async def test_settings_api_get_and_update(async_client):
         "/api/settings",
         json={
             "stickyThreadsEnabled": False,
+            "quotaFailoverEnabled": False,
             "upstreamStreamTransport": "websocket",
             "prohibitFastMode": True,
             "proxyAccountResponseCreateLimit": 12,
@@ -154,6 +156,7 @@ async def test_settings_api_get_and_update(async_client):
     assert response.status_code == 200
     updated = response.json()
     assert updated["stickyThreadsEnabled"] is False
+    assert updated["quotaFailoverEnabled"] is False
     assert updated["upstreamStreamTransport"] == "websocket"
     assert updated["prohibitFastMode"] is True
     assert updated["proxyAccountResponseCreateLimit"] == 12
@@ -204,6 +207,7 @@ async def test_settings_api_get_and_update(async_client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["stickyThreadsEnabled"] is False
+    assert payload["quotaFailoverEnabled"] is False
     assert payload["upstreamStreamTransport"] == "websocket"
     assert payload["prohibitFastMode"] is True
     assert payload["proxyAccountResponseCreateLimit"] == 12

@@ -115,6 +115,7 @@ const SettingsPayloadSchema = z.looseObject({
   upstreamStreamTransport: z
     .enum(["auto", "http", "websocket"])
     .optional(),
+  quotaFailoverEnabled: z.boolean().optional(),
   httpDownstreamTransportPolicy: z
     .enum(["smart", "always_http", "always_websocket", "pinned"])
     .optional(),

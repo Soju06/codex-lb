@@ -1,6 +1,8 @@
+import { Fragment } from "react";
 import { ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { InheritBadge } from "@/features/settings/components/inherit-badge";
 import type { InheritableSettingField } from "@/features/settings/hooks/use-inheritable-setting";
@@ -53,27 +55,48 @@ export function ResilienceSettings({ settings, busy, onSave }: ResilienceSetting
         </div>
 
         {RESILIENCE_TOGGLES.map((toggle) => (
-          <div key={toggle.name} className="flex items-center justify-between gap-3 rounded-lg border p-3">
-            <div className="space-y-1">
-              <p className="text-sm font-medium">{t(`settings.resilience.${toggle.i18nKey}.label`)}</p>
-              <p className="text-xs text-muted-foreground">
-                {t(`settings.resilience.${toggle.i18nKey}.description`)}
-              </p>
-              <InheritBadge
-                settings={settings}
-                name={toggle.name}
-                field={toggle.field satisfies InheritableSettingField}
-                busy={busy}
-                onSave={onSave}
+          <Fragment key={toggle.name}>
+            <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">{t(`settings.resilience.${toggle.i18nKey}.label`)}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t(`settings.resilience.${toggle.i18nKey}.description`)}
+                </p>
+                <InheritBadge
+                  settings={settings}
+                  name={toggle.name}
+                  field={toggle.field satisfies InheritableSettingField}
+                  busy={busy}
+                  onSave={onSave}
+                />
+              </div>
+              <Switch
+                aria-label={t(`settings.resilience.${toggle.i18nKey}.ariaLabel`)}
+                checked={settings[toggle.field]}
+                disabled={busy}
+                onCheckedChange={(checked) => save({ [toggle.field]: checked })}
               />
             </div>
-            <Switch
-              aria-label={t(`settings.resilience.${toggle.i18nKey}.ariaLabel`)}
-              checked={settings[toggle.field]}
-              disabled={busy}
-              onCheckedChange={(checked) => save({ [toggle.field]: checked })}
-            />
-          </div>
+            {toggle.field === "deterministicFailoverEnabled" ? (
+              <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">{t("settings.resilience.quotaContinuity.label")}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {t("settings.resilience.quotaContinuity.description")}
+                  </p>
+                  <Badge variant="secondary" className="text-[10px] font-normal">
+                    {t("settings.resilience.quotaContinuity.default")}
+                  </Badge>
+                </div>
+                <Switch
+                  aria-label={t("settings.resilience.quotaContinuity.ariaLabel")}
+                  checked={settings.quotaFailoverEnabled}
+                  disabled={busy}
+                  onCheckedChange={(checked) => save({ quotaFailoverEnabled: checked })}
+                />
+              </div>
+            ) : null}
+          </Fragment>
         ))}
       </div>
     </section>

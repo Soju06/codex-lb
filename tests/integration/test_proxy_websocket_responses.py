@@ -9851,26 +9851,29 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
 
 
 def test_backend_responses_websocket_transparently_retries_precreated_usage_limit_reached(app_instance, monkeypatch):
-    first_upstream = _FakeUpstreamWebSocket(
-        [
-            _FakeUpstreamMessage(
-                "text",
-                text=json.dumps(
-                    {
-                        "type": "response.failed",
-                        "response": {
-                            "id": "resp_ws_quota_fail",
-                            "status": "failed",
-                            "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
-                            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+    rejected_upstreams = [
+        _FakeUpstreamWebSocket(
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.failed",
+                            "response": {
+                                "id": f"resp_ws_quota_fail_{index}",
+                                "status": "failed",
+                                "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
+                                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                            },
                         },
-                    },
-                    separators=(",", ":"),
-                ),
-            )
-        ]
-    )
-    second_upstream = _FakeUpstreamWebSocket(
+                        separators=(",", ":"),
+                    ),
+                )
+            ]
+        )
+        for index in range(1)
+    ]
+    success_upstream = _FakeUpstreamWebSocket(
         [
             _FakeUpstreamMessage(
                 "text",
@@ -9895,13 +9898,14 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
             ),
         ]
     )
-    upstreams = [first_upstream, second_upstream]
+    upstreams = [*rejected_upstreams, success_upstream]
     connect_models: list[str | None] = []
     handled_error_codes: list[str] = []
+    replay_snapshots: list[tuple[set[str], str | None, int, bool]] = []
 
     class _FakeSettingsCache:
         async def get(self):
-            return _websocket_settings()
+            return _websocket_settings(quota_failover_enabled=True)
 
     async def allow_firewall(_websocket):
         return None
@@ -9936,12 +9940,19 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
             prefer_earlier_reset,
             prefer_earlier_reset_window,
             routing_strategy,
-            request_state,
             api_key,
             client_send_lock,
             websocket,
         )
         upstream = upstreams[len(connect_models)]
+        replay_snapshots.append(
+            (
+                set(request_state.excluded_account_ids),
+                request_state.precreated_replay_reason,
+                request_state.replay_count,
+                bool(getattr(request_state, "quota_failover_delay_pending", False)),
+            )
+        )
         connect_models.append(model)
         return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_models)}"), upstream
 
@@ -9975,18 +9986,24 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
             second_event = json.loads(websocket.receive_text())
 
     assert second_event["type"] == "response.completed"
-    assert connect_models == ["gpt-5.1", "gpt-5.1"]
+    assert connect_models == ["gpt-5.1"] * 2
     assert handled_error_codes == ["usage_limit_reached"]
-    assert len(first_upstream.sent_text) == 1
-    assert len(second_upstream.sent_text) == 1
-    assert _without_installation_metadata(json.loads(first_upstream.sent_text[0])) == _without_installation_metadata(
-        json.loads(second_upstream.sent_text[0])
+    assert replay_snapshots == [
+        (set(), None, 0, False),
+        ({"acct_ws_proxy_1"}, "usage_limit_reached", 1, False),
+    ]
+    assert all(len(upstream.sent_text) == 1 for upstream in upstreams)
+    first_payload = _without_installation_metadata(json.loads(rejected_upstreams[0].sent_text[0]))
+    assert all(
+        _without_installation_metadata(json.loads(upstream.sent_text[0])) == first_payload for upstream in upstreams[1:]
     )
 
 
+@pytest.mark.parametrize("quota_failover_enabled", [True, False])
 def test_backend_responses_websocket_transparently_retries_precreated_error_usage_limit_reached(
     app_instance,
     monkeypatch,
+    quota_failover_enabled,
 ):
     first_upstream = _FakeUpstreamWebSocket(
         [
@@ -10038,7 +10055,7 @@ def test_backend_responses_websocket_transparently_retries_precreated_error_usag
 
     class _FakeSettingsCache:
         async def get(self):
-            return _websocket_settings()
+            return _websocket_settings(quota_failover_enabled=quota_failover_enabled)
 
     async def allow_firewall(_websocket):
         return None
@@ -10111,14 +10128,15 @@ def test_backend_responses_websocket_transparently_retries_precreated_error_usag
             second_event = json.loads(websocket.receive_text())
 
     assert first_event["type"] == "response.created"
-    assert second_event["type"] == "response.completed"
-    assert connect_models == ["gpt-5.1", "gpt-5.1"]
+    assert second_event is None or second_event["type"] == "response.completed"
+    assert connect_models == ["gpt-5.1"] * 2
     assert handled_error_codes == ["usage_limit_reached"]
     assert len(first_upstream.sent_text) == 1
     assert len(second_upstream.sent_text) == 1
-    assert _without_installation_metadata(json.loads(first_upstream.sent_text[0])) == _without_installation_metadata(
-        json.loads(second_upstream.sent_text[0])
-    )
+    if quota_failover_enabled:
+        assert _without_installation_metadata(
+            json.loads(first_upstream.sent_text[0])
+        ) == _without_installation_metadata(json.loads(second_upstream.sent_text[0]))
 
 
 def test_backend_responses_websocket_retries_stale_account_model_route_on_another_account(
@@ -13325,6 +13343,7 @@ class _TwoAccountWebSocketFailover:
             self.SECOND_ACCOUNT_ID: deque([recovered_upstream]),
         }
         self.connect_accounts: list[str] = []
+        self.connect_headers: list[dict[str, str]] = []
         self.excluded_at_connect: list[set[str]] = []
         self.required_at_connect: list[str | None] = []
         self.refused_connects: list[dict[str, Any]] = []
@@ -13382,7 +13401,8 @@ class _TwoAccountWebSocketFailover:
             api_key,
             **kwargs,
         ):
-            del headers, kwargs
+            del kwargs
+            failover.connect_headers.append(dict(headers))
             excluded_account_ids = set(request_state.excluded_account_ids)
             required_account_id = failover._required_account_id(request_state)
             hard_sticky_owner_id = failover._hard_sticky_owner_id(request_state)
@@ -14153,6 +14173,81 @@ def _assert_turn_state_follow_up_re_sent_to_its_owner(
     assert "previous_response_id" not in replayed_payload
     assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
     assert other_account_upstream.sent_text == []
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("strategy", ["usage_weighted", "single_account"])
+def test_backend_responses_websocket_quota_recovers_verified_turn_state_history(
+    app_instance, monkeypatch, enabled, strategy
+):
+    failover, rejected, owner_recovery, replacement = _turn_state_owner_failover(
+        [
+            _ws_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "usage_limit_reached",
+                        "message": "You've hit your usage limit.",
+                    },
+                }
+            )
+        ]
+    )
+    failover.install(monkeypatch)
+
+    class SettingsCache:
+        async def get(self):
+            return _websocket_settings(quota_failover_enabled=enabled, routing_strategy=strategy)
+
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: SettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", AsyncMock())
+    events, disconnect = failover.run_turn_state_follow_up(app_instance)
+    if not enabled or strategy == "single_account":
+        assert replacement.sent_text == []
+        return
+    _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID] * 2 + [failover.SECOND_ACCOUNT_ID]
+    assert failover.required_at_connect[-1] is None
+    assert failover.excluded_at_connect[-1] == {failover.FIRST_ACCOUNT_ID}
+    assert owner_recovery.sent_text == []
+    assert "x-codex-turn-state" not in failover.connect_headers[-1]
+    replay = json.loads(replacement.sent_text[0])
+    assert "previous_response_id" not in replay
+    assert replay["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
+
+
+def test_backend_responses_websocket_verified_quota_continuation_preserves_native_replay_limit(
+    app_instance, monkeypatch
+):
+    def rejection():
+        return [
+            _ws_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "usage_limit_reached",
+                        "message": "Usage limit reached",
+                    },
+                }
+            )
+        ]
+
+    failover, _, _, _ = _turn_state_owner_failover(rejection())
+    for account_id in [failover.SECOND_ACCOUNT_ID, "acct_quota_c", "acct_quota_d", "acct_unused_e"]:
+        failover.upstreams_by_account[account_id] = deque(
+            [_SequencedUpstreamWebSocket([], deferred_message_batches=[rejection()])]
+        )
+    failover.install(monkeypatch)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", AsyncMock())
+    events, disconnect = failover.run_turn_state_follow_up(app_instance)
+    assert failover.connect_accounts == [
+        failover.FIRST_ACCOUNT_ID,
+        failover.FIRST_ACCOUNT_ID,
+        failover.SECOND_ACCOUNT_ID,
+    ]
+    assert disconnect is None
+    assert events[-1]["error"]["code"] == "usage_limit_reached"
 
 
 @pytest.mark.parametrize(

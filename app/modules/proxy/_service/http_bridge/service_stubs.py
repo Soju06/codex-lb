@@ -388,6 +388,10 @@ def _assign_websocket_response_id(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_assign_websocket_response_id")(*args, **kwargs)
 
 
+def _prepare_websocket_quota_continuation_replay(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_prepare_websocket_quota_continuation_replay")(*args, **kwargs)
+
+
 def _find_websocket_request_state_by_response_id(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_find_websocket_request_state_by_response_id")(*args, **kwargs)
 

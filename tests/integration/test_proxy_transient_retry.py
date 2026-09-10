@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 import aiohttp
 import pytest
 
+import app.modules.proxy._service.streaming.retry as streaming_retry_module
 import app.modules.proxy.account_cache as account_cache_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
@@ -29,10 +30,11 @@ from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.repository import UsageRepository
 
@@ -749,6 +751,322 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
         exhausted_account = await session.get(Account, account_a_id)
         assert exhausted_account is not None
         assert exhausted_account.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_transport", ["http", "sse"])
+async def test_stream_recovery_disabled_preserves_native_quota_failover(async_client, monkeypatch, error_transport):
+    first_id = await _import_account(async_client, "acc_stream_disabled_a", "stream-disabled-a@example.com")
+    await _import_account(async_client, "acc_stream_disabled_b", "stream-disabled-b@example.com")
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={"quotaFailoverEnabled": False, "deterministicFailoverEnabled": True},
+    )
+    assert settings_response.status_code == 200
+
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            "disabled-quota-cache",
+            first_id,
+            kind=StickySessionKind.PROMPT_CACHE,
+        )
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_stream_disabled_b":
+            yield _success_sse_event("resp_native_failover_ok")
+            return
+        if error_transport == "sse":
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "error": {
+                            "code": "usage_limit_reached",
+                            "message": "usage limit reached",
+                            "resets_at": 1_700_000_000,
+                            "resets_in_seconds": 3_600,
+                        }
+                    },
+                }
+            )
+            return
+        raise ProxyResponseError(
+            429,
+            openai_error("usage_limit_reached", "usage limit reached"),
+            failure_phase="status",
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": [],
+            "stream": True,
+            "prompt_cache_key": "disabled-quota-cache",
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen_account_ids == ["acc_stream_disabled_a", "acc_stream_disabled_b"]
+    assert _extract_events(response.text.splitlines())[-1]["response"]["id"] == "resp_native_failover_ok"
+
+
+@pytest.mark.asyncio
+async def test_stream_connect_phase_429_with_retained_item_does_not_wedge_on_payload_owner(async_client, monkeypatch):
+    await _import_account(async_client, "acc_stream_429_retained_a", "stream429retaineda@example.com")
+    await _import_account(async_client, "acc_stream_429_retained_b", "stream429retainedb@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_stream_429_retained_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_stream_429_retained_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"id": "msg_previous", "role": "user", "content": "hi"}],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    completed = [e for e in events if e.get("type") == "response.completed"]
+    failed = [e for e in events if e.get("type") == "response.failed"]
+    assert len(completed) == 1
+    assert not failed
+    assert seen_account_ids[:2] == ["acc_stream_429_retained_a", "acc_stream_429_retained_b"]
+
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+    assert seen_account_ids == [
+        "acc_stream_429_retained_a",
+        "acc_stream_429_retained_b",
+        "acc_stream_429_retained_b",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_transport", ["http", "sse"])
+async def test_stream_recovery_uses_native_attempt_budget_without_extra_delay(
+    async_client, monkeypatch, error_transport
+):
+    for index in range(5):
+        await _import_account(async_client, f"acc_stream_limit_bound_{index}", f"limit-bound-{index}@example.com")
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+    real_scheduler = streaming_retry_module.REAL_SCHEDULER
+
+    class RecordingScheduler:
+        def __getattr__(self, name):
+            return getattr(real_scheduler, name)
+
+        async def sleep(self, delay, result=None):
+            del result
+            delays.append(delay)
+            await real_sleep(0)
+
+    monkeypatch.setattr(streaming_retry_module, "scheduler_for", lambda _owner: RecordingScheduler())
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if error_transport == "sse":
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "error": {
+                            "code": "usage_limit_reached",
+                            "message": "usage limit reached",
+                            "resets_at": 1_700_000_000,
+                            "resets_in_seconds": 3_600,
+                        }
+                    },
+                }
+            )
+            return
+        raise ProxyResponseError(
+            429,
+            openai_error("usage_limit_reached", "usage limit reached"),
+            failure_phase="status",
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.1", "instructions": "hi", "input": [{"id": "retained"}], "stream": True},
+    )
+
+    if error_transport == "http":
+        assert response.status_code == 429
+    else:
+        events = _extract_events(response.text.splitlines())
+        assert events[-1]["response"]["error"]["code"] == "usage_limit_reached"
+        assert events[-1]["response"]["error"]["resets_at"] == 1_700_000_000
+        assert events[-1]["response"]["error"]["resets_in_seconds"] == 3_600
+    assert len(seen_account_ids) == 3
+    assert delays.count(5.0) == 0
+    assert all(account_id is not None for account_id in seen_account_ids)
+    assert all(
+        account_id is not None and account_id.startswith(f"acc_stream_limit_bound_{index}")
+        for index, account_id in enumerate(seen_account_ids)
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_quota_recovery_adds_no_artificial_delay(async_client, monkeypatch):
+    await _import_account(async_client, "acc_stream_quota_deadline_a", "quota-deadline-a@example.com")
+    await _import_account(async_client, "acc_stream_quota_deadline_b", "quota-deadline-b@example.com")
+    delays: list[float] = []
+    seen_account_ids: list[str | None] = []
+
+    class RecordingScheduler:
+        def __getattr__(self, name):
+            return getattr(streaming_retry_module.REAL_SCHEDULER, name)
+
+        async def sleep(self, delay, result=None):
+            del result
+            delays.append(delay)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        seen_account_ids.append(account_id)
+        if account_id == "acc_stream_quota_deadline_a":
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {"error": {"code": "usage_limit_reached", "message": "usage limit reached"}},
+                }
+            )
+            return
+        yield _success_sse_event("unexpected_quota_deadline_dispatch")
+
+    monkeypatch.setattr(streaming_retry_module, "scheduler_for", lambda _owner: RecordingScheduler())
+    monkeypatch.setattr(proxy_module.ProxyService, "_remaining_budget_seconds", lambda self, deadline: 4.0)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
+    )
+
+    events = _extract_events(response.text.splitlines())
+    assert events[-1]["response"]["id"] == "unexpected_quota_deadline_dispatch"
+    assert seen_account_ids == ["acc_stream_quota_deadline_a", "acc_stream_quota_deadline_b"]
+    assert delays == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code,retired", [("usage_limit_reached", True), ("invalid_request_error", False)])
+@pytest.mark.parametrize("error_transport", ["http", "sse"])
+async def test_stream_terminal_error_retires_only_exhausted_soft_pin(
+    async_client, monkeypatch, code, retired, error_transport
+):
+    account_id = await _import_account(async_client, "acc_terminal", "terminal@example.com")
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        await repo.upsert("quota-cache", account_id, kind=StickySessionKind.PROMPT_CACHE)
+        await repo.upsert("hard-owner", account_id, kind=StickySessionKind.CODEX_SESSION)
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        if error_transport == "sse":
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "error": {
+                            "code": code,
+                            "message": "rejected",
+                        }
+                    },
+                }
+            )
+            return
+        raise ProxyResponseError(429 if retired else 400, openai_error(code, "rejected"), failure_phase="status")
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 3)
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": [],
+            "stream": True,
+            "prompt_cache_key": "quota-cache",
+        },
+    )
+    assert response.status_code == (200 if error_transport == "sse" else 429 if retired else 400)
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        soft_owner = await repo.get_account_id("quota-cache", kind=StickySessionKind.PROMPT_CACHE)
+        assert soft_owner == (None if retired else account_id)
+        assert await repo.get_account_id("hard-owner", kind=StickySessionKind.CODEX_SESSION) == account_id
+
+
+@pytest.mark.asyncio
+async def test_stream_quota_cleanup_preserves_concurrently_reassigned_pin(async_client, monkeypatch):
+    first_upstream_id = "acc_race_a"
+    next_upstream_id = "acc_race_b"
+    first_id = await _import_account(async_client, first_upstream_id, "racea@example.com")
+    next_id = await _import_account(async_client, next_upstream_id, "raceb@example.com")
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert("race-cache", first_id, kind=StickySessionKind.PROMPT_CACHE)
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        if account_id == first_upstream_id:
+            async with SessionLocal() as session:
+                await StickySessionsRepository(session).upsert(
+                    "race-cache",
+                    next_id,
+                    kind=StickySessionKind.PROMPT_CACHE,
+                )
+            raise ProxyResponseError(429, openai_error("usage_limit_reached", "quota"), failure_phase="status")
+        assert account_id == next_upstream_id
+        yield _success_sse_event("resp_race_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 3)
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": [],
+            "stream": True,
+            "prompt_cache_key": "race-cache",
+        },
+    )
+    assert response.status_code == 200
+    assert any(event.get("type") == "response.completed" for event in _extract_events(response.text.splitlines()))
+    async with SessionLocal() as session:
+        assert (
+            await StickySessionsRepository(session).get_account_id(
+                "race-cache",
+                kind=StickySessionKind.PROMPT_CACHE,
+            )
+            == next_id
+        )
 
 
 @pytest.mark.asyncio

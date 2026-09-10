@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class DashboardSettingsData:
     sticky_threads_enabled: bool
+    quota_failover_enabled: bool
     upstream_stream_transport: str
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str
@@ -144,6 +145,7 @@ class DashboardSettingsData:
 @dataclass(frozen=True, slots=True)
 class DashboardSettingsUpdateData:
     sticky_threads_enabled: bool
+    quota_failover_enabled: bool
     upstream_stream_transport: str
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str
@@ -289,6 +291,7 @@ class SettingsService:
         row = await self._repository.update(
             expected_version=expected_version,
             sticky_threads_enabled=payload.sticky_threads_enabled,
+            quota_failover_enabled=payload.quota_failover_enabled,
             upstream_stream_transport=payload.upstream_stream_transport,
             prohibit_fast_mode=payload.prohibit_fast_mode,
             http_downstream_transport_policy=payload.http_downstream_transport_policy,
@@ -531,6 +534,7 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
     resolved = _resolve_inheritable_settings(row)
     return DashboardSettingsData(
         sticky_threads_enabled=row.sticky_threads_enabled,
+        quota_failover_enabled=row.quota_failover_enabled,
         upstream_stream_transport=row.upstream_stream_transport,
         prohibit_fast_mode=row.prohibit_fast_mode,
         http_downstream_transport_policy=row.http_downstream_transport_policy,

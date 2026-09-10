@@ -39,6 +39,7 @@ def _default_put_body() -> dict[str, Any]:
     ("payload_key", "new_value", "audit_field_name"),
     [
         ("stickyThreadsEnabled", False, "sticky_threads_enabled"),
+        ("quotaFailoverEnabled", False, "quota_failover_enabled"),
         ("upstreamStreamTransport", "websocket", "upstream_stream_transport"),
         ("prohibitFastMode", True, "prohibit_fast_mode"),
         ("preferEarlierResetAccounts", False, "prefer_earlier_reset_accounts"),

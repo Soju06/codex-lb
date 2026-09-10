@@ -697,6 +697,35 @@ def _prepare_websocket_request_state_for_account_switch(
     return _install_verified_fresh_replay(request_state)
 
 
+def _prepare_websocket_quota_continuation_replay(request_state: "_WebSocketRequestState") -> bool:
+    """Detach only a proven full-history continuation after a quota rejection.
+
+    Caller must enforce the quota allowlist, setting, retry budget, and sole
+    pre-created request boundary. Durable ownership is never changed here.
+    An unanchored body alone does not prove that a turn-state's history was
+    included, so require the retained, verified continuation projection.
+    """
+    if (
+        request_state.previous_response_id is None
+        or request_state.file_required_preferred_account
+        or request_state.payload_conversation_bound
+        or request_state.affinity_policy.require_unambiguous_account
+        or request_state.operation_id is not None
+    ):
+        return False
+    if _install_verified_fresh_replay(request_state, require_proxy_injected_previous_response_id=False) is None:
+        return False
+    request_state.preferred_account_id = None
+    request_state.replay_required_account_id = None
+    request_state.previous_response_owner_account_id = None
+    request_state.hard_continuity_anchor = False
+    # Do not rebind an old turn-state/legacy session key to a new account.
+    # The newly completed response establishes its own ownership instead.
+    request_state.affinity_policy = _AffinityPolicy()
+    request_state.quota_failover_detached_continuity = True
+    return True
+
+
 def _websocket_continuity_anchor_for_payload(
     continuity_state: _WebSocketContinuityState | None,
     *,
@@ -988,8 +1017,6 @@ def _websocket_precreated_retry_error_code(
         return None
     if not request_state.request_text:
         return None
-    if request_state.replay_count >= 1:
-        return None
     if event_type not in {"error", "response.failed"}:
         return None
 
@@ -997,6 +1024,8 @@ def _websocket_precreated_retry_error_code(
         _websocket_event_error_code(event_type, payload),
         _websocket_event_error_type(event_type, payload),
     )
+    if request_state.replay_count >= 1:
+        return None
     error_param = _websocket_event_error_param(event_type, payload)
     error_message = _websocket_event_error_message(event_type, payload)
     if _facade()._is_previous_response_not_found_error(

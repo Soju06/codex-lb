@@ -40,6 +40,7 @@ from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
+from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
@@ -220,11 +221,13 @@ def _make_dashboard_settings(
     prefer_earlier_reset_accounts: bool = False,
     gateway_safe_mode: bool = False,
     prompt_cache_idle_ttl_seconds: int | float = 3600,
+    quota_failover_enabled: bool = True,
     codex_prewarm_enabled: bool | None = None,
 ) -> DashboardSettings:
     return DashboardSettings(
         id=1,
         sticky_threads_enabled=False,
+        quota_failover_enabled=quota_failover_enabled,
         upstream_stream_transport="auto",
         # This suite exercises the bridge itself. Tests for policy-driven
         # bypass override this explicitly (for example, ``always_http``).
@@ -264,8 +267,17 @@ def _install_proxy_settings(
     monkeypatch.setattr(proxy_module, "_proxy_admission_wait_timeout_seconds", lambda: admission_wait_timeout_seconds)
 
 
-def _install_bridge_settings(monkeypatch: pytest.MonkeyPatch, *, enabled: bool) -> None:
-    _install_bridge_settings_with_limits(monkeypatch, enabled=enabled)
+def _install_bridge_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enabled: bool,
+    quota_failover_enabled: bool = True,
+) -> None:
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=enabled,
+        quota_failover_enabled=quota_failover_enabled,
+    )
 
 
 def _install_bridge_settings_with_limits(
@@ -281,6 +293,7 @@ def _install_bridge_settings_with_limits(
     codex_prewarm_dashboard: bool | None = None,
     gateway_safe_mode: bool = False,
     prefer_earlier_reset_accounts: bool = False,
+    quota_failover_enabled: bool = True,
     instance_id: str = "instance-a",
     instance_ring: list[str] | None = None,
 ) -> None:
@@ -301,6 +314,7 @@ def _install_bridge_settings_with_limits(
             prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
             gateway_safe_mode=gateway_safe_mode,
             prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+            quota_failover_enabled=quota_failover_enabled,
             codex_prewarm_enabled=codex_prewarm_dashboard,
         ),
     )
@@ -679,6 +693,8 @@ class _ErrorOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
 
 
 class _RateLimitErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    error_message = "Rate limit reached for gpt-4o on tokens per day"
+
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
         await self._messages.put(
@@ -691,7 +707,7 @@ class _RateLimitErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
                         "error": {
                             "type": "rate_limit_error",
                             "code": "rate_limit_exceeded",
-                            "message": "Rate limit reached for gpt-4o on tokens per day",
+                            "message": self.error_message,
                             "plan_type": "team",
                             "resets_at": 1700000000,
                             "resets_in_seconds": 3600,
@@ -701,6 +717,10 @@ class _RateLimitErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
                 ),
             )
         )
+
+
+class _CapacityMessageRateLimitUpstreamWebSocket(_RateLimitErrorUpstreamWebSocket):
+    error_message = "The selected model is at capacity."
 
 
 class _PreviousResponseNotFoundUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
@@ -13345,6 +13365,12 @@ async def test_v1_responses_http_bridge_preserves_rate_limit_metadata_in_429(asy
         preferred_account_id=None,
     ):
         del preferred_account_id
+        if account.id in (exclude_account_ids or set()):
+            return AccountSelection(
+                account=None,
+                error_message="No active accounts available",
+                error_code="no_accounts",
+            )
         return AccountSelection(account=account, error_message=None, error_code=None)
 
     async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
@@ -13381,6 +13407,274 @@ async def test_v1_responses_http_bridge_preserves_rate_limit_metadata_in_429(asy
     assert body["error"]["plan_type"] == "team"
     assert body["error"]["resets_at"] == 1700000000
     assert body["error"]["resets_in_seconds"] == 3600
+    assert len(fake_upstream.sent_text) == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_quota_limit_retries_on_another_account(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    first_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quota_first",
+        "http-bridge-quota-first@example.com",
+    )
+    second_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quota_second",
+        "http-bridge-quota-second@example.com",
+    )
+    first = await _get_account(first_id)
+    second = await _get_account(second_id)
+    upstreams = [_RateLimitErrorUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket("resp_quota_failover")]
+    selected_ids: list[str] = []
+    excluded_snapshots: list[set[str]] = []
+    connect_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        excluded = set(cast(set[str], kwargs.get("exclude_account_ids") or set()))
+        excluded_snapshots.append(excluded)
+        selected = second if first.id in excluded else first
+        selected_ids.append(selected.id)
+        return AccountSelection(account=selected, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    events = await _collect_sse_events(
+        async_client,
+        "/v1/responses",
+        json_body={
+            "model": "gpt-4o",
+            "input": "hello",
+            "prompt_cache_key": "http-bridge-quota-failover-key",
+            "stream": True,
+        },
+    )
+
+    _assert_created_text_delta_completed(events)
+    assert selected_ids == [first.id, second.id]
+    assert first.id in excluded_snapshots[1]
+    assert len(upstreams[0].sent_text) == 1
+    assert len(upstreams[1].sent_text) == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_quota_recovery_adds_no_artificial_delay(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    first_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quota_deadline_first",
+        "http-bridge-quota-deadline-first@example.com",
+    )
+    second_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quota_deadline_second",
+        "http-bridge-quota-deadline-second@example.com",
+    )
+    first = await _get_account(first_id)
+    second = await _get_account(second_id)
+    upstreams = [_RateLimitErrorUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket("unexpected_deadline_open")]
+    connect_count = 0
+    delays: list[float] = []
+
+    class RecordingScheduler:
+        async def sleep(self, delay, result=None):
+            del result
+            delays.append(delay)
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        excluded = set(kwargs.get("exclude_account_ids") or ())
+        selected = second if first.id in excluded else first
+        return AccountSelection(account=selected, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    service = get_proxy_service_for_app(app_instance)
+    monkeypatch.setattr(service, "_remaining_budget_seconds", lambda deadline: 4.0)
+    monkeypatch.setattr(http_bridge_mixin_module, "scheduler_for", lambda _owner: RecordingScheduler())
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-4o",
+            "input": "hello",
+            "prompt_cache_key": "http-bridge-quota-deadline-key",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "response.completed" in response.text
+    assert connect_count == 2
+    assert delays == []
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_quota_recovery_preserves_native_replay_limit(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    accounts: list[Account] = []
+    for index in range(5):
+        account_id = await _import_account(
+            async_client,
+            f"acc_http_bridge_quota_bound_{index}",
+            f"http-bridge-quota-bound-{index}@example.com",
+        )
+        accounts.append(await _get_account(account_id))
+    upstreams = [_RateLimitErrorUpstreamWebSocket() for _ in accounts]
+    selected_ids: list[str] = []
+    connect_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        excluded = set(kwargs.get("exclude_account_ids") or ())
+        selected = next(account for account in accounts if account.id not in excluded)
+        selected_ids.append(selected.id)
+        return AccountSelection(account=selected, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-4o",
+            "input": "hello",
+            "prompt_cache_key": "http-bridge-quota-bound-key",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "rate_limit_exceeded"
+    assert selected_ids == [account.id for account in accounts[:2]]
+    assert connect_count == 2
+    assert [len(upstream.sent_text) for upstream in upstreams] == [1, 1, 0, 0, 0]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_quota_recovery_disabled_preserves_native_retry(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True, quota_failover_enabled=False)
+    first_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quota_disabled_first",
+        "http-bridge-quota-disabled-first@example.com",
+    )
+    second_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quota_disabled_second",
+        "http-bridge-quota-disabled-second@example.com",
+    )
+    first = await _get_account(first_id)
+    second = await _get_account(second_id)
+    upstreams = [_CapacityMessageRateLimitUpstreamWebSocket(), _RateLimitErrorUpstreamWebSocket()]
+    selected_ids: list[str] = []
+    connect_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        excluded = set(kwargs.get("exclude_account_ids") or ())
+        selected = second if first.id in excluded else first
+        selected_ids.append(selected.id)
+        return AccountSelection(account=selected, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-4o",
+            "input": "hello",
+            "prompt_cache_key": "http-bridge-quota-disabled-key",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "rate_limit_exceeded"
+    assert selected_ids == [first.id, second.id]
 
 
 @pytest.mark.asyncio

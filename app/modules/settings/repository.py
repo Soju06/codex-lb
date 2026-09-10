@@ -31,6 +31,7 @@ class SettingsRepository:
         row = DashboardSettings(
             id=_SETTINGS_ID,
             sticky_threads_enabled=True,
+            quota_failover_enabled=True,
             upstream_stream_transport="auto",
             prohibit_fast_mode=False,
             # Account-capacity overrides are tri-state: NULL inherits the
@@ -120,6 +121,7 @@ class SettingsRepository:
         self,
         *,
         sticky_threads_enabled: bool | None = None,
+        quota_failover_enabled: bool | None = None,
         upstream_stream_transport: str | None = None,
         prohibit_fast_mode: bool | None = None,
         http_downstream_transport_policy: str | None = None,
@@ -253,6 +255,8 @@ class SettingsRepository:
         ) or (upstream_proxy_default_pool_id or None) != settings.upstream_proxy_default_pool_id
         if sticky_threads_enabled is not None:
             settings.sticky_threads_enabled = sticky_threads_enabled
+        if quota_failover_enabled is not None:
+            settings.quota_failover_enabled = quota_failover_enabled
         if upstream_stream_transport is not None:
             settings.upstream_stream_transport = upstream_stream_transport
         if prohibit_fast_mode is not None:

@@ -41,6 +41,12 @@ const BASE_SETTINGS: DashboardSettings = {
 const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 
 describe("RoutingSettings", () => {
+  it("does not duplicate quota continuity recovery in routing", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+    expect(screen.queryByRole("switch", { name: "Quota continuity recovery" })).not.toBeInTheDocument();
+  });
+
   it("saves per-account capacity limits including zero for unlimited", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

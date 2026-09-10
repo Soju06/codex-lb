@@ -1,4 +1,8 @@
 {
+  "settings.resilience.quotaContinuity.label": "할당량 연속성 복구",
+  "settings.resilience.quotaContinuity.description": "할당량 소진 시 소프트 고정을 해제하고 검증된 전체 기록의 후속 요청을 복구합니다. 기존 장애 전환 결정과 재시도 제한을 사용하며 추가 재시도나 지연을 만들지 않습니다.",
+  "settings.resilience.quotaContinuity.default": "기본값 (켜짐)",
+  "settings.resilience.quotaContinuity.ariaLabel": "할당량 연속성 복구",
   "accounts.actions.disableWarmup": "Warm-up 끄기",
   "accounts.actions.enableWarmup": "Warm-up 켜기",
   "accounts.actions.forceProbe": "강제 probe",
@@ -1196,7 +1200,7 @@
   "settings.inherit.reset": "상속으로 되돌리기",
   "settings.inherit.resetBlockedByReserve": "되돌릴 수 없습니다: 스트림 복구 예약이 스트림 상한을 넘게 됩니다. 다른 상한을 먼저 조정하세요.",
   "settings.resilience.title": "복원력",
-  "settings.resilience.description": "장애 조치 안전장치입니다. 여기서 바꾸기 전까지는 환경 변수(또는 기본값)를 상속하며, 변경은 모든 replica의 다음 요청부터 적용됩니다.",
+  "settings.resilience.description": "장애 전환 보호 및 연속성 복구. 변경 사항은 모든 복제본의 다음 요청부터 적용됩니다.",
   "settings.resilience.softDrain.label": "Soft drain",
   "settings.resilience.softDrain.description": "quota에 가까워진 계정을 한도까지 쓰는 대신 draining 단계로 옮기고, 조금씩 probe하며 되돌립니다.",
   "settings.resilience.softDrain.ariaLabel": "Soft drain",

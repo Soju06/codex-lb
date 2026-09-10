@@ -163,7 +163,13 @@ def classify_upstream_failure(
         # chose.
         failure_class = "rate_limit"
     elif (
-        error_code in _TRANSIENT_CODES
+        # A model catalog is global, but upstream entitlement can differ by
+        # subscription account and change during a rollout. Before any output
+        # is visible, let a different eligible account answer this rejection.
+        # If every candidate rejects it, the bounded attempt loop still
+        # surfaces the original model-not-found response.
+        error_code == "model_not_found"
+        or error_code in _TRANSIENT_CODES
         or is_upstream_model_capacity_error(error.get("message"))
         or (http_status is not None and http_status >= 500)
     ):

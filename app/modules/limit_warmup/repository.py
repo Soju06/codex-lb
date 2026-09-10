@@ -42,16 +42,6 @@ class LimitWarmupRepository:
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 
-    async def latest_attempt_for_account(self, account_id: str) -> AccountLimitWarmup | None:
-        stmt = (
-            select(AccountLimitWarmup)
-            .where(AccountLimitWarmup.account_id == account_id)
-            .order_by(AccountLimitWarmup.attempted_at.desc(), AccountLimitWarmup.id.desc())
-            .limit(1)
-        )
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
-
     async def try_create_attempt(
         self,
         *,

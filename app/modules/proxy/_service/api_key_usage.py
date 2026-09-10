@@ -3,17 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-import time
 from collections.abc import Coroutine, Mapping
 from typing import Any, Protocol, cast
 
 import anyio
+from anyio.lowlevel import checkpoint_if_cancelled
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clock import clock_for, scheduler_for
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.utils.request_id import get_request_id
+from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import Account
 from app.modules.api_keys.service import (
     API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
@@ -208,10 +210,11 @@ class _ApiKeyUsageMixin:
         drain the same request state concurrently without applying a penalty
         twice or corrupting the queue.
 
-        Each attempt runs as an owned task awaited through ``asyncio.shield``
-        (the ``_await_task_deferring_cancellation`` pattern; importing it from
-        ``http_bridge.helpers`` would cycle through that module's import of
-        this one). Caller cancellation therefore cannot abandon a
+        Each attempt runs as an owned task awaited through
+        ``wait_on_shared_future`` (the ``_await_task_deferring_cancellation``
+        pattern, inlined because the cancelled-attempt path must re-queue the
+        claimed penalty before re-raising). Caller cancellation therefore
+        cannot abandon a
         half-applied penalty for a later drain to replay: every claimed entry
         is drained to completion first — no later path owns the queue once
         terminal ownership is relinquished — and the cancellation re-raises
@@ -228,17 +231,20 @@ class _ApiKeyUsageMixin:
         penalties = request_state.deferred_keyed_stream_health
         # The anyio shield keeps a level-cancelled Starlette scope from
         # re-raising into every ``await``, which would otherwise busy-spin
-        # this loop until the owned task completes; the inner asyncio.shield
-        # loop defers edge task cancellation the same way.
+        # this loop until the owned task completes; the inner wait loop
+        # defers edge task cancellation the same way.
         with anyio.CancelScope(shield=True):
             while penalties:
                 penalty = penalties.pop(0)
-                apply_task = asyncio.create_task(
+                apply_task = scheduler_for(self).create_task(
                     proxy._handle_stream_error(penalty.account, penalty.error, penalty.code)
                 )
                 while True:
                     try:
-                        await asyncio.shield(apply_task)
+                        # wait_on_shared_future keeps repeated waits off the
+                        # task's done-callback list (3.14 shield leaks one per
+                        # cancelled wait).
+                        await wait_on_shared_future(apply_task)
                         break
                     except asyncio.CancelledError as exc:
                         if apply_task.cancelled():
@@ -255,6 +261,15 @@ class _ApiKeyUsageMixin:
                             exc_info=True,
                         )
                         break
+        if deferred_cancellation is None:
+            # The shield also blocks the level cancellation this drain
+            # promises to re-raise after the queue empties. Probe without
+            # suspending so it surfaces here instead of at an arbitrary
+            # later checkpoint.
+            try:
+                await checkpoint_if_cancelled()
+            except asyncio.CancelledError as exc:
+                deferred_cancellation = exc
         if deferred_cancellation is not None:
             raise deferred_cancellation
 
@@ -270,7 +285,7 @@ class _ApiKeyUsageMixin:
         if reservation is None:
             return last_touch_at
 
-        now = time.monotonic()
+        now = clock_for(self).monotonic()
         if now < last_touch_at + _api_key_reservation_heartbeat_seconds():
             return last_touch_at
 
@@ -303,9 +318,10 @@ class _ApiKeyUsageMixin:
         surface: str,
         stop_event: asyncio.Event,
     ) -> None:
+        scheduler = scheduler_for(self)
         while not stop_event.is_set():
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=_api_key_reservation_heartbeat_seconds())
+                await scheduler.wait_for(stop_event.wait(), timeout=_api_key_reservation_heartbeat_seconds())
                 return
             except TimeoutError:
                 touch_state.last_touch_at = await self._maybe_touch_api_key_reservation(
@@ -334,7 +350,7 @@ class _ApiKeyUsageMixin:
             return
         stop_event = asyncio.Event()
         request_state.api_key_reservation_heartbeat_stop = stop_event
-        request_state.api_key_reservation_heartbeat_task = asyncio.create_task(
+        request_state.api_key_reservation_heartbeat_task = scheduler_for(self).create_task(
             self._run_api_key_reservation_heartbeat(
                 api_key=api_key,
                 reservation=request_state.api_key_reservation,
@@ -498,9 +514,10 @@ class _ApiKeyUsageMixin:
         reservation_id = api_key_reservation.reservation_id
         model_name = api_key_reservation.model or settlement.model or ""
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
+        scheduler = scheduler_for(self)
 
         async def _release_ordering_sensitive_fallback() -> bool:
-            fallback_task = asyncio.create_task(
+            fallback_task = scheduler.create_task(
                 self._release_unsettled_stream_api_key_usage(
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
@@ -510,7 +527,7 @@ class _ApiKeyUsageMixin:
             )
             while not fallback_task.done():
                 try:
-                    await asyncio.shield(fallback_task)
+                    await wait_on_shared_future(fallback_task)
                 except asyncio.CancelledError:
                     # Keep waiting for the owned fallback. Cancellation is not
                     # a failed release; retry only when the fallback itself is
@@ -564,7 +581,7 @@ class _ApiKeyUsageMixin:
         # only over-restrict, never over-admit. Awaiting the ~5+2N-statement
         # settlement transaction here made every keyed stream's close wait on
         # it. Shutdown drains the task set (drain_persistence_tasks).
-        task = asyncio.create_task(_settle_once(), name=f"proxy-stream-api-key-settle-{request_id}")
+        task = scheduler.create_task(_settle_once(), name=f"proxy-stream-api-key-settle-{request_id}")
         settlement.usage_settlement_transferred = True
         self._track_stream_usage_settlement_task(
             task,
@@ -584,7 +601,7 @@ class _ApiKeyUsageMixin:
             with anyio.CancelScope(shield=True):
                 while True:
                     try:
-                        settlement_committed = await asyncio.shield(task)
+                        settlement_committed = await wait_on_shared_future(task)
                         break
                     except asyncio.CancelledError:
                         # Caller cancellation must not race fallback release
@@ -655,7 +672,7 @@ class _ApiKeyUsageMixin:
         action: str,
         request_id: str,
     ) -> None:
-        task = asyncio.create_task(coro, name=f"proxy-{action}-{request_id}")
+        task = scheduler_for(self).create_task(coro, name=f"proxy-{action}-{request_id}")
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         proxy._background_cleanup_tasks.add(task)
 
@@ -720,7 +737,7 @@ class _ApiKeyUsageMixin:
             finally:
                 if retry_slot_acquired:
                     proxy._stream_api_key_release_retry_semaphore.release()
-            await asyncio.sleep(retry_delay_seconds)
+            await scheduler_for(self).sleep(retry_delay_seconds)
             retry_attempt += 1
             retry_delay_seconds = min(
                 _STREAM_API_KEY_RELEASE_RETRY_MAX_SECONDS,

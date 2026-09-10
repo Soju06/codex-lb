@@ -41,6 +41,7 @@ from app.core.exceptions import (
     DashboardServiceUnavailableError,
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
@@ -280,10 +281,16 @@ async def serialize_reset_credit_redeem(
             try:
                 yield
             finally:
-                heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await heartbeat
-                await release_redeem_claim(account_id, holder_id)
+
+                async def cleanup_redeem_claim() -> None:
+                    heartbeat.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await heartbeat
+                    await release_redeem_claim(account_id, holder_id)
+
+                cancellation = await _await_cleanup_deferring_cancellation(cleanup_redeem_claim())
+                if cancellation is not None:
+                    raise cancellation
             return
 
     # Direct callers without a DB session keep the in-process lock.

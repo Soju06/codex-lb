@@ -11,6 +11,7 @@ import type {
   AccountUsageResetCredits,
 } from "@/features/accounts/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { useSmoothPercent } from "@/hooks/use-smooth-percent";
 import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatCompactNumber,
@@ -67,12 +68,12 @@ function QuotaRow({
                   : "text-red-600 dark:text-red-400",
           )}
         >
-          {formatPercentNullable(percent)}
+          {formatPercentNullable(percent, 1)}
         </span>
       </div>
       <div className={cn("h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
         <div
-          className={cn("h-full rounded-full transition-all duration-500 ease-out", quotaBarColor(clamped))}
+          className={cn("h-full rounded-full transition-colors duration-500 ease-out", quotaBarColor(clamped))}
           style={{ width: `${clamped}%` }}
         />
       </div>
@@ -233,19 +234,22 @@ export function AccountUsagePanel({
   onReset,
 }: AccountUsagePanelProps) {
   const { t } = useTranslation();
-  const primary = account.usage?.primaryRemainingPercent ?? null;
-  const secondary = account.usage?.secondaryRemainingPercent ?? null;
-  const monthly = account.usage?.monthlyRemainingPercent ?? null;
+  const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
+  const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
+  const monthlyState = useSmoothPercent(account.usage?.monthlyRemainingPercent ?? null);
+  const primary = primaryState.percent;
+  const secondary = secondaryState.percent;
+  const monthly = monthlyState.percent;
   const requestUsage = account.requestUsage ?? null;
   const hasRequestUsage = (requestUsage?.requestCount ?? 0) > 0;
-  const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
+  const hasPrimaryWindow = account.windowMinutesPrimary != null || primaryState.everKnown;
+  const hasSecondaryWindow = account.windowMinutesSecondary != null || secondaryState.everKnown;
+  const hasMonthlyWindow = account.windowMinutesMonthly != null || monthlyState.everKnown;
+  const weeklyOnly = !hasPrimaryWindow && hasSecondaryWindow;
   const primaryTrendPoints = trends?.primary ?? [];
   const secondaryTrendPoints = trends?.secondary ?? [];
   const secondaryScheduledTrendPoints = trends?.secondaryScheduled ?? [];
-  const monthlyOnly =
-    account.windowMinutesMonthly != null &&
-    account.windowMinutesPrimary == null &&
-    account.windowMinutesSecondary == null;
+  const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
   const hasTrends =
     primaryTrendPoints.length > 0 || secondaryTrendPoints.length > 0 || secondaryScheduledTrendPoints.length > 0;
 

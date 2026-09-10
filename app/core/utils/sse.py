@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from app.core.errors import ResponseFailedEvent
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_dict
+from app.core.utils.shared_future import _await_task_deferring_cancellation, wait_on_shared_future
 
 type JsonPayload = Mapping[str, JsonValue] | ResponseFailedEvent
 
@@ -76,8 +77,12 @@ async def inject_sse_keepalives(
                 if pending is None:
                     pending = asyncio.create_task(_next_chunk(iterator))
                 try:
-                    chunk = await asyncio.wait_for(
-                        asyncio.shield(pending),
+                    # Not ``wait_for(shield(pending))``: Python 3.14's shield
+                    # leaks a done-callback onto ``pending`` at every keepalive
+                    # timeout, so a quiet upstream accumulates callbacks (and
+                    # O(n) remove scans) until the next chunk arrives.
+                    chunk = await wait_on_shared_future(
+                        pending,
                         timeout=interval_seconds,
                     )
                 except asyncio.TimeoutError:
@@ -94,7 +99,18 @@ async def inject_sse_keepalives(
             if pending is not None and not pending.done():
                 pending.cancel()
                 try:
-                    await pending
+                    # Not ``await pending``: a level-cancelled consumer scope
+                    # re-cancels this task on every loop iteration, and a
+                    # direct task await cascades each cancel into ``pending``
+                    # and any cancellation-deferring wait beneath it (the
+                    # startup-probe task), spinning the loop until that
+                    # cleanup completes. The canonical helper shields this
+                    # task and waits through a proxy future, so the chunk task
+                    # sees only the explicit cancel above; it still settles
+                    # before the outer finalizers close the iterator chain the
+                    # chunk task is driving, and its eventual exception is
+                    # retrieved here rather than logged as never retrieved.
+                    await _await_task_deferring_cancellation(pending)
                 except BaseException:
                     pass
     finally:
@@ -115,12 +131,85 @@ def format_sse_event(payload: JsonPayload) -> str:
     return f"data: {data}\n\n"
 
 
+def _is_single_line_json_object_text(text: str) -> bool:
+    return text.startswith("{") and "\n" not in text and "\r" not in text
+
+
+def format_sse_event_from_text(payload: Mapping[str, JsonValue], text: str) -> str:
+    """Frame an already-serialized JSON object without re-dumping it.
+
+    ``text`` MUST be a JSON serialization of ``payload`` (the upstream frame the
+    payload was parsed from, or a compact re-dump of it). The result carries the
+    same ``event:`` line ``format_sse_event(payload)`` would emit, but its
+    ``data:`` line is ``text`` verbatim, so non-ASCII stays UTF-8 instead of
+    being ``\\uXXXX``-escaped and the JSON is never re-serialized. Anything
+    that would not produce a canonical single-line block (multi-line or
+    whitespace-prefixed text) falls back to ``format_sse_event``.
+    """
+    if not _is_single_line_json_object_text(text):
+        return format_sse_event(payload)
+    event_type = payload.get("type")
+    if isinstance(event_type, str) and event_type:
+        return f"event: {event_type}\ndata: {text}\n\n"
+    return f"data: {text}\n\n"
+
+
 def format_sse_data(payload: Mapping[str, JsonValue]) -> str:
     data = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     return f"data: {data}\n\n"
 
 
+class ParsedSseBlock(str):
+    """An SSE event block that carries its already-parsed ``data:`` payload.
+
+    Behaves exactly like ``str`` (framing, encoding, comparison, ``startswith``);
+    ``payload`` is what ``parse_sse_data_json`` returns for the same text, so a
+    chain of stream stages parses each block once. The payload object is shared
+    by every stage that receives the block: consumers MUST treat it as read-only
+    and copy before mutating. Derived strings (``strip()``, concatenation) are
+    plain ``str`` and take the full parse path again.
+    """
+
+    # ``__slots__`` is not supported on ``str`` subclasses; the instance dict
+    # costs ~100-200 B per block, far less than a redundant JSON parse.
+    payload: dict[str, JsonValue] | None
+
+    def __new__(cls, block: str, payload: dict[str, JsonValue] | None) -> ParsedSseBlock:
+        instance = super().__new__(cls, block)
+        instance.payload = payload
+        return instance
+
+
+def sse_block_with_payload(event_block: str, payload: dict[str, JsonValue] | None) -> ParsedSseBlock:
+    """Attach ``payload`` (the result of ``parse_sse_data_json(event_block)``) to the block."""
+    if isinstance(event_block, ParsedSseBlock) and event_block.payload is payload:
+        return event_block
+    return ParsedSseBlock(event_block, payload)
+
+
+def parse_sse_data_json_text(text: str) -> dict[str, JsonValue] | None:
+    """Parse one ``data:`` value as a JSON object.
+
+    Equivalent to ``parse_sse_data_json(f"data: {text}\\n\\n")`` but skips SSE
+    line parsing when ``text`` is a single-line JSON object — the shape every
+    upstream websocket frame has. Other inputs (blank, ``[DONE]``, multi-line or
+    whitespace-prefixed text) take the exact SSE field path so the ``None`` and
+    line-joining semantics stay identical.
+    """
+    if _is_single_line_json_object_text(text):
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if is_json_dict(payload):
+            return payload
+        return None
+    return parse_sse_data_json(f"data: {text}\n\n")
+
+
 def parse_sse_data_json(event_block: str) -> dict[str, JsonValue] | None:
+    if isinstance(event_block, ParsedSseBlock):
+        return event_block.payload
     data = extract_sse_data(event_block)
     if data is None:
         return None

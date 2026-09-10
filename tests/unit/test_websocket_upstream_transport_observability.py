@@ -7,12 +7,15 @@ from collections import deque
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import anyio
 import pytest
 
 from app.core.crypto import TokenEncryptor
+from app.core.openai.parsing import parse_sse_event_payload
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
@@ -87,7 +90,7 @@ class _DummyFacade:
         return None
 
 
-async def _no_op_release_gate(_request_state: object, _response_create_gate: object) -> None:
+async def _no_op_release_gate(_request_state: object, _response_create_gate: object, **_kwargs: object) -> None:
     return None
 
 
@@ -98,7 +101,7 @@ def _patch_websocket_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_websocket_connect_egress_normalizes_selected_installation_metadata(
+async def test_direct_websocket_connect_egress_uses_selected_installation_metadata_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _DummyWebSocketService()
@@ -112,12 +115,14 @@ async def test_direct_websocket_connect_egress_normalizes_selected_installation_
         *,
         route: object,
         allow_direct_egress: bool,
+        routing_hint: tuple[str, str | None] | None = None,
     ) -> object:
         captured["headers"] = dict(headers)
         captured["access_token"] = access_token
         captured["account_id"] = account_id
         captured["route"] = route
         captured["allow_direct_egress"] = allow_direct_egress
+        captured["routing_hint"] = routing_hint
         return expected_upstream
 
     class _DirectWebSocketFacade(_DummyFacade):
@@ -155,8 +160,9 @@ async def test_direct_websocket_connect_egress_normalizes_selected_installation_
     assert captured["account_id"] == "account-123"
     assert captured["route"] is None
     assert captured["allow_direct_egress"] is True
+    assert captured["routing_hint"] is None
     upstream_headers = cast(dict[str, str], captured["headers"])
-    assert upstream_headers["x-codex-installation-id"] == "account-installation"
+    assert "x-codex-installation-id" not in upstream_headers
     assert json.loads(upstream_headers["x-codex-turn-metadata"]) == {
         "installation_id": "account-installation",
         "turn_id": "turn_123",
@@ -455,3 +461,79 @@ async def test_fail_pending_websocket_requests_attributes_request_state_api_key(
 
     assert len(service.request_log_calls) == 1
     assert service.request_log_calls[0]["api_key"] is request_key
+
+
+_REASONING_REPLAY_MESSAGE = (
+    "Item with id 'rs_0f3a' of type 'reasoning' was provided without its required following item."
+)
+
+
+def _reasoning_replay_frame(event_type: str, *, code: str, message: str, enveloped: bool) -> dict[str, Any]:
+    if event_type == "response.failed":
+        return {
+            "type": "response.failed",
+            "response": {"id": "resp_replay", "error": {"code": code, "message": message}},
+        }
+    if enveloped:
+        return {"type": "error", "error": {"code": code, "message": message}}
+    # The ChatGPT-backed websocket emits error details directly on the frame.
+    return {"type": "error", "code": code, "message": message}
+
+
+@pytest.mark.parametrize(
+    ("event_type", "code", "message", "enveloped", "expected_increments"),
+    [
+        ("error", "invalid_request_error", _REASONING_REPLAY_MESSAGE, False, 1),
+        ("error", "invalid_request_error", _REASONING_REPLAY_MESSAGE, True, 1),
+        ("response.failed", "invalid_request_error", _REASONING_REPLAY_MESSAGE, True, 1),
+        ("error", "invalid_request_error", "No tool output found for function call call_abc.", False, 0),
+        ("response.failed", "server_error", _REASONING_REPLAY_MESSAGE, True, 0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_websocket_terminal_frame_counts_reasoning_replay_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+    code: str,
+    message: str,
+    enveloped: bool,
+    expected_increments: int,
+) -> None:
+    """Websocket (and HTTP-bridge) terminal frames never carry an HTTP status and are never
+    penalized for invalid_request_error, so the reasoning-replay counter must fire at frame
+    finalization rather than inside the account-health handler."""
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
+    service = _DummyWebSocketService()
+    payload = _reasoning_replay_frame(event_type, code=code, message=message, enveloped=enveloped)
+    event = parse_sse_event_payload(payload)
+    request_state = _WebSocketRequestState(
+        request_id="ws_replay",
+        request_log_id="resp_replay_log",
+        response_id="resp_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport=_REQUEST_TRANSPORT_WEBSOCKET,
+        upstream_transport=_REQUEST_TRANSPORT_WEBSOCKET,
+    )
+
+    await service._finalize_websocket_request_state(
+        request_state,
+        account=cast(Any, SimpleNamespace(id="acc_replay")),
+        account_id_value="acc_replay",
+        event=event,
+        event_type=event_type,
+        payload=payload,
+        api_key=None,
+        upstream_control=_WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert counter.inc.call_count == expected_increments
+    assert len(service.request_log_calls) == 1
+    assert service.request_log_calls[0]["status"] == "error"
+    assert service.request_log_calls[0]["error_code"] == code

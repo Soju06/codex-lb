@@ -169,17 +169,15 @@ export function formatPercent(value: unknown): string {
   return `${Math.round(numeric)}%`;
 }
 
-export function formatPercentNullable(value: unknown): string {
+export function formatPercentNullable(value: unknown, maximumFractionDigits = 0): string {
   const numeric = toNumber(value);
   if (numeric === null) {
     return "--";
   }
-  return `${Math.round(numeric)}%`;
-}
-
-export function formatPercentValue(value: unknown): number {
-  const numeric = toNumber(value);
-  return numeric === null ? 0 : Math.round(numeric);
+  if (maximumFractionDigits <= 0) {
+    return `${Math.round(numeric)}%`;
+  }
+  return `${numeric.toLocaleString("en-US", { maximumFractionDigits })}%`;
 }
 
 export function formatRate(value: unknown): string {
@@ -216,21 +214,6 @@ export function formatWindowLabel(
     return "5h";
   }
   return "--";
-}
-
-export function formatTokensWithCached(totalTokens: unknown, cachedInputTokens: unknown): string {
-  const total = toNumber(totalTokens);
-  if (total === null) {
-    return "--";
-  }
-  const cached = toNumber(cachedInputTokens);
-  if (cached === null || cached <= 0) {
-    return formatCompactNumber(total);
-  }
-  return t("formatters.cachedTokensInline", {
-    total: formatCompactNumber(total),
-    cached: formatCompactNumber(cached),
-  });
 }
 
 export function formatCachedTokensMeta(totalTokens: unknown, cachedInputTokens: unknown): string {
@@ -347,14 +330,6 @@ function padTwo(value: number): string {
   return String(value).padStart(2, "0");
 }
 
-export function formatLocalDateTimeSeconds(iso: string | null | undefined): string {
-  const date = parseDate(iso);
-  if (!date) {
-    return "--";
-  }
-  return `${date.getFullYear()}-${padTwo(date.getMonth() + 1)}-${padTwo(date.getDate())} ${padTwo(date.getHours())}:${padTwo(date.getMinutes())}:${padTwo(date.getSeconds())}`;
-}
-
 export function formatChartDateTime(iso: string | null | undefined): string {
   const date = parseDate(iso);
   return date ? getChartDateTimeFormatter().format(date) : "--";
@@ -455,32 +430,6 @@ export function formatSingleUnitRemaining(expiresAtIso: string): SingleUnitRemai
           ? `${minutes}m`
           : t("formatters.now");
   return { label, expiringSoon: ms < EXPIRING_SOON_THRESHOLD_MS };
-}
-
-export function formatQuotaResetMeta(
-  resetAtSecondary: string | null | undefined,
-  windowMinutesSecondary: unknown,
-): string {
-  const labelSecondary = formatQuotaResetLabel(resetAtSecondary);
-  const windowSecondary = formatWindowLabel("secondary", windowMinutesSecondary);
-  if (labelSecondary === RESET_ERROR_LABEL) {
-    return t("formatters.quotaResetUnavailable");
-  }
-  return t("formatters.quotaResetMeta", { window: windowSecondary, label: labelSecondary });
-}
-
-export function truncateText(value: unknown, maxLen = 80): string {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  const text = String(value);
-  if (text.length <= maxLen) {
-    return text;
-  }
-  if (maxLen <= 3) {
-    return text.slice(0, maxLen);
-  }
-  return `${text.slice(0, maxLen - 1)}\u2026`;
 }
 
 export function formatAccessTokenLabel(auth: AccountAuthStatus | null | undefined): string {

@@ -2,6 +2,8 @@ PYTEST_ARGS := -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeou
 POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
 INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
+	tests/integration/test_report_rollup.py \
+	tests/integration/test_reports_performance_api.py \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
@@ -23,6 +25,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_account_deletion_background.py \
 	tests/integration/test_request_usage_time_rollup.py \
 	tests/integration/test_request_usage_rollup_parity.py \
+	tests/integration/test_conversation_presence_union.py \
 	tests/integration/test_migrations.py::test_request_usage_time_rollups_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_conversation_presence_rollup_migration_upgrade_and_downgrade \
 	tests/integration/test_data_retention.py \
@@ -46,8 +49,10 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_capped_floor_query_plan_is_index_only_postgresql \
 	tests/integration/test_migrations.py::test_usage_history_bulk_covering_indexes_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql \
-	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql
-SHELL := /bin/bash
+	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql \
+	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql \
+	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql
+SHELL := bash
 
 .PHONY: help
 help:
@@ -56,12 +61,14 @@ help:
 	  '  make lint                    ruff check + format check + architecture checks' \
 	  '  make architecture-check      proxy architecture fitness ratchets' \
 	  '  make typecheck               ty check' \
+	  '  make rust-check              fmt + clippy + tests + release build' \
+	  '  make rust-audit              cargo-deny dependency policy' \
 	  '  make frontend-test           vitest coverage, same as CI' \
 	  '  make test-dashboard-browser-smoke  built dashboard against the real local API' \
 	  '  make test-unit               unit pytest slice, same as CI' \
 	  '  make test-integration-core   integration-core pytest slice' \
 	  '  make package                 build and verify sdist/wheel' \
-	  '  make ci-fast                 lint/type/frontend/unit/package' \
+	  '  make ci-fast                 lint/type/frontend/unit/package/rust-check' \
 	  '  make ci                      full local CI gate'
 
 .PHONY: frontend-install frontend-lint frontend-typecheck frontend-test frontend-test-fast frontend-build \
@@ -91,24 +98,44 @@ test-dashboard-browser-smoke: frontend-build frontend-playwright-chromium
 	uv sync --dev --frozen
 	uv run python scripts/run_dashboard_browser_smoke.py --frontend-built
 
-.PHONY: lint typecheck architecture-check
+.PHONY: lint typecheck architecture-check rust-fmt rust-lint rust-test rust-build rust-check rust-audit
 lint: architecture-check
 	uv run ruff check .
 	uv run ruff format --check .
 
 architecture-check:
 	uv run python scripts/check_proxy_architecture.py
+	uv run python scripts/check_cancellation_safety.py
+	uv run python scripts/check_proxy_timing_seams.py
+	uv run python scripts/check_settings_tiers.py
 
 typecheck:
 	uv sync --dev --frozen
 	uv run ty check
+
+rust-fmt:
+	cargo fmt --all -- --check
+
+rust-lint:
+	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+rust-test:
+	cargo test --workspace --all-targets --locked
+
+rust-build:
+	cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress
+
+rust-check: rust-fmt rust-lint rust-test rust-build
+
+rust-audit:
+	cargo deny --all-features check
 
 .PHONY: test-unit test-integration-core test-integration-core-shard \
 	test-integration-core-1 test-integration-core-2 test-integration-core-3 \
 	test-integration-bridge test-e2e test-postgres
 test-unit: frontend-build
 	uv sync --dev --frozen
-	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/test_request_logs_options_api.py
+	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/simulation tests/test_request_logs_options_api.py
 
 test-integration-core: frontend-build
 	uv sync --dev --frozen
@@ -228,8 +255,8 @@ helm-smoke-kind:
 	KUBE_CONTEXT=kind-codex-lb-smoke IMAGE_REGISTRY=ghcr.io IMAGE_REPOSITORY=soju06/codex-lb IMAGE_TAG=ci ./scripts/helm-kind-smoke.sh external-db
 
 .PHONY: ci-fast ci
-ci-fast: lint typecheck frontend-test test-unit package
+ci-fast: lint typecheck rust-check frontend-test test-unit package
 
-ci: frontend-lint frontend-typecheck frontend-test frontend-build lint typecheck \
+ci: frontend-lint frontend-typecheck frontend-test frontend-build lint typecheck rust-check rust-audit \
 	test-unit test-integration-core test-integration-bridge test-e2e test-postgres \
 	migration-check migration-check-postgres package docker helm-check helm-smoke-kind

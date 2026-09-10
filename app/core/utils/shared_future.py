@@ -20,9 +20,16 @@ touch the shared future's callback list.
 from __future__ import annotations
 
 import asyncio
-from typing import TypeVar
+from collections.abc import Awaitable, Coroutine
+from typing import Any, TypeVar, cast
+
+import anyio
+from anyio.lowlevel import checkpoint_if_cancelled
+
+from app.core.clock import REAL_SCHEDULER, Scheduler
 
 _T = TypeVar("_T")
+_TaskResultT = TypeVar("_TaskResultT")
 
 _WAITERS_ATTR = "_shared_future_fanout_waiters"
 
@@ -50,6 +57,7 @@ async def wait_on_shared_future(
     shared: "asyncio.Future[_T]",
     *,
     timeout: float | None = None,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> _T:
     """Drop-in equivalent of ``wait_for(shield(shared), timeout)`` for futures
     awaited by many concurrent waiters.
@@ -60,6 +68,9 @@ async def wait_on_shared_future(
       otherwise mutated by a waiter timing out or being cancelled.
     - Cancelling the awaiting task detaches its proxy in O(1) and leaves
       ``shared`` (and the work it represents) running.
+    - ``scheduler`` only matters for tests: a timed wait runs through its
+      ``wait_for`` so virtual time can expire it. The production default is
+      the real scheduler, i.e. ``asyncio.wait_for`` verbatim.
     """
     if shared.done():
         return shared.result()
@@ -75,6 +86,78 @@ async def wait_on_shared_future(
     try:
         if timeout is None:
             return await proxy
-        return await asyncio.wait_for(proxy, timeout)
+        return await scheduler.wait_for(proxy, timeout)
     finally:
         waiters.discard(proxy)
+
+
+async def _await_task_deferring_cancellation(
+    task: asyncio.Task[_TaskResultT],
+) -> tuple[_TaskResultT, asyncio.CancelledError | None]:
+    """Finish critical cleanup while preserving the caller's cancellation."""
+
+    cancellation: asyncio.CancelledError | None = None
+    result: _TaskResultT | None = None
+    # The anyio shield keeps a level-cancelled Starlette scope from re-raising
+    # into every ``await``, which would otherwise busy-spin this loop until the
+    # owned task completes. The shield only covers the task anyio tracks: when
+    # this helper runs inside a plain ``asyncio.create_task`` task that an
+    # anyio-tracked task awaits directly (``await task``), each level re-cancel
+    # of the tracked task cascades down the ``_fut_waiter`` chain and re-enters
+    # this loop anyway. Callers that hand such a task across a task boundary
+    # must await it through ``wait_on_shared_future`` so the proxy future, not
+    # the owned task, absorbs the repeated cancels (2026-09-07 production
+    # busy spin). ``wait_on_shared_future`` keeps the loop's waits
+    # off the task's done-callback list: Python 3.14's ``asyncio.shield``
+    # leaks a callback per cancelled wait, so re-shielding a task wedged on a
+    # lock grew 100k+ callbacks and O(n^2) remove scans in the 2026-08-30
+    # production event-loop livelock.
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                result = await wait_on_shared_future(task)
+                break
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancellation = cancellation or exc
+    if cancellation is None:
+        # The shield also blocks the level cancellation this helper promises
+        # to surface. Probe for it without suspending so callers still get
+        # their cancellation marker after the owned task finished.
+        try:
+            await checkpoint_if_cancelled()
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    return cast(_TaskResultT, result), cancellation
+
+
+async def _await_result_deferring_cancellation(
+    awaitable: "Awaitable[_TaskResultT]",
+    *,
+    scheduler: Scheduler = REAL_SCHEDULER,
+) -> tuple[_TaskResultT, asyncio.CancelledError | None]:
+    """``_await_task_deferring_cancellation`` for a bare awaitable.
+
+    A coroutine is spawned through ``scheduler`` (``asyncio.create_task``
+    under the real default, an owned task under a simulation); any other
+    awaitable is wrapped by ``asyncio.ensure_future`` as before.
+    """
+
+    task: asyncio.Task[_TaskResultT]
+    if asyncio.iscoroutine(awaitable):
+        task = scheduler.create_task(cast(Coroutine[Any, Any, _TaskResultT], awaitable))
+    else:
+        task = asyncio.ensure_future(awaitable)
+    return await _await_task_deferring_cancellation(task)
+
+
+async def _await_cleanup_deferring_cancellation(
+    awaitable: "Awaitable[object]",
+    *,
+    scheduler: Scheduler = REAL_SCHEDULER,
+) -> asyncio.CancelledError | None:
+    """Finish required cleanup, returning the deferred cancellation marker."""
+
+    _, cancellation = await _await_result_deferring_cancellation(awaitable, scheduler=scheduler)
+    return cancellation

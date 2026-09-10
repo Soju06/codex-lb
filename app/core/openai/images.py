@@ -41,6 +41,11 @@ from app.core.types import JsonValue
 #: Allowed public ``gpt-image-*`` family. Any other model is rejected up-front.
 GPT_IMAGE_MODEL_PREFIX: Final[str] = "gpt-image-"
 
+#: Public model used when a client omits ``model`` (fixed; issue #1340 /
+#: PRINCIPLES.md P2). It is the public API contract for model-less requests
+#: and must stay in the ``gpt-image-*`` family.
+DEFAULT_PUBLIC_IMAGE_MODEL: Final[str] = "gpt-image-2"
+
 #: Models that take the constrained gpt-image-2 parameter matrix.
 _GPT_IMAGE_2_MODELS: Final[frozenset[str]] = frozenset({"gpt-image-2"})
 
@@ -280,7 +285,7 @@ class V1ImagesGenerationsRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     #: Public model id. Optional; route handlers fall back to the configured
-    #: ``images_default_model`` when omitted. When provided, it must be a
+    #: ``DEFAULT_PUBLIC_IMAGE_MODEL`` when omitted. When provided, it must be a
     #: ``gpt-image-*`` model.
     model: str | None = Field(default=None, min_length=1)
     prompt: str = Field(min_length=1)
@@ -319,7 +324,7 @@ class V1ImagesEditsForm(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     #: Public model id. Optional; route handlers fall back to the configured
-    #: ``images_default_model`` when omitted. When provided, it must be a
+    #: ``DEFAULT_PUBLIC_IMAGE_MODEL`` when omitted. When provided, it must be a
     #: ``gpt-image-*`` model.
     model: str | None = Field(default=None, min_length=1)
     prompt: str = Field(min_length=1)

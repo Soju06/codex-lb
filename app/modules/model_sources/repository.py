@@ -1,10 +1,25 @@
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import ColumnElement, and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.models import ModelSource, ModelSourceModel
+
+
+def _enablement_filter(only_disabled: bool) -> ColumnElement[bool]:
+    """Enabled-state predicate for a per-capability source lookup.
+
+    ``only_disabled`` selects the exact complement of the routable set: rows
+    that match the model and the route shape but that an operator switched off,
+    at the source or at the individual model. Routing needs that complement to
+    tell "no source serves this model" apart from "the source that serves this
+    model is switched off" -- the latter must not fall through to a
+    subscription account, which rejects the model outright.
+    """
+    if only_disabled:
+        return or_(ModelSource.is_enabled.is_(False), ModelSourceModel.is_enabled.is_(False))
+    return and_(ModelSource.is_enabled.is_(True), ModelSourceModel.is_enabled.is_(True))
 
 
 class ModelSourcesRepository:
@@ -38,16 +53,16 @@ class ModelSourcesRepository:
         *,
         allowed_source_ids: set[str] | None = None,
         require_streaming: bool = False,
+        only_disabled: bool = False,
     ) -> ModelSource | None:
         stmt = (
             select(ModelSource)
             .options(selectinload(ModelSource.models))
             .join(ModelSourceModel, ModelSourceModel.source_id == ModelSource.id)
             .where(ModelSource.kind == "openai_compatible")
-            .where(ModelSource.is_enabled.is_(True))
             .where(ModelSource.supports_chat_completions.is_(True))
             .where(ModelSourceModel.model == model)
-            .where(ModelSourceModel.is_enabled.is_(True))
+            .where(_enablement_filter(only_disabled))
             .order_by(ModelSource.name, ModelSource.id)
             .limit(1)
         )
@@ -66,16 +81,16 @@ class ModelSourcesRepository:
         *,
         allowed_source_ids: set[str] | None = None,
         require_streaming: bool = False,
+        only_disabled: bool = False,
     ) -> ModelSource | None:
         stmt = (
             select(ModelSource)
             .options(selectinload(ModelSource.models))
             .join(ModelSourceModel, ModelSourceModel.source_id == ModelSource.id)
             .where(ModelSource.kind == "openai_compatible")
-            .where(ModelSource.is_enabled.is_(True))
             .where(ModelSource.supports_responses.is_(True))
             .where(ModelSourceModel.model == model)
-            .where(ModelSourceModel.is_enabled.is_(True))
+            .where(_enablement_filter(only_disabled))
             .order_by(ModelSource.name, ModelSource.id)
             .limit(1)
         )

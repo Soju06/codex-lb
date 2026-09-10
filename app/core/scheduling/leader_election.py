@@ -408,8 +408,8 @@ class LeaderElection:
         self._lease_deadline = renew_anchor + remaining
         return True
 
-    async def release(self) -> None:
-        """Delete the lease row we hold so followers can take over immediately.
+    async def release(self) -> bool:
+        """Delete the lease row we hold and report whether release completed.
 
         Bodies detached after the cancellation grace may still be draining
         shielded singleton work as the former leader, so the early release
@@ -445,7 +445,7 @@ class LeaderElection:
         settings = get_settings()
         if not settings.leader_election_enabled:
             await self._stop_release_keeper()
-            return
+            return True
         await self._stop_release_keeper()
         if not await self._drain_detached_bodies():
             logger.warning(
@@ -453,7 +453,7 @@ class LeaderElection:
                 "draining after %.1fs; the lease will expire after its TTL",
                 _RELEASE_DRAIN_GRACE_SECONDS,
             )
-            return
+            return False
         try:
             async with get_background_session() as session:
                 await session.execute(
@@ -476,8 +476,10 @@ class LeaderElection:
                     self._leader_id,
                     exc_info=True,
                 )
-                return
+                return False
             logger.warning("Failed to release scheduler leader lease", exc_info=True)
+            return False
+        return True
 
     def start_release_keeper(self) -> None:
         """Start the single lease-renewal keeper for the graceful-shutdown window.

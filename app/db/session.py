@@ -20,11 +20,23 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.core.config.settings import get_settings
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.sqlite_utils import (
+    IntegrityCheck,
+    SqliteFileIdentity,
     SqliteIntegrityCheckMode,
+    SqliteRunState,
+    SqliteRunStateDurabilityError,
+    _sqlite_file_identity,
+    acquire_sqlite_runstate_lock,
     check_sqlite_integrity,
+    integrity_check_pragma_name,
     normalize_sqlite_url,
+    read_sqlite_runstate_record,
+    release_sqlite_runstate_lock,
     sqlite_db_path_from_url,
+    sqlite_url_is_memory,
+    write_sqlite_runstate,
 )
 
 if TYPE_CHECKING:
@@ -57,15 +69,14 @@ _SQLITE_WRITE_STATEMENT_PREFIXES = (
     "begin exclusive",
 )
 _SQLITE_WATCHDOG_STATEMENT_PREVIEW_CHARS = 300
-# Hard deadline for the shielded rollback/close teardown on SQLite (part 2 of
-# the issue #1682 plan). A teardown wedged behind a stuck aiosqlite worker
-# keeps holding the single writer slot, so it must be reclaimed well before
-# other writers exhaust their busy timeout and surface "database is locked";
-# one-sixth of the busy timeout (5s) matches the leader-gated shielded-drain
-# grace. Abandoning the wedged await alone would NOT release the lock — the
-# aiosqlite worker thread still holds it — so on timeout the reclaim below
-# interrupts the driver and invalidates the connection, disposing the worker.
+# Initial observation bound for file-backed SQLite teardown. A pending worker
+# can retain the single writer slot (issue #1682); after the completion grace,
+# reclamation attempts to interrupt the driver and invalidate its connection.
 _SQLITE_TEARDOWN_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_SECONDS / 6
+# A worker can finish while loop callbacks remain queued (issue #2029). Allow
+# a separate bounded opportunity to observe successful task completion before
+# reclamation. A genuinely pending teardown can take this additional 0.75s.
+_SQLITE_TEARDOWN_COMPLETION_GRACE_SECONDS = _SQLITE_BUSY_TIMEOUT_SECONDS / 40
 # Session.info marker set once a teardown step was abandoned as wedged: the
 # session must never be driven by another coroutine again (the abandoned
 # greenlet may still resume), and the deferred cleanup takes over.
@@ -85,6 +96,14 @@ _wedged_teardown_cleanup_tasks: set[asyncio.Task[Any]] = set()
 # ``database_pool_size`` / ``database_max_overflow``.
 _POSTGRES_POOL_TIMEOUT_SECONDS = 30.0
 _POSTGRES_POOL_RECYCLE_SECONDS = 1800
+# Per-statement execution bound (issue #1971). One query hung on a half-dead
+# connection wedged the process-global settings-cache lock — and every
+# http-bridge submit parked behind it while holding its session's
+# pending_lock — for days. No runtime query legitimately runs this long
+# (retention and cleanup work is chunked); Alembic migrations use their own
+# synchronous engine and are not bounded by this. Fixed application constant
+# like the pool knobs above: not an operator decision.
+_POSTGRES_COMMAND_TIMEOUT_SECONDS = 60.0
 _database_url = normalize_sqlite_url(_settings.database_url)
 
 
@@ -104,7 +123,7 @@ def _is_sqlite_url(url: str) -> bool:
 
 
 def _is_sqlite_memory_url(url: str) -> bool:
-    return _is_sqlite_url(url) and ":memory:" in url
+    return sqlite_url_is_memory(url)
 
 
 def _postgres_async_connect_args(url: str) -> dict[str, object] | None:
@@ -120,7 +139,14 @@ def _postgres_async_connect_args(url: str) -> dict[str, object] | None:
     # bridge-session cleanup stop running, and account/stream lease expiry is
     # mis-evaluated. Forcing UTC keeps stored timestamps correct regardless of
     # the container time zone.
-    connect_args: dict[str, object] = {"server_settings": {"timezone": "UTC"}}
+    connect_args: dict[str, object] = {
+        "server_settings": {"timezone": "UTC"},
+        # Bound every statement so a query stalled on a half-dead connection
+        # cannot hold application locks forever (issue #1971). asyncpg cancels
+        # the statement server-side and raises, surfacing the stall as an
+        # error instead of an unbounded await.
+        "command_timeout": _POSTGRES_COMMAND_TIMEOUT_SECONDS,
+    }
     if os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
         connect_args["prepared_statement_cache_size"] = 0
     return connect_args
@@ -341,6 +367,8 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 _background_engine: AsyncEngine | None = None
 _background_session_factory: async_sessionmaker[AsyncSession] | None = None
 _sqlite_writer_lock: anyio.Lock | None = None
+_sqlite_lifetime_lock: sqlite3.Connection | None = None
+_sqlite_lifetime_lock_path: Path | None = None
 
 _T = TypeVar("_T")
 
@@ -357,47 +385,166 @@ def _ensure_sqlite_dir(url: str) -> None:
     sqlite_path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _release_sqlite_lifetime_lock() -> None:
+    global _sqlite_lifetime_lock, _sqlite_lifetime_lock_path
+    connection = _sqlite_lifetime_lock
+    _sqlite_lifetime_lock = None
+    _sqlite_lifetime_lock_path = None
+    if connection is not None:
+        release_sqlite_runstate_lock(connection)
+
+
+def _acquire_sqlite_lifetime_lock(sqlite_path: Path) -> None:
+    global _sqlite_lifetime_lock, _sqlite_lifetime_lock_path
+    if _sqlite_lifetime_lock is not None and _sqlite_lifetime_lock_path == sqlite_path:
+        return
+    _release_sqlite_lifetime_lock()
+    connection = acquire_sqlite_runstate_lock(sqlite_path)
+    _sqlite_lifetime_lock = connection
+    _sqlite_lifetime_lock_path = sqlite_path
+
+
 def _startup_sqlite_check_mode(raw_mode: str) -> SqliteIntegrityCheckMode | None:
     if raw_mode == "off":
         return None
     return SqliteIntegrityCheckMode(raw_mode)
 
 
+def _sqlite_startup_check_required(
+    sqlite_path: Path,
+    *,
+    mode: SqliteIntegrityCheckMode,
+    previous_state: SqliteRunState | None,
+    running_recorded: bool,
+    running_identity: SqliteFileIdentity | None,
+) -> bool:
+    """Decide whether this startup has to scan the whole SQLite file.
+
+    The scan reads every page, so its cost grows with the store and the
+    listener cannot bind until it returns. SQLite is already consistent after
+    a clean close, so the scan only earns its cost when the previous process
+    did not get to record one. Anything other than a recorded clean shutdown
+    (a crash, an OOM kill, a power loss, a first run, or an upgrade from a
+    build that never wrote the sidecar) still pays for the scan.
+    """
+    # The prior state is captured before startup marks this process RUNNING.
+    # A clean sidecar is not evidence for this startup if that transition was
+    # not durably recorded.
+    if not running_recorded or previous_state is not SqliteRunState.CLEAN:
+        return True
+    # Revalidate at the decision seam. A recovery replacement can happen
+    # between the earlier sidecar reads and this final branch.
+    current_identity = _sqlite_file_identity(sqlite_path)
+    if running_identity is None or current_identity is None or running_identity != current_identity:
+        return True
+    logger.info(
+        "Skipping SQLite startup %s after a recorded clean shutdown path=%s",
+        integrity_check_pragma_name(mode),
+        sqlite_path,
+    )
+    return False
+
+
+def _run_startup_sqlite_check(sqlite_path: Path, *, mode: SqliteIntegrityCheckMode) -> IntegrityCheck:
+    """Run the startup scan, announcing it so the stall is never unexplained."""
+    pragma_name = integrity_check_pragma_name(mode)
+    try:
+        size_bytes = sqlite_path.stat().st_size
+    except OSError:
+        size_bytes = 0
+    logger.info(
+        "Running SQLite startup %s path=%s size_bytes=%s; the listener does not bind until it completes",
+        pragma_name,
+        sqlite_path,
+        size_bytes,
+    )
+    started_monotonic = time.monotonic()
+    integrity = check_sqlite_integrity(sqlite_path, mode=mode)
+    elapsed_seconds = time.monotonic() - started_monotonic
+    if integrity.ok:
+        logger.info(
+            "SQLite startup %s passed in %.1fs path=%s",
+            pragma_name,
+            elapsed_seconds,
+            sqlite_path,
+        )
+    return integrity
+
+
+def _mark_sqlite_running(sqlite_path: Path) -> bool:
+    recorded = write_sqlite_runstate(sqlite_path, SqliteRunState.RUNNING)
+    if not recorded:
+        logger.warning(
+            "Failed to record the SQLite run state path=%s; the next startup will re-run the integrity check",
+            sqlite_path,
+        )
+    return recorded
+
+
+def mark_sqlite_shutdown_clean() -> None:
+    """Record that this process closed the SQLite store cleanly.
+
+    Call this after the engines are disposed while the process still owns the
+    SQLite lifetime lock. The next startup reads it and skips the integrity
+    scan, which is what keeps an operator restart from paying a whole-file read
+    that grows with the store.
+    """
+    sqlite_path = sqlite_db_path_from_url(normalize_sqlite_url(_settings.database_url))
+    if sqlite_path is None:
+        return
+    if _sqlite_lifetime_lock is None or _sqlite_lifetime_lock_path != sqlite_path:
+        logger.warning(
+            "Cannot record a clean SQLite shutdown without the lifetime lock path=%s; "
+            "the next startup will run the integrity check",
+            sqlite_path,
+        )
+        return
+    try:
+        if not write_sqlite_runstate(sqlite_path, SqliteRunState.CLEAN):
+            logger.warning(
+                "Failed to record a clean SQLite shutdown path=%s; the next startup will run the integrity check",
+                sqlite_path,
+            )
+    finally:
+        # The clean transition is the last operation that needs ownership. A
+        # failed write remains unknown, but must not leave a process lock held
+        # after shutdown has completed.
+        _release_sqlite_lifetime_lock()
+
+
 async def _shielded(awaitable: Awaitable[object]) -> None:
-    task = asyncio.ensure_future(awaitable)
-    cancellation: asyncio.CancelledError | None = None
-    with anyio.CancelScope(shield=True):
-        while True:
-            try:
-                await asyncio.shield(task)
-                break
-            except asyncio.CancelledError as exc:
-                if task.cancelled():
-                    raise
-                cancellation = cancellation or exc
+    cancellation = await _await_cleanup_deferring_cancellation(awaitable)
     if cancellation is not None:
         raise cancellation
 
 
 async def _shielded_bounded(awaitable: Awaitable[object], timeout: float) -> asyncio.Task[object] | None:
-    """Shield ``awaitable`` from the caller's cancellation, waiting at most ``timeout``.
+    """Observe ``awaitable`` within a bound, shielding it from caller cancellation.
 
-    Returns ``None`` when the awaitable finished inside the bound (re-raising
-    its exception like ``_shielded``); returns the still-running task when the
-    deadline passed — the caller must treat the underlying connection as
-    wedged and reclaim it, because the abandoned await does not release
-    anything the aiosqlite worker thread holds (issue #1682).
+    Returns ``None`` on successful completion and re-raises task failures.
+    Otherwise returns the pending task without cancelling it. The caller owns
+    further completion observation and any reclamation; the elapsed deadline
+    alone does not show whether the worker is stuck.
     """
     task = asyncio.ensure_future(awaitable)
-    waiter = asyncio.ensure_future(asyncio.wait({task}, timeout=timeout))
-    while not waiter.done():
-        try:
-            await asyncio.shield(waiter)
-        except asyncio.CancelledError:
-            # Teardown runs in ``finally`` blocks: the bound, not the caller's
-            # cancellation, decides abandonment. ``asyncio.wait`` cannot
-            # outlive its timeout, so this drain stays bounded.
-            continue
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    # The anyio shield keeps a level-cancelled scope from re-raising into
+    # every ``await`` (busy-spin); ``asyncio.wait`` removes its callback in a
+    # ``finally`` and never cancels ``task``, unlike 3.14's ``asyncio.shield``
+    # which leaks a done-callback per cancelled wait. The deadline (not a
+    # restarted timeout) keeps the bound exact under repeated edge cancels.
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait({task}, timeout=remaining)
+            except asyncio.CancelledError:
+                # Teardown runs in ``finally`` blocks: the bound, not the
+                # caller's cancellation, decides abandonment.
+                continue
     if task.done():
         task.result()
         return None
@@ -544,23 +691,34 @@ def _sqlite_watchdog_identifiers(connection: Connection) -> str:
         return "write_held_seconds=unknown"
 
 
+async def _teardown_completed_after_bound(abandoned: asyncio.Task[object]) -> bool:
+    """Observe successful completion during grace before reclaiming the session.
+
+    A worker can finish while its loop callbacks are delayed. Failure or
+    cancellation still requires reclamation using the captured connections:
+    SQLAlchemy may clear ``session._transaction`` before releasing them all.
+    """
+    try:
+        pending = await _shielded_bounded(abandoned, _SQLITE_TEARDOWN_COMPLETION_GRACE_SECONDS)
+    except (Exception, asyncio.CancelledError):
+        return False
+    return pending is None
+
+
 async def _reclaim_wedged_sqlite_session(
     session: AsyncSession,
     abandoned: asyncio.Task[object],
     connections: tuple[Connection, ...],
     *,
     phase: str,
+    elapsed_seconds: float,
 ) -> None:
-    """Release what a wedged SQLite teardown still holds and fence the session.
+    """Fence the session and attempt to reclaim its captured open connections.
 
-    Abandoning the wedged rollback/close is not enough: the aiosqlite worker
-    thread keeps holding the write lock (issue #1682). Interrupting the driver
-    aborts the C-level call the worker is stuck in, and invalidating the
-    connection terminates it at the pool — aiosqlite's ``stop()`` queues a
-    hard close of the underlying ``sqlite3`` connection, which releases the
-    writer slot and disposes the worker thread — so leader election and every
-    other writer recover instead of stalling behind the wedge. The invalidated
-    connection can never be handed out again.
+    Interrupting the driver and invalidating the connection can release a
+    blocked SQLite writer. Each attempt can fail, so retain ownership of the
+    original teardown and report cleanup failures without inferring a
+    permanent lock from an exception.
     """
     try:
         session.info[_SQLITE_TEARDOWN_WEDGED_INFO_KEY] = True
@@ -570,15 +728,40 @@ async def _reclaim_wedged_sqlite_session(
     # close_db runs concurrently with the reclaim, it must already see the
     # pending task in the registry instead of returning while the rollback is
     # still pending. The completion callbacks are attached only after the
-    # connection is invalidated below, so the deferred bookkeeping close can
-    # never touch a live connection.
+    # reclamation attempts below, so the deferred bookkeeping close follows
+    # those attempts and completion of the original teardown.
     _wedged_teardown_cleanup_tasks.add(abandoned)
     for connection in connections:
+        if connection.closed:
+            # The teardown that outlived the bound got far enough to close this
+            # connection before it failed or was cancelled inside grace.
+            # Skip the closed handle, but still report the teardown failure
+            # that ``_finish_abandoned_teardown`` otherwise consumes.
+            failure = abandoned.exception() if abandoned.done() and not abandoned.cancelled() else None
+            if failure is not None:
+                logger.warning(
+                    "sqlite_wedged_teardown phase=%s bound_seconds=%.1f elapsed_seconds=%.1f; the %s failed "
+                    "after releasing its connection; skipping the closed handle: %r",
+                    phase,
+                    _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
+                    elapsed_seconds,
+                    phase,
+                    failure,
+                )
+            else:
+                logger.debug(
+                    "sqlite_wedged_teardown phase=%s; the abandoned %s already closed its connection; "
+                    "nothing to reclaim",
+                    phase,
+                    phase,
+                )
+            continue
         logger.warning(
-            "sqlite_wedged_teardown phase=%s bound_seconds=%.1f %s — interrupting and invalidating the "
-            "connection so the writer slot is released instead of stalling every writer (issue #1682)",
+            "sqlite_wedged_teardown phase=%s bound_seconds=%.1f elapsed_seconds=%.1f %s; attempting "
+            "connection interruption and invalidation to release the writer slot (issue #1682)",
             phase,
             _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
+            elapsed_seconds,
             _sqlite_watchdog_identifiers(connection),
         )
         try:
@@ -594,20 +777,25 @@ async def _reclaim_wedged_sqlite_session(
                     await result
         except Exception:
             logger.warning(
-                "Interrupting a wedged SQLite connection failed — the invalidation below still "
-                "reclaims the writer slot, but the stuck statement may run to completion first",
+                "Interrupting a wedged SQLite connection failed; connection invalidation will still be attempted",
                 exc_info=True,
             )
         try:
             connection.invalidate()
         except Exception:
-            logger.debug("Invalidating a wedged SQLite connection failed", exc_info=True)
+            # Report failed reclamation even though the owned teardown may
+            # still release the connection later.
+            logger.warning(
+                "Invalidating a wedged SQLite connection failed; writer-slot release is unconfirmed (issue #1981)",
+                exc_info=True,
+            )
     if not connections:
         logger.warning(
-            "sqlite_wedged_teardown phase=%s bound_seconds=%.1f — no held connection to reclaim; "
-            "abandoning the wedged %s (issue #1682)",
+            "sqlite_wedged_teardown phase=%s bound_seconds=%.1f elapsed_seconds=%.1f; no captured connection "
+            "to reclaim; tracking the abandoned %s (issue #1682)",
             phase,
             _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
+            elapsed_seconds,
             phase,
         )
     # The abandoned teardown is owned until completion (registered above, so
@@ -626,13 +814,13 @@ def _finish_abandoned_teardown(session: AsyncSession, task: asyncio.Task[object]
         # connection is expected to error; consume it so the abandoned task
         # never logs "exception was never retrieved".
         task.exception()
-    logger.info("Wedged SQLite teardown finished late phase=%s", phase)
+    logger.info("SQLite teardown task finished phase=%s", phase)
     if phase != "rollback":
         return
 
     # The session was abandoned before ``close`` ran. Now that no other
-    # coroutine can be driving it, close it for bookkeeping — the connection
-    # is already invalidated, so this cannot touch the database.
+    # coroutine can be driving it, finish closing it for bookkeeping and any
+    # connection cleanup still needed after the reclamation attempts.
     async def _close_late() -> None:
         try:
             await asyncio.wait_for(session.close(), timeout=_SQLITE_TEARDOWN_TIMEOUT_SECONDS)
@@ -642,13 +830,40 @@ def _finish_abandoned_teardown(session: AsyncSession, task: asyncio.Task[object]
     try:
         cleanup_task = asyncio.get_running_loop().create_task(_close_late())
     except RuntimeError:
-        # Event loop already gone (shutdown); the invalidated connection was
-        # closed at the pool, nothing is leaked.
+        # Event loop already gone; no follow-up task can be scheduled.
         return
     # Own the task until completion: close_db drains it so shutdown cannot
     # skip the promised bookkeeping close or leave a pending-task warning.
     _wedged_teardown_cleanup_tasks.add(cleanup_task)
     cleanup_task.add_done_callback(_wedged_teardown_cleanup_tasks.discard)
+
+
+async def _finish_bounded_teardown(
+    session: AsyncSession,
+    abandoned: asyncio.Task[object],
+    held_connections: tuple[Connection, ...],
+    *,
+    phase: str,
+    elapsed_seconds: float,
+) -> None:
+    """Observe successful completion in grace or retain reclamation ownership."""
+    if await _teardown_completed_after_bound(abandoned):
+        logger.warning(
+            "sqlite_teardown_bound_elapsed_but_completed phase=%s bound_seconds=%.1f elapsed_seconds=%.1f; "
+            "%s completed successfully during completion grace; skipping reclamation (issue #2029)",
+            phase,
+            _SQLITE_TEARDOWN_TIMEOUT_SECONDS,
+            elapsed_seconds,
+            phase,
+        )
+        return
+    await _reclaim_wedged_sqlite_session(
+        session,
+        abandoned,
+        held_connections,
+        phase=phase,
+        elapsed_seconds=elapsed_seconds,
+    )
 
 
 async def _safe_rollback(session: AsyncSession) -> None:
@@ -657,7 +872,7 @@ async def _safe_rollback(session: AsyncSession) -> None:
     if _session_is_teardown_wedged(session):
         # A previous bounded teardown abandoned a wedged rollback; the
         # abandoned greenlet may still resume, so never drive this session
-        # concurrently. The reclaim already released the connection.
+        # concurrently. The tracked cleanup now owns the connection.
         return
     bound = _session_teardown_bound_seconds(session)
     if bound is None:
@@ -667,12 +882,19 @@ async def _safe_rollback(session: AsyncSession) -> None:
             return
         return
     held_connections = _session_sync_connections(session)
+    started = asyncio.get_running_loop().time()
     try:
         abandoned = await _shielded_bounded(session.rollback(), bound)
     except BaseException:
         return
     if abandoned is not None:
-        await _reclaim_wedged_sqlite_session(session, abandoned, held_connections, phase="rollback")
+        await _finish_bounded_teardown(
+            session,
+            abandoned,
+            held_connections,
+            phase="rollback",
+            elapsed_seconds=asyncio.get_running_loop().time() - started,
+        )
 
 
 async def _safe_close(session: AsyncSession) -> None:
@@ -687,12 +909,19 @@ async def _safe_close(session: AsyncSession) -> None:
             return
         return
     held_connections = _session_sync_connections(session)
+    started = asyncio.get_running_loop().time()
     try:
         abandoned = await _shielded_bounded(session.close(), bound)
     except BaseException:
         return
     if abandoned is not None:
-        await _reclaim_wedged_sqlite_session(session, abandoned, held_connections, phase="close")
+        await _finish_bounded_teardown(
+            session,
+            abandoned,
+            held_connections,
+            phase="close",
+            elapsed_seconds=asyncio.get_running_loop().time() - started,
+        )
 
 
 async def close_session(session: AsyncSession) -> None:
@@ -837,17 +1066,63 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         await close_session(session)
 
 
-async def init_db() -> None:
+async def _init_db() -> None:
     database_url = normalize_sqlite_url(_settings.database_url)
     _ensure_sqlite_dir(database_url)
     sqlite_path = sqlite_db_path_from_url(database_url)
     if sqlite_path is not None:
+        # Read the prior transition first, then fence this process as RUNNING
+        # before deciding whether a prior CLEAN record permits skipping the
+        # startup scan. A failed startup therefore leaves RUNNING where the
+        # sidecar can be written instead of resurrecting stale CLEAN state.
+        previous_record = read_sqlite_runstate_record(sqlite_path)
+        previous_state = previous_record.state if previous_record is not None else None
+        previous_clean_identity = (
+            previous_record.identity
+            if previous_record is not None and previous_record.state is SqliteRunState.CLEAN
+            else None
+        )
+        running_transition_error: SqliteRunStateDurabilityError | None = None
+        try:
+            running_recorded = _mark_sqlite_running(sqlite_path)
+        except SqliteRunStateDurabilityError as exc:
+            # A failed write can safely continue only when its old marker was
+            # durably removed. If that invalidation cannot be proven, still
+            # run the configured check, then stop before migrations or serving
+            # instead of allowing a stale CLEAN record to influence startup.
+            running_recorded = False
+            running_transition_error = exc
+            logger.error(
+                "Could not durably invalidate the SQLite run state path=%s; startup will fail closed",
+                sqlite_path,
+                exc_info=exc,
+            )
+        running_record = read_sqlite_runstate_record(sqlite_path) if running_recorded else None
+        running_identity = running_record.identity if running_record is not None else None
+        current_identity = _sqlite_file_identity(sqlite_path)
+        if previous_state is SqliteRunState.CLEAN and (
+            previous_clean_identity is None
+            or running_identity is None
+            or current_identity is None
+            or previous_clean_identity != running_identity
+            or running_identity != current_identity
+        ):
+            # The database may have been replaced on either side of the
+            # running fence. The prior clean identity no longer describes the
+            # file that this startup is about to use, so force the scan.
+            previous_state = None
         check_mode = _startup_sqlite_check_mode(_settings.database_sqlite_startup_check_mode)
-        if check_mode is not None:
-            integrity = check_sqlite_integrity(sqlite_path, mode=check_mode)
+        if check_mode is not None and _sqlite_startup_check_required(
+            sqlite_path,
+            mode=check_mode,
+            previous_state=previous_state,
+            running_recorded=running_recorded,
+            running_identity=running_identity,
+        ):
+            integrity = _run_startup_sqlite_check(sqlite_path, mode=check_mode)
             if not integrity.ok:
                 details = integrity.details or "unknown error"
-                pragma_name = "quick_check" if check_mode == SqliteIntegrityCheckMode.QUICK else "integrity_check"
+                pragma_name = integrity_check_pragma_name(check_mode)
                 logger.error(
                     "SQLite %s failed path=%s details=%s",
                     pragma_name,
@@ -868,7 +1143,8 @@ async def init_db() -> None:
                         "or restore a backup from the same directory."
                     )
                 raise RuntimeError(message)
-
+        if running_transition_error is not None:
+            raise running_transition_error
     try:
         inspect_migration_state, run_startup_migrations, check_schema_drift = _load_migration_entrypoints()
     except ModuleNotFoundError as exc:
@@ -951,31 +1227,61 @@ async def init_db() -> None:
             raise
 
 
-async def close_db() -> None:
-    if _wedged_teardown_cleanup_tasks:
-        # Abandoned wedged teardowns plus their deferred bookkeeping closes.
-        # Drain until the registry is stable — an abandoned teardown that
-        # completes during the drain schedules its bookkeeping close only
-        # after any one-time snapshot — and bound the whole drain so a
-        # teardown still wedged despite the reclaim (the interrupt is
-        # best-effort) cannot wedge shutdown too: one deadline covers the
-        # abandoned teardown and the bounded close it chains.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 2 * _SQLITE_TEARDOWN_TIMEOUT_SECONDS
+async def init_db() -> None:
+    """Initialize the database while fencing one process onto file SQLite."""
+    database_url = normalize_sqlite_url(_settings.database_url)
+    _ensure_sqlite_dir(database_url)
+    sqlite_path = sqlite_db_path_from_url(database_url)
+    if sqlite_path is None:
+        _release_sqlite_lifetime_lock()
+        await _init_db()
+        return
+
+    _acquire_sqlite_lifetime_lock(sqlite_path)
+    try:
+        await _init_db()
+    except BaseException:
+        # A failed startup never owns a live application, so it must not leave
+        # this process's test/reload path holding the sentinel indefinitely.
+        _release_sqlite_lifetime_lock()
+        raise
+
+
+async def close_db() -> bool:
+    """Dispose database engines and report whether SQLite teardown fully drained."""
+    loop = asyncio.get_running_loop()
+    # A teardown reclaimed as wedged can finish while engine disposal is in
+    # progress and register its bookkeeping close from a done callback. Use
+    # one deadline for both registry snapshots so that late work is included
+    # without allowing shutdown to grow an unbounded second wait.
+    deadline = loop.time() + 2 * _SQLITE_TEARDOWN_TIMEOUT_SECONDS
+    sqlite_teardown_drained = True
+
+    async def _drain_wedged_teardown_registry() -> None:
+        nonlocal sqlite_teardown_drained
         while _wedged_teardown_cleanup_tasks:
             remaining = deadline - loop.time()
             if remaining <= 0:
-                logger.warning(
-                    "close_db abandoned %d still-pending wedged-teardown task(s) after the bounded "
-                    "drain; their connections were already reclaimed (issue #1682)",
-                    len(_wedged_teardown_cleanup_tasks),
-                )
-                break
+                if sqlite_teardown_drained:
+                    logger.warning(
+                        "close_db abandoned %d still-pending wedged-teardown task(s) after the bounded "
+                        "drain; their connections were already reclaimed (issue #1682)",
+                        len(_wedged_teardown_cleanup_tasks),
+                    )
+                sqlite_teardown_drained = False
+                return
             await asyncio.wait(tuple(_wedged_teardown_cleanup_tasks), timeout=remaining)
             # Completion callbacks (deregistration and scheduling of the
             # deferred bookkeeping close) run via call_soon; yield once so
             # the registry reflects them before the next stability check.
             await asyncio.sleep(0)
+
+    # Drain work already registered before disposal, then give disposal a
+    # chance to schedule late cleanup before taking the final bounded snapshot.
+    await _drain_wedged_teardown_registry()
     await engine.dispose()
     if _background_engine is not None:
         await _background_engine.dispose()
+    await asyncio.sleep(0)
+    await _drain_wedged_teardown_registry()
+    return sqlite_teardown_drained

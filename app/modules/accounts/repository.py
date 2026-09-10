@@ -96,6 +96,24 @@ _HARD_STICKY_UNAVAILABLE_STATUSES = frozenset(
 _HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL = "hard_sticky_outage_grace_seeded"
 
 
+def _is_missing_hard_sticky_seed_table(exc: OperationalError) -> bool:
+    """Return True when startup grace seeding hit a not-yet-migrated database.
+
+    ``seed_hard_sticky_outage_grace_on_startup`` runs unguarded in the app
+    lifespan. With ``database_migrate_on_startup=false`` (operator-managed
+    migrations) the process can boot against a legacy database that does not
+    have ``runtime_sentinels`` (or, on a brand-new file, ``accounts``) yet;
+    before this guard that boot crashed with an unhandled sqlite
+    ``OperationalError``. The seeding is a best-effort one-time backfill: on a
+    missing table it rolls back and returns 0 without stamping the sentinel,
+    so the first boot after migrations run still performs the backfill. Only
+    the sqlite "no such table" shape is matched — this deployment mode boots
+    sqlite before migration; every other OperationalError still propagates.
+    """
+    message = str(exc).lower()
+    return "no such table: runtime_sentinels" in message or "no such table: accounts" in message
+
+
 @dataclass(frozen=True, slots=True)
 class AccountRequestUsageSummary:
     request_count: int
@@ -281,16 +299,11 @@ class AccountsRepository:
             return dict(summaries)
         return summaries
 
-    async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
-        return await self.get_active_by_chatgpt_account_id(chatgpt_account_id) is not None
-
     async def get_active_by_chatgpt_account_id(self, chatgpt_account_id: str) -> Account | None:
         result = await self._session.execute(
             select(Account)
             .where(Account.chatgpt_account_id == chatgpt_account_id)
-            .where(
-                Account.status.notin_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
-            )
+            .where(Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
             .limit(1)
         )
         return result.scalar_one_or_none()
@@ -740,7 +753,7 @@ class AccountsRepository:
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            if updated_id is not None and status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
@@ -815,7 +828,7 @@ class AccountsRepository:
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            if updated_id is not None and status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
@@ -883,20 +896,26 @@ class AccountsRepository:
             .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
             .returning(RuntimeSentinel.name)
         )
-        async with sqlite_writer_section():
-            stamp_result = await self._session.execute(stamp_stmt)
-            stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
-            if not stamped_by_this_boot:
+        try:
+            async with sqlite_writer_section():
+                stamp_result = await self._session.execute(stamp_stmt)
+                stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
+                if not stamped_by_this_boot:
+                    await self._session.commit()
+                    return 0
+                account_ids = (
+                    await self._session.scalars(
+                        select(Account.id).where(Account.status.in_(_HARD_STICKY_UNAVAILABLE_STATUSES))
+                    )
+                ).all()
+                for account_id in account_ids:
+                    await self._refresh_hard_sticky_outage_grace(account_id)
                 await self._session.commit()
-                return 0
-            account_ids = (
-                await self._session.scalars(
-                    select(Account.id).where(Account.status.in_(_HARD_STICKY_UNAVAILABLE_STATUSES))
-                )
-            ).all()
-            for account_id in account_ids:
-                await self._refresh_hard_sticky_outage_grace(account_id)
-            await self._session.commit()
+        except OperationalError as exc:
+            if not _is_missing_hard_sticky_seed_table(exc):
+                raise
+            await self._session.rollback()
+            return 0
         return len(account_ids)
 
     async def _close_http_bridge_sessions_for_account(self, account_id: str) -> None:

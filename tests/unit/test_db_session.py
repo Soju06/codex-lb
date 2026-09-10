@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +22,17 @@ from sqlalchemy.pool import NullPool
 
 import app.db.session as session_module
 from app.db.models import Account, AccountStatus, Base
-from app.db.sqlite_utils import IntegrityCheck, SqliteIntegrityCheckMode
+from app.db.sqlite_utils import (
+    IntegrityCheck,
+    SqliteFileIdentity,
+    SqliteIntegrityCheckMode,
+    SqliteRunState,
+    SqliteRunStateDurabilityError,
+    acquire_sqlite_runstate_lock,
+    read_sqlite_runstate,
+    release_sqlite_runstate_lock,
+    write_sqlite_runstate,
+)
 
 
 @dataclass(slots=True)
@@ -327,7 +340,10 @@ def test_postgres_connect_args_pin_session_timezone_to_utc(monkeypatch) -> None:
 
     connect_args = session_module._postgres_async_connect_args("postgresql+asyncpg://u:p@h/db")
 
-    assert connect_args == {"server_settings": {"timezone": "UTC"}}
+    assert connect_args == {
+        "server_settings": {"timezone": "UTC"},
+        "command_timeout": session_module._POSTGRES_COMMAND_TIMEOUT_SECONDS,
+    }
 
 
 def test_postgres_connect_args_pin_utc_and_keep_test_db_url_tuning(monkeypatch) -> None:
@@ -337,6 +353,7 @@ def test_postgres_connect_args_pin_utc_and_keep_test_db_url_tuning(monkeypatch) 
 
     assert connect_args == {
         "server_settings": {"timezone": "UTC"},
+        "command_timeout": session_module._POSTGRES_COMMAND_TIMEOUT_SECONDS,
         "prepared_statement_cache_size": 0,
     }
 
@@ -355,7 +372,10 @@ def test_postgres_engine_kwargs_forward_utc_connect_args(monkeypatch) -> None:
 
     kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db")
 
-    assert kwargs["connect_args"] == {"server_settings": {"timezone": "UTC"}}
+    assert kwargs["connect_args"] == {
+        "server_settings": {"timezone": "UTC"},
+        "command_timeout": session_module._POSTGRES_COMMAND_TIMEOUT_SECONDS,
+    }
 
 
 @pytest.mark.asyncio
@@ -1353,10 +1373,10 @@ async def test_close_session_reclaims_a_wedged_sqlite_rollback_so_other_writers_
             # finishes and the session is closed for bookkeeping.
             release_wedge.set()
             for _ in range(100):
-                if any("finished late" in record.getMessage() for record in caplog.records):
+                if any("SQLite teardown task finished" in record.getMessage() for record in caplog.records):
                     break
                 await asyncio.sleep(0.02)
-            assert any("finished late" in record.getMessage() for record in caplog.records), (
+            assert any("SQLite teardown task finished" in record.getMessage() for record in caplog.records), (
                 "the abandoned teardown must be observed finishing late"
             )
             # The deferred bookkeeping close is owned until completion (drained
@@ -1372,6 +1392,271 @@ async def test_close_session_reclaims_a_wedged_sqlite_rollback_so_other_writers_
         await asyncio.sleep(0.05)
         await engine.dispose()
         await other_writer.dispose()
+
+
+async def _wait_until(predicate, timeout: float = 2.0) -> None:
+    """Yield to the loop until ``predicate`` holds, so a bounded teardown under
+    test has genuinely started before the loop is starved."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        assert asyncio.get_running_loop().time() < deadline, "the teardown under test never started"
+        await asyncio.sleep(0.005)
+
+
+@pytest.mark.parametrize("loop_name", ["asyncio", "uvloop"])
+@pytest.mark.parametrize("phase", ["rollback", "close"])
+def test_sqlite_worker_completed_during_loop_starvation_skips_reclaim(
+    tmp_path, monkeypatch, caplog, loop_name: str, phase: str
+) -> None:
+    """A real native teardown may finish before its event-loop callbacks run.
+
+    Observe the installed driver's worker call without replacing rollback or
+    close. Both phases hold a real connection; rollback also owns a write lock.
+    A separate Runner exercises each supported loop without changing policy.
+    """
+    loop_factory = asyncio.new_event_loop
+    if loop_name == "uvloop":
+        loop_factory = pytest.importorskip("uvloop").new_event_loop
+    monkeypatch.setattr(session_module, "_SQLITE_TEARDOWN_TIMEOUT_SECONDS", 0.05)
+
+    async def exercise() -> None:
+        db_path = tmp_path / "worker-completion.db"
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{db_path}", poolclass=NullPool, connect_args={"timeout": 1.0}
+        )
+        session_module._configure_sqlite_engine(engine.sync_engine, enable_wal=True)
+        other_writer = create_async_engine(
+            f"sqlite+aiosqlite:///{db_path}", poolclass=NullPool, connect_args={"timeout": 1.0}
+        )
+        session = async_sessionmaker(engine, expire_on_commit=False)()
+        loop_blocked = threading.Event()
+        worker_finished = threading.Event()
+        timeline: list[tuple[str, float]] = []
+        observed = False
+        interrupted = False
+        invalidated = False
+
+        def record(name: str) -> None:
+            timeline.append((name, time.monotonic()))
+
+        def block_loop() -> None:
+            record("loop_blocked")
+            loop_blocked.set()
+            # Bounded waits are watchdogs, not assertions about machine speed.
+            # The native operation finishes while this thread cannot run any
+            # of the SQLAlchemy/aiosqlite completion callbacks.
+            worker_finished.wait(2.0)
+            time.sleep(0.12)
+            record("loop_resumed")
+
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(sa_text("CREATE TABLE teardown_probe (value INTEGER)"))
+            await session.execute(sa_text("INSERT INTO teardown_probe VALUES (1)"))
+            held = session_module._session_sync_connections(session)
+            assert len(held) == 1
+            sync_connection = held[0]
+            driver = sync_connection.connection.driver_connection
+            assert driver is not None
+            original_execute = driver._execute
+            original_interrupt = driver.interrupt
+
+            async def observe_execute(fn, *args, **kwargs):
+                nonlocal observed
+                if not observed and fn.__name__ == phase:
+                    observed = True
+                    asyncio.get_running_loop().call_soon(block_loop)
+
+                    def execute_on_worker():
+                        assert loop_blocked.wait(2.0), "the loop never entered the starvation window"
+                        record("worker_started")
+                        result = fn(*args, **kwargs)
+                        record("worker_finished")
+                        worker_finished.set()
+                        return result
+
+                    return await original_execute(execute_on_worker)
+                return await original_execute(fn, *args, **kwargs)
+
+            def observe_interrupt():
+                nonlocal interrupted
+                interrupted = True
+                return original_interrupt()
+
+            def observe_invalidation(*args) -> None:
+                nonlocal invalidated
+                invalidated = True
+
+            monkeypatch.setattr(driver, "_execute", observe_execute)
+            monkeypatch.setattr(driver, "interrupt", observe_interrupt)
+            sa_event.listen(engine.sync_engine, "invalidate", observe_invalidation)
+            caplog.clear()
+            with caplog.at_level(logging.INFO, logger=session_module.__name__):
+                if phase == "rollback":
+                    await asyncio.wait_for(session_module.close_session(session), timeout=5.0)
+                else:
+                    await asyncio.wait_for(session_module._safe_close(session), timeout=5.0)
+
+            assert [name for name, _ in timeline] == [
+                "loop_blocked",
+                "worker_started",
+                "worker_finished",
+                "loop_resumed",
+            ], timeline
+            assert timeline[2][1] < timeline[3][1], timeline
+            assert not interrupted, "a successfully completed teardown must not be interrupted"
+            assert not invalidated, "a successfully completed teardown must not be invalidated"
+            assert not sync_connection.invalidated
+            assert session_module._SQLITE_TEARDOWN_WEDGED_INFO_KEY not in session.info
+            assert not session_module._wedged_teardown_cleanup_tasks
+            assert sync_connection.closed, "normal teardown must close the held connection"
+            assert not session.in_transaction()
+
+            completed = [
+                record
+                for record in caplog.records
+                if "sqlite_teardown_bound_elapsed_but_completed" in record.getMessage()
+            ]
+            assert len(completed) == 1, "the initial bound must expire and grace must observe success"
+            assert completed[0].levelno == logging.WARNING
+            assert f"phase={phase}" in completed[0].getMessage()
+            assert "bound_seconds=" in completed[0].getMessage()
+            assert "elapsed_seconds=" in completed[0].getMessage()
+            assert not any("sqlite_wedged_teardown" in record.getMessage() for record in caplog.records)
+
+            async with other_writer.begin() as writer:
+                await writer.execute(sa_text("INSERT INTO teardown_probe VALUES (2)"))
+            async with other_writer.connect() as reader:
+                assert (await reader.execute(sa_text("SELECT value FROM teardown_probe"))).scalars().all() == [2]
+        finally:
+            # A failed assertion can leave the original teardown and then
+            # its follow-up close owned by the production cleanup registry.
+            for _ in range(2):
+                pending = tuple(session_module._wedged_teardown_cleanup_tasks)
+                if pending:
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2.0)
+                await asyncio.sleep(0)
+            await session.close()
+            await engine.dispose()
+            await other_writer.dispose()
+
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        runner.run(exercise())
+
+
+@pytest.mark.asyncio
+async def test_completion_grace_holds_its_deadline_under_repeated_cancellation() -> None:
+    """Teardown runs in ``finally`` blocks, so the caller is often already being
+    cancelled while the grace is looking. Letting a cancel cut the grace short
+    would reclaim a connection that was about to be released — the exact damage
+    the exemption exists to prevent — so the deadline, not the caller, decides
+    how long the grace looks (same contract as ``_shielded_bounded``)."""
+    release = asyncio.Event()
+    finished: list[bool] = []
+    result: list[bool] = []
+
+    async def _teardown() -> None:
+        await release.wait()
+        finished.append(True)
+
+    abandoned = asyncio.ensure_future(_teardown())
+
+    async def _caller() -> None:
+        result.append(await session_module._teardown_completed_after_bound(abandoned))
+
+    caller = asyncio.ensure_future(_caller())
+    await asyncio.sleep(0)
+    for _ in range(3):
+        caller.cancel()
+        await asyncio.sleep(0.01)
+    assert not caller.done(), "an edge cancel must not cut the grace short"
+
+    release.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await caller
+    await abandoned
+
+    assert finished, "the teardown must be allowed to finish inside the grace"
+    assert result == [True], "a teardown completing inside the grace is exempt from the reclaim"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["exception", "cancelled"])
+async def test_reclaim_still_runs_when_the_late_teardown_did_not_succeed(
+    tmp_path, monkeypatch, caplog, outcome: str
+) -> None:
+    """A terminal task is not a successful teardown. A rollback that raised or
+    was cancelled after the bound may have left its transaction half-closed —
+    SQLAlchemy clears ``session._transaction`` before releasing every held
+    connection — so only a successful completion earns the exemption; anything
+    else keeps the issue #1682 reclaim."""
+    monkeypatch.setattr(session_module, "_SQLITE_TEARDOWN_TIMEOUT_SECONDS", 0.2)
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / f'late-{outcome}.db'}",
+        poolclass=NullPool,
+        connect_args={"timeout": 5.0},
+    )
+    session_module._configure_sqlite_engine(engine.sync_engine, enable_wal=True)
+    release_wedge = asyncio.Event()
+    timer: threading.Timer | None = None
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        caplog.clear()
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        session = factory()
+        await session.execute(sa_text("DELETE FROM accounts"))
+        held = session_module._session_sync_connections(session)
+        assert held, "the open write transaction must expose its sync connection"
+        sync_connection = held[0]
+
+        entered = threading.Event()
+
+        async def _failing_rollback() -> None:
+            entered.set()
+            await release_wedge.wait()
+            if outcome == "exception":
+                raise RuntimeError("rollback failed after the bound")
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(session, "rollback", _failing_rollback)
+
+        loop = asyncio.get_running_loop()
+        with caplog.at_level(logging.INFO, logger=session_module.__name__):
+            rollback_task = asyncio.ensure_future(session_module._safe_rollback(session))
+            await _wait_until(entered.is_set)
+            timer = threading.Timer(0.35, lambda: loop.call_soon_threadsafe(release_wedge.set))
+            timer.start()
+            time.sleep(0.3)
+            done, _ = await asyncio.wait({rollback_task}, timeout=3.0)
+            assert done, "_safe_rollback must be bounded"
+            rollback_task.result()
+
+        assert sync_connection.invalidated, (
+            "a teardown that failed or was cancelled must still have its connection reclaimed"
+        )
+        assert session.info.get(session_module._SQLITE_TEARDOWN_WEDGED_INFO_KEY) is True, (
+            "an unsuccessful teardown must still fence the session"
+        )
+        assert any("sqlite_wedged_teardown" in record.getMessage() for record in caplog.records), (
+            "the reclaim must still be reported"
+        )
+        assert not any(
+            "sqlite_teardown_bound_elapsed_but_completed" in record.getMessage() for record in caplog.records
+        ), "an unsuccessful teardown must not be reported as completed"
+
+        pending_cleanup = tuple(session_module._wedged_teardown_cleanup_tasks)
+        if pending_cleanup:
+            await asyncio.wait_for(asyncio.gather(*pending_cleanup, return_exceptions=True), timeout=2.0)
+        session_module._wedged_teardown_cleanup_tasks.clear()
+    finally:
+        if timer is not None:
+            timer.cancel()
+        release_wedge.set()
+        await asyncio.sleep(0.05)
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -1600,8 +1885,15 @@ async def test_reclaim_interrupts_the_real_aiosqlite_driver_without_a_spy(tmp_pa
             return None
 
         abandoned = asyncio.ensure_future(_already_finished_teardown())
+        # ``ensure_future`` schedules but does not run the coroutine, and
+        # nothing awaits before the reclaim: the task is genuinely pending at
+        # entry, which is what keeps this exercising the wedged path rather
+        # than the completed-teardown exemption (issue #2029).
+        assert not abandoned.done(), "the reclaim under test must see a pending teardown"
         with caplog.at_level(logging.DEBUG, logger=session_module.__name__):
-            await session_module._reclaim_wedged_sqlite_session(session, abandoned, held, phase="rollback")
+            await session_module._reclaim_wedged_sqlite_session(
+                session, abandoned, held, phase="rollback", elapsed_seconds=0.0
+            )
 
         assert not any(
             "Interrupting a wedged SQLite connection failed" in record.getMessage() for record in caplog.records
@@ -1617,6 +1909,72 @@ async def test_reclaim_interrupts_the_real_aiosqlite_driver_without_a_spy(tmp_pa
             await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2.0)
             await asyncio.sleep(0)
         assert not session_module._wedged_teardown_cleanup_tasks
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reclaim_skips_a_connection_the_failed_teardown_already_closed(tmp_path, caplog) -> None:
+    """With the completion grace, the reclaim can be entered with a teardown
+    that failed *after* releasing its connection: SQLAlchemy's
+    ``SessionTransaction.rollback`` captures a DBAPI rollback error, closes the
+    connection, then re-raises. That connection holds nothing, so interrupting
+    or invalidating it only raises and the issue #1981 permanent-hold warning
+    would be a false alarm; the rollback's own error is what must be reported."""
+    caplog.set_level(logging.INFO, logger=session_module.__name__)
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'closed-reclaim.db'}",
+        poolclass=NullPool,
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        session = factory()
+        await session.execute(sa_text("DELETE FROM accounts"))
+        held = session_module._session_sync_connections(session)
+        assert held, "the open write transaction must expose its sync connection"
+        # The teardown released the connection, then failed.
+        await session.rollback()
+        assert held[0].closed
+
+        async def _failed_after_release() -> None:
+            raise RuntimeError("rollback raised after the connection was released")
+
+        abandoned = asyncio.ensure_future(_failed_after_release())
+        with contextlib.suppress(RuntimeError):
+            await abandoned
+        with caplog.at_level(logging.DEBUG, logger=session_module.__name__):
+            await session_module._reclaim_wedged_sqlite_session(
+                session, abandoned, held, phase="rollback", elapsed_seconds=6.0
+            )
+
+        warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+        assert not any("Interrupting a wedged SQLite connection failed" in message for message in warnings)
+        assert not any("Invalidating a wedged SQLite connection failed" in message for message in warnings)
+        assert not any("connection interruption and invalidation" in message for message in warnings), (
+            "a released connection must not be reported as a reclaim"
+        )
+        released = [message for message in warnings if "failed after releasing its connection" in message]
+        assert len(released) == 1, "the failure that ended the teardown must still be reported"
+        assert "rollback raised after the connection was released" in released[0]
+        assert "phase=rollback" in released[0] and "elapsed_seconds=6.0" in released[0]
+        assert session.info.get(session_module._SQLITE_TEARDOWN_WEDGED_INFO_KEY) is True, (
+            "the session is still fenced: its teardown did not complete successfully"
+        )
+
+        for _ in range(100):
+            pending = tuple(session_module._wedged_teardown_cleanup_tasks)
+            if not pending:
+                break
+            await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2.0)
+            await asyncio.sleep(0)
+        assert not session_module._wedged_teardown_cleanup_tasks
+        messages = [record.getMessage() for record in caplog.records]
+        assert "SQLite teardown task finished phase=rollback" in messages
+        assert not any("finished late" in message for message in messages), (
+            "a task already terminal during grace must not be reported as finishing after reclamation"
+        )
     finally:
         await engine.dispose()
 
@@ -1671,7 +2029,7 @@ async def test_close_db_drains_a_pending_reclaimed_rollback_and_its_bookkeeping_
                 release_wedge.set()
 
             releaser = asyncio.ensure_future(_release_soon())
-            await asyncio.wait_for(session_module.close_db(), timeout=5.0)
+            assert await asyncio.wait_for(session_module.close_db(), timeout=5.0) is True
             # RED pre-fix: close_db saw an empty registry and returned
             # immediately, before the wedge was even released.
             assert release_wedge.is_set(), "close_db must drain the pending reclaimed rollback"
@@ -1683,7 +2041,7 @@ async def test_close_db_drains_a_pending_reclaimed_rollback_and_its_bookkeeping_
             )
             await releaser
 
-        assert any("finished late" in record.getMessage() for record in caplog.records)
+        assert any("SQLite teardown task finished" in record.getMessage() for record in caplog.records)
     finally:
         release_wedge.set()
         await asyncio.sleep(0.05)
@@ -1701,7 +2059,7 @@ async def test_close_db_bounds_the_wedged_teardown_drain(monkeypatch, caplog) ->
     session_module._wedged_teardown_cleanup_tasks.add(stuck)
     try:
         with caplog.at_level(logging.WARNING, logger=session_module.__name__):
-            await asyncio.wait_for(session_module.close_db(), timeout=2.0)
+            assert await asyncio.wait_for(session_module.close_db(), timeout=2.0) is False
         assert any("still-pending wedged-teardown" in record.getMessage() for record in caplog.records), (
             "the bounded drain must report what it abandoned"
         )
@@ -1710,3 +2068,523 @@ async def test_close_db_bounds_the_wedged_teardown_drain(monkeypatch, caplog) ->
         session_module._wedged_teardown_cleanup_tasks.discard(stuck)
         never.set()
         await stuck
+
+
+@pytest.mark.asyncio
+async def test_close_db_drains_teardown_registered_during_engine_disposal(monkeypatch) -> None:
+    """A disposal callback registered after the initial snapshot still gates clean."""
+    monkeypatch.setattr(session_module, "_SQLITE_TEARDOWN_TIMEOUT_SECONDS", 0.5)
+    release_wedge = asyncio.Event()
+    late_task: asyncio.Task[bool] | None = None
+
+    class _EngineThatRegistersLateTeardown:
+        async def dispose(self) -> None:
+            nonlocal late_task
+            late_task = asyncio.create_task(release_wedge.wait(), name="late-disposal-teardown")
+            session_module._wedged_teardown_cleanup_tasks.add(late_task)
+            late_task.add_done_callback(session_module._wedged_teardown_cleanup_tasks.discard)
+
+    monkeypatch.setattr(session_module, "engine", _EngineThatRegistersLateTeardown())
+    monkeypatch.setattr(session_module, "_background_engine", None)
+
+    async def _release_soon() -> None:
+        await asyncio.sleep(0.05)
+        release_wedge.set()
+
+    releaser = asyncio.create_task(_release_soon())
+    try:
+        assert await asyncio.wait_for(session_module.close_db(), timeout=5.0) is True
+        assert release_wedge.is_set(), "close_db must drain teardown registered by engine disposal"
+        assert late_task is not None and late_task.done()
+        assert not session_module._wedged_teardown_cleanup_tasks
+    finally:
+        release_wedge.set()
+        await releaser
+        if late_task is not None:
+            await late_task
+
+
+def _stub_head_migration_state(monkeypatch) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_load_migration_entrypoints",
+        lambda: (
+            lambda _: _FakeMigrationState(
+                current_revision="head",
+                head_revision="head",
+                has_alembic_version_table=True,
+                has_legacy_migrations_table=False,
+                needs_upgrade=False,
+            ),
+            lambda _: (_ for _ in ()).throw(AssertionError("startup migrations should stay disabled")),
+            lambda _: (),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_init_db_skips_startup_check_after_recorded_clean_shutdown(monkeypatch, tmp_path, caplog) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+
+    def _check(_: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        raise AssertionError("a cleanly closed store must not pay for the whole-file scan")
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    _stub_head_migration_state(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=session_module.__name__):
+        await session_module.init_db()
+
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+    assert "Skipping SQLite startup quick_check after a recorded clean shutdown" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_init_db_runs_startup_check_when_running_state_write_fails(monkeypatch, tmp_path, caplog) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+    seen: list[SqliteIntegrityCheckMode] = []
+
+    monkeypatch.setattr(session_module, "_mark_sqlite_running", lambda _: False)
+
+    def _check(path: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        assert path == db_path
+        seen.append(mode)
+        return IntegrityCheck(ok=True, details=None)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    _stub_head_migration_state(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=session_module.__name__):
+        await session_module.init_db()
+
+    assert seen == [SqliteIntegrityCheckMode.QUICK]
+    assert "Running SQLite startup quick_check" in caplog.text
+    assert "SQLite startup quick_check passed in" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_init_db_aborts_after_check_when_running_invalidation_is_not_durable(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+    seen: list[SqliteIntegrityCheckMode] = []
+    migration_loaded = False
+
+    def _raise_unconfirmed_invalidation(_: Path, __: SqliteRunState) -> bool:
+        raise SqliteRunStateDurabilityError("could not persist removal of failed SQLite run-state files")
+
+    def _load_entrypoints() -> tuple[object, object, object]:
+        nonlocal migration_loaded
+        migration_loaded = True
+        return (
+            lambda _: _FakeMigrationState(
+                current_revision="head",
+                head_revision="head",
+                has_alembic_version_table=True,
+                has_legacy_migrations_table=False,
+                needs_upgrade=False,
+            ),
+            lambda _: (_ for _ in ()).throw(AssertionError("startup migrations must not run")),
+            lambda _: (),
+        )
+
+    def _check(path: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        assert path == db_path
+        seen.append(mode)
+        return IntegrityCheck(ok=True, details=None)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "write_sqlite_runstate", _raise_unconfirmed_invalidation)
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    monkeypatch.setattr(session_module, "_load_migration_entrypoints", _load_entrypoints)
+
+    with pytest.raises(SqliteRunStateDurabilityError, match="persist removal"):
+        await session_module.init_db()
+
+    assert seen == [SqliteIntegrityCheckMode.QUICK]
+    assert migration_loaded is False
+    replacement = acquire_sqlite_runstate_lock(db_path)
+    release_sqlite_runstate_lock(replacement)
+
+
+@pytest.mark.asyncio
+async def test_init_db_runs_startup_check_when_database_replaced_before_running_fence(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"original")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+    replacement = tmp_path / "replacement.db"
+    replacement.write_bytes(b"replacement")
+    seen: list[SqliteIntegrityCheckMode] = []
+    real_mark_running = session_module._mark_sqlite_running
+
+    def _replace_before_mark(path: Path) -> bool:
+        replacement.replace(path)
+        return real_mark_running(path)
+
+    def _check(path: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        assert path == db_path
+        seen.append(mode)
+        return IntegrityCheck(ok=True, details=None)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "_mark_sqlite_running", _replace_before_mark)
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    _stub_head_migration_state(monkeypatch)
+
+    await session_module.init_db()
+
+    assert seen == [SqliteIntegrityCheckMode.QUICK]
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_init_db_runs_startup_check_when_database_replaced_after_running_fence(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"original")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+    replacement = tmp_path / "replacement.db"
+    replacement.write_bytes(b"replacement")
+    seen: list[SqliteIntegrityCheckMode] = []
+    real_mark_running = session_module._mark_sqlite_running
+
+    def _replace_after_mark(path: Path) -> bool:
+        recorded = real_mark_running(path)
+        replacement.replace(path)
+        return recorded
+
+    def _check(path: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        assert path == db_path
+        seen.append(mode)
+        return IntegrityCheck(ok=True, details=None)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "_mark_sqlite_running", _replace_after_mark)
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    _stub_head_migration_state(monkeypatch)
+
+    await session_module.init_db()
+
+    assert seen == [SqliteIntegrityCheckMode.QUICK]
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_init_db_runs_startup_check_when_database_replaced_before_decision(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"original")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+    replacement = tmp_path / "replacement.db"
+    replacement.write_bytes(b"replacement")
+    seen: list[SqliteIntegrityCheckMode] = []
+    real_check_required = session_module._sqlite_startup_check_required
+
+    def _replace_before_decision(path: Path, **kwargs: Any) -> bool:
+        replacement.replace(path)
+        return real_check_required(path, **kwargs)
+
+    def _check(path: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        assert path == db_path
+        seen.append(mode)
+        return IntegrityCheck(ok=True, details=None)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "_sqlite_startup_check_required", _replace_before_decision)
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    _stub_head_migration_state(monkeypatch)
+
+    await session_module.init_db()
+
+    assert seen == [SqliteIntegrityCheckMode.QUICK]
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+
+@pytest.mark.parametrize(
+    ("running_identity", "current_identity"),
+    [
+        pytest.param(
+            None,
+            SqliteFileIdentity(dev=1, ino=1, size=1, mtime_ns=1, ctime_ns=1),
+            id="running-identity-missing",
+        ),
+        pytest.param(
+            SqliteFileIdentity(dev=1, ino=1, size=1, mtime_ns=1, ctime_ns=1),
+            None,
+            id="current-identity-unavailable",
+        ),
+    ],
+)
+def test_sqlite_startup_check_requires_non_null_identities_for_a_clean_skip(
+    monkeypatch,
+    tmp_path,
+    running_identity,
+    current_identity,
+) -> None:
+    db_path = tmp_path / "store.db"
+    monkeypatch.setattr(session_module, "_sqlite_file_identity", lambda _: current_identity)
+
+    assert (
+        session_module._sqlite_startup_check_required(
+            db_path,
+            mode=SqliteIntegrityCheckMode.QUICK,
+            previous_state=SqliteRunState.CLEAN,
+            running_recorded=True,
+            running_identity=running_identity,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "recorded_state",
+    [
+        pytest.param(None, id="no-sidecar-upgrade-or-first-run"),
+        pytest.param(SqliteRunState.RUNNING, id="previous-process-did-not-finish"),
+    ],
+)
+async def test_init_db_runs_startup_check_when_shutdown_was_not_clean(monkeypatch, tmp_path, recorded_state) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    if recorded_state is not None:
+        write_sqlite_runstate(db_path, recorded_state)
+    seen: list[SqliteIntegrityCheckMode] = []
+
+    def _check(path: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        assert path == db_path
+        seen.append(mode)
+        return IntegrityCheck(ok=True, details=None)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    _stub_head_migration_state(monkeypatch)
+
+    await session_module.init_db()
+
+    assert seen == [SqliteIntegrityCheckMode.QUICK]
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_init_db_records_running_state_even_when_check_is_disabled(monkeypatch, tmp_path) -> None:
+    """Re-enabling the check must not trust a state this process never wrote."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+            database_sqlite_startup_check_mode="off",
+        ),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "check_sqlite_integrity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("check is disabled")),
+    )
+    _stub_head_migration_state(monkeypatch)
+
+    await session_module.init_db()
+
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_init_db_leaves_state_unclean_when_the_startup_check_fails(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "check_sqlite_integrity",
+        lambda *_args, **_kwargs: IntegrityCheck(ok=False, details="database disk image is malformed"),
+    )
+    _stub_head_migration_state(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="quick_check failed"):
+        await session_module.init_db()
+
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_init_db_does_not_trust_clean_sidecar_after_failed_check_on_retry(monkeypatch, tmp_path) -> None:
+    """A failed startup must leave RUNNING so a retry cannot skip its check."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+    check_attempts = 0
+    required_decisions = 0
+    real_check_required = session_module._sqlite_startup_check_required
+
+    def _check(_: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        nonlocal check_attempts
+        check_attempts += 1
+        assert mode is SqliteIntegrityCheckMode.QUICK
+        assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+        return IntegrityCheck(ok=False, details="database disk image is malformed")
+
+    def _check_required(path: Path, **kwargs: Any) -> bool:
+        nonlocal required_decisions
+        required_decisions += 1
+        if required_decisions == 1:
+            assert read_sqlite_runstate(path) is SqliteRunState.RUNNING
+            return True
+        return real_check_required(path, **kwargs)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    monkeypatch.setattr(session_module, "_sqlite_startup_check_required", _check_required)
+    _stub_head_migration_state(monkeypatch)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="quick_check failed"):
+            await session_module.init_db()
+        assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+    assert check_attempts == 2
+
+
+def test_mark_sqlite_shutdown_clean_records_a_clean_close(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.RUNNING)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url=f"sqlite+aiosqlite:///{db_path}"),
+    )
+
+    session_module._acquire_sqlite_lifetime_lock(db_path)
+    session_module.mark_sqlite_shutdown_clean()
+
+    assert read_sqlite_runstate(db_path) is SqliteRunState.CLEAN
+
+
+def test_mark_sqlite_shutdown_clean_releases_the_lifetime_lock(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.RUNNING)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url=f"sqlite+aiosqlite:///{db_path}"),
+    )
+
+    session_module._acquire_sqlite_lifetime_lock(db_path)
+    session_module.mark_sqlite_shutdown_clean()
+
+    assert session_module._sqlite_lifetime_lock is None
+    replacement = acquire_sqlite_runstate_lock(db_path)
+    release_sqlite_runstate_lock(replacement)
+
+
+@pytest.mark.asyncio
+async def test_init_db_fails_closed_when_another_process_holds_the_lifetime_lock(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    held = acquire_sqlite_runstate_lock(db_path)
+    try:
+        monkeypatch.setattr(
+            session_module,
+            "_settings",
+            _FakeSettings(
+                database_url=f"sqlite+aiosqlite:///{db_path}",
+                database_migrate_on_startup=False,
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="SQLite lifetime lock"):
+            await session_module.init_db()
+    finally:
+        release_sqlite_runstate_lock(held)
+
+
+def test_mark_sqlite_shutdown_clean_is_inert_for_non_sqlite_backends(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url="postgresql+asyncpg://user@localhost/codexlb"),
+    )
+
+    session_module.mark_sqlite_shutdown_clean()
+
+    assert not list(tmp_path.iterdir())

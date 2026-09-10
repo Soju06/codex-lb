@@ -8,6 +8,7 @@ import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { useThemeStore } from "@/hooks/use-theme";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 
 function installLocalStorageMock() {
   const storage = new Map<string, string>();
@@ -35,6 +36,21 @@ describe("AppearanceSettings", () => {
     useTimeFormatStore.setState({ timeFormat: "12h" });
     useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" });
+    useDashboardPreferencesStore.setState({ refreshSeconds: 15 });
+  });
+
+  it("updates the dashboard refresh cadence", async () => {
+    const user = userEvent.setup();
+    render(<AppearanceSettings />);
+
+    const fiveSeconds = screen.getByRole("button", { name: "5s" });
+    const fifteenSeconds = screen.getByRole("button", { name: "15s" });
+    expect(fifteenSeconds).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(fiveSeconds);
+
+    expect(fiveSeconds).toHaveAttribute("aria-pressed", "true");
+    expect(useDashboardPreferencesStore.getState().refreshSeconds).toBe(5);
   });
 
   it("exposes selected state for the time-format toggle", async () => {

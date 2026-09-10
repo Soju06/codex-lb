@@ -592,6 +592,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -612,6 +613,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     allow_fleet_refresh = asyncio.Event()
     fleet_refresh_finished = asyncio.Event()
     audit_write_actions: list[str] = []
+    clean_marker_attempted = False
 
     async def _mark_stale(*args, **kwargs) -> None:
         _ = (args, kwargs)
@@ -659,10 +661,15 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         assert not shutdown_state.is_control_plane_task_admission_open()
         call_order.append("close_http_client")
 
-    async def _close_db() -> None:
+    async def _close_db() -> bool:
         assert fleet_refresh_finished.is_set()
         assert not shutdown_state.is_control_plane_task_admission_open()
         call_order.append("close_db")
+        return True
+
+    def _mark_sqlite_shutdown_clean() -> None:
+        nonlocal clean_marker_attempted
+        clean_marker_attempted = True
 
     class _BlockedAccountsService:
         async def import_account(self, raw: bytes) -> AccountImportResponse:
@@ -706,9 +713,9 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
 
     original_control_plane_drain = main._drain_detached_control_plane_tasks
 
-    async def _track_control_plane_drain(timeout_seconds: float) -> None:
+    async def _track_control_plane_drain(timeout_seconds: float) -> bool:
         final_control_plane_drain_started.set()
-        await original_control_plane_drain(timeout_seconds)
+        return await original_control_plane_drain(timeout_seconds)
 
     init_db = AsyncMock()
     init_db.side_effect = _init_db
@@ -729,6 +736,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(main, "mark_sqlite_shutdown_clean", _mark_sqlite_shutdown_clean)
     monkeypatch.setattr(audit_service_module, "_write_audit_log", _blocked_audit_write)
     monkeypatch.setattr(main.fleet_api, "_refresh_fleet_usage_with_owned_session", _blocked_fleet_refresh)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -834,10 +842,15 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     assert api_key_limit_reset_scheduler.stopped is True
     assert model_scheduler.stopped is True
     assert sticky_scheduler.stopped is True
+    assert clean_marker_attempted is False
 
 
 @pytest.mark.asyncio
-async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("dispose_failure", [False, True], ids=["clean-dispose", "failed-dispose"])
+async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    dispose_failure: bool,
+):
     import app.core.startup as startup_module
     import app.main as main
     from app.core.cache.invalidation import get_cache_invalidation_poller
@@ -846,11 +859,12 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         http_responses_session_bridge_instance_id="pod-a",
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -859,7 +873,18 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
     close_http_client = AsyncMock()
-    close_db = AsyncMock()
+    shutdown_events: list[str] = []
+
+    async def _close_db() -> bool:
+        shutdown_events.append("close_db")
+        if dispose_failure:
+            raise RuntimeError("dispose failed")
+        return True
+
+    def _mark_sqlite_shutdown_clean() -> None:
+        shutdown_events.append("mark_clean")
+
+    close_db = AsyncMock(side_effect=_close_db)
     register = AsyncMock()
 
     async def _register(instance_id: str, *, endpoint_base_url: str | None = None) -> None:
@@ -873,12 +898,20 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         heartbeat=AsyncMock(),
         list_active=AsyncMock(return_value=[]),
     )
+    routing_availability_cache = SimpleNamespace(refresh_from_db=AsyncMock())
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
         prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
+
+    class _AccountsRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def seed_hard_sticky_outage_grace_on_startup(self) -> int:
+            return 0
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
@@ -892,6 +925,8 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(main, "mark_sqlite_shutdown_clean", _mark_sqlite_shutdown_clean)
+    monkeypatch.setattr(main, "AccountsRepository", _AccountsRepository)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
     monkeypatch.setattr(main, "build_api_key_limit_reset_scheduler", lambda: api_key_limit_reset_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
@@ -906,10 +941,20 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         "app.core.cache.invalidation.CacheInvalidationPoller",
         lambda session_factory: cache_poller,
     )
+    monkeypatch.setattr(
+        "app.modules.proxy.account_cache.get_routing_availability_cache",
+        lambda: routing_availability_cache,
+    )
 
-    async with main.lifespan(main.app):
-        await asyncio.sleep(0)
-        assert startup_module._startup_complete is True
+    if dispose_failure:
+        with pytest.raises(RuntimeError, match="dispose failed"):
+            async with main.lifespan(main.app):
+                await asyncio.sleep(0)
+                assert startup_module._startup_complete is True
+    else:
+        async with main.lifespan(main.app):
+            await asyncio.sleep(0)
+            assert startup_module._startup_complete is True
 
     register.assert_awaited_once_with("pod-a", endpoint_base_url=None)
     wait_for_reachable.assert_not_awaited()
@@ -922,6 +967,8 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     )
     ring_service.unregister.assert_not_called()
     cache_poller.stop.assert_awaited_once()
+    expected_events = ["close_db"] if dispose_failure else ["close_db", "mark_clean"]
+    assert shutdown_events == expected_events
     # Shutdown must clear the process-global poller so bump_cache_invalidation
     # is a no-op (not a call through this test's fake) after lifespan exit.
     assert get_cache_invalidation_poller() is None
@@ -944,11 +991,12 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         http_responses_session_bridge_instance_id="pod-a",
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -1111,12 +1159,13 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_advertise_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -1146,6 +1195,18 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
         stop=AsyncMock(),
     )
 
+    # This test owns the bridge-membership lifecycle only. Keep startup's
+    # unrelated database-backed seed and routing snapshot out of the mocked
+    # database lifecycle so they cannot race another test's SQLite writer.
+    routing_availability_cache = SimpleNamespace(refresh_from_db=AsyncMock())
+
+    class _AccountsRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def seed_hard_sticky_outage_grace_on_startup(self) -> int:
+            return 0
+
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
@@ -1162,6 +1223,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     monkeypatch.setattr(main, "build_api_key_limit_reset_scheduler", lambda: api_key_limit_reset_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
+    monkeypatch.setattr(main, "AccountsRepository", _AccountsRepository)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
     monkeypatch.setattr(main, "_wait_for_bridge_advertise_endpoint", AsyncMock())
     monkeypatch.setattr(main, "_validate_bridge_advertise_endpoint_for_multi_replica", AsyncMock())
@@ -1169,6 +1231,10 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     monkeypatch.setattr(
         "app.core.cache.invalidation.CacheInvalidationPoller",
         lambda session_factory: cache_poller,
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.account_cache.get_routing_availability_cache",
+        lambda: routing_availability_cache,
     )
 
     async with main.lifespan(main.app):
@@ -1193,11 +1259,15 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_advertise_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace()),
+        get=AsyncMock(return_value=SimpleNamespace()),
+    )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     api_key_limit_reset_scheduler = _DummyScheduler()
@@ -1285,9 +1355,13 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock())
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace()),
+        get=AsyncMock(return_value=SimpleNamespace()),
+    )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     api_key_limit_reset_scheduler = _DummyScheduler()
@@ -1327,11 +1401,13 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         database_migrations_fail_fast=False,
     )
     settings_cache = SimpleNamespace(
-        invalidate=AsyncMock(), get=AsyncMock(return_value=SimpleNamespace(password_hash=None))
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
+        get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()

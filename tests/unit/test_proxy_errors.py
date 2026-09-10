@@ -12,6 +12,7 @@ from app.core.exceptions import ProxyRateLimitError
 from app.core.openai.requests import ResponsesRequest
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.api import _logged_error_json_response, _stream_response_error_events
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
 
@@ -22,7 +23,7 @@ def test_http_bridge_recovery_eligibility_accepts_turn_state_anchor_without_prev
     monkeypatch.setattr(
         proxy_api.proxy_service_module,
         "get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_operation_ledger_enabled=True),
+        lambda: SimpleNamespace(),
     )
     payload = ResponsesRequest(model="gpt-5.6", instructions="", input="retry")
 
@@ -51,7 +52,6 @@ def test_http_bridge_indefinite_recovery_defers_predecessor_proof_to_submit_path
         proxy_api.proxy_service_module,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_operation_ledger_enabled=True,
             http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
         ),
     )
@@ -152,7 +152,7 @@ async def test_indefinite_recovery_does_not_retry_after_downstream_event(monkeyp
         proxy_api,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
         ),
     )
 
@@ -188,10 +188,10 @@ async def test_indefinite_recovery_converts_retry_reservation_failure_to_sse(mon
         proxy_api,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
         ),
     )
-    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay: _completed_asyncio_sleep())
+    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
 
     async def stream():
         if False:
@@ -219,6 +219,120 @@ async def test_indefinite_recovery_converts_retry_reservation_failure_to_sse(mon
 
 
 @pytest.mark.asyncio
+async def test_indefinite_recovery_exhaustion_emits_terminal_response_failed(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        proxy_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    monkeypatch.setattr(proxy_api, "HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
+    attempts = 0
+
+    def durable_stream_incomplete(message: str) -> ProxyResponseError:
+        exc = ProxyResponseError(
+            502,
+            {"error": {"code": "stream_incomplete", "message": message, "type": "server_error"}},
+            retry_after_seconds=1,
+        )
+        setattr(exc, "http_bridge_durable_recovery_eligible", True)
+        return exc
+
+    async def stream():
+        if False:
+            yield ""
+        raise durable_stream_incomplete("closed before response.created")
+
+    async def recovery_stream():
+        nonlocal attempts
+        attempts += 1
+        raise durable_stream_incomplete(f"still closed attempt {attempts}")
+        yield ""
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+            recovery_stream_factory=lambda: recovery_stream(),
+            require_durable_recovery_fence=True,
+        )
+    ]
+
+    assert attempts == 2
+    assert events.count(": codex-lb recovery in progress\n\n") == 2
+    assert "response.failed" in events[-1]
+    assert "stream_incomplete" in events[-1]
+    assert "still closed attempt 2" in events[-1]
+    payload = proxy_api._parse_sse_payload(events[-1])
+    assert payload is not None
+    response = payload.get("response")
+    assert isinstance(response, dict)
+    assert isinstance(response.get("id"), str)
+    assert response["id"]
+
+
+@pytest.mark.asyncio
+async def test_indefinite_recovery_retries_eventless_bridge_timeouts(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        proxy_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    monkeypatch.setattr(proxy_api, "HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
+    attempts = 0
+
+    def durable_eventless_timeout(message: str) -> ProxyResponseError:
+        exc = ProxyResponseError(
+            503,
+            {
+                "error": {
+                    "code": proxy_api.HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
+                    "message": message,
+                    "type": "server_error",
+                }
+            },
+            retry_after_seconds=1,
+        )
+        setattr(exc, "http_bridge_durable_recovery_eligible", True)
+        return exc
+
+    async def stream():
+        if False:
+            yield ""
+        raise durable_eventless_timeout("eventless before recovery")
+
+    async def recovery_stream():
+        nonlocal attempts
+        attempts += 1
+        raise durable_eventless_timeout(f"eventless retry {attempts}")
+        yield ""
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+            recovery_stream_factory=lambda: recovery_stream(),
+            require_durable_recovery_fence=True,
+        )
+    ]
+
+    assert attempts == 2
+    assert events.count(": codex-lb recovery in progress\n\n") == 2
+    assert "response.failed" in events[-1]
+    assert proxy_api.HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE in events[-1]
+    assert "eventless retry 2" in events[-1]
+
+
+@pytest.mark.asyncio
 async def test_indefinite_recovery_converts_unexpected_admission_failure_to_sse(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -226,10 +340,10 @@ async def test_indefinite_recovery_converts_unexpected_admission_failure_to_sse(
         proxy_api,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
         ),
     )
-    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay: _completed_asyncio_sleep())
+    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
 
     async def stream():
         if False:
@@ -264,10 +378,10 @@ async def test_indefinite_recovery_stops_after_retry_output_then_transport_error
         proxy_api,
         "get_settings",
         lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
         ),
     )
-    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay: _completed_asyncio_sleep())
+    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
     attempts = 0
 
     async def stream():
@@ -400,3 +514,59 @@ async def test_error_event_fallback_no_reason():
     event = await _error_event_from_response(resp)
 
     assert event["response"]["error"].get("message") == "Upstream error: HTTP 500"
+
+
+@pytest.mark.asyncio
+async def test_indefinite_recovery_delay_sleeps_on_the_injected_scheduler(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        proxy_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    monkeypatch.setattr(proxy_api, "HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS", 2)
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    recovery_attempts = 0
+
+    async def stream():
+        if False:
+            yield ""
+        raise ProxyResponseError(
+            502,
+            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
+        )
+
+    async def recovery_stream():
+        nonlocal recovery_attempts
+        recovery_attempts += 1
+        yield 'data: {"type":"response.completed","response":{"id":"resp_recovered"}}\n\n'
+
+    events: list[str] = []
+
+    async def consume() -> None:
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+            recovery_stream_factory=lambda: recovery_stream(),
+            scheduler=scheduler,
+        ):
+            events.append(event)
+
+    consumer = scheduler.create_task(consume())
+    await scheduler.drain()
+    # The recovery marker is emitted, then the retry parks on a virtual timer
+    # (retry_after defaults to 5 seconds) instead of a wall-clock sleep.
+    assert events == [": codex-lb recovery in progress\n\n"]
+    assert recovery_attempts == 0
+    assert not consumer.done()
+    assert scheduler.pending_timers == 1
+
+    await scheduler.advance(5.0)
+    await consumer
+
+    assert recovery_attempts == 1
+    assert events[-1].startswith("data:") and "response.completed" in events[-1]
+    assert clock.monotonic() == pytest.approx(5.0)

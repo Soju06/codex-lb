@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -41,6 +42,7 @@ from app.modules.api_keys.service import (
     ApiKeyValidationError,
     LimitRuleInput,
     _build_api_key_trends,
+    _hash_key,
     _is_sqlite_database_locked,
     _normalize_usage_sections,
 )
@@ -597,7 +599,7 @@ async def test_create_key_stores_hash_and_prefix() -> None:
         )
     )
 
-    assert created.key.startswith("sk-clb-")
+    assert re.fullmatch(r"sk-clb-[0-9a-f]{48}", created.key)
     assert created.key_prefix == created.key[:15]
     assert created.allowed_models == ["o3-pro"]
     assert created.traffic_class == "foreground"
@@ -1353,6 +1355,28 @@ async def test_create_key_with_limits() -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_key_accepts_legacy_base64url_format() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="legacy-key",
+            allowed_models=None,
+            expires_at=None,
+        )
+    )
+    legacy_key = f"sk-clb-{'A' * 43}"
+    row = await repo.get_by_id(created.id)
+    assert row is not None
+    row.key_hash = _hash_key(legacy_key)
+    row.key_prefix = legacy_key[:15]
+
+    validated = await service.validate_key(legacy_key)
+
+    assert validated.id == created.id
+
+
+@pytest.mark.asyncio
 async def test_validate_key_checks_expiry_and_limit() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
@@ -1995,7 +2019,7 @@ async def test_regenerate_key_rotates_hash_and_prefix() -> None:
     row_after = await repo.get_by_id(created.id)
     assert row_after is not None
 
-    assert regenerated.key.startswith("sk-clb-")
+    assert re.fullmatch(r"sk-clb-[0-9a-f]{48}", regenerated.key)
     assert row_after.key_hash != old_hash
     assert row_after.key_prefix != old_prefix
 

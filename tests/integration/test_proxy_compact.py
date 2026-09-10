@@ -3,11 +3,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+from dataclasses import replace
 from datetime import timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
 from sqlalchemy import select
 
@@ -16,6 +18,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
+from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
 from app.core.utils.time import utcnow
@@ -911,6 +914,130 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/backend-api/codex/responses/compact",
+        "/v1/responses/compact",
+    ],
+)
+@pytest.mark.parametrize(
+    ("tier", "prohibit_fast", "omit_account_header", "expected_tier"),
+    [
+        (None, False, False, None),
+        ("priority", False, False, "priority"),
+        ("fast", False, False, "priority"),
+        ("ultrafast", False, False, "ultrafast"),
+        ("priority", True, False, None),
+        ("priority", False, True, "priority"),
+    ],
+)
+async def test_proxy_compact_synthesizes_final_subscription_routing_hint(
+    async_client,
+    monkeypatch,
+    path: str,
+    tier: str | None,
+    prohibit_fast: bool,
+    omit_account_header: bool,
+    expected_tier: str | None,
+):
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json("acc_compact_hint", "compact-hint@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    account_id = generate_unique_account_id("acc_compact_hint", "compact-hint@example.com")
+    model = "gpt-5.6-sol"
+    registry = get_model_registry()
+    catalog_model = replace(
+        registry.get_models_with_fallback()[model],
+        raw={"service_tiers": [{"id": "priority"}, {"id": "ultrafast"}]},
+    )
+    await registry.update(
+        {"plus": [catalog_model]},
+        per_account_results={account_id: ("plus", [catalog_model])},
+        active_account_plans={account_id: "plus"},
+    )
+    if omit_account_header:
+
+        async def fresh_without_account_header(self, account: Account, **kwargs: object) -> Account:
+            account.chatgpt_account_id = None
+            return account
+
+        monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fresh_without_account_header)
+    settings = await async_client.put(
+        "/api/settings", json={"prohibitFastMode": prohibit_fast, "apiKeyAuthEnabled": True}
+    )
+    assert settings.status_code == 200
+    _, key = await _create_api_key(name="compact-hint")
+    session = _JsonSession(_SseResponse())
+
+    @contextlib.asynccontextmanager
+    async def lease_session(session_override=None):
+        assert session_override is None
+        yield session
+
+    monkeypatch.setattr(proxy_client_module, "lease_http_session", lease_session)
+    payload: dict[str, object] = {"model": model, "instructions": "hi", "input": []}
+    if tier is not None:
+        payload["service_tier"] = tier
+    response = await async_client.post(
+        path,
+        json=payload,
+        headers={
+            "authorization": f"Bearer {key}",
+            "X-Codex-Routing-Hint": "model=untrusted;tier=ultrafast",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert len(session.calls) == 1
+    outbound = _session_call_json(session)
+    assert outbound.get("service_tier") == expected_tier
+    assert outbound["input"] == [{"type": "compaction_trigger"}]
+    assert outbound["instructions"] == "hi"
+    headers = cast(dict[str, str], session.calls[0]["headers"])
+    expected_hint = f"model={model}" + (f";tier={expected_tier}" if expected_tier else "")
+    assert headers.get("x-codex-routing-hint") == expected_hint
+    if omit_account_header:
+        assert not any(name.lower() == "chatgpt-account-id" for name in headers)
+    assert response.json()["output"][0]["encrypted_content"] == "enc_compact_summary_1"
+    assert response.json().get("service_tier") is None
+
+
+@pytest.mark.asyncio
+async def test_compact_transport_without_subscription_provenance_omits_routing_hint():
+    session = _JsonSession(_SseResponse())
+    payload = ResponsesCompactRequest(model="gpt-5.6-sol", instructions="hi", input=[], service_tier="priority")
+    await proxy_client_module.compact_responses(
+        payload,
+        {"X-Codex-Routing-Hint": "model=untrusted;tier=priority"},
+        "test-token",
+        "account-header-is-not-provenance",
+        session=cast(aiohttp.ClientSession, session),
+    )
+    assert len(session.calls) == 1
+    headers = cast(dict[str, str], session.calls[0]["headers"])
+    assert not any(name.lower() == "x-codex-routing-hint" for name in headers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses/compact/", "/v1/responses/compact/"])
+async def test_compact_trailing_slash_rejection_does_not_dispatch(async_client, monkeypatch, path: str):
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+    response = await async_client.post(path, json={"model": "gpt-5.6-sol", "instructions": "hi", "input": []})
+    assert response.status_code == 405
+    assert response.json()["error"]["code"] == "invalid_request_error"
+    compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_masks_previous_response_not_found(async_client, monkeypatch):
     email = "compact-prev-missing@example.com"
     raw_account_id = "acc_compact_prev_missing"
@@ -1269,6 +1396,85 @@ async def test_proxy_compact_token_invalidated_marks_reauth_and_fails_over(async
     assert overview_response.status_code == 200
     overview_accounts = {account["accountId"]: account for account in overview_response.json()["accounts"]}
     assert overview_accounts[invalidated_account_id]["status"] == "reauth_required"
+
+
+@pytest.mark.asyncio
+async def test_backend_compact_permanent_forced_refresh_failure_fails_over(async_client, monkeypatch):
+    from app.core.auth.refresh import RefreshError
+
+    account_ids: list[str] = []
+    upstream_account_ids: list[str | None] = []
+    for suffix in ("a", "b"):
+        email = f"compact-revoked-refresh-{suffix}@example.com"
+        raw_account_id = f"acc_compact_revoked_refresh_{suffix}"
+        response = await async_client.post(
+            "/api/accounts/import",
+            files={
+                "auth_json": (
+                    f"auth-{suffix}.json",
+                    json.dumps(_make_auth_json(raw_account_id, email)),
+                    "application/json",
+                )
+            },
+        )
+        assert response.status_code == 200
+        account_ids.append(generate_unique_account_id(raw_account_id, email))
+
+    async with SessionLocal() as session:
+        for suffix, account_id in zip(("a", "b"), account_ids, strict=True):
+            account = await session.get(Account, account_id)
+            assert account is not None
+            account.chatgpt_account_id = f"chatgpt_compact_revoked_refresh_{suffix}"
+        await session.commit()
+
+    failed_account_id: str | None = None
+    failed_upstream_account_id: str | None = None
+
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
+        del self, timeout_seconds
+        nonlocal failed_account_id
+        if failed_account_id is None:
+            failed_account_id = account.id
+        if force and account.id == failed_account_id:
+            raise RefreshError(
+                "refresh_token_invalidated",
+                "Refresh token was revoked",
+                True,
+            )
+        return account
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        nonlocal failed_upstream_account_id
+        if failed_upstream_account_id is None:
+            failed_upstream_account_id = account_id
+        upstream_account_ids.append(account_id)
+        if account_id == failed_upstream_account_id:
+            raise ProxyResponseError(
+                401,
+                openai_error(
+                    "token_revoked",
+                    "Encountered invalidated oauth token for user, failing request",
+                    error_type="authentication_error",
+                ),
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.6-sol", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    assert len(upstream_account_ids) == 2
+    assert upstream_account_ids[0] == failed_upstream_account_id
+    assert upstream_account_ids[1] != failed_upstream_account_id
+    assert failed_account_id is not None
+    async with SessionLocal() as session:
+        failed_account = await session.get(Account, failed_account_id)
+        assert failed_account is not None
+        assert failed_account.status == AccountStatus.REAUTH_REQUIRED
 
 
 @pytest.mark.asyncio

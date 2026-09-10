@@ -176,9 +176,6 @@ class RefreshClaimSnapshot:
     claimed_at: datetime
     claim_expires_at: datetime
 
-    def is_expired(self, now: datetime) -> bool:
-        return self.claim_expires_at < now
-
 
 class RefreshClaimCoordinatorPort(Protocol):
     @property

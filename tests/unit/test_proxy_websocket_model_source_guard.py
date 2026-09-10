@@ -407,8 +407,9 @@ class _AliasSourceCatalog:
     ``responses_model_is_source_owned`` itself would test the stub instead).
     """
 
-    def __init__(self, source_models: set[str]) -> None:
+    def __init__(self, source_models: set[str], disabled_source_models: set[str] | None = None) -> None:
         self.source_models = source_models
+        self.disabled_source_models = disabled_source_models or set()
         self.seen_candidates: list[str] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -424,10 +425,17 @@ class _AliasSourceCatalog:
                 *,
                 allowed_source_ids=None,  # noqa: ANN001
                 require_streaming: bool = False,
+                only_disabled: bool = False,
             ):  # noqa: ANN202
                 catalog.seen_candidates.append(candidate)
+                # ``only_disabled`` selects the complement of the routable
+                # set, mirroring the real repository's enablement filter.
+                if only_disabled:
+                    if candidate in catalog.disabled_source_models:
+                        return SimpleNamespace(id="src_disabled", name="disabled-source", is_enabled=False)
+                    return None
                 if candidate in catalog.source_models:
-                    return SimpleNamespace(id="src_alias", name="alias-source", enabled=True)
+                    return SimpleNamespace(id="src_alias", name="alias-source", is_enabled=True)
                 return None
 
         @asynccontextmanager
@@ -911,3 +919,124 @@ async def test_connect_guard_skips_terminal_compaction_trigger_requests(
     assert prepared.request_state.source_route_excluded is True, (
         "preparation must record the HTTP source-route exclusion on the request state"
     )
+
+
+@pytest.mark.asyncio
+async def test_source_ownership_counts_disabled_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model whose only source is disabled is still source-owned.
+
+    The WebSocket transport cannot serve a source-owned model whether the
+    source is enabled or not; dispatching it to a subscription account instead
+    yields the opaque upstream 400. Recognizing disabled ownership makes the
+    guards bounce the turn to HTTP, where the disabled-source denial answers
+    503 ``model_source_disabled``.
+    """
+    catalog = _AliasSourceCatalog(set(), disabled_source_models={"qwen3.8-max"})
+    catalog.install(monkeypatch)
+
+    assert await responses_model_is_source_owned("qwen3.8-max", None) is True
+    assert await responses_model_is_source_owned("model-nobody-configured", None) is False, (
+        "a model no source claims must keep falling through to subscription selection"
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_guard_fails_session_for_disabled_source_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect guard must bounce a disabled-source model to HTTP.
+
+    The real ``responses_model_is_source_owned`` runs against a catalog where
+    the model's only source is disabled: without the ``only_disabled`` probe
+    the guard misses, the turn dispatches to a subscription account, and the
+    incident's entitlement 400 comes back on exactly this transport.
+    """
+    settings = _make_proxy_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    catalog = _AliasSourceCatalog(set(), disabled_source_models={"qwen3.8-max"})
+    catalog.install(monkeypatch)
+
+    emitted: dict[str, object] = {}
+    selection_calls = 0
+
+    async def fake_emit(self, websocket, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        emitted.update(kwargs)
+
+    async def fake_select(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal selection_calls
+        selection_calls += 1
+        return None
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_emit_websocket_connect_failure", fake_emit)
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select)
+
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+
+    account, upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="capacity_weighted",
+        model="qwen3.8-max",
+        request_state=_request_state("qwen3.8-max"),
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=AsyncMock(),
+    )
+
+    assert account is None
+    assert upstream is None
+    assert selection_calls == 0, "the guard must short-circuit before subscription account selection"
+    assert emitted.get("error_code") == "model_source_requires_http_transport"
+    assert emitted.get("status_code") == 503, "a 4xx is terminal client-side and would strand the HTTP fallback"
+    assert "qwen3.8-max" in catalog.seen_candidates, "the disabled-source probe must reach the catalog"
+
+
+@pytest.mark.asyncio
+async def test_reuse_guard_rejects_a_later_disabled_source_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later turn that switches to a disabled-source model must not be forwarded.
+
+    Socket reuse bypasses connect-time selection, so without disabled-source
+    recognition in the reuse guard the frame goes to the subscription account
+    already attached to the open upstream and is rejected by the backend with
+    the unsupported-model 400.
+    """
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    catalog = _AliasSourceCatalog(set(), disabled_source_models={"qwen3.8-max"})
+    catalog.install(monkeypatch)
+
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_source_guard_disabled_reuse")
+    upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_turn_one"))
+
+    async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        return account, upstream
+
+    released = AsyncMock()
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
+    monkeypatch.setattr(proxy_service.ProxyService, "_release_websocket_request_state_reservation", released)
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+
+    downstream = _Downstream([_create_frame("gpt-5.6-sol"), _create_frame("qwen3.8-max")])
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert any("resp_turn_one" in text for text in downstream.sent_text), "the subscription turn must complete"
+    assert any("model_source_requires_http_transport" in text for text in downstream.sent_text), (
+        "the disabled-source turn must be rejected by the reuse guard"
+    )
+    assert len(upstream.sent_text) == 1, "the rejected turn must not be forwarded upstream"
+    assert released.await_count >= 1, "the rejected turn must release its usage reservation"

@@ -1,22 +1,25 @@
 from __future__ import annotations
 
-from datetime import timedelta
+import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
-from pydantic import ValidationError
 from sqlalchemy import select
 
 import app.core.retention.job as retention_job
-from app.core.config.settings import Settings, get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.retention.job import run_retention_pass
+from app.core.retention.job import prune_model_source_pins, run_retention_pass
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, AdditionalUsageHistory, RequestLog, UsageHistory
-from app.db.session import SessionLocal
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, ModelSourcePin, RequestLog, UsageHistory
+from app.db.session import SessionLocal, sqlite_writer_section
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import run_fold_pass
 from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
+from app.modules.proxy.model_source_pins import ModelSourcePinRepository, PinWrite
+from app.modules.reports.rollup import run_report_fold_pass
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.settings.repository import SettingsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -54,20 +57,14 @@ async def _add_log(
     )
 
 
-def _set_retention(monkeypatch, *, request_logs: int = 0, usage_history: int = 0) -> None:
-    monkeypatch.setenv("CODEX_LB_REQUEST_LOG_RETENTION_DAYS", str(request_logs))
-    monkeypatch.setenv("CODEX_LB_USAGE_HISTORY_RETENTION_DAYS", str(usage_history))
-    get_settings.cache_clear()
-
-
-def test_retention_settings_validation():
-    assert Settings(request_log_retention_days=0).request_log_retention_days == 0
-    assert Settings(request_log_retention_days=30).request_log_retention_days == 30
-    assert Settings(usage_history_retention_days=45).usage_history_retention_days == 45
-    with pytest.raises(ValidationError):
-        Settings(request_log_retention_days=7)
-    with pytest.raises(ValidationError):
-        Settings(usage_history_retention_days=30)
+async def _set_retention(*, request_logs: int | None = 0, usage_history: int | None = 0) -> None:
+    """Store the dashboard retention windows (NULL = never configured, 0 = disabled)."""
+    async with SessionLocal() as session:
+        row = await SettingsRepository(session).get_or_create()
+        row.request_log_retention_days = request_logs
+        row.usage_history_retention_days = usage_history
+        await session.commit()
+    await get_settings_cache().invalidate()
 
 
 @pytest.mark.asyncio
@@ -82,7 +79,7 @@ async def test_retention_disabled_by_default_deletes_nothing(db_setup):
         await session.commit()
 
     deleted = await run_retention_pass(now=now)
-    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 0}
 
 
 @pytest.mark.asyncio
@@ -99,6 +96,7 @@ async def test_request_log_pruning_respects_watermark_and_preserves_totals(async
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
     await run_conversation_fold_pass(now=now)
+    await run_report_fold_pass(now=now)
 
     async def _request_usage():
         response = await async_client.get("/api/accounts")
@@ -109,7 +107,7 @@ async def test_request_log_pruning_respects_watermark_and_preserves_totals(async
     before = await _request_usage()
     assert before["requestCount"] == 3
 
-    _set_retention(monkeypatch, request_logs=30)
+    await _set_retention(request_logs=30)
     deleted = await run_retention_pass(now=now)
     assert deleted["request_logs"] == 2
 
@@ -129,7 +127,7 @@ async def test_request_log_pruning_skipped_without_watermark(db_setup, monkeypat
         await accounts_repo.upsert(_make_account("acc_nofold", "nofold@example.com"))
         await _add_log(logs_repo, account_id="acc_nofold", request_id="req_old", requested_at=now - timedelta(days=400))
 
-    _set_retention(monkeypatch, request_logs=30)
+    await _set_retention(request_logs=30)
     deleted = await run_retention_pass(now=now)
     assert deleted["request_logs"] == 0
     async with SessionLocal() as session:
@@ -164,7 +162,7 @@ async def test_usage_history_pruning_keeps_latest_per_identity(db_setup, monkeyp
             )
         await session.commit()
 
-    _set_retention(monkeypatch, usage_history=45)
+    await _set_retention(usage_history=45)
     deleted = await run_retention_pass(now=now)
     assert deleted["usage_history"] == 2
     assert deleted["additional_usage_history"] == 2
@@ -196,7 +194,8 @@ async def test_pruning_drains_backlog_across_batches(db_setup, monkeypatch):
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
     await run_conversation_fold_pass(now=now)
-    _set_retention(monkeypatch, request_logs=30)
+    await run_report_fold_pass(now=now)
+    await _set_retention(request_logs=30)
     monkeypatch.setattr(retention_job, "BATCH_SIZE", 2)
     deleted = await run_retention_pass(now=now)
     assert deleted["request_logs"] == 5
@@ -232,7 +231,7 @@ async def test_request_log_pruning_skipped_while_fold_is_not_current(async_clien
     before = await _request_usage()
     assert before["requestCount"] == 3
 
-    _set_retention(monkeypatch, request_logs=30)
+    await _set_retention(request_logs=30)
     deleted = await run_retention_pass(now=now)
     assert deleted["request_logs"] == 0
 
@@ -264,13 +263,14 @@ async def test_request_log_pruning_skipped_while_hourly_backfill_behind(db_setup
 
     # Lifetime fold current, hourly fold never ran (watermark at epoch).
     await run_fold_pass(now=now)
-    _set_retention(monkeypatch, request_logs=30)
+    await _set_retention(request_logs=30)
     deleted = await run_retention_pass(now=now)
     assert deleted["request_logs"] == 0
 
     # Hourly fold catches up -> min watermark is current -> pruning resumes.
     await run_hourly_fold_pass(now=now)
     await run_conversation_fold_pass(now=now)
+    await run_report_fold_pass(now=now)
     async with SessionLocal() as session:
         hourly_before = sorted(
             (await session.execute(sa_select(RequestUsageHourlyRollup))).scalars().all(),
@@ -313,7 +313,7 @@ async def test_request_log_pruning_skipped_while_hourly_fold_stalled(db_setup, m
     await run_conversation_fold_pass(now=now - timedelta(days=50))
     await run_fold_pass(now=now)
 
-    _set_retention(monkeypatch, request_logs=30)
+    await _set_retention(request_logs=30)
     deleted = await run_retention_pass(now=now)
     assert deleted["request_logs"] == 0
     async with SessionLocal() as session:
@@ -348,10 +348,11 @@ async def test_request_log_pruning_skipped_while_conversation_backfill_behind(db
 
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
-    _set_retention(monkeypatch, request_logs=30)
+    await _set_retention(request_logs=30)
     assert (await run_retention_pass(now=now))["request_logs"] == 0
 
     await run_conversation_fold_pass(now=now)
+    await run_report_fold_pass(now=now)
     assert (await run_retention_pass(now=now))["request_logs"] == 1
     async with SessionLocal() as session:
         presence = (await session.execute(sa_select(RequestConversationHourlyRollup))).scalars().all()
@@ -381,7 +382,7 @@ async def test_usage_history_protects_latest_by_recorded_at_not_insert_order(db_
         )
         await session.commit()
 
-    _set_retention(monkeypatch, usage_history=45)
+    await _set_retention(usage_history=45)
     deleted = await run_retention_pass(now=now)
     assert deleted["usage_history"] == 1
 
@@ -431,7 +432,7 @@ async def test_usage_history_pruning_null_window_and_multi_identity(db_setup, mo
                 )
         await session.commit()
 
-    _set_retention(monkeypatch, usage_history=45)
+    await _set_retention(usage_history=45)
     deleted = await run_retention_pass(now=now)
     assert deleted["usage_history"] == 1  # only the NULL-window row
     assert deleted["additional_usage_history"] == 2  # older row of each quota key
@@ -463,7 +464,7 @@ async def test_usage_history_backlog_drains_across_batches(db_setup, monkeypatch
             )
         await session.commit()
 
-    _set_retention(monkeypatch, usage_history=45)
+    await _set_retention(usage_history=45)
     monkeypatch.setattr(retention_job, "BATCH_SIZE", 2)
     deleted = await run_retention_pass(now=now)
     assert deleted["usage_history"] == 6  # all but the latest row
@@ -472,13 +473,6 @@ async def test_usage_history_backlog_drains_across_batches(db_setup, monkeypatch
         rows = (await session.execute(select(UsageHistory))).scalars().all()
     assert len(rows) == 1
     assert rows[0].used_percent == 6.0
-
-
-def test_retention_settings_reject_absurd_values():
-    with pytest.raises(ValidationError):
-        Settings(request_log_retention_days=100_000_000)
-    with pytest.raises(ValidationError):
-        Settings(usage_history_retention_days=1_000_000)
 
 
 @pytest.mark.asyncio
@@ -522,9 +516,10 @@ async def test_api_key_totals_survive_pruning_and_match_pre_fold(db_setup, monke
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
     await run_conversation_fold_pass(now=now)
+    await run_report_fold_pass(now=now)
     assert await _key_summary() == before
 
-    _set_retention(monkeypatch, request_logs=30)
+    await _set_retention(request_logs=30)
     deleted = await run_retention_pass(now=now)
     assert deleted["request_logs"] == 2
     assert await _key_summary() == before
@@ -633,49 +628,8 @@ async def test_fold_start_covers_key_only_soft_deleted_history(db_setup):
     assert summary.total_tokens == 150
 
 
-async def _set_dashboard_retention(*, request_logs: int | None = None, usage_history: int | None = None) -> None:
-    from app.core.config.settings_cache import get_settings_cache
-    from app.modules.settings.repository import SettingsRepository
-
-    async with SessionLocal() as session:
-        row = await SettingsRepository(session).get_or_create()
-        row.request_log_retention_days = request_logs
-        row.usage_history_retention_days = usage_history
-        await session.commit()
-    await get_settings_cache().invalidate()
-
-
 @pytest.mark.asyncio
-async def test_dashboard_retention_overrides_env_alias(async_client, db_setup, monkeypatch):
-    """A non-NULL dashboard value wins over the deprecated env alias."""
-    now = utcnow()
-    async with SessionLocal() as session:
-        accounts_repo = AccountsRepository(session)
-        logs_repo = RequestLogsRepository(session)
-        await accounts_repo.upsert(_make_account("acc_dash", "dash@example.com"))
-        await _add_log(logs_repo, account_id="acc_dash", request_id="req_40d", requested_at=now - timedelta(days=40))
-        await _add_log(logs_repo, account_id="acc_dash", request_id="req_1d", requested_at=now - timedelta(days=1))
-
-    await run_fold_pass(now=now)
-    await run_hourly_fold_pass(now=now)
-    await run_conversation_fold_pass(now=now)
-
-    # Env alias alone (90 days) would keep the 40-day-old row...
-    _set_retention(monkeypatch, request_logs=90)
-    deleted = await run_retention_pass(now=now)
-    assert deleted["request_logs"] == 0
-
-    # ...but a 30-day dashboard override prunes it without touching env.
-    await _set_dashboard_retention(request_logs=30)
-    deleted = await run_retention_pass(now=now)
-    assert deleted["request_logs"] == 1
-    async with SessionLocal() as session:
-        remaining = (await session.execute(select(RequestLog.request_id))).scalars().all()
-    assert sorted(remaining) == ["req_1d"]
-
-
-@pytest.mark.asyncio
-async def test_dashboard_zero_disables_retention_despite_env_alias(db_setup, monkeypatch):
+async def test_dashboard_zero_disables_retention(db_setup):
     now = utcnow()
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -684,18 +638,17 @@ async def test_dashboard_zero_disables_retention_despite_env_alias(db_setup, mon
         session.add(UsageHistory(account_id="acc_zero", used_percent=20.0, recorded_at=now - timedelta(days=390)))
         await session.commit()
 
-    _set_retention(monkeypatch, usage_history=45)
-    await _set_dashboard_retention(usage_history=0)
+    await _set_retention(request_logs=None, usage_history=0)
 
     deleted = await run_retention_pass(now=now)
-    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 0}
     async with SessionLocal() as session:
         assert len((await session.execute(select(UsageHistory.id))).scalars().all()) == 2
 
 
 @pytest.mark.asyncio
-async def test_env_alias_applies_while_dashboard_value_unset(db_setup, monkeypatch):
-    """NULL dashboard values inherit the deprecated env alias unchanged."""
+async def test_null_dashboard_value_disables_retention_despite_removed_env_alias(db_setup, monkeypatch):
+    """NULL dashboard values are disabled; the removed env alias has no effect."""
     now = utcnow()
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -705,11 +658,112 @@ async def test_env_alias_applies_while_dashboard_value_unset(db_setup, monkeypat
         await session.commit()
 
     # Force row creation so the dashboard columns exist and stay NULL.
-    await _set_dashboard_retention(request_logs=None, usage_history=None)
+    await _set_retention(request_logs=None, usage_history=None)
+    monkeypatch.setenv("CODEX_LB_USAGE_HISTORY_RETENTION_DAYS", "45")
 
-    _set_retention(monkeypatch, usage_history=45)
+    retention = await retention_job.get_effective_retention()
+    assert retention.enabled is False
     deleted = await run_retention_pass(now=now)
-    assert deleted["usage_history"] == 1
+    assert deleted["usage_history"] == 0
     async with SessionLocal() as session:
         remaining = (await session.execute(select(UsageHistory.used_percent))).scalars().all()
-    assert remaining == [20.0]
+    assert sorted(remaining) == [10.0, 20.0]
+
+
+# --- model-source pins: purge independent of the retention opt-in (#2123 WP-C1) ---
+
+
+async def _write_pin(pin_key: str, *, now: datetime, drain_until: datetime | None = None) -> None:
+    async with SessionLocal() as session:
+        async with sqlite_writer_section():
+            await ModelSourcePinRepository(session).upsert(
+                [PinWrite(pin_key, "thread", "src_overflow", None)], now=now, drain_until=drain_until
+            )
+            await session.commit()
+
+
+async def _pin_exists(pin_key: str) -> bool:
+    async with SessionLocal() as session:
+        return await ModelSourcePinRepository(session).reread(pin_key) is not None
+
+
+async def _arm_drain(drain_until: datetime | None) -> None:
+    async with SessionLocal() as session:
+        row = await SettingsRepository(session).get_or_create()
+        row.subscription_overflow_drain_until = drain_until
+        await session.commit()
+    await get_settings_cache().invalidate(propagate=False)
+
+
+@pytest.mark.asyncio
+async def test_model_source_pins_are_pruned_while_retention_is_disabled(db_setup, caplog):
+    """A purged pin answers no lookup any more, so its row goes regardless of the opt-in windows."""
+    now = datetime.now(timezone.utc)
+    await _write_pin("thread\npurged", now=now - timedelta(days=40))  # purge_at 12 days ago
+    await _write_pin("thread\ntombstone", now=now - timedelta(days=10))  # expired, still answerable
+    await _write_pin("thread\nlive", now=now)
+    caplog.set_level(logging.WARNING, logger="app.core.retention.job")
+
+    deleted = await run_retention_pass(now=utcnow())
+
+    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 1}
+    assert not await _pin_exists("thread\npurged")
+    assert await _pin_exists("thread\ntombstone")
+    assert await _pin_exists("thread\nlive")
+    assert "model_source_pins_drain_invariant_violated" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_model_source_pin_purge_drains_backlog_across_batches(db_setup):
+    now = datetime.now(timezone.utc)
+    for index in range(5):
+        await _write_pin(f"thread\npurged-{index}", now=now - timedelta(days=40))
+    await _write_pin("thread\nlive", now=now)
+
+    assert await prune_model_source_pins(batch_size=2) == 5
+    assert await prune_model_source_pins(batch_size=2) == 0
+    assert await _pin_exists("thread\nlive")
+
+
+@pytest.mark.asyncio
+async def test_model_source_pin_drain_invariant_alarm(db_setup, caplog):
+    """While a drain is armed every row must purge before the deadline; a later ``purge_at`` is logged, not repaired."""
+    now = datetime.now(timezone.utc)
+    drain_until_naive = utcnow() + timedelta(days=29)
+    drain_until = drain_until_naive.replace(tzinfo=timezone.utc)
+    await _arm_drain(drain_until_naive)
+    caplog.set_level(logging.WARNING, logger="app.core.retention.job")
+
+    # Rows written through the repository are drain-capped: no alarm.
+    await _write_pin("thread\ncapped", now=now, drain_until=drain_until)
+    assert await run_retention_pass(now=utcnow()) == {
+        "request_logs": 0,
+        "usage_history": 0,
+        "additional_usage_history": 0,
+        "model_source_pins": 0,
+    }
+    assert "model_source_pins_drain_invariant_violated" not in caplog.text
+
+    # A row that bypassed the cap (never produced by the repository) trips the alarm and stays.
+    async with SessionLocal() as session:
+        session.add(
+            ModelSourcePin(
+                pin_key="thread\nuncapped",
+                kind="thread",
+                source_id="src_overflow",
+                created_at=now,
+                last_seen_at=now,
+                expires_at=now + timedelta(days=7),
+                purge_at=drain_until + timedelta(days=1),
+            )
+        )
+        await session.commit()
+    await run_retention_pass(now=utcnow())
+    assert "model_source_pins_drain_invariant_violated" in caplog.text
+    assert await _pin_exists("thread\nuncapped")
+
+    # Clearing the drain silences the alarm.
+    caplog.clear()
+    await _arm_drain(None)
+    await run_retention_pass(now=utcnow())
+    assert "model_source_pins_drain_invariant_violated" not in caplog.text

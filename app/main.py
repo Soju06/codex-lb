@@ -27,9 +27,13 @@ from app.core.auth.guardian import build_auth_guardian_scheduler
 from app.core.balancer import configure_replica_salt
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
+from app.core.clients.native_egress import close_discovered_native_egress_client
+from app.core.config.dashboard_overrides import effective_settings
 from app.core.config.key_fingerprint import verify_encryption_key_fingerprint
 from app.core.config.settings import (
+    Settings,
     _bridge_advertise_hostname_is_replica_specific,
+    _parse_port_value,
     get_settings,
     warn_removed_settings,
 )
@@ -50,6 +54,7 @@ from app.core.middleware import (
     add_trusted_proxy_headers_middleware,
 )
 from app.core.middleware.dashboard_gzip import add_dashboard_gzip_middleware
+from app.core.middleware.dashboard_overrides import DashboardOverridesMiddleware
 from app.core.middleware.inflight import InFlightMiddleware
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.resilience.backpressure import BackpressureMiddleware
@@ -57,13 +62,21 @@ from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
 from app.core.resilience.loop_lag_monitor import run_event_loop_lag_monitor
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.retention.scheduler import build_data_retention_scheduler
+from app.core.runtime_logging import install_redacting_loop_exception_handler
 from app.core.scheduling.leader_election import get_leader_election
 from app.core.shutdown import close_control_plane_task_admission
-from app.core.timeout_invariants import validate_runtime_timeout_invariants
+from app.core.timeout_invariants import validate_runtime_timeout_invariants, validate_timeout_invariants
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
-from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
+from app.db.session import (
+    SessionLocal,
+    close_db,
+    close_session,
+    init_background_db,
+    init_db,
+    mark_sqlite_shutdown_clean,
+)
 from app.modules.accounts import api as accounts_api
 from app.modules.accounts.deletion import build_account_deletion_scheduler
 from app.modules.accounts.repository import AccountsRepository
@@ -85,7 +98,10 @@ from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
-from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
+from app.modules.proxy.durable_bridge_repository import (
+    DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
+    missing_durable_bridge_tables,
+)
 from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
@@ -98,13 +114,18 @@ from app.modules.quota_planner import api as quota_planner_api
 from app.modules.quota_planner.scheduler import build_quota_planner_scheduler
 from app.modules.rate_limit_reset_credits import api as rate_limit_reset_credits_api
 from app.modules.reports import api as reports_api
+from app.modules.reports.cache import ReportsCaches
 from app.modules.request_logs import api as request_logs_api
 from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
+from app.modules.settings.service import warn_environment_shadowed_by_dashboard
 from app.modules.sticky_sessions import api as sticky_sessions_api
 from app.modules.sticky_sessions.cleanup_scheduler import (
+    OperationRetentionCleanupResult,
     _abandoned_bridge_retention_seconds,
+    _record_operation_retention_cleanup,
     build_sticky_session_cleanup_scheduler,
+    operation_retention_metrics_enabled,
 )
 from app.modules.telemetry import api as telemetry_api
 from app.modules.telemetry.scheduler import build_telemetry_scheduler
@@ -144,17 +165,18 @@ _ensure_web_asset_mime_types()
 async def run_http_bridge_heartbeat_maintenance(proxy_service: Any) -> None:
     """Per-replica bridge upkeep driven by the ring heartbeat.
 
-    Both passes are request-independent by design: durable ownership must be
+    All passes are request-independent by design: durable ownership must be
     reconciled even on a replica nothing is routing to, and the idle sweep is
     otherwise only reached from ``_get_or_create_http_bridge_session``, so a
     replica that stops taking bridge requests would keep its idle sessions'
     upstream WebSockets open until restart (issue #1354). Each pass is isolated
-    so one failing cannot skip the other or stop the heartbeat.
+    so one failing cannot skip the others or stop the heartbeat.
     """
     if proxy_service is None:
         return
     for attribute, failure_message in (
         ("reconcile_durable_http_bridge_ownership", "HTTP bridge durable ownership reconciliation failed"),
+        ("abandon_stale_http_bridge_operations", "HTTP bridge stale operation abandonment failed"),
         ("prune_idle_http_bridge_sessions", "HTTP bridge idle sweep failed"),
     ):
         pass_callable = getattr(proxy_service, attribute, None)
@@ -166,7 +188,7 @@ async def run_http_bridge_heartbeat_maintenance(proxy_service: Any) -> None:
             logger.warning(failure_message, exc_info=True)
 
 
-def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:
+def _log_abandoned_lease_release(task: asyncio.Task[bool]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -174,7 +196,7 @@ def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:
         logger.warning("Abandoned scheduler leader lease release finished with error", exc_info=exc)
 
 
-async def _release_leader_lease_within(timeout: float) -> None:
+async def _release_leader_lease_within(timeout: float) -> bool:
     """Release the scheduler leader lease without ever pinning shutdown.
 
     ``release()`` uses a background DB session whose rollback/close shield and
@@ -185,7 +207,7 @@ async def _release_leader_lease_within(timeout: float) -> None:
     outcome from a done callback) so shutdown always proceeds within the
     deadline; the lease then expires after its TTL, which is acceptable.
     """
-    release_task: asyncio.Task[None] = asyncio.ensure_future(get_leader_election().release())
+    release_task: asyncio.Task[bool] = asyncio.ensure_future(get_leader_election().release())
     done, _ = await asyncio.wait({release_task}, timeout=timeout)
     if release_task not in done:
         logger.warning(
@@ -194,10 +216,18 @@ async def _release_leader_lease_within(timeout: float) -> None:
             timeout,
         )
         release_task.add_done_callback(_log_abandoned_lease_release)
-        return
+        return False
+    if release_task.cancelled():
+        logger.warning("Scheduler leader lease release was cancelled during shutdown")
+        return False
     exc = release_task.exception()
     if exc is not None:
         logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=exc)
+        return False
+    if release_task.result() is False:
+        logger.warning("Scheduler leader lease release did not complete; suppressing the SQLite clean marker")
+        return False
+    return True
 
 
 async def _drain_proxy_persistence_tasks(
@@ -220,7 +250,45 @@ async def _drain_proxy_persistence_tasks(
         return False
 
 
-async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
+async def _close_proxy_http_bridge_sessions_for_shutdown(
+    proxy_service: Any,
+    *,
+    mark_draining: bool,
+) -> bool:
+    """Close bridge resources and report whether that database-owning step completed.
+
+    Bridge teardown owns durable leases and can enqueue persistence work.  A
+    failed mark/close must therefore suppress the SQLite ``clean`` marker even
+    when the later persistence drain and engine disposal happen to complete.
+    ``None`` remains a successful result for older/test service doubles; the
+    concrete service returns ``True`` or ``False`` explicitly.
+    """
+    if proxy_service is None:
+        return True
+
+    bridge_sessions_drained = True
+    if mark_draining and hasattr(proxy_service, "mark_http_bridge_draining"):
+        try:
+            result = await proxy_service.mark_http_bridge_draining()
+            if result is False:
+                bridge_sessions_drained = False
+        except Exception:
+            logger.warning("Failed to mark HTTP bridge durable sessions draining during shutdown", exc_info=True)
+            bridge_sessions_drained = False
+
+    if hasattr(proxy_service, "close_all_http_bridge_sessions"):
+        try:
+            result = await proxy_service.close_all_http_bridge_sessions()
+            if result is False:
+                bridge_sessions_drained = False
+        except Exception:
+            logger.warning("Failed to close HTTP bridge sessions during shutdown", exc_info=True)
+            bridge_sessions_drained = False
+
+    return bridge_sessions_drained
+
+
+async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> bool:
     # Closing admission is synchronous with producer checks on the event loop,
     # so no task can appear after the stable drain passes complete.
     close_control_plane_task_admission()
@@ -249,7 +317,7 @@ async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
                 clean_pass = False
 
         if not clean_pass:
-            return
+            return False
 
         clean_passes += 1
 
@@ -258,6 +326,7 @@ async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
         # HTTP clients and DB engines are torn down.
         if clean_passes < 2:
             await asyncio.sleep(0)
+    return True
 
 
 class _MetricsServer(Protocol):
@@ -315,11 +384,100 @@ def _log_non_multiproc_metrics_bind_conflict(port: int) -> None:
     )
 
 
+async def _close_db_and_record_clean_shutdown(
+    *,
+    database_tasks_drained: bool,
+    leader_lease_release_completed: bool,
+) -> None:
+    """Dispose the database engines, then record the shutdown as clean.
+
+    The record is only reached once disposal returns and every database-owning
+    shutdown drain completed. A cancellation, failed dispose, or abandoned
+    drain must leave the run state unclean, because that is exactly the
+    incomplete shutdown the next startup's integrity scan is for.
+    """
+    sqlite_teardown_drained = await close_db()
+    if sqlite_teardown_drained and database_tasks_drained and leader_lease_release_completed:
+        mark_sqlite_shutdown_clean()
+
+
+async def _purge_operation_spool_on_startup(*, retention_seconds: float) -> int:
+    """Run one bounded transcript purge and record a sanitized aggregate result."""
+
+    started_at = time.monotonic()
+    try:
+        operation_purge_result = await DurableBridgeSessionCoordinator(SessionLocal).purge_operation_spool_batch(
+            cutoff=utcnow() - timedelta(seconds=retention_seconds),
+        )
+    except Exception as exc:
+        result = OperationRetentionCleanupResult(
+            deleted_operations=0,
+            batches=0,
+            backlog_likely=True,
+            outcome="failed",
+            duration_seconds=max(time.monotonic() - started_at, 0.0),
+        )
+        _record_operation_retention_cleanup(result)
+        logger.warning(
+            "HTTP bridge operation transcript startup retention failed "
+            "deleted_operations=0 batches=0 outcome=failed backlog_likely=true "
+            "duration_seconds=%.3f error_type=%s",
+            result.duration_seconds,
+            type(exc).__name__,
+        )
+        raise RuntimeError("HTTP bridge operation transcript startup retention failed") from None
+
+    backlog_likely = operation_purge_result.selected_operations >= DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
+    result = OperationRetentionCleanupResult(
+        deleted_operations=operation_purge_result.deleted_operations,
+        batches=1,
+        backlog_likely=backlog_likely,
+        outcome="batch_budget_exhausted" if backlog_likely else "completed",
+        duration_seconds=max(time.monotonic() - started_at, 0.0),
+    )
+    _record_operation_retention_cleanup(result)
+    if not operation_retention_metrics_enabled():
+        logger.info(
+            "HTTP bridge operation transcript startup retention "
+            "deleted_operations=%s batches=%s outcome=%s "
+            "backlog_likely=%s duration_seconds=%.3f",
+            result.deleted_operations,
+            result.batches,
+            result.outcome,
+            result.backlog_likely,
+            result.duration_seconds,
+        )
+    return operation_purge_result.deleted_operations
+
+
+async def _report_dashboard_timeout_overrides(settings: Settings) -> None:
+    """Best-effort startup report on the dashboard-managed timeouts (C2-1).
+
+    Names env aliases the dashboard shadows and logs (never raises) invariant
+    violations of the effective values — a stored dashboard value can break a
+    combination the environment alone satisfies. A snapshot read failure must
+    not abort boot: the environment fallback stays in force until the cache
+    recovers.
+    """
+    try:
+        dashboard_settings_row = await get_settings_cache().get()
+    except Exception:  # noqa: BLE001 - startup must not depend on the snapshot
+        logger.debug("dashboard settings snapshot unavailable at startup; environment timeouts apply", exc_info=True)
+        return
+    warn_environment_shadowed_by_dashboard(dashboard_settings_row, settings)
+    validate_timeout_invariants(effective_settings(dashboard_settings_row, settings), strict=False, log=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
 
+    app.state.reports_caches = ReportsCaches()
     shutdown_state = import_module("app.core.shutdown")
+    # First app code on uvicorn's loop: mask credential-bearing object reprs
+    # (aiohttp ConnectionKey proxy URLs, BasicAuth) before the default handler
+    # renders them into the 'asyncio' logger.
+    install_redacting_loop_exception_handler(asyncio.get_running_loop())
     metrics_server = None
     metrics_server_task: asyncio.Task[None] | None = None
     ring_service = None
@@ -347,13 +505,12 @@ async def lifespan(app: FastAPI):
     if _auto_bootstrap_token:
         log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
+    await _report_dashboard_timeout_overrides(settings)
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready is True:
         startup_module.mark_bridge_durable_schema_ready()
         dashboard_settings = await get_settings_cache().get()
-        ownerless_cutoff = utcnow() - timedelta(
-            seconds=_abandoned_bridge_retention_seconds(dashboard_settings, settings)
-        )
+        ownerless_cutoff = utcnow() - timedelta(seconds=_abandoned_bridge_retention_seconds(dashboard_settings))
         deleted_bridge_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_owned_sessions_on_startup(
             instance_id=settings.http_responses_session_bridge_instance_id,
             owner_process_epoch=http_bridge_owner_process_epoch(),
@@ -367,9 +524,8 @@ async def lifespan(app: FastAPI):
                     "deleted": deleted_bridge_rows,
                 },
             )
-        purged_operation_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_operation_spool(
-            cutoff=utcnow()
-            - timedelta(seconds=settings.http_responses_session_bridge_operation_spool_retention_seconds),
+        purged_operation_rows = await _purge_operation_spool_on_startup(
+            retention_seconds=settings.http_responses_session_bridge_operation_spool_retention_seconds,
         )
         if purged_operation_rows > 0:
             logger.info(
@@ -390,6 +546,7 @@ async def lifespan(app: FastAPI):
         get_cache_invalidation_poller,
         set_cache_invalidation_poller,
     )
+    from app.core.config.context_window_overrides import get_model_context_window_overrides_cache
     from app.core.middleware.firewall_cache import get_firewall_ip_cache
     from app.core.upstream_proxy.cache import get_upstream_route_cache
     from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
@@ -415,25 +572,36 @@ async def lifespan(app: FastAPI):
         NAMESPACE_SETTINGS,
         lambda: get_settings_cache().invalidate(propagate=False),
     )
+    # Then pull the new row in. Readers that cannot await the cache (the
+    # conversation archive gate runs per archived frame) would otherwise keep
+    # the pre-change snapshot on a replica that is only carrying already-open
+    # streams; the invalidate above already expired it, so a failed refresh
+    # degrades to the ordinary TTL reload instead of serving a stale value.
+    cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_settings_cache().refresh)
     cache_poller.on_invalidation(NAMESPACE_UPSTREAM_ROUTE, get_upstream_route_cache().clear)
     # The route resolver also reads the dashboard settings row (routing enabled
     # + default pool id), so settings bumps clear resolved routes as well.
     cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_upstream_route_cache().clear)
+    # M4 model catalogue: the per-model context window override rows are
+    # invalidated through the settings namespace as well.
+    cache_poller.on_invalidation(
+        NAMESPACE_SETTINGS,
+        lambda: get_model_context_window_overrides_cache().invalidate(propagate=False),
+    )
     # The bus carries no payload, so a peer redeem clears this replica's whole
     # reset-credits store; the refresh scheduler repopulates it on its next tick.
     cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
-    if settings.model_registry_enabled:
-        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
+    from app.core.openai.model_registry_store import reconcile_model_registry_from_store
 
-        # raise_on_error=True so a transient load failure leaves the
-        # model_registry version unacknowledged and is retried on the next poll
-        # cycle (matching the account_routing refresh callback) instead of being
-        # swallowed, which would strand this replica on the stale catalog until
-        # the non-leader scheduler backstop.
-        cache_poller.on_invalidation(
-            NAMESPACE_MODEL_REGISTRY,
-            lambda: reconcile_model_registry_from_store(raise_on_error=True),
-        )
+    # raise_on_error=True so a transient load failure leaves the
+    # model_registry version unacknowledged and is retried on the next poll
+    # cycle (matching the account_routing refresh callback) instead of being
+    # swallowed, which would strand this replica on the stale catalog until
+    # the non-leader scheduler backstop.
+    cache_poller.on_invalidation(
+        NAMESPACE_MODEL_REGISTRY,
+        lambda: reconcile_model_registry_from_store(raise_on_error=True),
+    )
     set_cache_invalidation_poller(cache_poller)
 
     # Seed the invalidation version baseline BEFORE loading the routing snapshot
@@ -464,13 +632,10 @@ async def lifespan(app: FastAPI):
         # account_routing bump retries the refresh via the poller callback.
         logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
 
-    if settings.model_registry_enabled:
-        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
-
-        # Warm the in-memory registry from the persisted snapshot before any
-        # scheduler starts so a restarted replica serves the refreshed catalog
-        # instead of the bootstrap floor. Never fails startup.
-        await reconcile_model_registry_from_store()
+    # Warm the in-memory registry from the persisted snapshot before any
+    # scheduler starts so a restarted replica serves the refreshed catalog
+    # instead of the bootstrap floor. Never fails startup.
+    await reconcile_model_registry_from_store()
 
     await cache_poller.start()
 
@@ -566,7 +731,9 @@ async def lifespan(app: FastAPI):
         await svc.register(iid, endpoint_base_url=None)
         await _wait_for_bridge_advertise_endpoint(
             bridge_endpoint_base_url,
-            connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+            connect_timeout_seconds=effective_settings(
+                await get_settings_cache().get(), settings
+            ).upstream_connect_timeout_seconds,
         )
         await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
         startup_module.mark_bridge_registration_complete()
@@ -634,36 +801,31 @@ async def lifespan(app: FastAPI):
         recovery_settlements_drained = True
         # Settle detached recovery journals while their origin leases are
         # still held; bridge teardown below may release those owner fences.
-        remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
         recovery_settlements_drained = await _drain_proxy_persistence_tasks(
             proxy_service,
-            remaining_drain_seconds,
+            shutdown_state.remaining_post_drain_cleanup_timeout_seconds() or 0.0,
             task_name_prefixes=("http-bridge-recovery-settlement-",),
             failure_message="Failed to pre-drain proxy settlement tasks during shutdown",
         )
-        if (
-            recovery_settlements_drained
-            and proxy_service is not None
-            and hasattr(proxy_service, "mark_http_bridge_draining")
-        ):
-            try:
-                await proxy_service.mark_http_bridge_draining()
-            except Exception:
-                logger.warning("Failed to mark HTTP bridge durable sessions draining during shutdown", exc_info=True)
-        if proxy_service is not None and hasattr(proxy_service, "close_all_http_bridge_sessions"):
-            try:
-                await proxy_service.close_all_http_bridge_sessions()
-            except Exception:
-                logger.warning("Failed to close HTTP bridge sessions during shutdown", exc_info=True)
+        # An in-flight request can still own a database session after the
+        # process-wide drain deadline. It is therefore part of the clean proof
+        # even though the later detached drains have their own gates.
+        database_tasks_drained = drained and recovery_settlements_drained
+        bridge_sessions_drained = await _close_proxy_http_bridge_sessions_for_shutdown(
+            proxy_service,
+            mark_draining=recovery_settlements_drained,
+        )
+        database_tasks_drained = database_tasks_drained and bridge_sessions_drained
         # Drain AFTER the bridge teardown: failing a bridge's pending
         # requests writes their request logs, which enqueues more
         # persistence tasks that this drain must cover.
         remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
-        await _drain_proxy_persistence_tasks(
+        final_proxy_persistence_drained = await _drain_proxy_persistence_tasks(
             proxy_service,
             remaining_drain_seconds,
             failure_message="Failed to drain proxy persistence tasks during shutdown",
         )
+        database_tasks_drained = database_tasks_drained and final_proxy_persistence_drained
 
         # Cancel heartbeat and age the shared ring row near expiry.
         if heartbeat_task is not None:
@@ -705,7 +867,8 @@ async def lifespan(app: FastAPI):
         # The replica heartbeat is already stopped/staled so this grace period
         # does not extend its active bridge-ring lifetime.
         remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
-        await _drain_detached_control_plane_tasks(remaining_drain_seconds)
+        control_plane_tasks_drained = await _drain_detached_control_plane_tasks(remaining_drain_seconds)
+        database_tasks_drained = database_tasks_drained and control_plane_tasks_drained
 
         # Start the single process-level lease-renewal keeper BEFORE stopping any
         # scheduler. Schedulers are stopped one at a time and only the final
@@ -755,9 +918,12 @@ async def lifespan(app: FastAPI):
         # release path shields and awaits its own session teardown — is
         # enforced by abandoning the release task rather than awaiting a
         # potentially wedged cancellation, so shutdown always proceeds.
-        await _release_leader_lease_within(10)
+        leader_lease_release_completed = await _release_leader_lease_within(10)
         try:
-            await close_http_client()
+            try:
+                await close_discovered_native_egress_client()
+            finally:
+                await close_http_client()
         finally:
             try:
                 if metrics_server_task is not None:
@@ -769,7 +935,10 @@ async def lifespan(app: FastAPI):
             finally:
                 mark_process_dead()
                 try:
-                    await close_db()
+                    await _close_db_and_record_clean_shutdown(
+                        database_tasks_drained=database_tasks_drained,
+                        leader_lease_release_completed=leader_lease_release_completed,
+                    )
                 finally:
                     shutdown_state.mark_lifespan_completed()
 
@@ -788,6 +957,10 @@ def create_app() -> FastAPI:
 
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
 
+    # Innermost of the app-level middlewares: binds the dashboard-managed
+    # settings overrides (C2-1 timeouts) for the request/socket once the
+    # admission middlewares below have let it through.
+    app.add_middleware(cast(Any, DashboardOverridesMiddleware))
     app.add_middleware(cast(Any, InFlightMiddleware))
     add_dashboard_gzip_middleware(app)
     add_dashboard_auth_proxy_middleware(app)
@@ -966,16 +1139,6 @@ def _local_api_port() -> int | None:
     port = _parse_port_value(raw.strip()) if raw is not None else None
     if port is None:
         port = _port_from_argv()
-    return port
-
-
-def _parse_port_value(raw: str) -> int | None:
-    try:
-        port = int(raw)
-    except ValueError:
-        return None
-    if port <= 0:
-        return None
     return port
 
 

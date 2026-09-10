@@ -13,6 +13,7 @@ from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import (
     DEFAULT_PROBE_MODEL,
+    PROBE_MAX_OUTPUT_TOKENS,
     AccountNotProbableError,
     AccountsService,
 )
@@ -102,11 +103,24 @@ async def test_probe_account_rejects_deactivated_account():
 
 
 @pytest.mark.asyncio
-async def test_probe_account_rejects_reauth_required_account():
+async def test_probe_account_allows_reauth_required_account(monkeypatch):
     account = _make_account(status=AccountStatus.REAUTH_REQUIRED)
     service = _build_service(account=account)
-    with pytest.raises(AccountNotProbableError):
-        await service.probe_account(_ACCOUNT_ID)
+    captured_kwargs: dict[str, object] = {}
+
+    async def _fake_probe(**kwargs: object) -> int:
+        captured_kwargs.update(kwargs)
+        return 200
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    result = await service.probe_account(_ACCOUNT_ID)
+
+    assert result is not None
+    assert result.probe_status_code == 200
+    assert result.account_status_before == AccountStatus.REAUTH_REQUIRED.value
+    assert result.account_status_after == AccountStatus.REAUTH_REQUIRED.value
+    assert captured_kwargs["access_token"] == _PROBE_TOKEN_PLAINTEXT
 
 
 @pytest.mark.asyncio
@@ -143,7 +157,7 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
     assert service._usage_updater is not None
     force_refresh_mock = service._usage_updater.force_refresh_result
     assert isinstance(force_refresh_mock, AsyncMock)
-    force_refresh_mock.assert_awaited_once_with(account, ignore_refresh_disabled=True)
+    force_refresh_mock.assert_awaited_once_with(account)
 
 
 @pytest.mark.asyncio
@@ -337,6 +351,10 @@ async def test_send_probe_request_uses_shared_http_client(monkeypatch):
     assert captured["headers"]["Authorization"] == f"Bearer {_PROBE_TOKEN_PLAINTEXT}"
     assert captured["headers"]["chatgpt-account-id"] == _CHATGPT_ACCOUNT_ID
     assert captured["json"]["model"] == "gpt-5.5-test"
+    assert captured["json"]["max_output_tokens"] == PROBE_MAX_OUTPUT_TOKENS
+    assert captured["json"]["max_output_tokens"] == 16
+    assert captured["json"]["stream"] is True
+    assert captured["json"]["store"] is False
     assert captured["timeout"].total == 30.0
     assert captured["timeout"].connect is None
     assert captured["timeout"].sock_connect == 10.0

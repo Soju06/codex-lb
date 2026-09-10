@@ -22,6 +22,7 @@ from app.core.clients.proxy import transcribe_audio as core_transcribe_audio
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
@@ -186,6 +187,7 @@ class _TranscribeMixin:
         transcribe_model = "gpt-4o-transcribe"
 
         settings = await _service_get_settings_cache().get()
+        bind_resilience_toggles(settings)  # C2-3 resilience toggles
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
         try:

@@ -35,7 +35,7 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     formatters = log_config["formatters"]
     assert formatters["default"]["fmt"].startswith("%(asctime)s ")
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
-    assert kwargs["timeout_keep_alive"] == 7200
+    assert kwargs["timeout_keep_alive"] == 300
     assert kwargs["ws_max_size"] == 128 * 1024 * 1024
     assert "workers" not in kwargs
     assert kwargs["proxy_headers"] is False
@@ -227,6 +227,9 @@ def test_run_server_uses_graceful_server_and_shared_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
+    # Warnings (aiohttp ResourceWarning reprs) must flow through the redacting
+    # log handlers rather than raw stderr.
+    monkeypatch.setattr(logging, "captureWarnings", lambda capture: captured.__setitem__("capture_warnings", capture))
 
     class FakeConfig:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -266,6 +269,7 @@ def test_run_server_uses_graceful_server_and_shared_timeout(
     assert captured["drain_timeout_seconds"] == 17
     assert captured["loaded"] is True
     assert captured["ran"] is True
+    assert captured["capture_warnings"] is True
 
 
 def test_load_http_protocol_class_falls_back_to_h11_without_httptools(

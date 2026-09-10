@@ -286,3 +286,65 @@ async def test_list_recent_count_cache_key_includes_conversation_id(db_setup, mo
     logs_repository_module._clear_recent_count_cache()
     assert result_a.total == 2
     assert result_b.total == 1
+
+
+@pytest.mark.asyncio
+async def test_list_recent_count_cache_uses_symbolic_timeframe_identity(
+    db_setup,
+    monkeypatch,
+):
+    from app.modules.request_logs import repository as logs_repository_module
+
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    logs_repository_module._clear_recent_count_cache()
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        first_since = utcnow() - timedelta(hours=1)
+        async with SessionLocal() as session:
+            repo = RequestLogsRepository(session)
+            await repo.add_log(
+                account_id=None,
+                request_id="req_timeframe_cache",
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=1,
+                latency_ms=10,
+                status="success",
+                error_code=None,
+                requested_at=utcnow(),
+            )
+            statements.clear()
+            await repo.list_recent(
+                search="req_timeframe_cache",
+                since=first_since,
+                cache_mode="timeframe",
+                timeframe="1h",
+            )
+            await repo.list_recent(
+                search="req_timeframe_cache",
+                since=first_since + timedelta(minutes=1),
+                cache_mode="timeframe",
+                timeframe="1h",
+            )
+            await repo.list_recent(
+                search="req_timeframe_cache",
+                since=first_since,
+                cache_mode="timeframe",
+                timeframe="24h",
+            )
+            await repo.list_recent(
+                search="req_timeframe_cache",
+                since=first_since,
+                cache_mode="since",
+            )
+
+        count_queries = [statement for statement in statements if "count(request_logs.id)" in statement.lower()]
+        assert len(count_queries) == 3
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+        logs_repository_module._clear_recent_count_cache()

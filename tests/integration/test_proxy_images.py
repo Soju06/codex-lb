@@ -20,6 +20,7 @@ import pytest
 from httpx import AsyncByteStream
 from sqlalchemy import select
 from starlette.datastructures import UploadFile
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 import app.modules.proxy.api as proxy_api_module
@@ -97,13 +98,8 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
-        upstream_stream_transport="auto",
         stream_idle_timeout_seconds=300.0,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
     dashboard_settings = DashboardSettings(
         id=1,
@@ -1317,7 +1313,7 @@ async def test_images_variations_returns_404(async_client):
 
 @pytest.mark.asyncio
 async def test_images_generations_falls_back_to_default_model_when_omitted(async_client, monkeypatch):
-    """Omitting ``model`` should fall back to ``settings.images_default_model``."""
+    """Omitting ``model`` should fall back to ``DEFAULT_PUBLIC_IMAGE_MODEL``."""
     await _import_account(async_client, "acc_images_default", "img-default@example.com")
 
     captured: dict[str, Any] = {}
@@ -1352,7 +1348,7 @@ async def test_images_generations_falls_back_to_default_model_when_omitted(async
     )
     assert response.status_code == 200, response.text
     image_tool = cast(dict[str, Any], cast(list[Any], captured["tools"])[0])
-    # Default falls back to images_default_model = "gpt-image-2".
+    # Default falls back to DEFAULT_PUBLIC_IMAGE_MODEL = "gpt-image-2".
     assert image_tool["model"] == "gpt-image-2"
 
 
@@ -1405,9 +1401,214 @@ async def test_images_generations_propagates_upstream_error_before_first_chunk(a
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["generations", "edits"])
+async def test_image_routes_cancel_before_first_upstream_frame_release_reservation(
+    async_client,
+    monkeypatch,
+    route,
+):
+    await _enable_api_key_auth(async_client)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": f"images-{route}-cancel-before-first-frame",
+            "limits": [
+                {
+                    "limitType": "total_tokens",
+                    "limitWindow": "weekly",
+                    "maxValue": 1_000_000,
+                },
+            ],
+        },
+    )
+    assert created.status_code == 200, created.text
+    key_payload = created.json()
+    api_key = key_payload["key"]
+    api_key_id = key_payload["id"]
+
+    await _import_account(
+        async_client,
+        f"acc_images_{route}_cancel_prime",
+        f"img-{route}-cancel-prime@example.com",
+    )
+
+    upstream_entered = asyncio.Event()
+    upstream_closed = asyncio.Event()
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        upstream_entered.set()
+        try:
+            if False:  # pragma: no cover - generator marker only
+                yield ""
+            await asyncio.Event().wait()
+        finally:
+            upstream_closed.set()
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    from app.modules.api_keys.service import ApiKeysService
+
+    release_calls: list[str] = []
+    release_started = asyncio.Event()
+    release_allowed = asyncio.Event()
+    release_completed = asyncio.Event()
+    original_release = ApiKeysService.release_usage_reservation
+
+    async def tracked_release(self, reservation_id):
+        release_calls.append(reservation_id)
+        release_started.set()
+        await release_allowed.wait()
+        await original_release(self, reservation_id)
+        release_completed.set()
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(ApiKeysService, "release_usage_reservation", tracked_release)
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if route == "generations":
+        request = async_client.post(
+            "/v1/images/generations",
+            headers=headers,
+            json={
+                "model": "gpt-image-2",
+                "prompt": "cancel before first frame",
+                "size": "1024x1024",
+                "quality": "low",
+            },
+        )
+    else:
+        request = async_client.post(
+            "/v1/images/edits",
+            headers=headers,
+            data={
+                "model": "gpt-image-2",
+                "prompt": "cancel before first frame",
+                "size": "1024x1024",
+                "quality": "low",
+            },
+            files={
+                "image": (
+                    "source.png",
+                    b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
+                    "image/png",
+                ),
+            },
+        )
+
+    request_task = asyncio.create_task(request)
+    await asyncio.wait_for(upstream_entered.wait(), timeout=1.0)
+    request_task.cancel()
+
+    await asyncio.wait_for(release_started.wait(), timeout=1.0)
+    assert upstream_closed.is_set()
+    assert not request_task.done()
+
+    request_task.cancel()
+    await asyncio.sleep(0)
+    assert not request_task.done()
+
+    release_allowed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+    assert release_completed.is_set()
+
+    async with SessionLocal() as session:
+        reservations = (
+            (
+                await session.execute(
+                    select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == api_key_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(reservations) == 1
+        reservation = reservations[0]
+        assert release_calls == [reservation.id]
+        assert reservation.status == "released"
+
+        limits = await ApiKeysRepository(session).get_limits_by_key(api_key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_log"),
+    [
+        ("close", "Failed to close Images upstream stream after first-frame termination"),
+        ("release", "Failed to run Images first-frame termination cleanup"),
+    ],
+)
+async def test_prime_upstream_stream_cleanup_failure_preserves_original_cancellation(
+    caplog,
+    failure,
+    expected_log,
+):
+    cancellation = asyncio.CancelledError("upstream cancelled")
+    close_calls = 0
+    release_calls = 0
+
+    class _CancelledIterator:
+        def __aiter__(self) -> _CancelledIterator:
+            return self
+
+        async def __anext__(self) -> str:
+            raise cancellation
+
+        async def aclose(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if failure == "close":
+                raise RuntimeError("simulated close failure")
+
+    async def on_error() -> None:
+        nonlocal release_calls
+        release_calls += 1
+        if failure == "release":
+            raise RuntimeError("simulated release failure")
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/images/generations",
+            "headers": [],
+        }
+    )
+    iterator = _CancelledIterator()
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await proxy_api_module._prime_upstream_stream(
+                request,
+                iterator,
+                {},
+                on_error=on_error,
+            )
+
+    assert exc_info.value is cancellation
+    assert close_calls == 1
+    assert release_calls == 1
+    assert expected_log in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_images_edits_falls_back_to_default_model_when_omitted(async_client, monkeypatch):
     """Omitting ``model`` on multipart edits should fall back to
-    ``settings.images_default_model`` instead of being rejected by the
+    ``DEFAULT_PUBLIC_IMAGE_MODEL`` instead of being rejected by the
     FastAPI form parser with a 422.
     """
     await _import_account(async_client, "acc_images_edit_default", "img-edit-default@example.com")

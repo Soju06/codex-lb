@@ -394,8 +394,7 @@ def _compute_pooled_credits(
     account_map = {
         a.id: a
         for a in all_accounts
-        if a.id in requested_account_ids
-        and a.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+        if a.id in requested_account_ids and a.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
     }
     account_ids = set(account_map)
 
@@ -1390,7 +1389,7 @@ def _get_usage_sections_with_default(row: ApiKey) -> str:
 
 
 def _generate_plain_key() -> str:
-    return f"sk-clb-{secrets.token_urlsafe(32)}"
+    return f"sk-clb-{secrets.token_hex(24)}"
 
 
 def _hash_key(plain_key: str) -> str:

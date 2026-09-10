@@ -9,6 +9,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
+import anyio
+from anyio.lowlevel import checkpoint_if_cancelled
 from pydantic import ValidationError
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
@@ -28,10 +30,12 @@ from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
 from app.core.resilience.network_recovery import ProcessNetworkRecovery
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
+from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -262,17 +266,11 @@ def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
     return min(20.0, max(0.0, remaining_budget - reserve))
 
 
-def _compact_upstream_budget_seconds(
-    remaining_budget: float,
-    configured_timeout_seconds: float | None = None,
-) -> float:
+def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
     if remaining_budget <= 0:
         return 0.0
     reserve = _compact_upstream_call_budget_reserve_seconds(remaining_budget)
-    available = max(0.0, remaining_budget - reserve)
-    if configured_timeout_seconds is not None:
-        return min(configured_timeout_seconds, available)
-    return available
+    return max(0.0, remaining_budget - reserve)
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -626,9 +624,10 @@ class _CompactMixin:
         only for owner loss the owner's quota state caused. At selection time
         that evidence is the owner's own persisted status: ``RATE_LIMITED`` or
         ``QUOTA_EXCEEDED`` is the same upstream usage-exhaustion state the
-        selector consulted. Authentication loss (``REAUTH_REQUIRED``,
-        ``DEACTIVATED``), operator pauses, local capacity caps on an ``ACTIVE``
-        account, and a failed lookup all stay owner-bound.
+        selector consulted. Hard authentication loss (``DEACTIVATED``),
+        operator pauses, local capacity caps on a request-routable account, and
+        a failed lookup all stay owner-bound. ``REAUTH_REQUIRED`` remains
+        selectable and therefore does not itself cause owner loss.
         """
 
         proxy = cast(_CompactServiceProtocol, self)
@@ -850,6 +849,8 @@ class _CompactMixin:
                     )
             raise
         settings = await _service_get_settings_cache().get()
+        # C2-3 resilience toggles: this request's snapshot, bound for the client.
+        resilience = bind_resilience_toggles(settings, startup_settings=base_settings)
         concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
@@ -943,6 +944,7 @@ class _CompactMixin:
         deferred_stream_health: list[tuple[Account, Any, str, int | None]] = []
         deferred_http_500_health: list[tuple[Account, ProxyResponseError, int]] = []
         deferred_proxy_health: list[tuple[Account, ProxyResponseError]] = []
+        deferred_permanent_health: list[tuple[Account, str]] = []
         settlement_attempted = False
 
         async def flush_deferred_health() -> None:
@@ -952,6 +954,8 @@ class _CompactMixin:
             deferred_http_500_health.clear()
             proxy_pending = list(deferred_proxy_health)
             deferred_proxy_health.clear()
+            permanent_pending = list(deferred_permanent_health)
+            deferred_permanent_health.clear()
             for failed_account, failed_error, failed_code, failed_status in stream_pending:
                 try:
                     await proxy._handle_stream_error(
@@ -988,6 +992,16 @@ class _CompactMixin:
                         request_id,
                         exc_info=True,
                     )
+            for failed_account, failed_code in permanent_pending:
+                try:
+                    await proxy._load_balancer.mark_permanent_failure(failed_account, failed_code)
+                except Exception:
+                    logger.warning(
+                        "Failed to flush deferred compact permanent health account_id=%s request_id=%s",
+                        failed_account.id,
+                        request_id,
+                        exc_info=True,
+                    )
 
         async def settle_compact_usage(
             *,
@@ -1015,13 +1029,26 @@ class _CompactMixin:
                 name=f"compact-deferred-health-{request_id}",
             )
             cancellation_pending = False
-            while not flush_task.done():
+            # The anyio shield keeps a level-cancelled Starlette scope from
+            # re-raising into every ``await`` (busy-spin), and
+            # ``wait_on_shared_future`` keeps waits off the task's
+            # done-callback list (3.14 shield leaks one per cancelled wait).
+            with anyio.CancelScope(shield=True):
+                while not flush_task.done():
+                    try:
+                        await wait_on_shared_future(flush_task)
+                    except asyncio.CancelledError:
+                        cancellation_pending = True
+                    except Exception:
+                        break
+            if not cancellation_pending:
+                # The shield also blocks the level cancellation this block
+                # promises to re-raise after the flush. Probe without
+                # suspending so a disconnected compact request still cancels.
                 try:
-                    await asyncio.shield(flush_task)
+                    await checkpoint_if_cancelled()
                 except asyncio.CancelledError:
                     cancellation_pending = True
-                except Exception:
-                    break
             try:
                 flush_task.result()
             except Exception:
@@ -1060,6 +1087,15 @@ class _CompactMixin:
                 deferred_proxy_health.append((failed_account, failed_exc))
                 return
             await proxy._handle_proxy_error(failed_account, failed_exc)
+
+        async def record_or_defer_permanent_health(
+            failed_account: Account,
+            failed_code: str,
+        ) -> None:
+            if api_key is not None and api_key_reservation is not None:
+                deferred_permanent_health.append((failed_account, failed_code))
+                return
+            await proxy._load_balancer.mark_permanent_failure(failed_account, failed_code)
 
         async def record_or_defer_stream_health(
             failed_account: Account,
@@ -1114,10 +1150,7 @@ class _CompactMixin:
                             target.id,
                         )
                         _raise_proxy_budget_exhausted()
-                    upstream_budget = _compact_upstream_budget_seconds(
-                        remaining_budget,
-                        getattr(settings, "upstream_compact_timeout_seconds", None),
-                    )
+                    upstream_budget = _compact_upstream_budget_seconds(remaining_budget)
                     if upstream_budget <= 0:
                         logger.warning(
                             "Compact request budget exhausted before upstream call cap request_id=%s account_id=%s",
@@ -1156,6 +1189,7 @@ class _CompactMixin:
                                     "allow_direct_egress": route is None,
                                     "route_trace": route_trace,
                                     "chatgpt_account_id": account_id,
+                                    "synthesize_routing_hint": True,
                                 },
                             ),
                             timeout=upstream_budget,
@@ -1735,6 +1769,22 @@ class _CompactMixin:
                             except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
                                 if isinstance(refresh_exc, RefreshError):
                                     if refresh_exc.is_permanent:
+                                        if preferred_account_id is None:
+                                            # This compact request is not bound to an
+                                            # account-owned response, turn state, or
+                                            # file. Retire the revoked account and
+                                            # continue the same pre-visible request on
+                                            # another healthy account. For API-key
+                                            # requests the health write is deferred
+                                            # until after usage settlement.
+                                            await record_or_defer_permanent_health(
+                                                account,
+                                                refresh_exc.code,
+                                            )
+                                            last_exc = exc
+                                            excluded_account_ids.add(account.id)
+                                            transient_exhausted = True
+                                            break
                                         await settle_compact_usage(
                                             api_key=api_key,
                                             api_key_reservation=api_key_reservation,
@@ -1998,7 +2048,7 @@ class _CompactMixin:
                             http_status=exc.status_code,
                             phase="first_event",
                         )
-                        if getattr(base_settings, "deterministic_failover_enabled", True):
+                        if resilience.deterministic_failover_enabled:
                             action = failover_decision(
                                 failure_class=classified["failure_class"],
                                 downstream_visible=False,

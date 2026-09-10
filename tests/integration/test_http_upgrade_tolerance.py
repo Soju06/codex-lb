@@ -12,7 +12,10 @@ The suite covers three layers:
 - protocol-level tests driving ``UpgradeTolerantHttpToolsProtocol`` through a
   fake transport with both client segmentations;
 - canary tests pinning the stock behavior these fixes exist for (if a uvicorn
-  upgrade makes them fail, the subclass can likely be retired);
+  upgrade makes them fail, the upgrade-offer handling can be dropped; the
+  subclasses also release the keep-alive timer on connection loss, see
+  ``test_http_keepalive_timer.py``, and can only be retired once that canary
+  fails too);
 - a live-server test using the production protocol wiring over real sockets,
   including a real WebSocket upgrade that must keep completing.
 """
@@ -116,8 +119,8 @@ class _FakeTransport(asyncio.Transport):
         return default
 
 
-def _make_protocol(protocol_class: type[Any]) -> tuple[Any, _FakeTransport]:
-    config = uvicorn.Config(app=_echo_app, lifespan="off")
+def _make_protocol(protocol_class: type[Any], **config_kwargs: Any) -> tuple[Any, _FakeTransport]:
+    config = uvicorn.Config(app=_echo_app, lifespan="off", **config_kwargs)
     config.load()
     protocol = protocol_class(config=config, server_state=ServerState(), app_state={})
     transport = _FakeTransport()
@@ -386,8 +389,11 @@ async def test_stock_httptools_protocol_still_breaks_on_h2c_offers() -> None:
     The stock parser drops a coalesced body (the application observes an empty
     body) and answers 400 when the body arrives as a separate segment. If a
     uvicorn/httptools upgrade makes this test fail, upstream has fixed
-    https://github.com/Soju06/codex-lb/issues/1757 and
-    ``UpgradeTolerantHttpToolsProtocol`` can likely be retired.
+    https://github.com/Soju06/codex-lb/issues/1757 and the upgrade-offer
+    handling in ``UpgradeTolerantHttpToolsProtocol`` can be dropped. The
+    subclass itself also releases the keep-alive timer on connection loss
+    (``test_http_keepalive_timer.py``), so it can only be retired once that
+    canary fails as well.
     """
     protocol, transport = _make_protocol(HttpToolsProtocol)
     protocol.data_received(_H2C_HEAD + _BODY)

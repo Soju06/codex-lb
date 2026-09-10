@@ -6,6 +6,7 @@ from typing import cast
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers
+from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.config.settings import get_settings
@@ -16,6 +17,7 @@ from app.core.request_locality import (
     parse_trusted_proxy_networks,
     resolve_connection_client_ip,
 )
+from app.core.socket_peer import raw_socket_peer_host
 from app.db.session import get_background_session
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
@@ -47,10 +49,9 @@ class ApiFirewallMiddleware:
             await self.app(scope, receive, send)
             return
 
-        client = scope.get("client")
         client_ip = resolve_connection_client_ip(
             Headers(scope=scope),
-            client[0] if client else None,
+            raw_socket_peer_host(HTTPConnection(scope)),
             trust_proxy_headers=self._trust_proxy_headers,
             trusted_proxy_networks=self._trusted_proxy_networks,
             allowed_proxy_header_names=FORWARDED_CHAIN_HEADER_NAMES,
@@ -103,7 +104,7 @@ def _resolve_client_ip(
 ) -> str | None:
     return resolve_connection_client_ip(
         request.headers,
-        request.client.host if request.client else None,
+        raw_socket_peer_host(request),
         trust_proxy_headers=trust_proxy_headers,
         trusted_proxy_networks=trusted_proxy_networks,
         allowed_proxy_header_names=FORWARDED_CHAIN_HEADER_NAMES,

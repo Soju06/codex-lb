@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1123,6 +1124,69 @@ async def test_serialize_reset_credit_redeem_renews_sqlite_claim_while_held(
         events.append("locked")
 
     assert events == ["acquire", "heartbeat-start", "locked", "heartbeat-cancelled", "release"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_releases_reset_credit_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    heartbeat_started = asyncio.Event()
+    body_started = asyncio.Event()
+    release_started = asyncio.Event()
+    release_allowed = asyncio.Event()
+
+    async def fake_acquire(account_id: str, holder_id: str) -> None:
+        events.append("claim-acquired")
+
+    async def fake_heartbeat(account_id: str, holder_id: str) -> None:
+        heartbeat_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("heartbeat-stopped")
+            raise
+
+    async def fake_release(account_id: str, holder_id: str) -> None:
+        release_started.set()
+        await release_allowed.wait()
+        events.append("claim-released")
+
+    monkeypatch.setattr(reset_credits_api, "acquire_redeem_claim", fake_acquire)
+    monkeypatch.setattr(reset_credits_api, "renew_redeem_claim_periodically", fake_heartbeat)
+    monkeypatch.setattr(reset_credits_api, "release_redeem_claim", fake_release)
+
+    async def hold_claim() -> None:
+        async with serialize_reset_credit_redeem("acc_1", session=cast(Any, _FakeSqliteSession())):
+            await heartbeat_started.wait()
+            body_started.set()
+            await asyncio.Event().wait()
+
+    holder = asyncio.create_task(hold_claim())
+    try:
+        await asyncio.wait_for(body_started.wait(), timeout=5)
+
+        holder.cancel("redeem-body-cancelled")
+        await asyncio.wait_for(release_started.wait(), timeout=5)
+        holder.cancel("release-cancelled")
+        asyncio.get_running_loop().call_soon(release_allowed.set)
+
+        with pytest.raises(asyncio.CancelledError):
+            await holder
+        events.append("cancellation-propagated")
+
+        assert events == [
+            "claim-acquired",
+            "heartbeat-stopped",
+            "claim-released",
+            "cancellation-propagated",
+        ]
+    finally:
+        release_allowed.set()
+        if not holder.done():
+            holder.cancel()
+            with suppress(asyncio.CancelledError):
+                await holder
 
 
 @pytest.mark.asyncio

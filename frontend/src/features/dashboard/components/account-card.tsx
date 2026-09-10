@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { useSmoothPercent } from "@/hooks/use-smooth-percent";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import {
@@ -66,12 +67,12 @@ function QuotaBar({
                   : "text-red-600 dark:text-red-400",
           )}
         >
-          {formatPercentNullable(percent)}
+          {formatPercentNullable(percent, 1)}
         </span>
       </div>
       <div className={cn("h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
         <div
-          className={cn("h-full rounded-full transition-all duration-500 ease-out", quotaBarColor(clamped))}
+          className={cn("h-full rounded-full transition-colors duration-500 ease-out", quotaBarColor(clamped))}
           style={{ width: `${clamped}%` }}
         />
       </div>
@@ -88,14 +89,17 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
   const blurred = usePrivacyStore((s) => s.blurred);
   const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
   const status = normalizeStatus(account.status);
-  const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
-  const secondaryRemaining = account.usage?.secondaryRemainingPercent ?? null;
-  const monthlyRemaining = account.usage?.monthlyRemainingPercent ?? null;
-  const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
-  const monthlyOnly =
-    account.windowMinutesMonthly != null &&
-    account.windowMinutesPrimary == null &&
-    account.windowMinutesSecondary == null;
+  const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
+  const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
+  const monthlyState = useSmoothPercent(account.usage?.monthlyRemainingPercent ?? null);
+  const primaryRemaining = primaryState.percent;
+  const secondaryRemaining = secondaryState.percent;
+  const monthlyRemaining = monthlyState.percent;
+  const hasPrimaryWindow = account.windowMinutesPrimary != null || primaryState.everKnown;
+  const hasSecondaryWindow = account.windowMinutesSecondary != null || secondaryState.everKnown;
+  const hasMonthlyWindow = account.windowMinutesMonthly != null || monthlyState.everKnown;
+  const weeklyOnly = !hasPrimaryWindow && hasSecondaryWindow;
+  const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
   const subscriptionCreditsLabel = formatCreditValue(accountSubscriptionCredits(account));
   const purchasedCreditsLabel = formatPurchasedCredits(account, t("common.states.unlimited"));
 

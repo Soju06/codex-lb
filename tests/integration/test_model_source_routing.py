@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import socket
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+import json
+import time
+from collections.abc import AsyncGenerator, AsyncIterator
 from tempfile import SpooledTemporaryFile
-from typing import TypeAlias, cast
+from typing import cast
 
 import pytest
 import starlette.formparsers as starlette_formparsers
@@ -12,86 +13,22 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 from sqlalchemy import select
 
+from app.core.clients import http as http_module
+from app.core.clients.http import get_http_client
 from app.core.utils.time import utcnow
 from app.db.models import ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
+from tests.integration.model_source_helpers import (
+    _AsgiStream,
+    _create_model_source,
+    _enable_api_key_auth,
+    _free_port,
+    stub_source_upstreams,
+)
 
 pytestmark = pytest.mark.integration
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-async def _create_model_source(
-    async_client,
-    *,
-    name: str,
-    model: str,
-    base_url: str,
-    input_per_1m: float | None = None,
-    cached_input_per_1m: float | None = None,
-    output_per_1m: float | None = None,
-    audio_per_minute: float | None = None,
-    raw_metadata_json: str | None = None,
-    supports_responses: bool = False,
-    supports_streaming: bool = True,
-    supports_audio_transcriptions: bool = False,
-    supports_embeddings: bool = False,
-) -> str:
-    model_entry: dict[str, object] = {
-        "model": model,
-        "displayName": model,
-        "contextWindow": 8192,
-        "maxOutputTokens": 1024,
-        "supportsStreaming": supports_streaming,
-        "supportsTools": True,
-    }
-    if raw_metadata_json is not None:
-        model_entry["rawMetadataJson"] = raw_metadata_json
-    if input_per_1m is not None:
-        model_entry["inputPer1M"] = input_per_1m
-    if cached_input_per_1m is not None:
-        model_entry["cachedInputPer1M"] = cached_input_per_1m
-    if output_per_1m is not None:
-        model_entry["outputPer1M"] = output_per_1m
-    if audio_per_minute is not None:
-        model_entry["audioPerMinute"] = audio_per_minute
-    response = await async_client.post(
-        "/api/model-sources/",
-        json={
-            "name": name,
-            "baseUrl": base_url,
-            "apiKey": f"token-{name}",
-            "supportsChatCompletions": True,
-            "supportsResponses": supports_responses,
-            "supportsAudioTranscriptions": supports_audio_transcriptions,
-            "supportsEmbeddings": supports_embeddings,
-            "models": [model_entry],
-        },
-    )
-    assert response.status_code == 200
-    return response.json()["id"]
-
-
-async def _enable_api_key_auth(async_client) -> None:
-    response = await async_client.put(
-        "/api/settings",
-        json={
-            "stickyThreadsEnabled": False,
-            "preferEarlierResetAccounts": False,
-            "totpRequiredOnLogin": False,
-            "apiKeyAuthEnabled": True,
-        },
-    )
-    assert response.status_code == 200
-
-
-_UpstreamHandler: TypeAlias = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 
 def _record_multipart_spools(monkeypatch: pytest.MonkeyPatch) -> list[SpooledTemporaryFile[bytes]]:
@@ -108,24 +45,9 @@ def _record_multipart_spools(monkeypatch: pytest.MonkeyPatch) -> list[SpooledTem
 
 
 @pytest.fixture
-async def source_upstream() -> AsyncIterator[Callable[[_UpstreamHandler], Awaitable[str]]]:
-    runners: list[web.AppRunner] = []
-
-    async def start(handler: _UpstreamHandler) -> str:
-        app = web.Application()
-        app.router.add_route("*", "/{tail:.*}", handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        port = _free_port()
-        site = web.TCPSite(runner, "127.0.0.1", port)
-        await site.start()
-        runners.append(runner)
-        return f"http://127.0.0.1:{port}/v1"
-
-    yield start
-
-    for runner in runners:
-        await runner.cleanup()
+async def source_upstream():
+    async with stub_source_upstreams() as start:
+        yield start
 
 
 def _embedding_success_response(model: str) -> web.Response:
@@ -489,6 +411,56 @@ async def test_source_audio_transcription_raw_alias_lookup_requires_exact_allowl
     assert called is False
 
 
+_SOURCE_RATE_LIMITED = {"error": {"message": "slow down", "type": "rate_limit_error", "code": "rate_limit_exceeded"}}
+
+
+async def _post_source_family_request(async_client, family: str, model: str):
+    if family == "chat_stream":
+        return await async_client.post(
+            "/v1/chat/completions",
+            json={"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+    if family == "chat":
+        return await async_client.post(
+            "/v1/chat/completions",
+            json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+        )
+    if family == "embeddings":
+        return await async_client.post("/v1/embeddings", json={"model": model, "input": "hello"})
+    assert family == "transcription"
+    return await async_client.post(
+        "/v1/audio/transcriptions",
+        files=[("model", (None, model)), ("file", ("sample.wav", b"\x01\x02\x03", "audio/wav"))],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["chat_stream", "chat", "embeddings", "transcription"])
+async def test_every_source_route_relays_the_source_retry_after(async_client, source_upstream, family: str) -> None:
+    """Honest passthrough (outbound-http-clients): a source ``429`` reaches the client with the source's status, its
+    envelope and its ``Retry-After`` on every source route, not only on Responses dispatch."""
+
+    async def limited(_request: web.Request) -> web.Response:
+        return web.json_response(_SOURCE_RATE_LIMITED, status=429, headers={"Retry-After": "7"})
+
+    base_url = await source_upstream(limited)
+    model = f"source-retry-after-{family.replace('_', '-')}"
+    await _create_model_source(
+        async_client,
+        name=f"retry-after-{family.replace('_', '-')}",
+        model=model,
+        base_url=base_url,
+        supports_embeddings=family == "embeddings",
+        supports_audio_transcriptions=family == "transcription",
+    )
+
+    response = await _post_source_family_request(async_client, family, model)
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "7"
+    assert response.json() == _SOURCE_RATE_LIMITED
+
+
 @pytest.mark.asyncio
 async def test_source_stream_upstream_error_maps_to_error_response(async_client, source_upstream):
     async def unauthorized(_request: web.Request) -> web.Response:
@@ -513,6 +485,243 @@ async def test_source_stream_upstream_error_maps_to_error_response(async_client,
     assert response.status_code == 401
     body = response.json()
     assert body["error"]["code"] == "invalid_api_key"
+
+
+def _model_source_connections_acquired() -> int:
+    session = get_http_client().model_source_session
+    assert session is not None
+    connector = session.connector
+    assert connector is not None
+    return len(connector._acquired)
+
+
+def _active_http_client_leases() -> int:
+    """Generation leases held (``lease_model_source_session`` takes one per source exchange until released)."""
+
+    managed = http_module._http_client
+    assert managed is not None
+    return managed.active_leases
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_client_leaving_during_prompt_processing_releases_the_source(async_client, source_upstream):
+    """Direct chat route: the ``200`` and headers reach the client at the source's headers (as on ``main``), so a
+    client that leaves while the source is still processing the prompt cancels the body -- the handler returns, the
+    source connection closes and the request is recorded as cancelled -- instead of everything being held until the
+    first token or the source's total budget."""
+
+    prepared = asyncio.Event()
+    release_token = asyncio.Event()
+    upstream: dict[str, int] = {"cancelled": 0, "finished": 0}
+
+    async def slow_prompt_processing(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        prepared.set()
+        try:
+            await release_token.wait()
+            await response.write(b'data: {"id":"chatcmpl_late","choices":[{"index":0,"delta":{"content":"x"}}]}\n\n')
+            await response.write_eof()
+        except asyncio.CancelledError:
+            upstream["cancelled"] += 1
+            raise
+        upstream["finished"] += 1
+        return response
+
+    base_url = await source_upstream(slow_prompt_processing, handler_cancellation=True, shutdown_timeout=1.0)
+    model = "source-slow-prompt-model"
+    source_id = await _create_model_source(async_client, name="slow-prompt", model=model, base_url=base_url)
+
+    stream = _AsgiStream(
+        app=async_client._transport.app,
+        path="/v1/chat/completions",
+        headers={},
+        body=json.dumps({"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True}).encode(),
+    )
+    runner = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(prepared.wait(), timeout=5)
+        # ``main`` parity: the client holds the 200 and headers while the source processes the prompt.
+        await stream.wait_for_response_start(timeout=5)
+        assert stream.status == 200
+        assert stream.received() == b""
+        assert _model_source_connections_acquired() == 1
+
+        left_at = time.monotonic()
+        stream.disconnect()
+        await asyncio.wait_for(runner, timeout=5)
+        assert time.monotonic() - left_at < 2.0
+
+        deadline = time.monotonic() + 5
+        while upstream["cancelled"] == 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert upstream["cancelled"] == 1, "the source connection was not closed when the client left"
+        assert upstream["finished"] == 0
+        assert _model_source_connections_acquired() == 0
+    finally:
+        release_token.set()
+        if not runner.done():
+            runner.cancel()
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.model_source_id == source_id
+        assert log.status == "cancelled"
+        assert log.error_code == "client_disconnected"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_client_leaving_before_the_body_starts_releases_the_source(async_client, source_upstream):
+    """Direct chat route, the pre-body window: the client is gone between the route returning the streaming response
+    and Starlette's first write, so ``http.response.start`` never completes and the settlement generator wrapped
+    around the source body never starts. The response's transport owner must close the source connection, return
+    the pooled lease and record the attempt as ``cancelled`` (``client_disconnected_before_body``); ``main`` left the
+    upstream response, the lease and the row to garbage collection."""
+
+    prepared = asyncio.Event()
+    release_token = asyncio.Event()
+    upstream: dict[str, int] = {"cancelled": 0, "finished": 0}
+
+    async def slow_prompt_processing(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        prepared.set()
+        try:
+            await release_token.wait()
+            await response.write(b'data: {"id":"chatcmpl_late","choices":[{"index":0,"delta":{"content":"x"}}]}\n\n')
+            await response.write_eof()
+        except asyncio.CancelledError:
+            upstream["cancelled"] += 1
+            raise
+        upstream["finished"] += 1
+        return response
+
+    base_url = await source_upstream(slow_prompt_processing, handler_cancellation=True, shutdown_timeout=1.0)
+    model = "source-pre-body-model"
+    source_id = await _create_model_source(async_client, name="pre-body", model=model, base_url=base_url)
+    leases_before = _active_http_client_leases()
+
+    stream = _AsgiStream(
+        app=async_client._transport.app,
+        path="/v1/chat/completions",
+        headers={},
+        body=json.dumps({"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True}).encode(),
+        stall_response_start=True,
+    )
+    runner = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(prepared.wait(), timeout=5)
+        await stream.wait_for_response_start(timeout=5)
+        assert stream.status == 200
+        # The route returned with the source exchange open: one pooled connection, one generation lease.
+        assert _model_source_connections_acquired() == 1
+        assert _active_http_client_leases() == leases_before + 1
+
+        left_at = time.monotonic()
+        stream.disconnect()
+        await asyncio.wait_for(runner, timeout=5)
+        assert time.monotonic() - left_at < 2.0
+
+        # Nothing was written after the response start: the body never ran.
+        assert stream.received() == b""
+        deadline = time.monotonic() + 5
+        while upstream["cancelled"] == 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert upstream["cancelled"] == 1, "the source connection was not closed when the client left"
+        assert upstream["finished"] == 0
+        assert _model_source_connections_acquired() == 0
+        assert _active_http_client_leases() == leases_before
+    finally:
+        release_token.set()
+        if not runner.done():
+            runner.cancel()
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.model_source_id == source_id
+        assert log.status == "cancelled"
+        assert log.error_code == "client_disconnected_before_body"
+
+
+async def _empty_2xx_chat_stream(request: web.Request) -> web.StreamResponse:
+    """A source that answers ``200 text/event-stream`` and closes without a single body chunk."""
+
+    response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+    await response.prepare(request)
+    await response.write_eof()
+    return response
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_empty_2xx_source_ends_the_started_body_cleanly_and_records_the_verdict(
+    async_client, source_upstream
+):
+    """The ``200`` and headers reached the client at the source's headers, so a source that closes before its first
+    chunk ends the body as the clean empty stream ``main`` relayed -- no exception escapes the started ASGI body --
+    while the request-log row keeps the ``error invalid_upstream_response`` verdict, not ``main``'s ``success``."""
+
+    base_url = await source_upstream(_empty_2xx_chat_stream)
+    model = "source-empty-chat-stream-model"
+    source_id = await _create_model_source(async_client, name="empty-chat-stream", model=model, base_url=base_url)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        body = b"".join([chunk async for chunk in response.aiter_bytes()])
+    assert body == b""
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.model_source_id == source_id
+        assert (log.status, log.error_code) == ("error", "invalid_upstream_response")
+        assert log.error_message == "OpenAI-compatible model source closed the stream before the first frame"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_empty_2xx_source_answers_502_to_a_limited_key_before_any_byte(async_client, source_upstream):
+    """The limited-key chat stream is buffered, so nothing reached the client yet: the empty-stream verdict is the
+    open's own ``502 invalid_upstream_response`` and the reservation is released."""
+
+    await _enable_api_key_auth(async_client)
+    base_url = await source_upstream(_empty_2xx_chat_stream)
+    model = "source-empty-chat-stream-limited-model"
+    source_id = await _create_model_source(
+        async_client, name="empty-chat-stream-limited", model=model, base_url=base_url
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "empty-chat-stream-limited-key",
+            "assignedSourceIds": [source_id],
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100_000}],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "invalid_upstream_response"
+    async with SessionLocal() as session:
+        reservation = (
+            await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id))
+        ).scalar_one()
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert (reservation.status, limits[0].current_value) == ("released", 0)
+        log = (await session.execute(select(RequestLog).where(RequestLog.model == model))).scalar_one()
+        assert (log.status, log.error_code, log.upstream_status_code) == ("error", "invalid_upstream_response", 200)
 
 
 @pytest.mark.asyncio
@@ -553,6 +762,204 @@ async def test_source_unreachable_returns_error_envelope_and_releases_reservatio
             select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
         )
         assert result.scalars().all() == []
+
+
+async def _set_source_enabled(async_client, source_id: str, enabled: bool) -> None:
+    response = await async_client.patch(f"/api/model-sources/{source_id}", json={"isEnabled": enabled})
+    assert response.status_code == 200
+    assert response.json()["isEnabled"] is enabled
+
+
+async def _disable_source_model(async_client, source_id: str, model: str) -> None:
+    response = await async_client.patch(
+        f"/api/model-sources/{source_id}",
+        json={
+            "models": [
+                {
+                    "model": model,
+                    "displayName": model,
+                    "contextWindow": 8192,
+                    "maxOutputTokens": 1024,
+                    "supportsStreaming": True,
+                    "supportsTools": True,
+                    "isEnabled": False,
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["models"][0]["isEnabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_disabled_source_chat_is_refused_instead_of_hitting_a_subscription(async_client):
+    """A disabled source's model must not be handed to a subscription account.
+
+    Subscription upstreams answer such a request with "The '<model>' model is
+    not supported when using Codex with a ChatGPT account.", which tells the
+    caller nothing and spends the account's health signal on a request no
+    account could ever serve.
+    """
+    await _enable_api_key_auth(async_client)
+    model = "disabled-source-chat-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="disabled-chat-source",
+        model=model,
+        base_url=f"http://127.0.0.1:{_free_port()}/v1",
+    )
+    await _set_source_enabled(async_client, source_id, False)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "disabled-source-chat-key",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "model_source_disabled"
+    assert model in error["message"]
+
+    # Refused before any account was selected, so nothing was dispatched and no
+    # reservation was taken.
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        assert result.scalars().all() == []
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
+        )
+        assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_source_model_row_chat_is_refused_instead_of_hitting_a_subscription(async_client):
+    await _enable_api_key_auth(async_client)
+    model = "disabled-row-chat-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="disabled-row-chat-source",
+        model=model,
+        base_url=f"http://127.0.0.1:{_free_port()}/v1",
+    )
+    await _disable_source_model(async_client, source_id, model)
+    created = await async_client.post("/api/api-keys/", json={"name": "disabled-row-chat-key"})
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "model_source_disabled"
+    assert "has that model disabled" in error["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+async def test_disabled_source_responses_is_refused_instead_of_hitting_a_subscription(async_client, path):
+    await _enable_api_key_auth(async_client)
+    model = "disabled-source-responses-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="disabled-responses-source",
+        model=model,
+        base_url=f"http://127.0.0.1:{_free_port()}/v1",
+        supports_responses=True,
+    )
+    await _set_source_enabled(async_client, source_id, False)
+    created = await async_client.post("/api/api-keys/", json={"name": "disabled-source-responses-key"})
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        path,
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "input": "hi", "stream": True},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "model_source_disabled"
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_still_falls_through_to_subscription_routing(async_client):
+    """Negative control: a model no source ever claimed keeps today's path.
+
+    The refusal above must key on "a model source owns this slug and is off",
+    not on "the slug is unfamiliar" -- custom subscription catalogs and alias
+    slugs legitimately reach the account pool.
+    """
+    await _enable_api_key_auth(async_client)
+    created = await async_client.post("/api/api-keys/", json={"name": "unknown-model-key"})
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "no-source-ever-claimed-this", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    # Unchanged behaviour: subscription selection runs and reports the account
+    # pool's own verdict.
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_disabled_source_does_not_capture_a_subscription_model_slug(async_client):
+    """Negative control: subscription slugs keep winning over source rows.
+
+    An unscoped key never source-routes a slug the subscription registry
+    already serves, so a disabled source that happens to list that slug must
+    not start refusing subscription traffic.
+    """
+    await _enable_api_key_auth(async_client)
+    model = "gpt-5.6-sol"
+    from app.core.openai.model_registry import get_model_registry
+
+    # Precondition: without registry membership the disabled source would win
+    # the lookup and this test would assert model_source_disabled instead of
+    # subscription precedence.
+    assert model in get_model_registry().get_models_with_fallback()
+    source_id = await _create_model_source(
+        async_client,
+        name="disabled-shadow-source",
+        model=model,
+        base_url=f"http://127.0.0.1:{_free_port()}/v1",
+    )
+    await _set_source_enabled(async_client, source_id, False)
+    created = await async_client.post("/api/api-keys/", json={"name": "shadow-slug-key"})
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.json()["error"]["code"] == "no_accounts"
 
 
 @pytest.mark.asyncio
@@ -1137,6 +1544,7 @@ async def test_cancelled_buffered_stream_releases_reservation(async_client, monk
             reservation=reservation,
             stream=cancelled_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             rate_limit_headers={},
         )
 
@@ -1201,6 +1609,7 @@ async def test_cancelled_buffered_stream_releases_reservation_when_close_fails(a
             reservation=reservation,
             stream=cancelled_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             rate_limit_headers={},
         )
 
@@ -1270,6 +1679,7 @@ async def test_cancelled_buffered_stream_finishes_usage_settlement(async_client,
             reservation=reservation,
             stream=complete_stream(),
             usage_holder=usage_holder,
+            upstream_status_code=200,
             rate_limit_headers={},
         )
     )
@@ -1344,6 +1754,7 @@ async def test_cancelled_buffered_stream_logs_disconnect(async_client, monkeypat
             reservation=reservation,
             stream=cancelled_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             rate_limit_headers={},
         )
 
@@ -1351,6 +1762,81 @@ async def test_cancelled_buffered_stream_logs_disconnect(async_client, monkeypat
     assert logs[-1]["status"] == "cancelled"
     assert logs[-1]["error_code"] == "client_disconnected"
     assert logs[-1]["error_message"] == "client disconnected during source stream buffering"
+
+
+@pytest.mark.asyncio
+async def test_source_chat_completion_prohibits_explicit_priority_service_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.core.openai.chat_requests import ChatCompletionsRequest
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceChatCompletion
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_forward(_source: ModelSource, source_payload: dict[str, object]) -> SourceChatCompletion:
+        seen_payload.update(source_payload)
+        return SourceChatCompletion(
+            payload={"id": "chatcmpl_prohibit_priority", "object": "chat.completion", "choices": []},
+            usage=None,
+            timings=None,
+            upstream_status_code=200,
+        )
+
+    async def settle(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def record_log(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(proxy_api, "forward_chat_completion", fake_forward)
+    monkeypatch.setattr(proxy_api, "_settle_source_reservation", settle)
+    monkeypatch.setattr(proxy_api, "_log_source_chat_completion", record_log)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "query_string": b"",
+        }
+    )
+    source = ModelSource(
+        id="src_prohibit_priority",
+        name="prohibit-priority",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    payload = ChatCompletionsRequest.model_validate(
+        {
+            "model": "source-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "service_tier": "priority",
+            "stream": False,
+        }
+    )
+
+    response = await proxy_api._source_chat_completion_response(
+        request,
+        payload,
+        source=source,
+        model="source-model",
+        api_key=None,
+        reservation=None,
+        rate_limit_headers={},
+        prohibit_fast_mode=True,
+    )
+
+    assert response.status_code == 200
+    assert "service_tier" not in seen_payload
 
 
 @pytest.mark.asyncio
@@ -1662,6 +2148,7 @@ async def test_buffered_stream_cancellation_logs_disconnect_even_if_release_fail
             reservation=reservation,
             stream=cancelled_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             rate_limit_headers={},
         )
 
@@ -1710,7 +2197,9 @@ async def test_source_stream_body_teardown_survives_repeated_cancellation(monkey
         content = _FakeContent()
 
     async def fake_open(*_args: object, **_kwargs: object) -> object:
-        return stack, _FakeResponse()
+        # The open hands back the first chunk it already read (P2 first-frame
+        # deadline); the body yields it before reading further.
+        return stack, _FakeResponse(), b"data: first\n\n"
 
     monkeypatch.setattr(forwarding_module, "_open_source_stream", fake_open)
 
@@ -1779,7 +2268,7 @@ async def test_open_source_stream_cleanup_finishes_after_cancellation(monkeypatc
             cleanup_finished.set()
             return False
 
-    monkeypatch.setattr(forwarding_module, "lease_http_session", lambda: _SessionLease())
+    monkeypatch.setattr(forwarding_module, "lease_model_source_session", lambda: _SessionLease())
 
     source = ModelSource(
         id="src_open_cancelled_cleanup",
@@ -1851,7 +2340,7 @@ async def test_forward_chat_completion_cleanup_finishes_after_cancellation(monke
             cleanup_finished.set()
             return False
 
-    monkeypatch.setattr(forwarding_module, "lease_http_session", lambda: _SessionLease())
+    monkeypatch.setattr(forwarding_module, "lease_model_source_session", lambda: _SessionLease())
 
     source = ModelSource(
         id="src_forward_cancelled_cleanup",
@@ -1936,6 +2425,7 @@ async def test_downstream_disconnect_closes_source_stream(async_client, monkeypa
         proxy_api._source_chat_stream_with_settlement(
             source_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             request=request,
             source=source,
             api_key=None,
@@ -1999,6 +2489,7 @@ async def test_source_stream_disconnect_logs_cancelled_not_error(async_client, d
         proxy_api._source_chat_stream_with_settlement(
             source_stream(),
             usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
             request=request,
             source=source,
             api_key=None,
@@ -2089,6 +2580,7 @@ async def test_source_stream_settlement_cancellation_logs_cancelled_not_success(
         async for _chunk in proxy_api._source_chat_stream_with_settlement(
             source_stream(),
             usage_holder=usage_holder,
+            upstream_status_code=200,
             request=request,
             source=source,
             api_key=None,
@@ -2455,7 +2947,7 @@ async def test_v1_models_metadata_reflects_reasoning_optin(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_models_context_window_override_applies_to_source_model(async_client, monkeypatch):
+async def test_v1_models_context_window_override_applies_to_source_model(async_client):
     # Source-catalog models synthesize `max_context_window == context_window`
     # purely so Codex clients can parse the entry; that parseability default
     # must not clamp an operator raise override to the un-raised window.
@@ -2466,11 +2958,11 @@ async def test_v1_models_context_window_override_applies_to_source_model(async_c
         base_url="http://127.0.0.1:9/v1",
     )
 
-    from app.core.config.settings import get_settings
-    from app.modules.proxy import api as proxy_api_module
-
-    patched = get_settings().model_copy(update={"model_context_window_overrides": {"override-source-model": 32_768}})
-    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+    # M4 model catalogue: the override is a dashboard row (not an env monkeypatch).
+    seeded = await async_client.put(
+        "/api/settings/model-context-window-overrides/override-source-model", json={"contextWindow": 32_768}
+    )
+    assert seeded.status_code == 200, seeded.text
 
     response = await async_client.get("/v1/models")
     assert response.status_code == 200
@@ -3274,6 +3766,7 @@ async def test_buffer_limit_closes_abandoned_upstream_stream(async_client, monke
         reservation=None,
         stream=big_stream(),
         usage_holder=SourceUsageHolder(),
+        upstream_status_code=200,
         rate_limit_headers={},
     )
 
@@ -3769,3 +4262,65 @@ async def test_source_embeddings_without_usage_fails_closed_for_limited_key(asyn
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "usage_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_direct_source_routing_forwards_only_constructed_headers(async_client, source_upstream) -> None:
+    """Direct routing is unchanged by construction (#2123 WP-C2, preflight finding v).
+
+    ``forwarding._source_headers`` builds the source request's headers from
+    scratch, so a native Codex request's ChatGPT-internal telemetry headers
+    (``x-openai-subagent``, ``x-codex-*``, ``session-id``, ``thread-id``, ...)
+    never reach a source and the client's ``User-Agent`` is replaced by the
+    HTTP client's own. The overflow path shares the builder; its capture lives
+    in ``test_subscription_overflow_routing.py``.
+    """
+    from tests.unit.test_model_source_request_headers import (
+        CODEX_TELEMETRY_REQUEST_HEADERS,
+        assert_source_saw_only_constructed_headers,
+    )
+
+    seen_headers: list[dict[str, str]] = []
+    seen_bodies: list[dict[str, object]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        seen_headers.append(dict(request.headers))
+        seen_bodies.append(await request.json())
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(
+            b'data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_hdr","object":"response",'
+            b'"status":"in_progress","output":[]}}\n\n'
+        )
+        await response.write(
+            b'data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_hdr","object":"response",'
+            b'"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+        await response.write_eof()
+        return response
+
+    base_url = await source_upstream(handler)
+    model = "source-header-proof-model"
+    await _create_model_source(
+        async_client, name="header-proof", model=model, base_url=base_url, supports_responses=True
+    )
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "stream": True,
+            "client_metadata": {"session_id": "sess_header_proof", "thread_id": "thr_header_proof"},
+            "stream_options": {"reasoning_summary_delivery": "final"},
+        },
+        headers=CODEX_TELEMETRY_REQUEST_HEADERS,
+    ) as response:
+        assert response.status_code == 200
+        await response.aread()
+
+    assert len(seen_headers) == 1
+    assert_source_saw_only_constructed_headers(seen_headers[0], source_token="token-header-proof")
+    assert "client_metadata" not in seen_bodies[0]
+    assert "stream_options" not in seen_bodies[0]

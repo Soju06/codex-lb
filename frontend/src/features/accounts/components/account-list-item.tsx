@@ -7,6 +7,7 @@ import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { useSmoothPercent } from "@/hooks/use-smooth-percent";
 import { StatusBadge } from "@/components/status-badge";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
 import type {
@@ -51,21 +52,27 @@ export function AccountListItem({
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
   const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
-  const primary = account.usage?.primaryRemainingPercent ?? null;
-  const secondary = account.usage?.secondaryRemainingPercent ?? null;
-  const monthly = account.usage?.monthlyRemainingPercent ?? null;
+  const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
+  const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
+  const monthlyState = useSmoothPercent(account.usage?.monthlyRemainingPercent ?? null);
+  const primary = primaryState.percent;
+  const secondary = secondaryState.percent;
+  const monthly = monthlyState.percent;
   const hasPrimaryWindow =
     account.windowMinutesPrimary != null ||
     primary !== null ||
-    account.resetAtPrimary != null;
+    account.resetAtPrimary != null ||
+    primaryState.everKnown;
   const hasSecondaryWindow =
     account.windowMinutesSecondary != null ||
     secondary !== null ||
-    account.resetAtSecondary != null;
+    account.resetAtSecondary != null ||
+    secondaryState.everKnown;
   const hasMonthlyWindow =
     account.windowMinutesMonthly != null ||
     monthly !== null ||
-    account.resetAtMonthly != null;
+    account.resetAtMonthly != null ||
+    monthlyState.everKnown;
   const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
   const showMonthlyRow = monthlyOnly;
   const showPrimaryRow =
@@ -215,7 +222,7 @@ function MiniQuotaRow({
       <div className="flex items-center justify-between text-[11px]">
         <span className="text-muted-foreground">{label}</span>
         <span className="tabular-nums font-medium">
-          {formatPercentNullable(percent)}
+          {formatPercentNullable(percent, 1)}
         </span>
       </div>
       <MiniQuotaBar

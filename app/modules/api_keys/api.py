@@ -119,9 +119,11 @@ def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> l
     return limit_inputs
 
 
+@router.post("", response_model=ApiKeyCreateResponse, include_in_schema=False)
 @router.post("/", response_model=ApiKeyCreateResponse)
 async def create_api_key(
     request: Request,
+    response: Response,
     payload: ApiKeyCreateRequest = Body(...),
     _write_access=Depends(require_dashboard_write_access),
     context: ApiKeysContext = Depends(get_api_keys_context),
@@ -159,12 +161,16 @@ async def create_api_key(
         actor_ip=request.client.host if request.client else None,
         details={"key_id": created.id},
     )
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return ApiKeyCreateResponse(
         **resp.model_dump(),
         key=created.key,
     )
 
 
+@router.get("", response_model=list[ApiKeyResponse], include_in_schema=False)
 @router.get("/", response_model=list[ApiKeyResponse])
 async def list_api_keys(
     context: ApiKeysContext = Depends(get_api_keys_context),
@@ -256,6 +262,7 @@ async def delete_api_key(
 @router.post("/{key_id}/regenerate", response_model=ApiKeyCreateResponse)
 async def regenerate_api_key(
     key_id: str,
+    response: Response,
     _write_access=Depends(require_dashboard_write_access),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyCreateResponse:
@@ -264,6 +271,9 @@ async def regenerate_api_key(
     except ApiKeyNotFoundError as exc:
         raise DashboardNotFoundError(str(exc)) from exc
     resp = _to_response(row)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return ApiKeyCreateResponse(
         **resp.model_dump(),
         key=row.key,

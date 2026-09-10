@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import re
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
@@ -145,6 +146,29 @@ async def _create_model_source(
 
 
 @pytest.mark.asyncio
+async def test_api_key_collection_routes_accept_equivalent_slash_forms(async_client):
+    canonical_list = await async_client.get("/api/api-keys/")
+    unslashed_list = await async_client.get("/api/api-keys", follow_redirects=False)
+    unslashed_create = await async_client.post(
+        "/api/api-keys",
+        json={"name": "unslashed-key", "allowedModels": []},
+        follow_redirects=False,
+    )
+
+    assert {
+        "canonical_get": canonical_list.status_code,
+        "unslashed_get": unslashed_list.status_code,
+        "unslashed_post": unslashed_create.status_code,
+    } == {
+        "canonical_get": 200,
+        "unslashed_get": 200,
+        "unslashed_post": 200,
+    }
+    assert unslashed_list.json() == canonical_list.json()
+    assert unslashed_create.json()["key"].startswith("sk-clb-")
+
+
+@pytest.mark.asyncio
 async def test_api_keys_crud_and_regenerate(async_client):
     create = await async_client.post(
         "/api/api-keys/",
@@ -159,7 +183,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert create.status_code == 200
     payload = create.json()
     assert payload["name"] == "dev-key"
-    assert payload["key"].startswith("sk-clb-")
+    assert re.fullmatch(r"sk-clb-[0-9a-f]{48}", payload["key"])
     assert payload["accountAssignmentScopeEnabled"] is False
     assert payload["assignedAccountIds"] == []
     assert len(payload["limits"]) == 1
@@ -195,7 +219,7 @@ async def test_api_keys_crud_and_regenerate(async_client):
     assert regenerated.status_code == 200
     regenerated_payload = regenerated.json()
     assert regenerated_payload["id"] == key_id
-    assert regenerated_payload["key"].startswith("sk-clb-")
+    assert re.fullmatch(r"sk-clb-[0-9a-f]{48}", regenerated_payload["key"])
     assert regenerated_payload["key"] != first_key
 
     deleted = await async_client.delete(f"/api/api-keys/{key_id}")
@@ -1381,7 +1405,7 @@ async def test_backend_codex_responses_routes_responses_capable_model_source(asy
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream(source, payload):
+    async def fake_stream(source, payload, **_kwargs):
         observed["source_id"] = source.id
         observed["payload"] = dict(payload)
         usage_holder = SourceUsageHolder()
@@ -1424,7 +1448,7 @@ async def test_v1_responses_strips_replayed_tool_call_namespaces_for_model_sourc
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream(source, payload):
+    async def fake_stream(source, payload, **_kwargs):
         observed["payload"] = dict(payload)
         usage_holder = SourceUsageHolder()
 
@@ -1499,7 +1523,7 @@ async def test_backend_codex_responses_filters_unsupported_model_source_tools(as
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream(source, payload):
+    async def fake_stream(source, payload, **_kwargs):
         observed["source_id"] = source.id
         observed["payload"] = dict(payload)
         usage_holder = SourceUsageHolder()
@@ -1559,7 +1583,7 @@ async def test_backend_codex_responses_keeps_search_tools_for_capable_model_sour
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream(source, payload):
+    async def fake_stream(source, payload, **_kwargs):
         observed["payload"] = dict(payload)
         usage_holder = SourceUsageHolder()
 
@@ -1613,7 +1637,7 @@ async def test_backend_codex_responses_keeps_legacy_alias_allowed_search_tool_ch
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream(source, payload):
+    async def fake_stream(source, payload, **_kwargs):
         observed["payload"] = dict(payload)
         usage_holder = SourceUsageHolder()
 
@@ -1683,7 +1707,7 @@ async def test_backend_codex_responses_normalizes_allowed_tool_choice_alias_with
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream(source, payload):
+    async def fake_stream(source, payload, **_kwargs):
         observed["payload"] = dict(payload)
         usage_holder = SourceUsageHolder()
 
@@ -1746,7 +1770,7 @@ async def test_backend_codex_responses_drops_tool_choice_referencing_dropped_sou
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream(source, payload):
+    async def fake_stream(source, payload, **_kwargs):
         observed["payload"] = dict(payload)
         usage_holder = SourceUsageHolder()
 
@@ -1797,7 +1821,7 @@ async def test_backend_codex_responses_prunes_include_entries_of_dropped_source_
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream(source, payload):
+    async def fake_stream(source, payload, **_kwargs):
         observed["payload"] = dict(payload)
         usage_holder = SourceUsageHolder()
 
@@ -1852,7 +1876,7 @@ async def test_v1_responses_filters_unsupported_model_source_tools(async_client,
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream(source, payload):
+    async def fake_stream(source, payload, **_kwargs):
         observed["source_id"] = source.id
         observed["payload"] = dict(payload)
         usage_holder = SourceUsageHolder()
@@ -2159,7 +2183,7 @@ async def test_v1_responses_source_owned_previous_response_id_keeps_model_source
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream_source(source, payload):
+    async def fake_stream_source(source, payload, **_kwargs):
         observed["source_id"] = source.id
         observed["previous_response_id"] = payload.get("previous_response_id")
         observed["model"] = payload.get("model")
@@ -2212,7 +2236,7 @@ async def test_backend_codex_responses_source_owned_previous_response_id_keeps_m
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream_source(source, payload):
+    async def fake_stream_source(source, payload, **_kwargs):
         observed["source_id"] = source.id
         observed["previous_response_id"] = payload.get("previous_response_id")
         observed["model"] = payload.get("model")
@@ -2265,7 +2289,7 @@ async def test_v1_responses_compaction_trigger_keeps_model_source(async_client, 
     )
     observed: dict[str, object] = {}
 
-    async def fake_stream_source(source, payload):
+    async def fake_stream_source(source, payload, **_kwargs):
         observed["source_id"] = source.id
         observed["model"] = payload.get("model")
         observed["input"] = payload.get("input")

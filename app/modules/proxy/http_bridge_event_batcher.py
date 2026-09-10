@@ -391,6 +391,16 @@ class HttpBridgeOperationEventBatcher:
         async with self._lock:
             return operation_id not in self._dropped_operations
 
+    async def pending_operation_ids(self) -> set[str]:
+        """Return operation IDs still owned by the in-memory spooler.
+
+        Contexts and closing operations are included because a terminal
+        settlement may have drained the event queue while its final durable
+        write is still in flight.
+        """
+        async with self._lock:
+            return set(self._pending) | set(self._contexts) | set(self._closing_operations)
+
     async def discard_operation(self, *, operation_id: str) -> None:
         """Drop an abandoned nonterminal context without finalizing its spool."""
         async with self._flush_lock:

@@ -37,6 +37,7 @@ from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # 
 from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
 )
+from app.core.clock import Clock
 from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
@@ -745,6 +746,27 @@ def _mark_stream_settlement_interrupted(
         error_message,
         _RequestLogFailureMetadata(failure_phase=failure_phase, failure_detail=failure_detail),
     )
+
+
+def _stamp_terminal(settlement: _StreamSettlement, event_type: str | None, clock: Clock) -> bool:
+    """Return whether ``event_type`` is an upstream terminal frame, stamping its parse instant on the settlement.
+
+    Called at the HTTP stream's terminal-detection sites before the frame is
+    yielded downstream, so the throughput cohort sample's span ends when the
+    upstream finished generating, not when a slow downstream consumer drained
+    the frame or the upstream connection finally closed.
+    """
+    if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+        return False
+    settlement.upstream_terminal_at = clock.monotonic()
+    return True
+
+
+def _upstream_terminal_latency_ms(settlement: _StreamSettlement, started_at: float) -> int | None:
+    """Attempt-start-to-upstream-terminal latency for the request-log funnel; ``None`` without a terminal stamp."""
+    if settlement.upstream_terminal_at is None:
+        return None
+    return max(0, int((settlement.upstream_terminal_at - started_at) * 1000))
 
 
 def _mark_upstream_stream_incomplete(

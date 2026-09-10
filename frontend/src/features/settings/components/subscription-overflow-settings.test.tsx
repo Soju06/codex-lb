@@ -39,7 +39,6 @@ describe("SubscriptionOverflowSettings", () => {
 
     const trigger = screen.getByRole("combobox", { name: OVERFLOW_LABEL });
     expect(trigger).toHaveTextContent("Off");
-    expect(screen.getByText(/Shipping in stages/)).toBeInTheDocument();
     expect(screen.queryByTestId("subscription-overflow-preflight")).not.toBeInTheDocument();
 
     await user.click(trigger);

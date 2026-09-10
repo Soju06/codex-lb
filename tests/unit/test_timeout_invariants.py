@@ -23,7 +23,7 @@ pytestmark = pytest.mark.unit
 
 def test_default_settings_satisfy_timeout_invariants() -> None:
     settings = Settings()
-    assert len(TIMEOUT_INVARIANT_RULES) == 11
+    assert len(TIMEOUT_INVARIANT_RULES) == 13
     assert find_timeout_invariant_violations(settings) == []
 
 
@@ -55,6 +55,19 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
         ("upstream-connect-within-proxy-budget", {"upstream_connect_timeout_seconds": 601.0}),
         ("upstream-connect-within-compact-budget", {"upstream_connect_timeout_seconds": 181.0}),
         ("upstream-connect-within-transcription-budget", {"upstream_connect_timeout_seconds": 121.0}),
+        # M1 stream/bridge budgets: connect 61 s fits every other budget but not a 60 s stream budget.
+        (
+            "upstream-connect-within-stream-budget",
+            {"upstream_connect_timeout_seconds": 61.0, "http_responses_stream_request_budget_seconds": 60.0},
+        ),
+        # The bridge path spends the connect timeout inside the bridge budget too.
+        (
+            "upstream-connect-within-bridge-budget",
+            {
+                "upstream_connect_timeout_seconds": 61.0,
+                "http_responses_session_bridge_request_budget_seconds": 60.0,
+            },
+        ),
         ("admission-wait-within-proxy-budget", {"proxy_request_budget_seconds": 9.0}),
         ("admission-wait-within-stream-budget", {"http_responses_stream_request_budget_seconds": 9.0}),
         ("admission-wait-within-compact-budget", {"compact_request_budget_seconds": 9.0}),

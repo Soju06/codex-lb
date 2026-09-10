@@ -210,6 +210,27 @@ def project_responses_input_for_account_neutral_fresh_replay(
     )
 
 
+def strip_input_item_ids(input_items: list[JsonValue]) -> list[JsonValue]:
+    """Copy ``input_items`` with the top-level ``id`` of every object item removed; nothing else changes.
+
+    The neutral release of a pinned conversation (#2123 WP-C2, design §7.2)
+    hands a source-served, provably source-free transcript back to a
+    subscription account, where the source-minted item ids would not resolve.
+    This is the one body mutation the release performs: only the top-level
+    ``id`` goes -- nested content, tool payloads and non-object items are
+    returned as they are (the same object when nothing was removed), so the
+    projection is idempotent and never fabricates a field.
+    """
+
+    stripped: list[JsonValue] = []
+    for item in input_items:
+        if isinstance(item, dict) and "id" in item:
+            stripped.append({key: value for key, value in item.items() if key != "id"})
+        else:
+            stripped.append(item)
+    return stripped
+
+
 def _is_canonical_lite_tool_bundle(item: JsonValue) -> bool:
     return (
         isinstance(item, dict)
@@ -1121,6 +1142,9 @@ _DECLARED_TOOL_TYPE_BY_ITEM_TYPE = {
 # or account-side state -- containers, vector stores, connectors -- and are never
 # portable in v1, declared or not.
 _STATELESS_DECLARABLE_TOOL_TYPES = frozenset({"apply_patch", "local_shell", "shell", "tool_search"})
+# Public alias: the overflow neutral release passes this set because the release target is a
+# subscription account for which these stateless Codex tool declarations are native.
+STATELESS_DECLARABLE_TOOL_TYPES = _STATELESS_DECLARABLE_TOOL_TYPES
 # The only shape a stateless declaration may take to be set aside: ``type`` plus
 # an optional string ``description``. A positive allowlist, not a scan for known
 # account-scoped keys, so an unknown field (an account-bound ``container``, a
@@ -1336,6 +1360,18 @@ def _unportable_item_type(input_items: list[JsonValue], supported_tool_types: fr
             continue
         return item_type
     return None
+
+
+def input_carries_image_parts(input_items: JsonValue) -> bool:
+    """Whether a Responses ``input`` carries an ``input_image`` part in message content or tool output.
+
+    The vision step of ``responses_payload_is_provider_portable`` on its own,
+    for the pinned/anchored overflow dispatch: a pin overrides body
+    portability except for what the source model cannot see (design §7.2
+    P16). A non-list ``input`` (a bare string) carries no parts.
+    """
+
+    return isinstance(input_items, list) and _input_carries_image_parts(input_items)
 
 
 def _input_carries_image_parts(input_items: list[JsonValue]) -> bool:

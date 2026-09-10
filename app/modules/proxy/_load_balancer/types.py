@@ -48,6 +48,19 @@ class RuntimeState:
     # minute bucket -> [successes, failures], pruned to the configured window.
     # Feeds the selection weight multiplier; replica-local, never persisted.
     outcome_buckets: dict[int, list[int]] | None = None
+    # Recent eligible first-token latencies (see ``_load_balancer/ttft_cohort.py``):
+    # ``(recorded_at, ttft_ms)`` pruned to the window/cap. Replica-local, never persisted.
+    ttft_samples: list[tuple[float, int]] | None = None
+    # Recent eligible output throughputs per model (see
+    # ``_load_balancer/throughput_cohort.py``): model -> ``(recorded_at, tokens_per_second)``
+    # pruned to the window/cap; models without in-window samples are dropped.
+    tps_samples: dict[str, list[tuple[float, float]]] | None = None
+    # Transition-log gates of ``_load_balancer/latency_cohort.py``: the last
+    # applied first-token multiplier (model-agnostic) and the last applied
+    # non-neutral throughput multiplier per model (neutral models are dropped,
+    # so the map only grows with models the account is discounted on).
+    ttft_weight: float = 1.0
+    tps_weights: dict[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)

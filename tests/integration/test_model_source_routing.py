@@ -2947,7 +2947,7 @@ async def test_v1_models_metadata_reflects_reasoning_optin(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_models_context_window_override_applies_to_source_model(async_client, monkeypatch):
+async def test_v1_models_context_window_override_applies_to_source_model(async_client):
     # Source-catalog models synthesize `max_context_window == context_window`
     # purely so Codex clients can parse the entry; that parseability default
     # must not clamp an operator raise override to the un-raised window.
@@ -2958,11 +2958,11 @@ async def test_v1_models_context_window_override_applies_to_source_model(async_c
         base_url="http://127.0.0.1:9/v1",
     )
 
-    from app.core.config.settings import get_settings
-    from app.modules.proxy import api as proxy_api_module
-
-    patched = get_settings().model_copy(update={"model_context_window_overrides": {"override-source-model": 32_768}})
-    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+    # M4 model catalogue: the override is a dashboard row (not an env monkeypatch).
+    seeded = await async_client.put(
+        "/api/settings/model-context-window-overrides/override-source-model", json={"contextWindow": 32_768}
+    )
+    assert seeded.status_code == 200, seeded.text
 
     response = await async_client.get("/v1/models")
     assert response.status_code == 200
@@ -4262,3 +4262,65 @@ async def test_source_embeddings_without_usage_fails_closed_for_limited_key(asyn
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "usage_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_direct_source_routing_forwards_only_constructed_headers(async_client, source_upstream) -> None:
+    """Direct routing is unchanged by construction (#2123 WP-C2, preflight finding v).
+
+    ``forwarding._source_headers`` builds the source request's headers from
+    scratch, so a native Codex request's ChatGPT-internal telemetry headers
+    (``x-openai-subagent``, ``x-codex-*``, ``session-id``, ``thread-id``, ...)
+    never reach a source and the client's ``User-Agent`` is replaced by the
+    HTTP client's own. The overflow path shares the builder; its capture lives
+    in ``test_subscription_overflow_routing.py``.
+    """
+    from tests.unit.test_model_source_request_headers import (
+        CODEX_TELEMETRY_REQUEST_HEADERS,
+        assert_source_saw_only_constructed_headers,
+    )
+
+    seen_headers: list[dict[str, str]] = []
+    seen_bodies: list[dict[str, object]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        seen_headers.append(dict(request.headers))
+        seen_bodies.append(await request.json())
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(
+            b'data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_hdr","object":"response",'
+            b'"status":"in_progress","output":[]}}\n\n'
+        )
+        await response.write(
+            b'data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_hdr","object":"response",'
+            b'"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+        await response.write_eof()
+        return response
+
+    base_url = await source_upstream(handler)
+    model = "source-header-proof-model"
+    await _create_model_source(
+        async_client, name="header-proof", model=model, base_url=base_url, supports_responses=True
+    )
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "stream": True,
+            "client_metadata": {"session_id": "sess_header_proof", "thread_id": "thr_header_proof"},
+            "stream_options": {"reasoning_summary_delivery": "final"},
+        },
+        headers=CODEX_TELEMETRY_REQUEST_HEADERS,
+    ) as response:
+        assert response.status_code == 200
+        await response.aread()
+
+    assert len(seen_headers) == 1
+    assert_source_saw_only_constructed_headers(seen_headers[0], source_token="token-header-proof")
+    assert "client_metadata" not in seen_bodies[0]
+    assert "stream_options" not in seen_bodies[0]

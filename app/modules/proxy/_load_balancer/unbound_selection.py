@@ -87,6 +87,8 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     allow_usage_exhaustion_error: bool = True
     api_key_id: str | None = None
     api_key_stream_fair_share_threshold_pct: int = 0
+    # Requested model; scopes the per-model latency cohort weight of fresh draws.
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +165,7 @@ async def run_unbound_selection_path(
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
                 routing_tunables=routing_tunables,
+                model=request.model,
             )
             usage_states = filter_usage_capped_states(
                 states, selection_inputs.usage_cap_resets_by_account, now=selection_now

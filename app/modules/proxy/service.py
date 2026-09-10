@@ -1416,6 +1416,14 @@ class ProxyService(
             await self._release_request_state_account_response_create_lease(request_state)
             await _release_websocket_response_create_gate(request_state, response_create_gate, scheduler=scheduler)
             raise
+        # The global response-create admission is a queue wait too, and a direct
+        # WebSocket has no bridge-queue measurement: fold it into the gate wait
+        # so the row carries the whole pre-send wait (the TTFT cohort sampler
+        # skips any row with a non-zero wait).
+        if request_state.response_create_gate_wait_started_at is not None:
+            request_state.latency_response_create_gate_wait_ms = int(
+                max(0.0, self._clock.monotonic() - request_state.response_create_gate_wait_started_at) * 1000
+            )
 
     async def _release_request_state_account_response_create_lease(
         self,

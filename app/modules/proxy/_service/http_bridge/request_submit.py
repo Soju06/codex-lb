@@ -2556,6 +2556,15 @@ class _HTTPBridgeRequestSubmitMixin:
         if not session.codex_session or session.prewarmed or request_state.previous_response_id is not None:
             request_state.prewarm_status = request_state.prewarm_status or "not_applicable"
             return
+        # M3 codex prewarm: the switch is dashboard-managed, and it reaches this
+        # path through the request-bound overlay already applied by
+        # ``_service_get_settings()`` above (the field is in
+        # ``DASHBOARD_OVERRIDE_SETTINGS``, and the entry-point middleware bound
+        # the snapshot once for this request). Resolving it is therefore a plain
+        # memory read that adds neither a settings read nor an ``await`` -- here
+        # or, more importantly, under ``prewarm_lock`` below, where a cache
+        # refresh could run a DB query and suspend (issues #1971 and #1972
+        # wedged every keyed submit on exactly that pattern).
         if not _http_bridge_prewarm_enabled(settings):
             request_state.prewarm_status = "not_applicable"
             return

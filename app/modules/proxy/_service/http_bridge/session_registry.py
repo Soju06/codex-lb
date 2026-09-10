@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clock import scheduler_for
+from app.core.config.dashboard_overrides import effective_settings
 from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -37,6 +38,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_reattach,
     _register_http_bridge_turn_state_aliases_locked,
     _renew_durable_http_bridge_lease,
+    _service_get_settings_cache,
     _track_alias_registration,
 )
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
@@ -104,7 +106,19 @@ class _HTTPBridgeSessionRegistryMixin:
         proof. A durable row is only eligible when no canonical or detached
         generation, including terminal event settlement, still references it.
         """
+        # M1 stream/bridge budgets: this pass runs from the ring heartbeat, outside
+        # any request binding, so the dashboard-managed bridge budget is applied
+        # from one snapshot read here (``effective_settings``), never the bare
+        # environment value. A snapshot failure keeps the environment budget.
         settings = _service_get_settings()
+        try:
+            settings = effective_settings(await _service_get_settings_cache().get(), settings)
+        except Exception:
+            logger.warning(
+                "HTTP bridge stale operation abandonment could not read the dashboard settings snapshot; "
+                "using the environment budget",
+                exc_info=True,
+            )
         inactivity_seconds = max(30.0 * 60.0, _http_bridge_request_budget_seconds(settings))
         maintenance_now = utcnow()
         cutoff = maintenance_now - timedelta(seconds=inactivity_seconds)

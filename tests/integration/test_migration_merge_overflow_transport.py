@@ -24,7 +24,9 @@ _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
 _OLD_USAGE_CAP_HEAD = "20260907_000000_add_account_usage_caps"
 _PRE_REPAIR_HEADS = (_OLD_USAGE_CAP_HEAD, "20260909_070000_automation_run_claim_budget")
-_HEAD = "20260909_090000_repair_reparented_overflow_schema"
+_REPAIR = "20260909_090000_repair_reparented_overflow_schema"
+_UPSTREAM_HEAD = "20260909_130000_add_request_logs_live_facet_indexes"
+_HEAD = "20260910_000000_merge_usage_cap_repair_and_live_facets"
 
 
 @dataclass
@@ -157,7 +159,9 @@ def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tm
     script = ScriptDirectory.from_config(config)
     assert script.get_heads() == [_HEAD]
     head = script.get_revision(_HEAD)
-    assert head is not None and head.down_revision == _PRE_REPAIR_HEADS
+    assert head is not None and head.down_revision == (_REPAIR, _UPSTREAM_HEAD)
+    repair = script.get_revision(_REPAIR)
+    assert repair is not None and repair.down_revision == _PRE_REPAIR_HEADS
     assert _MERGE in {revision.revision for revision in script.iterate_revisions(_HEAD, "base")}
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS

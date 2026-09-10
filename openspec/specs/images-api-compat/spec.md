@@ -7,7 +7,7 @@ pipeline.
 ## Requirements
 ### Requirement: OpenAI-compatible image generation endpoint
 
-The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Images API request shape (`model`, `prompt`, `n`, `size`, `quality`, `background`, `output_format`, `output_compression`, `moderation`, `partial_images`, `stream`, `user`). The endpoint MUST require `model` to start with `gpt-image-` and MUST treat `gpt-image-2` as the default if unspecified. The endpoint MUST NOT expose the internal "host" Responses model used to invoke the built-in `image_generation` tool.
+The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Images API request shape (`model`, `prompt`, `n`, `size`, `quality`, `background`, `output_format`, `output_compression`, `moderation`, `partial_images`, `stream`, `user`). The endpoint MUST require `model` to start with `gpt-image-` and MUST treat `gpt-image-2` as the default if unspecified; the default is the fixed constant `DEFAULT_PUBLIC_IMAGE_MODEL` in `app/core/openai/images.py` and MUST NOT be operator-configurable. The endpoint MUST NOT expose the internal "host" Responses model used to invoke the built-in `image_generation` tool.
 
 #### Scenario: Compatible image generation request returns a JSON envelope
 
@@ -38,7 +38,8 @@ The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Imag
 #### Scenario: Missing model defaults to images_default_model
 
 - **WHEN** a client sends `/v1/images/generations` or `/v1/images/edits` without `model`
-- **THEN** the service uses `images_default_model` (default `gpt-image-2`) as the publicly-effective model for validation, request log accounting, and the internal `image_generation` tool config
+- **THEN** the service uses `gpt-image-2` as the publicly-effective model for validation, request log accounting, and the internal `image_generation` tool config
+- **AND** a `CODEX_LB_IMAGES_DEFAULT_MODEL` value in the environment does not change that default (startup logs the removed-setting warning once)
 
 ### Requirement: OpenAI-compatible image edit endpoint
 

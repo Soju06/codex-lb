@@ -3360,7 +3360,17 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
 
 
 def _http_bridge_prewarm_enabled(settings: Any) -> bool:
-    """Prewarm eligibility is the ``prewarm_enabled`` flag alone.
+    """Prewarm eligibility is the ``prewarm_enabled`` switch alone.
+
+    M3 codex prewarm: the switch is dashboard-managed, and it is folded into
+    ``settings`` before this is called. ``settings`` is the proxy service facade
+    value (``_service_get_settings()``), which applies the request-bound
+    dashboard overlay: the field is in ``DASHBOARD_OVERRIDE_SETTINGS``, so a
+    non-NULL ``dashboard_settings`` column has already won over the deprecated
+    ``CODEX_LB_*`` env alias by the time this reads it. Outside a bound request
+    context (startup, schedulers, unit tests) the env alias applies, and then
+    the code default (off) -- the same precedence ``resolve_inheritable``
+    applies for the settings API's provenance.
 
     The canary percent and allow/deny cohort scaffolding was one-time
     rollout tooling retired by ``reduce-settings-surface-phase-4``.

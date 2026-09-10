@@ -9,6 +9,7 @@ import {
   buildRemainingItems,
   buildWeeklyCreditPace,
   sumRemaining,
+  usableCapacityTotal,
   weeklyCreditPaceStatus,
   type RemainingItem,
   type WeeklyCreditPace,
@@ -38,6 +39,8 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     remainingCreditsSecondary: overrides.remainingCreditsSecondary ?? null,
     capacityCreditsMonthly: overrides.capacityCreditsMonthly ?? null,
     remainingCreditsMonthly: overrides.remainingCreditsMonthly ?? null,
+    usageCap5HPercent: overrides.usageCap5HPercent ?? null,
+    usageCapWeeklyPercent: overrides.usageCapWeeklyPercent ?? null,
     auth: overrides.auth ?? null,
     additionalQuotas: overrides.additionalQuotas ?? [],
     isEmailDuplicate: overrides.isEmailDuplicate,
@@ -296,6 +299,29 @@ describe("buildRemainingItems", () => {
     expect(buildRemainingItems([monthly], null, "primary")).toEqual([]);
     expect(buildRemainingItems([monthly], null, "secondary")).toEqual([]);
   });
+
+  it("subtracts reserved credits from capped donut balances", () => {
+    const capped = account({
+      accountId: "capped", email: "capped@example.com", capacityCreditsPrimary: 100,
+      windowMinutesPrimary: 300, usageCap5HPercent: 80,
+      usage: { primaryRemainingPercent: 40, secondaryRemainingPercent: null },
+    });
+    const items = buildRemainingItems([capped], {
+      windowKey: "primary", windowMinutes: 300,
+      accounts: [{ accountId: "capped", remainingPercentAvg: 40, capacityCredits: 100, remainingCredits: 40 }],
+    }, "primary");
+    expect(items[0]).toMatchObject({ value: 20, remainingPercent: 25 });
+    expect(usableCapacityTotal(100, [capped], "primary")).toBe(80);
+  });
+
+  it("does not subtract reserves for a missing usage window", () => {
+    const capped = account({
+      accountId: "capped", email: "capped@example.com",
+      capacityCreditsPrimary: 100, usageCap5HPercent: 80,
+      windowMinutesPrimary: null,
+    });
+    expect(usableCapacityTotal(100, [capped], "primary")).toBe(100);
+  });
 });
 
 describe("sumRemaining", () => {
@@ -365,6 +391,24 @@ describe("buildWeeklyCreditPace", () => {
       remainingCreditsSecondary: remainingCreditBudget,
     });
   }
+
+  it("uses only unreserved weekly credits for pace", () => {
+    const pace = buildWeeklyCreditPace([weeklyAccount({
+      accountId: "capped", fullCredits: 100_000, remainingCredits: 40_000,
+      usageCapWeeklyPercent: 80, timeLeftPercent: 50,
+    })], now);
+    expect(pace?.totalFullCredits).toBe(80_000);
+    expect(pace?.totalActualRemainingCredits).toBe(20_000);
+  });
+
+  it("keeps full capacity for a capped non-weekly secondary window", () => {
+    const pace = buildWeeklyCreditPace([weeklyAccount({
+      accountId: "capped-daily", fullCredits: 100_000, remainingCredits: 40_000,
+      usageCapWeeklyPercent: 80, windowMinutesSecondary: 1_440, timeLeftPercent: 50,
+    })], now);
+    expect(pace?.totalFullCredits).toBe(100_000);
+    expect(pace?.totalActualRemainingCredits).toBe(40_000);
+  });
 
   it("marks over-schedule weekly usage as ahead before hard shortfall states", () => {
     expect(weeklyCreditPaceStatus(6, 0)).toBe("ahead");
@@ -788,6 +832,7 @@ describe("buildDashboardView", () => {
     expect(pace?.status).toBe("on_track");
     expect(pace?.scheduleGapCredits).toBe(52_416);
   });
+
 
   it("parses an old-backend overview payload without runway fields and keeps the legacy shape", () => {
     // serverWeeklyPace() carries only the legacy fields; the JSON round-trip

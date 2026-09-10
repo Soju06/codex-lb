@@ -1544,6 +1544,9 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
         nonlocal invalidations
         invalidations += 1
 
+    async def _refresh_usage_cap_caches_after_write() -> None:
+        return None
+
     monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
     monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
     monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
@@ -1552,6 +1555,11 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
     monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
     monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
     monkeypatch.setattr(refresh_scheduler_module, "_invalidate_usage_refresh_caches", _invalidate)
+    monkeypatch.setattr(
+        refresh_scheduler_module,
+        "refresh_usage_cap_caches_after_write",
+        _refresh_usage_cap_caches_after_write,
+    )
 
     scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
 

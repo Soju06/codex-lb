@@ -325,9 +325,10 @@ The dashboard SHALL show weekly quota runway when account weekly capacity credit
 
 #### Scenario: Add-capacity recommendation is stable and gated
 
-- **WHEN** trailing seven-day fleet demand in quota-weeks exceeds current fleet weekly capacity
+- **WHEN** each account's positive trailing seven-day weekly burn is converted to credits using its provider weekly capacity
+- **AND** total provider demand in Pro quota-weeks exceeds effective capped fleet capacity in Pro quota-weeks
 - **AND** the runway verdict is `runs_dry` or at least one account is saturated
-- **THEN** the response recommends additional Pro accounts computed from the weekly demand surplus
+- **THEN** the response recommends the ceiling of the Pro quota-week surplus as additional Pro accounts
 - **AND** the recommendation does not change materially from hour to hour under steady traffic
 
 #### Scenario: Throttle guidance precedes purchase guidance

@@ -26,7 +26,11 @@ from app.modules.limit_warmup.service import (
     StreamingLimitWarmupSender,
     usage_reset_confirmed,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    get_routing_availability_cache,
+    refresh_usage_cap_caches_after_write,
+)
 from app.modules.proxy.load_balancer import background_recovery_state_from_account, effective_routing_tunables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -213,6 +217,7 @@ class UsageRefreshScheduler:
                 refresh_started_at = usage_updater_module.utcnow()
                 usage_written = await updater.refresh_accounts([selected_account], before_primary)
                 if usage_written:
+                    await refresh_usage_cap_caches_after_write()
                     async with get_background_session() as session:
                         usage_repo = UsageRepository(session)
                         accounts_repo = AccountsRepository(session)
@@ -323,6 +328,7 @@ def _usage_refresh_slice_seconds(interval_seconds: int, account_count: int) -> f
 async def _invalidate_usage_refresh_caches() -> None:
     await get_rate_limit_headers_cache().invalidate()
     get_account_selection_cache().invalidate()
+    await get_routing_availability_cache().refresh_usage_caps_from_db()
 
 
 @contextlib.asynccontextmanager

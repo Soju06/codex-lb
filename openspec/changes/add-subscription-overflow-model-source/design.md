@@ -10,6 +10,7 @@ Design source: issue #2123 (subscription-exhaustion overflow to a designated mod
 4. **No foreign key from `subscription_overflow_source_id`.** Mirrors `single_account_id`: a dangling id is "off" by definition. Deleting the designated source clears the setting in the same transaction (settings stage).
 5. **One plain index on `purge_at`, created inside the migration transaction.** The table is created empty by the same revision, so `CONCURRENTLY` buys nothing. The index step is guarded independently of the table step so a pre-existing table (partial dump, out-of-band creation) still receives the index; on PostgreSQL an existing invalid same-named index is dropped and rebuilt rather than accepted by name.
 6. **No `server_default`, no backfill, no seed rows.** Both settings columns are nullable and NULL means off / no drain armed; the pin table starts empty.
+6a. **A forward repair handles the reparented usage-cap head.** The usage-cap revision was available on the feature branch before its parent changed from the prior head to the overflow/transport merge. Databases already stamped at the usage-cap revision cannot discover those inserted ancestors. `20260909_090000_repair_reparented_overflow_schema` therefore replays the two canonical idempotent upgrades from a new descendant and has a no-op downgrade, matching the existing repair-migration precedent; it never claims ownership of or removes the canonical schema.
 
 ## Decisions (WP-B: designation, preflight, drain, dashboard)
 

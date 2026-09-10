@@ -131,6 +131,8 @@ class Account(Base):
         server_default=text("'normal'"),
         nullable=False,
     )
+    usage_cap_5h_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    usage_cap_weekly_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

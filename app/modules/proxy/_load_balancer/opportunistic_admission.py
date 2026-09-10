@@ -47,6 +47,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
 )
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._load_balancer.types import AccountConcurrencyCaps, AccountLease, AccountLeaseKind, RuntimeState
+from app.modules.proxy._load_balancer.usage_cap_selection import filter_usage_capped_states
 
 # Preserve the established observability surface while implementation moves to
 # a private module; operators and tests filter this logger by its public owner.
@@ -298,9 +299,6 @@ async def run_opportunistic_admission(
             soft_drain_enabled=request.soft_drain_enabled,
             model=request.model,
         )
-        selection_states, cap_closed = _account_cap_closed(request, states)
-        if cap_closed is not None:
-            return cap_closed
     else:
         async with owner._runtime_lock:
             states, account_map = owner._prepare_sticky_selection_states(
@@ -311,9 +309,10 @@ async def run_opportunistic_admission(
                 soft_drain_enabled=request.soft_drain_enabled,
                 model=request.model,
             )
-            selection_states, cap_closed = _account_cap_closed(request, states)
-            if cap_closed is not None:
-                return cap_closed
+    states = filter_usage_capped_states(states, selection_inputs.usage_cap_resets_by_account, now=owner._clock.time())
+    selection_states, cap_closed = _account_cap_closed(request, states)
+    if cap_closed is not None:
+        return cap_closed
     result = _select_account_preferring_budget_safe(
         selection_states,
         prefer_earlier_reset=request.prefer_earlier_reset_accounts,

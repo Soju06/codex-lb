@@ -273,7 +273,7 @@ from app.modules.proxy._service.support import (
     _reset_propagated_responses_service_cleanup_ready,
     _strip_blank_html_comment_lines,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_cache import get_account_selection_cache, refresh_usage_cap_caches_after_write
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
 from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingResponse
@@ -2124,7 +2124,7 @@ async def _refresh_usage_after_v1_reset_credit_redeem(account_id: str) -> None:
         )
         refreshed = await usage_updater.force_refresh(account)
     if refreshed:
-        get_account_selection_cache().invalidate()
+        await refresh_usage_cap_caches_after_write()
         return
     logger.warning(
         "V1 reset credit consume succeeded but usage refresh returned no update account_id=%s",
@@ -7700,7 +7700,7 @@ async def _force_refresh_codex_usage_identity_account(request: Request) -> None:
         )
         usage_written = await updater.force_refresh(account, access_token_override=access_token)
         if usage_written:
-            get_account_selection_cache().invalidate()
+            await refresh_usage_cap_caches_after_write()
 
 
 def _request_state_str(request: Request, name: str) -> str | None:

@@ -262,6 +262,8 @@ def _account_to_summary(
         plan_type=plan_type,
         status=effective_status.value,
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
+        usage_cap_5h_percent=account.usage_cap_5h_percent,
+        usage_cap_weekly_percent=account.usage_cap_weekly_percent,
         security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,

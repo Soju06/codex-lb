@@ -181,4 +181,3 @@ Byte-limit failures MUST return HTTP 413 with OpenAI error `code = payload_too_l
 
 - **WHEN** a transcription request omits the required-capability carrier
 - **THEN** the existing authentication, parsing, policy, account-routing, and response behavior remains in effect
-

@@ -68,6 +68,7 @@ from app.modules.proxy.account_cache import (
     get_account_selection_cache,
     mark_account_routing_unavailable,
     propagate_account_routing_change,
+    refresh_usage_cap_caches_after_write,
 )
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.additional_quota_keys import (
@@ -347,7 +348,10 @@ class AccountsService:
         usage_written = False
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
             usage_written = await self._usage_updater.force_refresh(account)
-            get_account_selection_cache().invalidate()
+            if usage_written:
+                await refresh_usage_cap_caches_after_write()
+            else:
+                get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)
@@ -650,6 +654,12 @@ class AccountsService:
             get_account_selection_cache().invalidate()
         return result
 
+    async def set_usage_caps(self, account_id: str, *, cap_5h: float | None, cap_weekly: float | None) -> bool:
+        result = await self._repo.update_usage_caps(account_id, cap_5h=cap_5h, cap_weekly=cap_weekly)
+        if result:
+            await refresh_usage_cap_caches_after_write()
+        return result
+
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
         # Fast path: stamp the pending-deletion marker (terminal status, hidden
         # from listings, sticky/bridge cleanup) and return in milliseconds; the
@@ -716,11 +726,14 @@ class AccountsService:
         if self._usage_repo and self._usage_updater:
             usage_refresh_result = await self._usage_updater.force_refresh_result(probe_account)
             usage_refresh_fetch_succeeded = usage_refresh_result.fetch_succeeded
-            # Forced refresh can still persist fresh OAuth credentials before a
-            # later upstream usage fetch fails. Selection-cache rows carry
-            # cloned encrypted tokens, so every forced attempt must invalidate
-            # cached accounts, not only attempts that wrote usage rows.
-            get_account_selection_cache().invalidate()
+            if usage_refresh_result.usage_written:
+                await refresh_usage_cap_caches_after_write()
+            else:
+                # Forced refresh can still persist fresh OAuth credentials before a
+                # later upstream usage fetch fails. Selection-cache rows carry
+                # cloned encrypted tokens, so every forced attempt must invalidate
+                # cached accounts, not only attempts that wrote usage rows.
+                get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)

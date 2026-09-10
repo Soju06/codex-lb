@@ -53,9 +53,10 @@ the alerting share one truth.
 - **Recommendation**:
   - First remedy: existing `throttle_to_percent` (already computed, now
     surfaced) — shown only when `runs_dry`.
-  - `add_pro_accounts`: from trailing-7d fleet demand in quota-weeks
-    (`Σ positive weekly burn / 50,400`) minus current fleet capacity in
-    quota-weeks (`Σ full_credits / 50,400`), ceil,
+  - `add_pro_accounts`: from trailing-7d provider demand in Pro quota-weeks
+    (`Σ(provider_full_credits × positive weekly burn percent / 100) / 50,400`)
+    minus current effective capped fleet capacity in Pro quota-weeks
+    (`Σ effective_full_credits / 50,400`), ceil,
     shown only when demand exceeds capacity AND (`runs_dry` or
     `saturated_account_count > 0`). This is stable across hours and matches
     the capacity-sizing methodology used for actual purchase decisions.

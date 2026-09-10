@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import TypeVar, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -281,9 +282,12 @@ async def test_rate_limit_payload_detaches_pre_refresh_rows() -> None:
     assert session.expunge_all_calls == 1
 
 
+@pytest.mark.parametrize(("usage_written", "expected_refreshes"), [(False, 0), (True, 1)])
 @pytest.mark.asyncio
 async def test_rate_limit_usage_refresh_owns_and_joins_singleflight_session(
     monkeypatch: pytest.MonkeyPatch,
+    usage_written: bool,
+    expected_refreshes: int,
 ) -> None:
     base_service, _ = _service_and_guard()
     service = _RefreshRateLimitService(base_service._repo_factory)
@@ -300,11 +304,17 @@ async def test_rate_limit_usage_refresh_owns_and_joins_singleflight_session(
         captured["accounts"] = accounts
         captured["latest_usage"] = latest_usage
         captured.update(kwargs)
-        return False
+        return usage_written
 
     monkeypatch.setattr(UsageUpdater, "refresh_accounts", capture_refresh)
+    refresh_cap_caches = AsyncMock()
+    monkeypatch.setattr(
+        "app.modules.proxy._service.rate_limit.refresh_usage_cap_caches_after_write",
+        refresh_cap_caches,
+    )
 
     await service._refresh_usage([account], {})
 
     assert captured["own_singleflight_sessions"] is True
     assert captured["join_existing"] is True
+    assert refresh_cap_caches.await_count == expected_refreshes

@@ -20,9 +20,11 @@ import {
   updateAccount,
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
+  updateAccountUsageCaps,
 } from "@/features/accounts/api";
 import type {
   AccountRoutingPolicy,
+  AccountUsageCaps,
   AccountUsageResetConsumeResponse,
 } from "@/features/accounts/schemas";
 
@@ -303,4 +305,20 @@ export function useAccounts() {
   const mutations = useAccountMutations();
 
   return { accountsQuery, ...mutations };
+}
+
+export function useAccountUsageCapsMutation() {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ accountId, caps }: { accountId: string; caps: AccountUsageCaps }) =>
+      updateAccountUsageCaps(accountId, caps),
+    onSuccess: async () => {
+      await invalidateAccountRelatedQueries(queryClient);
+      toast.success(t("accounts.toasts.updated"));
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.updateFailed"));
+    },
+  });
 }

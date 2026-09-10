@@ -10,6 +10,7 @@ import type { AccountSummary } from "@/features/accounts/schemas";
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
   useAccounts: vi.fn(),
   useAccountTrends: vi.fn(() => ({ data: null })),
+  useAccountUsageCapsMutation: vi.fn(() => ({ isPending: false, error: null, mutate: vi.fn() })),
   useAccountUsageResetCredits: vi.fn(() => ({
     data: { rateLimitResetCredits: { availableCount: 3 } },
     isFetching: false,

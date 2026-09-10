@@ -890,14 +890,11 @@ async def test_v1_reset_credit_post_force_refreshes_usage_and_invalidates_select
             force_refresh_calls.append((account.id, account.status.value))
             return True
 
-    class SelectionCache:
-        def __init__(self) -> None:
-            self.invalidations = 0
+    cache_refreshes = 0
 
-        def invalidate(self) -> None:
-            self.invalidations += 1
-
-    selection_cache = SelectionCache()
+    async def refresh_usage_cap_caches_after_write() -> None:
+        nonlocal cache_refreshes
+        cache_refreshes += 1
 
     monkeypatch.setattr(
         "app.modules.proxy.api.fetch_reset_credits",
@@ -915,7 +912,10 @@ async def test_v1_reset_credit_post_force_refreshes_usage_and_invalidates_select
     )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
     monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
-    monkeypatch.setattr("app.modules.proxy.api.get_account_selection_cache", lambda: selection_cache)
+    monkeypatch.setattr(
+        "app.modules.proxy.api.refresh_usage_cap_caches_after_write",
+        refresh_usage_cap_caches_after_write,
+    )
 
     response = await async_client.post(
         "/v1/reset-credit",
@@ -930,7 +930,7 @@ async def test_v1_reset_credit_post_force_refreshes_usage_and_invalidates_select
         "redeemed_at": "2031-05-02T01:30:00Z",
     }
     assert force_refresh_calls == [(account_id, "active")]
-    assert selection_cache.invalidations == 1
+    assert cache_refreshes == 1
     assert get_rate_limit_reset_credits_store().get(account_id) is None
 
 

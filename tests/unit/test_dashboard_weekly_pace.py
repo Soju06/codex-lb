@@ -16,8 +16,8 @@ from app.modules.dashboard.weekly_pace import PRO_WEEKLY_CAPACITY_CREDITS, build
 NOW = datetime(2026, 8, 17, 12, 0, 0)
 
 
-def _account(account_id: str) -> Account:
-    return Account(id=account_id, status=AccountStatus.ACTIVE)
+def _account(account_id: str, *, weekly_cap: float | None = None) -> Account:
+    return Account(id=account_id, status=AccountStatus.ACTIVE, usage_cap_weekly_percent=weekly_cap)
 
 
 def _summary(
@@ -26,6 +26,7 @@ def _summary(
     used_percent: float,
     reset_in_hours: float,
     capacity: float = PRO_WEEKLY_CAPACITY_CREDITS,
+    weekly_cap: float | None = None,
 ) -> AccountSummary:
     return AccountSummary(
         account_id=account_id,
@@ -37,6 +38,7 @@ def _summary(
         window_minutes_secondary=10_080,
         capacity_credits_secondary=capacity,
         remaining_credits_secondary=capacity * (1.0 - used_percent / 100.0),
+        usage_cap_weekly_percent=weekly_cap,
     )
 
 
@@ -71,7 +73,7 @@ def _build(
     trailing_demand_used_percent_by_account: dict[str, float] | None = None,
 ):
     pace = build_weekly_credit_pace(
-        accounts=[_account(summary.account_id) for summary in summaries],
+        accounts=[_account(summary.account_id, weekly_cap=summary.usage_cap_weekly_percent) for summary in summaries],
         account_summaries=summaries,
         secondary_history=histories,
         now=NOW,
@@ -107,6 +109,35 @@ def test_weekly_pace_verdict_branches_and_legacy_status_mapping(
     assert pace.status == legacy_status
     assert pace.burn_rate_recent_credits_per_hour is not None
     assert pace.depletion_eta_hours is not None
+
+
+def test_weekly_pace_rebases_runway_onto_capped_capacity() -> None:
+    summary = _summary("acc-capped", used_percent=60.0, reset_in_hours=5.0, capacity=100_000).model_copy(
+        update={"usage_cap_weekly_percent": 80}
+    )
+    pace = _build(
+        [summary],
+        {"acc-capped": _three_hour_history("acc-capped", final_used_percent=60.0, hourly_delta=5.0)},
+    )
+
+    assert pace.total_full_credits == 80_000
+    assert pace.total_actual_remaining_credits == 20_000
+    assert pace.headroom_credits == 20_000
+    assert pace.headroom_percent == 25
+    assert pace.reset_events[0].credits_returned == 60_000
+
+
+def test_weekly_pace_ignores_weekly_cap_for_non_weekly_secondary_window() -> None:
+    summary = _summary("acc-daily", used_percent=60.0, reset_in_hours=5.0, capacity=100_000).model_copy(
+        update={"usage_cap_weekly_percent": 80, "window_minutes_secondary": 1_440}
+    )
+    pace = _build(
+        [summary],
+        {"acc-daily": _three_hour_history("acc-daily", final_used_percent=60.0, hourly_delta=5.0)},
+    )
+
+    assert pace.total_full_credits == 100_000
+    assert pace.total_actual_remaining_credits == 40_000
 
 
 def test_weekly_pace_relief_clusters_resets_within_one_hour() -> None:
@@ -282,11 +313,22 @@ def test_weekly_pace_add_pro_accounts_uses_fleet_capacity_on_mixed_fleets() -> N
         trailing_demand_used_percent_by_account={pro_id: 110.0, plus_id: 300.0},
     )
 
-    # Demand is 78,120 credits (1.55 Pro-weeks) against 57,960 credits of fleet
-    # capacity (1.15 Pro-weeks). A seat-count basis would treat the Plus account
-    # as a full Pro seat (1.55 - 2 < 0) and suppress the recommendation; the
-    # capacity basis recommends one extra Pro account.
+    # Demand is 78,120 provider credits (1.55 Pro-weeks) against 57,960
+    # effective credits (1.15 Pro-weeks), leaving a 0.4-Pro-account surplus.
     assert pace.saturated_account_count == 2
+    assert pace.add_pro_accounts == 1
+
+
+def test_weekly_pace_add_pro_accounts_uses_provider_capacity_for_capped_demand() -> None:
+    account_id = "acc-capped-demand"
+    pace = _build(
+        [_summary(account_id, used_percent=99.5, reset_in_hours=2.0, weekly_cap=80.0)],
+        {account_id: [_row(account_id, 99.5, NOW - timedelta(minutes=1))]},
+        trailing_demand_used_percent_by_account={account_id: 100.0},
+    )
+
+    # One provider week of demand exceeds the account's 0.8 Pro-week
+    # effective capped fleet contribution.
     assert pace.add_pro_accounts == 1
 
 

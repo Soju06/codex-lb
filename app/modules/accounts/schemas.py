@@ -90,6 +90,8 @@ class AccountSummary(DashboardModel):
     seat_type: str | None = None
     plan_type: str
     routing_policy: str = Field(default="normal", pattern=r"^(normal|burn_first|preserve)$")
+    usage_cap_5h_percent: float | None = None
+    usage_cap_weekly_percent: float | None = None
     status: str
     security_work_authorized: bool = False
     usage: AccountUsage | None = None
@@ -306,3 +308,8 @@ class AccountAliasRequest(DashboardModel):
 class AccountAliasResponse(DashboardModel):
     account_id: str
     alias: str | None = None
+
+
+class AccountUsageCapsRequest(DashboardModel):
+    usage_cap_5h_percent: float | None = Field(gt=0, le=100, allow_inf_nan=False, strict=True)
+    usage_cap_weekly_percent: float | None = Field(gt=0, le=100, allow_inf_nan=False, strict=True)

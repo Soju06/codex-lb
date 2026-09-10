@@ -5,7 +5,7 @@ import inspect
 import json
 import logging
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
 from uuid import uuid4
@@ -150,6 +150,7 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
+from app.modules.proxy._load_balancer.usage_cap_selection import usage_cap_resets_by_account
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
@@ -254,6 +255,7 @@ class _SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
+    usage_cap_resets_by_account: Mapping[str, tuple[int | None, ...]] = field(default_factory=dict)
     # C2-3 resilience toggles: resolved once per selection from the dashboard
     # snapshot passed to ``select_account``; None = inherit the env alias.
     soft_drain_enabled: bool | None = None
@@ -309,7 +311,7 @@ class LoadBalancer:
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
         self._account_locks_registry_lock = asyncio.Lock()
-        self._selection_inputs_cache = get_account_selection_cache()
+        self._selection_inputs_cache = get_account_selection_cache(clock=clock)
         # C2-2 routing/overload: the most recent request-path snapshot; paths
         # without one (stream error funnel, unkeyed bridge reacquires) reuse it.
         self._routing_tunables: RoutingTunables | None = None
@@ -666,24 +668,11 @@ class LoadBalancer:
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
-                selection_inputs = _SelectionInputs(
+                selection_inputs = replace(
+                    selection_inputs,
                     accounts=authorized_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=authorized_owner_candidates,
                     sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
-                    ),
                 )
             if excluded_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
@@ -702,25 +691,12 @@ class LoadBalancer:
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
-                selection_inputs = _SelectionInputs(
+                selection_inputs = replace(
+                    selection_inputs,
                     accounts=filtered_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
                     sticky_mutation_authority_account_ids=(
                         selection_inputs.effective_sticky_mutation_authority_account_ids
-                    ),
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
                     ),
                 )
             if required_continuity_owner:
@@ -1186,7 +1162,6 @@ class LoadBalancer:
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
             return _clone_selection_inputs(cached)
-
         load_generation = self._selection_inputs_cache.generation
 
         async with self._repo_factory() as repos:
@@ -1243,9 +1218,7 @@ class LoadBalancer:
                         account.id for account in accounts if account.id not in general_model_account_ids
                     )
             else:
-                # Administrative/runtime status affects routability, not who
-                # may own account-scoped upstream state. Capture this pool
-                # before PAUSED/DEACTIVATED/etc. can manufacture uniqueness.
+                # Runtime status affects routability, not account-scoped ownership.
                 continuity_owner_candidates = scoped_accounts
             if model and not accounts:
                 if not all_accounts:
@@ -1369,12 +1342,14 @@ class LoadBalancer:
                     _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
                 )
                 return selection_inputs
-
             # These share one AsyncSession: concurrent execution on a single
             # session is unsafe (asyncpg) and gains nothing — the driver
             # serializes statements per connection anyway.
             standard_latest_primary = await repos.usage.latest_by_account()
             standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
+            cap_resets_by_account = usage_cap_resets_by_account(
+                accounts, standard_latest_primary, standard_latest_secondary, now=self._clock.time()
+            )
             latest_monthly = await repos.usage.latest_by_account(window="monthly")
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
@@ -1424,6 +1399,7 @@ class LoadBalancer:
                 persist_standard_quota_status=True,
                 routing_policy_override=routing_policy_override,
                 quota_admitted_catalog_omission_account_ids=quota_admitted_catalog_omission_account_ids,
+                usage_cap_resets_by_account=cap_resets_by_account,
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -2978,6 +2954,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         quota_admitted_catalog_omission_account_ids=frozenset(
             selection_inputs.quota_admitted_catalog_omission_account_ids
         ),
+        usage_cap_resets_by_account=dict(selection_inputs.usage_cap_resets_by_account),
     )
 
 

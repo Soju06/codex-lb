@@ -7,7 +7,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
-from app.db.models import UsageHistory
+from app.db.models import Account, UsageHistory
 from app.modules.accounts.mappers import build_account_summaries
 from app.modules.dashboard.builders import (
     build_dashboard_overview_summary,
@@ -245,7 +245,7 @@ class DashboardService:
             now,
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
         )
-        pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
+        pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, accounts, now)
         trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
             _weekly_history_windows(primary_usage, secondary_usage),
             since=now - DEMAND_WINDOW,
@@ -441,11 +441,13 @@ async def _load_projection_histories(
 def _build_depletion_by_window(
     primary_history: dict[str, list[UsageHistory]],
     secondary_history: dict[str, list[UsageHistory]],
-    now,
+    accounts: list[Account],
+    now: datetime,
 ) -> tuple[DepletionResponse | None, DepletionResponse | None]:
     """Compute depletion independently per window."""
     active_cache_keys = {(account_id, "standard", "primary") for account_id in primary_history}
     active_cache_keys.update((account_id, "standard", "secondary") for account_id in secondary_history)
+    account_by_id = {account.id: account for account in accounts}
 
     def _aggregate(history: dict[str, list[UsageHistory]], window: str) -> DepletionResponse | None:
         metrics = []
@@ -456,6 +458,11 @@ def _build_depletion_by_window(
                 window=window,
                 history=rows,
                 now=now,
+                usage_cap_percent=(
+                    account_by_id[account_id].usage_cap_5h_percent
+                    if window == "primary"
+                    else account_by_id[account_id].usage_cap_weekly_percent
+                ),
             )
             metrics.append(m)
         agg = compute_aggregate_depletion(metrics)

@@ -359,4 +359,3 @@ existing response contract including `actorIp`, `details`, and `requestId`.
 - **WHEN** an admin requests the same row
 - **THEN** the request succeeds
 - **AND** actor IP, details, and request ID remain present
-

@@ -43,6 +43,11 @@ from app.modules.proxy._load_balancer.types import (
     ProbeReservation,
     RuntimeState,
 )
+from app.modules.proxy._load_balancer.usage_cap_selection import (
+    USAGE_CAP_ERROR_CODE,
+    USAGE_CAP_ERROR_MESSAGE,
+    filter_usage_capped_states,
+)
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.fair_share import (
     API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
@@ -85,6 +90,7 @@ class SelectionInputsProtocol(Protocol):
     error_code: str | None
     ignore_standard_quota_account_ids: frozenset[str]
     routing_policy_override: str | None
+    usage_cap_resets_by_account: Mapping[str, tuple[int | None, ...]]
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]: ...
@@ -583,9 +589,13 @@ async def run_sticky_selection_path(
                     error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
                     error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
                 )
-            # Fair share is measured against the full candidate pool, before
+            usage_states = filter_usage_capped_states(
+                states, selection_inputs.usage_cap_resets_by_account, now=owner._clock.time()
+            )
+            usage_cap_exhausted = bool(states and not usage_states)
+            # Fair share is measured against the full cap-eligible pool, before
             # hard-sticky narrows selection to the owner account.
-            fair_share_candidate_ids = [state.account_id for state in states]
+            fair_share_candidate_ids = [state.account_id for state in usage_states]
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
@@ -605,22 +615,23 @@ async def run_sticky_selection_path(
                 # constraint, not a preference. Scope, exclusions,
                 # health, and caps may make it unavailable, but must
                 # never delete or rebind it.
-                selection_states = [state for state in states if state.account_id == sticky_existing_account_id]
+                owner_states = [state for state in states if state.account_id == sticky_existing_account_id]
+                selection_states = [state for state in usage_states if state.account_id == sticky_existing_account_id]
+                usage_cap_exhausted = bool(owner_states and not selection_states)
             elif bare_session_key and isinstance(sticky_existing_account_id, str) and not cap_spillover_allowed:
                 # Mobility was revoked by owner-bearing payload or
                 # recovery stage. Keep the old cap exception for this
                 # soft hint; the authoritative preferred-owner path
                 # normally bypasses it.
-                selection_states = states
+                selection_states = usage_states
                 if owner_overload_isolated:
-                    # The owner keeps its cap exemption, but a sibling it
-                    # may be released to must pass the caps: otherwise the
-                    # reroute could pick a saturated sibling that lease
-                    # admission then rejects while the owner had capacity.
+                    # The owner keeps its concurrency-cap exemption, but a
+                    # sibling it may be released to must pass both usage and
+                    # concurrency caps before overload isolation reroutes it.
                     cap_eligible_ids = {
                         state.account_id
                         for state in _filter_states_for_account_caps(
-                            states,
+                            usage_states,
                             lease_kind=lease_kind,
                             caps=caps,
                             stream_reserve_slots=stream_reserve_slots,
@@ -628,12 +639,12 @@ async def run_sticky_selection_path(
                     }
                     selection_states = [
                         state
-                        for state in states
+                        for state in usage_states
                         if state.account_id == sticky_existing_account_id or state.account_id in cap_eligible_ids
                     ]
             else:
                 selection_states = _filter_states_for_account_caps(
-                    states,
+                    usage_states,
                     lease_kind=lease_kind,
                     caps=caps,
                     stream_reserve_slots=stream_reserve_slots,
@@ -762,7 +773,11 @@ async def run_sticky_selection_path(
                     retired_legacy_owner_account_ids.add(abandoned_account_id)
             continue
         sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
-        if fair_share_denial is not None:
+        if usage_cap_exhausted:
+            selection_error_code = USAGE_CAP_ERROR_CODE
+            selection_resets_at = None
+            result = SelectionResult(None, USAGE_CAP_ERROR_MESSAGE, error_code=USAGE_CAP_ERROR_CODE)
+        elif fair_share_denial is not None:
             # Denial parks in the transport capacity-wait loop like a cap
             # denial. Sticky DB work, mapping mutation, and probe
             # reservation are all skipped so mappings are preserved.

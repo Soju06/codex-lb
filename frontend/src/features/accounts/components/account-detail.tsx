@@ -11,6 +11,7 @@ import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountProxyBinding } from "@/features/accounts/components/account-proxy-binding";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
+import { AccountUsageCaps } from "@/features/accounts/components/account-usage-caps";
 import type {
   AccountRoutingPolicy,
   AccountSummary,
@@ -170,6 +171,11 @@ export function AccountDetail({
         resetCreditsUnavailable={resetCreditsUnavailable}
         resetDisabled={usageResetDisabled}
         onReset={onResetUsage}
+      />
+      <AccountUsageCaps
+        key={`${account.accountId}:${account.usageCap5HPercent}:${account.usageCapWeeklyPercent}`}
+        account={account}
+        disabled={busy || readOnly}
       />
       <AccountTokenInfo account={account} />
       <AccountActions

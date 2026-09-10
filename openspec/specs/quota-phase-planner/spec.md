@@ -388,4 +388,3 @@ so a slow tick is attributable from logs alone.
 - **GIVEN** a replica that ran a planner tick as leader
 - **WHEN** the tick completes
 - **THEN** the replica logs the tick duration in milliseconds
-

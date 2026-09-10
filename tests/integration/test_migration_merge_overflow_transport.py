@@ -22,6 +22,11 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+_OLD_USAGE_CAP_HEAD = "20260907_000000_add_account_usage_caps"
+_PRE_REPAIR_HEADS = (_OLD_USAGE_CAP_HEAD, "20260909_070000_automation_run_claim_budget")
+_REPAIR = "20260909_090000_repair_reparented_overflow_schema"
+_UPSTREAM_HEAD = "20260909_130000_add_request_logs_live_facet_indexes"
+_HEAD = "20260910_000000_merge_usage_cap_repair_and_live_facets"
 
 
 @dataclass
@@ -152,11 +157,12 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
 def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tmp_path: Path) -> None:
     config = _build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}")
     script = ScriptDirectory.from_config(config)
-    # Later revisions build on the merge; the graph must still have one head
-    # and the merge must be on its ancestry.
-    heads = script.get_heads()
-    assert len(heads) == 1
-    assert _MERGE in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
+    assert script.get_heads() == [_HEAD]
+    head = script.get_revision(_HEAD)
+    assert head is not None and head.down_revision == (_REPAIR, _UPSTREAM_HEAD)
+    repair = script.get_revision(_REPAIR)
+    assert repair is not None and repair.down_revision == _PRE_REPAIR_HEADS
+    assert _MERGE in {revision.revision for revision in script.iterate_revisions(_HEAD, "base")}
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
     for revision in _PARENTS:
@@ -227,3 +233,36 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
         assert _revisions(database.engine) == (head,)
         assert _state(database.engine) == populated
         assert check_schema_drift(database.url) == ()
+
+
+def test_repair_migrates_database_stamped_at_pre_reparent_usage_cap_head(tmp_path: Path) -> None:
+    database_path = tmp_path / "pre-reparent-head.sqlite"
+    url = f"sqlite+aiosqlite:///{database_path}"
+    engine = create_engine(f"sqlite:///{database_path}")
+    try:
+        run_upgrade(url, _COMMON_PARENT, bootstrap_legacy=False)
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE accounts ADD COLUMN usage_cap_5h_percent FLOAT"))
+            connection.execute(text("ALTER TABLE accounts ADD COLUMN usage_cap_weekly_percent FLOAT"))
+        command.stamp(_build_alembic_config(url), _OLD_USAGE_CAP_HEAD)
+
+        result = run_upgrade(url, "head", bootstrap_legacy=False)
+
+        assert result.current_revision == _HEAD
+        assert _revisions(engine) == (_HEAD,)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            settings_columns = {column["name"]: column for column in inspector.get_columns("dashboard_settings")}
+            assert settings_columns["subscription_overflow_source_id"]["nullable"]
+            assert settings_columns["subscription_overflow_drain_until"]["nullable"]
+            assert inspector.has_table("model_source_pins")
+            assert {index["name"] for index in inspector.get_indexes("model_source_pins")} == {
+                "ix_model_source_pins_purge_at"
+            }
+            transport = connection.execute(
+                text("SELECT upstream_stream_transport FROM dashboard_settings WHERE id = 1")
+            ).scalar_one()
+            assert transport == "auto"
+        assert check_schema_drift(url) == ()
+    finally:
+        engine.dispose()

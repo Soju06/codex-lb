@@ -80,6 +80,8 @@ export type DashboardView = {
   primaryTotal: number;
   /** Sum of visible secondary remaining items shown in the donut center label. */
   secondaryTotal: number;
+  primaryCapacityTotal?: number;
+  secondaryCapacityTotal?: number;
   requestLogs: RequestLog[];
   safeLinePrimary: SafeLineView | null;
   safeLineSecondary: SafeLineView | null;
@@ -139,6 +141,53 @@ function accountRemainingPercent(account: AccountSummary, windowKey: "primary" |
   return account.usage?.primaryRemainingPercent ?? null;
 }
 
+function accountUsageCap(account: AccountSummary, windowKey: "primary" | "secondary"): number | null {
+  return windowKey === "primary"
+    ? account.usageCap5HPercent ?? null
+    : account.usageCapWeeklyPercent ?? null;
+}
+
+function accountWindowCapacity(account: AccountSummary, windowKey: "primary" | "secondary"): number | null {
+  return windowKey === "primary"
+    ? account.capacityCreditsPrimary ?? null
+    : account.capacityCreditsSecondary ?? null;
+}
+
+function cappedCredits(
+  remaining: number,
+  capacity: number | null,
+  cap: number | null,
+  fallbackPercent: number | null,
+): { remaining: number; remainingPercent: number | null; reserved: number } {
+  if (capacity == null || capacity <= 0 || cap == null) {
+    return { remaining, remainingPercent: fallbackPercent, reserved: 0 };
+  }
+  const usableCapacity = capacity * (Math.min(100, Math.max(0, cap)) / 100);
+  const reserved = capacity - usableCapacity;
+  const usableRemaining = Math.max(0, remaining - reserved);
+  return {
+    remaining: usableRemaining,
+    remainingPercent: usableCapacity > 0 ? (usableRemaining / usableCapacity) * 100 : 0,
+    reserved,
+  };
+}
+
+export function usableCapacityTotal(
+  total: number,
+  accounts: AccountSummary[],
+  windowKey: "primary" | "secondary",
+): number {
+  const reserved = accounts.reduce((sum, account) => {
+    const windowMinutes = windowKey === "primary" ? account.windowMinutesPrimary : account.windowMinutesSecondary;
+    const expectedMinutes = windowKey === "primary" ? 300 : 10_080;
+    if (windowMinutes !== expectedMinutes) return sum;
+    return sum + cappedCredits(
+      0, accountWindowCapacity(account, windowKey), accountUsageCap(account, windowKey), null,
+    ).reserved;
+  }, 0);
+  return Math.max(0, total - reserved);
+}
+
 /**
  * Cap primary (5h) remaining by secondary (7d) absolute credits.
  *
@@ -192,7 +241,13 @@ export function buildRemainingItems(
       if (windowKey === "primary" && isWeeklyOnlyAccount(account)) {
         return null;
       }
-      const remaining = usageIndex.get(account.accountId) ?? 0;
+      const rawRemaining = usageIndex.get(account.accountId) ?? 0;
+      const adjusted = cappedCredits(
+        rawRemaining,
+        accountWindowCapacity(account, windowKey),
+        accountUsageCap(account, windowKey),
+        accountRemainingPercent(account, windowKey),
+      );
       const rawLabel = account.displayName || account.email || account.accountId;
       const labelIsEmail = !!account.email && rawLabel === account.email;
       const labelSuffix = account.isEmailDuplicate === true
@@ -203,8 +258,8 @@ export function buildRemainingItems(
         label: rawLabel,
         labelSuffix,
         isEmail: labelIsEmail,
-        value: remaining,
-        remainingPercent: accountRemainingPercent(account, windowKey),
+        value: adjusted.remaining,
+        remainingPercent: adjusted.remainingPercent,
         color: palette[index % palette.length],
       };
     })
@@ -630,19 +685,27 @@ export function buildWeeklyCreditPace(
   const weeklyAccounts: WeeklyPoolAccount[] = [];
 
   for (const account of accounts) {
-    const fullCredits = account.capacityCreditsSecondary;
-    const remainingCredits = account.remainingCreditsSecondary;
+    const rawFullCredits = account.capacityCreditsSecondary;
+    const rawRemainingCredits = account.remainingCreditsSecondary;
     const resetAtMs = account.resetAtSecondary ? Date.parse(account.resetAtSecondary) : Number.NaN;
     const windowMinutes = account.windowMinutesSecondary;
 
     if (
-      !isPositiveFinite(fullCredits) ||
-      !isNonNegativeFinite(remainingCredits) ||
+      !isPositiveFinite(rawFullCredits) ||
+      !isNonNegativeFinite(rawRemainingCredits) ||
       !Number.isFinite(resetAtMs) ||
       !isPositiveFinite(windowMinutes)
     ) {
       continue;
     }
+    const adjusted = cappedCredits(
+      rawRemainingCredits,
+      rawFullCredits,
+      windowMinutes === 10_080 ? account.usageCapWeeklyPercent ?? null : null,
+      null,
+    );
+    const fullCredits = rawFullCredits - adjusted.reserved;
+    const remainingCredits = adjusted.remaining;
 
     const windowMs = windowMinutes * 60_000;
     const effectiveResetAtMs = advanceWeeklyResetAt(resetAtMs, windowMs, nowMs);
@@ -730,6 +793,7 @@ export function buildWeeklyCreditPace(
     confidence: "low",
   };
 }
+
 
 export function buildDashboardView(
   overview: DashboardOverview,
@@ -853,6 +917,13 @@ export function buildDashboardView(
   const primaryUsageItems = secondaryWindow
     ? applySecondaryConstraint(rawPrimaryItems, secondaryUsageItems)
     : rawPrimaryItems;
+  const primaryCapacityTotal = usableCapacityTotal(
+    overview.summary.primaryWindow.capacityCredits, overview.accounts, "primary",
+  );
+  const secondaryFullCapacity = overview.summary.secondaryWindow?.capacityCredits ?? 0;
+  const secondaryCapacityTotal = usableCapacityTotal(secondaryFullCapacity, overview.accounts, "secondary");
+  const weeklyCreditPace =
+    overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts);
 
   return {
     stats,
@@ -860,17 +931,11 @@ export function buildDashboardView(
     secondaryUsageItems,
     primaryTotal: sumRemaining(primaryUsageItems),
     secondaryTotal: sumRemaining(secondaryUsageItems),
+    primaryCapacityTotal,
+    secondaryCapacityTotal,
     requestLogs,
     safeLinePrimary: buildDepletionView(projections?.depletionPrimary ?? overview.depletionPrimary),
     safeLineSecondary: buildDepletionView(projections?.depletionSecondary ?? overview.depletionSecondary),
-    // A present overview pace is the freshest verdict and always wins.
-    // TanStack Query retains the last successful projections payload across
-    // later failures, so a stale projections copy must never override it.
-    // Older backends serve `weeklyCreditPace: null` (they cannot compute the
-    // runway model), which is indistinguishable from a fresh backend with no
-    // eligible accounts — so null falls back to the projections copy and then
-    // to the local projection instead of hiding the card entirely.
-    weeklyCreditPace:
-      overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts),
+    weeklyCreditPace,
   };
 }

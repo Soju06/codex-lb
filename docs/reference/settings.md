@@ -120,7 +120,7 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_COMPACT_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `180.0` |
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT` | T1 | `int` | `100` |
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT_PER_HOST` | T1 | `int` | `50` |
-| `CODEX_LB_HTTP_RESPONSES_STREAM_REQUEST_BUDGET_SECONDS` | T3 | `float` | `7200.0` |
+| `CODEX_LB_HTTP_RESPONSES_STREAM_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `7200.0` |
 | `CODEX_LB_SSE_KEEPALIVE_INTERVAL_SECONDS` | T3 (dashboard) | `float` | `10.0` |
 | `CODEX_LB_STREAM_IDLE_TIMEOUT_SECONDS` | T3 (dashboard) | `float` | `7200.0` |
 | `CODEX_LB_TRANSCRIPTION_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `120.0` |
@@ -144,7 +144,7 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_FORMAT` | T1 | `'rows_v1' \| 'chunks_v2'` | `'rows_v1'` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_RETENTION_SECONDS` | T3 | `float` | `604800` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUEUE_LIMIT` | T1 | `int` | `8` |
-| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_REQUEST_BUDGET_SECONDS` | T3 | `float` | `7200.0` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `7200.0` |
 
 ## Proxy admission & account caps
 
@@ -176,7 +176,7 @@ anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
-| `CODEX_LB_AUTH_GUARDIAN_ENABLED` | T3 | `bool` | `True` |
+| `CODEX_LB_AUTH_GUARDIAN_ENABLED` | T3 (dashboard) | `bool` | `True` |
 | `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS` | T3 | `int` | `8` |
 
 ## Usage
@@ -184,14 +184,14 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE` | T1 | `Path \| None` | `None` |
-| `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` | T3 | `bool` | `True` |
+| `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` | T3 (dashboard) | `bool` | `True` |
 
 ## Model registry
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
-| `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` | T3 | `dict[str, int]` | `{}` |
-| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | T1 | `str` | `'0.153.4'` |
+| `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` | T3 (dashboard) | `dict[str, int]` | `{}` |
+| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | T1 | `str` | `'0.154.0'` |
 | `CODEX_LB_MODEL_REGISTRY_SNAPSHOT_MAX_AGE_SECONDS` | T1 | `int` | `86400` |
 
 ## Firewall
@@ -218,14 +218,14 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_CONVERSATION_ARCHIVE_DIR` | T1 | `Path` | `<data_dir>/conversation-archive` |
-| `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED` | T3 | `bool` | `False` |
+| `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED` | T3 (dashboard) | `bool` | `False` |
 | `CODEX_LB_CONVERSATION_ARCHIVE_QUEUE_MAX_BYTES` | T1 | `int` | `268435456` |
 
 ## Schedulers
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
-| `CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED` | T3 | `bool` | `True` |
+| `CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED` | T3 (dashboard) | `bool` | `True` |
 
 ## Multi-replica
 
@@ -263,7 +263,7 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_EVENT_LOOP_LAG_WARN_THRESHOLD_SECONDS` | T1 | `float` | `0.5` |
-| `CODEX_LB_TELEMETRY_ENABLED` | T3 | `bool \| None` | `None` |
+| `CODEX_LB_TELEMETRY_ENABLED` | T3 (dashboard) | `bool \| None` | `None` |
 | `CODEX_LB_TELEMETRY_ENDPOINT` | T1 | `str` | `'https://telemetry.tokmaxxing.com'` |
 | `CODEX_LB_TIMEOUT_INVARIANT_VALIDATION_STRICT` | T4 | `bool` | `False` |
 

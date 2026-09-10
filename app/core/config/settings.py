@@ -16,6 +16,7 @@ from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
+from app.core.clients.codex_version_snapshot import CODEX_VERSION
 from app.core.utils.proxy_env import outbound_proxy_env_configured
 
 logger = logging.getLogger(__name__)
@@ -307,6 +308,7 @@ class Settings(BaseSettings):
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
     # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)
@@ -317,6 +319,7 @@ class Settings(BaseSettings):
     # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
     oauth_callback_host: str = _default_oauth_callback_host()
+    # T3 → dashboard (deprecated env alias, remove next minor)
     auth_guardian_enabled: bool = True
     # T3 → dashboard (deprecated env alias, remove next minor)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
@@ -327,8 +330,10 @@ class Settings(BaseSettings):
     # migration ``20260312_000000`` reads the same env name directly because
     # migrations must not depend on ``Settings``.
     additional_quota_registry_file: Path | None = None
+    # T3 → dashboard (deprecated env alias, remove next minor)
     rate_limit_reset_credits_refresh_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
+    # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor): the same-name
     # ``dashboard_settings`` column wins when set (M3 codex prewarm).
@@ -374,6 +379,7 @@ class Settings(BaseSettings):
     # disables caching. Admin mutations invalidate durably through the
     # cache-invalidation bus, so this only bounds out-of-band database edits.
     upstream_route_cache_ttl_seconds: float = Field(default=60.0, ge=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     automations_scheduler_enabled: bool = True
     # T3 (dashboard home: dashboard_settings.telemetry_consent). Headless
     # first-boot opt-out fallback; a persisted dashboard decision always wins.
@@ -393,6 +399,9 @@ class Settings(BaseSettings):
     # (upstream request summary/completion), ``upstream_payload`` (upstream
     # request payload). Interactive incident use only, not steady-state config.
     trace: str = ""
+    # T3 → dashboard (deprecated env alias, remove next minor): the
+    # ``dashboard_settings.conversation_archive_enabled`` column wins when set;
+    # the archive writer resolves it from the settings-cache snapshot.
     conversation_archive_enabled: bool = False
     conversation_archive_dir: Path = DEFAULT_CONVERSATION_ARCHIVE_DIR
     conversation_archive_queue_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
@@ -408,10 +417,13 @@ class Settings(BaseSettings):
     # Must stay >= the highest ``minimal_client_version`` in the bootstrap
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
     # receive an upstream catalog without those models.
-    model_registry_client_version: str = "0.153.4"
+    model_registry_client_version: str = CODEX_VERSION
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor). Per-slug fallback:
+    # a ``model_context_window_overrides`` dashboard row wins for its slug; slugs
+    # without a row still read this dict.
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     # T1 (topology). Raw socket-peer CIDRs allowed to call the proxy without an
     # API key: a fact of this replica's network namespace (sidecar, pod CIDR),

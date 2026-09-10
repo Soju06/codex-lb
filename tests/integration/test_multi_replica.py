@@ -278,7 +278,9 @@ async def test_automations_scheduler_tick_body_runs_once_across_two_replicas(db_
 
     body_runs = 0
 
-    async def _counting_body(self: AutomationsScheduler) -> None:
+    async def _counting_body(self: AutomationsScheduler, dashboard_settings) -> None:
+        # M2 background jobs: the tick threads its pre-lock settings snapshot
+        # into the leader-gated body.
         nonlocal body_runs
         body_runs += 1
 

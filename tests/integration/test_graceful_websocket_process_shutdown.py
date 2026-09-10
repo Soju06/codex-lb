@@ -178,9 +178,8 @@ async def test_sigint_exits_when_lifespan_absorbs_cleanup_cancellation() -> None
 @pytest.mark.asyncio
 async def test_prestop_commits_deadline_before_sigterm_and_cannot_reopen() -> None:
     async with _run_server(
-        mode="complete",
+        mode="controlled_complete",
         drain_timeout_seconds=2.0,
-        completion_delay_seconds=0.25,
     ) as server:
         async with connect(server.websocket_url) as websocket:
             await websocket.send(json.dumps({"type": "response.create"}))
@@ -213,6 +212,7 @@ async def test_prestop_commits_deadline_before_sigterm_and_cannot_reopen() -> No
                 async with connect(server.websocket_url):
                     pytest.fail("late WebSocket admission unexpectedly succeeded")
 
+            await websocket.send("complete")
             terminal = json.loads(await websocket.recv())
             assert terminal["type"] == "response.completed"
             with pytest.raises(ConnectionClosed):

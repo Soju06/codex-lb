@@ -16,13 +16,16 @@ import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
 import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
+import { ConversationArchiveSettings } from "@/features/settings/components/conversation-archive-settings";
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
+import { ModelCatalogueSettings } from "@/features/settings/components/model-catalogue-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
 import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
 import { SessionBridgeSettings } from "@/features/settings/components/session-bridge-settings";
+import { BackgroundJobsSettings } from "@/features/settings/components/background-jobs-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
 import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream-timeout-settings";
@@ -53,6 +56,9 @@ const FIREWALL_LAYOUT_QUERY_KEYS = [
   ["accounts", "list"],
   ["settings", "upstream-proxy"],
   ["model-sources", "list"],
+  // M4 model catalogue: the card sits above Firewall and grows by a table row
+  // per override, so a late response would push a #firewall scroll out of view.
+  ["settings", "model-context-window-overrides"],
 ] as const;
 
 export function SettingsPage() {
@@ -238,6 +244,7 @@ export function SettingsPage() {
               />
               <ResilienceSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <SessionBridgeSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+              <BackgroundJobsSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               {upstreamProxyQuery.data ? (
                 <UpstreamProxySettings
                   admin={upstreamProxyQuery.data}
@@ -252,6 +259,7 @@ export function SettingsPage() {
                 />
               ) : null}
               <ModelSourcesSettings disabled={controlsDisabled} />
+              <ModelCatalogueSettings disabled={controlsDisabled} />
               <FirewallSection disabled={controlsDisabled} />
               <QuotaPlannerSection disabled={controlsDisabled} />
               <StickySessionsSection disabled={controlsDisabled} />
@@ -266,6 +274,8 @@ export function SettingsPage() {
                 busy={controlsDisabled}
                 onSave={handleSave}
               />
+              {/* M5 conversation archive: next to Data retention (same "what we keep" family). */}
+              <ConversationArchiveSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <UpstreamTimeoutSettings
                 key={[
                   settings.version,
@@ -273,6 +283,8 @@ export function SettingsPage() {
                   settings.proxyRequestBudgetSeconds,
                   settings.compactRequestBudgetSeconds,
                   settings.transcriptionRequestBudgetSeconds,
+                  settings.httpResponsesStreamRequestBudgetSeconds,
+                  settings.httpResponsesSessionBridgeRequestBudgetSeconds,
                   settings.streamIdleTimeoutSeconds,
                   settings.proxyDownstreamWebsocketIdleTimeoutSeconds,
                   settings.sseKeepaliveIntervalSeconds,

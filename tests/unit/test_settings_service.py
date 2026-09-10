@@ -13,6 +13,7 @@ from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import (
     InheritableValue,
+    SettingSource,
     SettingsService,
     _dump_additional_quota_routing_policies,
     _parse_additional_quota_routing_policies,
@@ -98,6 +99,14 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         "circuit_breaker_enabled": InheritableValue(False, "default", False, False),
         # M3 codex prewarm: NULL column, env double without the field -> off.
         "http_responses_session_bridge_codex_prewarm_enabled": InheritableValue(False, "default", False, False),
+        # M2 background jobs: NULL columns, env double without the fields ->
+        # code defaults (every scheduler on).
+        "auth_guardian_enabled": InheritableValue(True, "default", True, True),
+        "automations_scheduler_enabled": InheritableValue(True, "default", True, True),
+        "rate_limit_reset_credits_refresh_enabled": InheritableValue(True, "default", True, True),
+        # M5 conversation archive: NULL column, env double without the field
+        # -> code default (off).
+        "conversation_archive_enabled": InheritableValue(False, "default", False, False),
         # C2-1 timeouts: NULL columns and a startup fake without the fields
         # resolve to the code default.
         **{
@@ -151,6 +160,49 @@ async def test_timeout_settings_resolve_dashboard_then_environment_then_default(
     assert settings.provenance["sse_keepalive_interval_seconds"] == InheritableValue(3.0, "env", 3.0, 10.0)
     assert settings.upstream_connect_timeout_seconds == 8.0
     assert settings.provenance["upstream_connect_timeout_seconds"] == InheritableValue(8.0, "default", 8.0, 8.0)
+
+
+@pytest.mark.asyncio
+async def test_stream_and_bridge_budgets_resolve_dashboard_then_environment_then_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # M1 stream/bridge budgets: the three resolver states on the two new columns.
+    row = DashboardSettings()
+    row.http_responses_stream_request_budget_seconds = 3600.0
+    row.http_responses_session_bridge_request_budget_seconds = None
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    # (a) dashboard column set -> dashboard; (b) NULL column + env differs -> env.
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_stream_request_budget_seconds=5000.0,
+            http_responses_session_bridge_request_budget_seconds=5400.0,
+        ),
+    )
+    settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+    assert settings.http_responses_stream_request_budget_seconds == 3600.0
+    assert settings.provenance["http_responses_stream_request_budget_seconds"] == InheritableValue(
+        3600.0, "dashboard", 5000.0, 7200.0
+    )
+    assert settings.http_responses_session_bridge_request_budget_seconds == 5400.0
+    assert settings.provenance["http_responses_session_bridge_request_budget_seconds"] == InheritableValue(
+        5400.0, "env", 5400.0, 7200.0
+    )
+
+    # (c) NULL column and no environment value -> code default.
+    row.http_responses_stream_request_budget_seconds = None
+    monkeypatch.setattr(settings_service_module, "get_settings", lambda: SimpleNamespace())
+    settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+    assert settings.http_responses_stream_request_budget_seconds == 7200.0
+    assert settings.provenance["http_responses_stream_request_budget_seconds"] == InheritableValue(
+        7200.0, "default", 7200.0, 7200.0
+    )
+    assert settings.provenance["http_responses_session_bridge_request_budget_seconds"].source == "default"
 
 
 @pytest.mark.asyncio
@@ -433,3 +485,99 @@ async def test_settings_data_resolves_codex_prewarm_switch_with_provenance(
 
     assert data.http_responses_session_bridge_codex_prewarm_enabled is expected.value
     assert data.provenance["http_responses_session_bridge_codex_prewarm_enabled"] == expected
+
+
+# --- M2 background jobs -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_settings_data_resolves_background_job_toggles_with_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M2 background jobs: dashboard column > deprecated env alias > default, plus the topology flag."""
+    row = DashboardSettings()
+    row.auth_guardian_enabled = None
+    row.automations_scheduler_enabled = False
+    row.rate_limit_reset_credits_refresh_enabled = None
+    # A real Settings so the topology gate is evaluated: two-replica ring
+    # without leader election blocks the guardian whatever the toggle says.
+    startup = Settings(
+        _env_file=None,
+        auth_guardian_enabled=True,
+        automations_scheduler_enabled=True,
+        rate_limit_reset_credits_refresh_enabled=False,
+        leader_election_enabled=False,
+        http_responses_session_bridge_instance_id="pod-a",
+        http_responses_session_bridge_instance_ring=["pod-a", "pod-b"],
+    )
+    monkeypatch.setattr(settings_service_module, "get_settings", lambda: startup)
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    service = SettingsService(cast(SettingsRepository, _Repository()))
+
+    data = await service.get_settings()
+
+    assert data.auth_guardian_enabled is True
+    assert data.auth_guardian_blocked_by_topology is True
+    assert data.automations_scheduler_enabled is False
+    assert data.rate_limit_reset_credits_refresh_enabled is False
+    assert data.provenance["auth_guardian_enabled"] == InheritableValue(True, "default", True, True)
+    assert data.provenance["automations_scheduler_enabled"] == InheritableValue(False, "dashboard", True, True)
+    assert data.provenance["rate_limit_reset_credits_refresh_enabled"] == InheritableValue(False, "env", False, True)
+
+    startup.leader_election_enabled = True
+    assert (await service.get_settings()).auth_guardian_blocked_by_topology is False
+
+
+# M5 conversation archive
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("column", "env", "expected", "source"),
+    [
+        (None, False, False, "default"),
+        (None, True, True, "env"),
+        (True, False, True, "dashboard"),
+        (False, True, False, "dashboard"),
+    ],
+)
+async def test_settings_data_resolves_conversation_archive_toggle_with_provenance(
+    monkeypatch: pytest.MonkeyPatch, column: bool | None, env: bool, expected: bool, source: SettingSource
+) -> None:
+    row = DashboardSettings()
+    row.conversation_archive_enabled = column
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            proxy_account_response_create_limit=4,
+            proxy_account_stream_limit=8,
+            proxy_account_stream_recovery_reserve=1,
+            proxy_api_key_fair_share_congestion_threshold_pct=0,
+            conversation_archive_enabled=env,
+        ),
+    )
+
+    data = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+
+    assert data.conversation_archive_enabled is expected
+    assert data.provenance["conversation_archive_enabled"] == InheritableValue(expected, source, env, False)
+
+
+def test_conversation_archive_env_shadow_warning_names_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A set CODEX_LB_CONVERSATION_ARCHIVE_ENABLED that the dashboard column overrides is reported at startup."""
+    row = DashboardSettings()
+    row.conversation_archive_enabled = False
+    environment = Settings(conversation_archive_enabled=True)
+
+    shadowed = settings_service_module.warn_environment_shadowed_by_dashboard(row, environment)
+
+    assert "conversation_archive_enabled" in shadowed
+
+
+# end M5 conversation archive

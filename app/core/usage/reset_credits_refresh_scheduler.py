@@ -18,7 +18,7 @@ from app.core.clients.rate_limit_reset_credits import (
     build_snapshot,
     fetch_reset_credits,
 )
-from app.core.config.settings import get_settings
+from app.core.config.background_jobs import background_job_enabled, resolve_background_job_toggle
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
@@ -68,13 +68,18 @@ class RateLimitResetCreditsRefreshScheduler:
     interval_seconds: int
     rng: random.Random = field(default_factory=random.Random)
     enabled: bool = True
+    # M2 background jobs: the loop always runs; each cycle reads the effective
+    # ``rate_limit_reset_credits_refresh_enabled`` toggle from the settings
+    # cache before taking the lock and skips while it is False, so a dashboard
+    # change applies on the next tick without a restart.
+    dashboard_enabled: Callable[[], Awaitable[bool]] = field(default_factory=lambda: _dashboard_polling_enabled)
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def start(self) -> None:
+        await self._warn_if_auto_redeem_conflicts()
         if not self.enabled:
-            await self._warn_if_auto_redeem_conflicts()
             return
         if self._task and not self._task.done():
             return
@@ -83,15 +88,19 @@ class RateLimitResetCreditsRefreshScheduler:
 
     async def _warn_if_auto_redeem_conflicts(self) -> None:
         # The refresh loop is the only driver of automatic redemption, so a
-        # disabled scheduler silently starves a persisted auto-redeem opt-in.
+        # disabled toggle silently starves a persisted auto-redeem opt-in. M2:
+        # the toggle is the effective dashboard value, not the env alias alone.
         try:
             async with get_background_session() as session:
                 dashboard_settings = await SettingsRepository(session).get_or_create()
                 auto_redeem_enabled = dashboard_settings.auto_redeem_reset_credits_before_expiry
+                polling_enabled = resolve_background_job_toggle(
+                    dashboard_settings, "rate_limit_reset_credits_refresh_enabled"
+                )
         except Exception:
             logger.exception("Reset credits auto-redeem conflict check failed")
             return
-        if auto_redeem_enabled:
+        if auto_redeem_enabled and not polling_enabled:
             logger.warning(
                 "rate_limit_reset_credits_refresh_enabled=false disables automatic reset-credit "
                 "redemption, but dashboard setting auto_redeem_reset_credits_before_expiry is "
@@ -117,7 +126,13 @@ class RateLimitResetCreditsRefreshScheduler:
         if await self._wait_or_stop(self._startup_delay_seconds()):
             return
         while not self._stop.is_set():
-            await self._refresh_once()
+            # The whole cycle, including the settings read that decides whether
+            # polling runs, is guarded: a transient database error must not kill
+            # the loop task (a dead task also aborts the shutdown stop chain).
+            try:
+                await self._refresh_once()
+            except Exception:
+                logger.exception("Reset credits refresh cycle failed")
             if await self._wait_or_stop(self._tick_delay_seconds()):
                 return
 
@@ -129,6 +144,9 @@ class RateLimitResetCreditsRefreshScheduler:
         return True
 
     async def _refresh_once(self) -> None:
+        if not await self.dashboard_enabled():
+            logger.debug("Reset credits refresh skipped: polling disabled in the dashboard settings")
+            return
         async with self._lock:
             try:
                 async with get_background_session() as session:
@@ -406,9 +424,12 @@ async def _refresh_usage_after_auto_redeem(account: Account) -> None:
         get_account_selection_cache().invalidate()
 
 
+async def _dashboard_polling_enabled() -> bool:
+    return await background_job_enabled("rate_limit_reset_credits_refresh_enabled")
+
+
 def build_rate_limit_reset_credits_scheduler() -> RateLimitResetCreditsRefreshScheduler:
-    settings = get_settings()
     return RateLimitResetCreditsRefreshScheduler(
         interval_seconds=_REFRESH_INTERVAL_SECONDS,
-        enabled=settings.rate_limit_reset_credits_refresh_enabled,
+        enabled=True,
     )

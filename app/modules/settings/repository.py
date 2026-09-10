@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -11,7 +14,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.db.models import DashboardSettings
+from app.db.models import DashboardSettings, ModelContextWindowOverride
 
 _SETTINGS_ID = 1
 
@@ -92,6 +95,12 @@ class SettingsRepository:
             circuit_breaker_enabled=None,
             # M3 codex prewarm: NULL = inherit the env alias / default (off).
             http_responses_session_bridge_codex_prewarm_enabled=None,
+            # M2 background jobs: NULL = inherit the env alias / default.
+            auth_guardian_enabled=None,
+            automations_scheduler_enabled=None,
+            rate_limit_reset_credits_refresh_enabled=None,
+            # M5 conversation archive: NULL = inherit the env alias / default.
+            conversation_archive_enabled=None,
         )
         self._session.add(row)
         try:
@@ -183,6 +192,17 @@ class SettingsRepository:
         clear_deterministic_failover_enabled: bool = False,
         circuit_breaker_enabled: bool | None = None,
         clear_circuit_breaker_enabled: bool = False,
+        # M2 background jobs (tri-state like the resilience toggles)
+        auth_guardian_enabled: bool | None = None,
+        clear_auth_guardian_enabled: bool = False,
+        automations_scheduler_enabled: bool | None = None,
+        clear_automations_scheduler_enabled: bool = False,
+        rate_limit_reset_credits_refresh_enabled: bool | None = None,
+        clear_rate_limit_reset_credits_refresh_enabled: bool = False,
+        # M5 conversation archive (tri-state like the resilience toggles)
+        conversation_archive_enabled: bool | None = None,
+        clear_conversation_archive_enabled: bool = False,
+        # end M5 conversation archive
         # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
         # inherit, neither = untouched).
         upstream_connect_timeout_seconds: float | None = None,
@@ -204,6 +224,12 @@ class SettingsRepository:
         http_responses_session_bridge_codex_prewarm_enabled: bool | None = None,
         clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False,
         # end M3 codex prewarm
+        # M1 stream/bridge budgets (same tri-state contract).
+        http_responses_stream_request_budget_seconds: float | None = None,
+        clear_http_responses_stream_request_budget_seconds: bool = False,
+        http_responses_session_bridge_request_budget_seconds: float | None = None,
+        clear_http_responses_session_bridge_request_budget_seconds: bool = False,
+        # end M1 stream/bridge budgets
         expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -385,6 +411,29 @@ class SettingsRepository:
             settings.circuit_breaker_enabled = None
         elif circuit_breaker_enabled is not None:
             settings.circuit_breaker_enabled = circuit_breaker_enabled
+        # M2 background jobs: clear flag resets to NULL (inherit the env alias
+        # / code default); a non-None value is dashboard-owned.
+        for column_name, value, clear in (
+            ("auth_guardian_enabled", auth_guardian_enabled, clear_auth_guardian_enabled),
+            ("automations_scheduler_enabled", automations_scheduler_enabled, clear_automations_scheduler_enabled),
+            (
+                "rate_limit_reset_credits_refresh_enabled",
+                rate_limit_reset_credits_refresh_enabled,
+                clear_rate_limit_reset_credits_refresh_enabled,
+            ),
+        ):
+            if clear:
+                setattr(settings, column_name, None)
+            elif value is not None:
+                setattr(settings, column_name, value)
+        # end M2 background jobs
+        # M5 conversation archive: clear flag resets to NULL (inherit the env
+        # alias / code default); a non-None value is dashboard-owned.
+        if clear_conversation_archive_enabled:
+            settings.conversation_archive_enabled = None
+        elif conversation_archive_enabled is not None:
+            settings.conversation_archive_enabled = conversation_archive_enabled
+        # end M5 conversation archive
         # C2-1 timeouts
         for column_name, value, clear in (
             (
@@ -406,6 +455,18 @@ class SettingsRepository:
                 clear_proxy_downstream_websocket_idle_timeout_seconds,
             ),
             ("sse_keepalive_interval_seconds", sse_keepalive_interval_seconds, clear_sse_keepalive_interval_seconds),
+            # M1 stream/bridge budgets
+            (
+                "http_responses_stream_request_budget_seconds",
+                http_responses_stream_request_budget_seconds,
+                clear_http_responses_stream_request_budget_seconds,
+            ),
+            (
+                "http_responses_session_bridge_request_budget_seconds",
+                http_responses_session_bridge_request_budget_seconds,
+                clear_http_responses_session_bridge_request_budget_seconds,
+            ),
+            # end M1 stream/bridge budgets
         ):
             if clear:
                 setattr(settings, column_name, None)
@@ -464,3 +525,54 @@ class SettingsRepository:
             # stale state the hook is meant to reset.
             on_committed()
         await self._session.refresh(settings)
+
+
+# M4 model catalogue: dashboard rows of the per-model context window overrides.
+_UPSERT_INSERT_FNS = {"postgresql": pg_insert, "sqlite": sqlite_insert}
+
+
+class ModelContextWindowOverridesRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_all(self) -> list[ModelContextWindowOverride]:
+        result = await self._session.execute(
+            select(ModelContextWindowOverride).order_by(ModelContextWindowOverride.slug.asc())
+        )
+        return list(result.scalars().all())
+
+    async def by_slug(self) -> dict[str, int]:
+        """``slug -> context_window`` for every dashboard row."""
+        return {row.slug: row.context_window for row in await self.list_all()}
+
+    async def upsert(self, slug: str, context_window: int) -> None:
+        """Create or replace the row for ``slug`` in one statement.
+
+        A read-then-insert would let two concurrent creates of the same new slug
+        both miss and one fail the primary key, turning a documented
+        create-or-replace into a 500. ``updated_at`` is set explicitly because
+        the ORM ``onupdate`` does not fire for a Core insert.
+        """
+        dialect = self._session.get_bind().dialect.name
+        insert_fn = _UPSERT_INSERT_FNS.get(dialect)
+        if insert_fn is None:
+            raise RuntimeError(f"model_context_window_overrides upsert unsupported for dialect={dialect!r}")
+        statement = insert_fn(ModelContextWindowOverride).values(slug=slug, context_window=context_window)
+        await self._session.execute(
+            statement.on_conflict_do_update(
+                index_elements=[ModelContextWindowOverride.slug],
+                set_={"context_window": context_window, "updated_at": func.now()},
+            )
+        )
+        await self._session.commit()
+
+    async def delete(self, slug: str) -> bool:
+        row = await self._session.get(ModelContextWindowOverride, slug)
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.commit()
+        return True
+
+
+# end M4 model catalogue

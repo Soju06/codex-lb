@@ -64,6 +64,7 @@ class _NoopScheduler:
 # themselves (e.g. test_otel, test_telemetry_consent,
 # test_model_registry_replication) and keep working.
 BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
+    "build_metadata_refresh_scheduler",
     "build_usage_refresh_scheduler",
     "build_model_refresh_scheduler",
     "build_sticky_session_cleanup_scheduler",
@@ -212,6 +213,17 @@ def _disable_account_usage_summary_cache(monkeypatch):
 
     accounts_repository_module._clear_request_usage_summary_cache()
     monkeypatch.setattr(accounts_repository_module, "_SUMMARY_CACHE_TTL_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _disable_dashboard_trailing_demand_cache(monkeypatch):
+    """Zero the weekly-pace trailing-demand cache TTL so dashboard pace
+    figures stay exact within a test. The TTL is a fixed constant in
+    production; cache-behavior tests patch it back to a positive value."""
+    import app.modules.dashboard.repository as dashboard_repository_module
+
+    dashboard_repository_module._clear_trailing_demand_cache()
+    monkeypatch.setattr(dashboard_repository_module, "_TRAILING_DEMAND_TTL_SECONDS", 0.0)
 
 
 @pytest.fixture(autouse=True)
@@ -429,9 +441,13 @@ def _reset_codex_version_cache():
     cache = get_codex_version_cache()
     cache._cached_version = None
     cache._cached_at = 0.0
+    cache._retry_at = 0.0
+    cache._cache_path = None
     yield
     cache._cached_version = None
     cache._cached_at = 0.0
+    cache._retry_at = 0.0
+    cache._cache_path = None
 
 
 def _reset_global_state() -> None:
@@ -467,12 +483,23 @@ def _reset_global_state() -> None:
         settings_cache = get_settings_cache()
         settings_cache._cached_settings = None
         settings_cache._cached_at = 0.0
+        # ``cached_row()`` deliberately survives an invalidation (a dashboard
+        # value must not revert to the environment between a mutation and the
+        # next load), so the fallback slot needs an explicit reset here or a
+        # dashboard row leaks from one test into the next.
+        settings_cache._last_loaded_settings = None
     except Exception:
         pass
     try:
         from app.core.upstream_proxy.cache import get_upstream_route_cache
 
         get_upstream_route_cache().clear()
+    except Exception:
+        pass
+    try:
+        from app.core.config.context_window_overrides import get_model_context_window_overrides_cache
+
+        get_model_context_window_overrides_cache().clear()
     except Exception:
         pass
     try:

@@ -66,6 +66,7 @@ from app.core.runtime_logging import install_redacting_loop_exception_handler
 from app.core.scheduling.leader_election import get_leader_election
 from app.core.shutdown import close_control_plane_task_admission
 from app.core.timeout_invariants import validate_runtime_timeout_invariants, validate_timeout_invariants
+from app.core.usage.metadata_scheduler import build_metadata_refresh_scheduler
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
@@ -546,6 +547,7 @@ async def lifespan(app: FastAPI):
         get_cache_invalidation_poller,
         set_cache_invalidation_poller,
     )
+    from app.core.config.context_window_overrides import get_model_context_window_overrides_cache
     from app.core.middleware.firewall_cache import get_firewall_ip_cache
     from app.core.upstream_proxy.cache import get_upstream_route_cache
     from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
@@ -571,10 +573,22 @@ async def lifespan(app: FastAPI):
         NAMESPACE_SETTINGS,
         lambda: get_settings_cache().invalidate(propagate=False),
     )
+    # Then pull the new row in. Readers that cannot await the cache (the
+    # conversation archive gate runs per archived frame) would otherwise keep
+    # the pre-change snapshot on a replica that is only carrying already-open
+    # streams; the invalidate above already expired it, so a failed refresh
+    # degrades to the ordinary TTL reload instead of serving a stale value.
+    cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_settings_cache().refresh)
     cache_poller.on_invalidation(NAMESPACE_UPSTREAM_ROUTE, get_upstream_route_cache().clear)
     # The route resolver also reads the dashboard settings row (routing enabled
     # + default pool id), so settings bumps clear resolved routes as well.
     cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_upstream_route_cache().clear)
+    # M4 model catalogue: the per-model context window override rows are
+    # invalidated through the settings namespace as well.
+    cache_poller.on_invalidation(
+        NAMESPACE_SETTINGS,
+        lambda: get_model_context_window_overrides_cache().invalidate(propagate=False),
+    )
     # The bus carries no payload, so a peer redeem clears this replica's whole
     # reset-credits store; the refresh scheduler repopulates it on its next tick.
     cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
@@ -634,6 +648,7 @@ async def lifespan(app: FastAPI):
             seeded_count,
         )
 
+    metadata_scheduler = build_metadata_refresh_scheduler()
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     api_key_last_used_flush_scheduler = build_api_key_last_used_flush_scheduler()
@@ -651,6 +666,7 @@ async def lifespan(app: FastAPI):
     # even if a nested lifespan on another loop replaces the module-global
     # singleton in the meantime; shutdown below stops exactly this instance.
     live_usage_ingestor = start_live_usage_ingestor()
+    await metadata_scheduler.start()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
     await api_key_last_used_flush_scheduler.start()
@@ -873,6 +889,7 @@ async def lifespan(app: FastAPI):
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()
         await sticky_session_cleanup_scheduler.stop()
+        await metadata_scheduler.stop()
         await model_scheduler.stop()
         # Stop the invalidation poller only after the model scheduler: a final
         # leader tick may still bump through the installed poller.

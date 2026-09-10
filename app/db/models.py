@@ -932,6 +932,11 @@ class DashboardSettings(Base):
     proxy_downstream_websocket_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     sse_keepalive_interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     # end C2-1 timeouts
+    # M1 stream/bridge budgets: dashboard-managed Responses stream and HTTP
+    # session bridge request budgets. NULL = inherit the ``Settings`` field.
+    http_responses_stream_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    http_responses_session_bridge_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end M1 stream/bridge budgets
     # C2-2 routing/overload: dashboard-managed routing weights and overload
     # isolation. NULL inherits the process environment value (or the code
     # default) at read time; a non-NULL value wins over the environment.
@@ -1191,6 +1196,17 @@ class DashboardSettings(Base):
     soft_drain_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     deterministic_failover_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     circuit_breaker_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # M2 background jobs: NULL inherits the deprecated ``CODEX_LB_*`` env alias
+    # (then the code default); schedulers read the value at every cycle entry.
+    auth_guardian_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    automations_scheduler_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    rate_limit_reset_credits_refresh_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M2 background jobs
+    # M5 conversation archive: NULL inherits the deprecated
+    # ``CODEX_LB_CONVERSATION_ARCHIVE_ENABLED`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    conversation_archive_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M5 conversation archive
     version: Mapped[int] = mapped_column(
         Integer,
         default=1,
@@ -1206,6 +1222,31 @@ class DashboardSettings(Base):
     )
 
     __mapper_args__ = {"version_id_col": version}
+
+
+# M4 model catalogue: dashboard-managed per-model context window overrides.
+class ModelContextWindowOverride(Base):
+    """One dashboard-stored context window override for a model slug.
+
+    A row wins over the ``CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES`` entry for
+    the same slug; slugs without a row inherit the environment entry (or have
+    no override). The migration never copies the environment into rows.
+    """
+
+    __tablename__ = "model_context_window_overrides"
+
+    slug: Mapped[str] = mapped_column(String, primary_key=True)
+    context_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+# end M4 model catalogue
 
 
 class RuntimeSentinel(Base):
@@ -2323,6 +2364,21 @@ Index(
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
+    "idx_logs_missing_cost",
+    RequestLog.model_source_id,
+    RequestLog.id,
+    postgresql_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+    sqlite_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+)
+Index(
     "idx_logs_deleted_at_requested_at_id",
     RequestLog.deleted_at,
     RequestLog.requested_at.desc(),
@@ -2372,6 +2428,32 @@ Index(
     RequestLog.error_code,
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
+)
+# Live-row partial indexes for the unfiltered request-log facet skip scan
+# (recursive ``facet_skip`` probes: ``min(column) WHERE deleted_at IS NULL AND
+# column > previous``). The predicate matches the probe so a probe never walks
+# the soft-deleted cohort sharing a value. Account ids need none: soft deletion
+# detaches account_id (NULL), which ``account_id > previous`` never walks.
+# Enforced via the manual drift index requirements like the covering index.
+Index(
+    "idx_logs_live_api_key",
+    RequestLog.api_key_id,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
+)
+Index(
+    "idx_logs_live_model_effort",
+    RequestLog.model,
+    RequestLog.reasoning_effort,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
+)
+Index(
+    "idx_logs_live_status_error",
+    RequestLog.status,
+    RequestLog.error_code,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
 )
 Index(
     "idx_logs_request_status_api_key_time",

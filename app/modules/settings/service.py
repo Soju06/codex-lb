@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from app.core.config.background_jobs import BACKGROUND_JOB_SETTINGS
 from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 
 # Re-exported: the resolver lives in ``app.core.config.inheritable`` so hot
@@ -16,6 +17,7 @@ from app.core.config.inheritable import SettingScalar as SettingScalar
 from app.core.config.inheritable import SettingSource as SettingSource
 from app.core.config.inheritable import resolve_inheritable as resolve_inheritable
 from app.core.config.settings import Settings, get_settings
+from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
@@ -101,6 +103,17 @@ class DashboardSettingsData:
     soft_drain_enabled: bool
     deterministic_failover_enabled: bool
     circuit_breaker_enabled: bool
+    # M2 background jobs: effective values (dashboard column, else the deprecated
+    # env alias, else the code default); provenance carries the source. The
+    # guardian additionally reports whether the static topology blocks it.
+    auth_guardian_enabled: bool
+    auth_guardian_blocked_by_topology: bool
+    automations_scheduler_enabled: bool
+    rate_limit_reset_credits_refresh_enabled: bool
+    # end M2 background jobs
+    # M5 conversation archive: effective toggle; provenance carries the source.
+    conversation_archive_enabled: bool
+    # end M5 conversation archive
     version: int
     # C2-1 timeouts: effective values (dashboard column, else environment,
     # else code default); the column values are exposed through ``provenance``.
@@ -112,6 +125,11 @@ class DashboardSettingsData:
     proxy_downstream_websocket_idle_timeout_seconds: float
     sse_keepalive_interval_seconds: float
     # end C2-1 timeouts
+    # M1 stream/bridge budgets: effective values (dashboard column, else
+    # environment, else code default); provenance carries the source.
+    http_responses_stream_request_budget_seconds: float
+    http_responses_session_bridge_request_budget_seconds: float
+    # end M1 stream/bridge budgets
     # Effective value, source and fallbacks of every inheritable setting, keyed
     # by setting name; the settings API exposes it as ``provenance``.
     provenance: Mapping[str, InheritableValue[Any]] = field(default_factory=dict)
@@ -199,6 +217,18 @@ class DashboardSettingsUpdateData:
     clear_deterministic_failover_enabled: bool = False
     circuit_breaker_enabled: bool | None = None
     clear_circuit_breaker_enabled: bool = False
+    # M2 background jobs: tri-state like the resilience toggles.
+    auth_guardian_enabled: bool | None = None
+    clear_auth_guardian_enabled: bool = False
+    automations_scheduler_enabled: bool | None = None
+    clear_automations_scheduler_enabled: bool = False
+    rate_limit_reset_credits_refresh_enabled: bool | None = None
+    clear_rate_limit_reset_credits_refresh_enabled: bool = False
+    # end M2 background jobs
+    # M5 conversation archive: tri-state like the resilience toggles.
+    conversation_archive_enabled: bool | None = None
+    clear_conversation_archive_enabled: bool = False
+    # end M5 conversation archive
     # C2-1 timeouts (tri-state like the caps: value = store, clear = NULL,
     # neither = untouched).
     upstream_connect_timeout_seconds: float | None = None
@@ -221,6 +251,12 @@ class DashboardSettingsUpdateData:
     http_responses_session_bridge_codex_prewarm_enabled: bool | None = None
     clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False
     # end M3 codex prewarm
+    # M1 stream/bridge budgets (tri-state like the C2-1 timeouts).
+    http_responses_stream_request_budget_seconds: float | None = None
+    clear_http_responses_stream_request_budget_seconds: bool = False
+    http_responses_session_bridge_request_budget_seconds: float | None = None
+    clear_http_responses_session_bridge_request_budget_seconds: bool = False
+    # end M1 stream/bridge budgets
 
 
 class SettingsService:
@@ -321,10 +357,22 @@ class SettingsService:
             # C2-3 resilience toggles
             soft_drain_enabled=payload.soft_drain_enabled,
             clear_soft_drain_enabled=payload.clear_soft_drain_enabled,
+            # M5 conversation archive
+            conversation_archive_enabled=payload.conversation_archive_enabled,
+            clear_conversation_archive_enabled=payload.clear_conversation_archive_enabled,
+            # end M5 conversation archive
             deterministic_failover_enabled=payload.deterministic_failover_enabled,
             clear_deterministic_failover_enabled=payload.clear_deterministic_failover_enabled,
             circuit_breaker_enabled=payload.circuit_breaker_enabled,
             clear_circuit_breaker_enabled=payload.clear_circuit_breaker_enabled,
+            # M2 background jobs
+            auth_guardian_enabled=payload.auth_guardian_enabled,
+            clear_auth_guardian_enabled=payload.clear_auth_guardian_enabled,
+            automations_scheduler_enabled=payload.automations_scheduler_enabled,
+            clear_automations_scheduler_enabled=payload.clear_automations_scheduler_enabled,
+            rate_limit_reset_credits_refresh_enabled=payload.rate_limit_reset_credits_refresh_enabled,
+            clear_rate_limit_reset_credits_refresh_enabled=payload.clear_rate_limit_reset_credits_refresh_enabled,
+            # end M2 background jobs
             # C2-1 timeouts
             upstream_connect_timeout_seconds=payload.upstream_connect_timeout_seconds,
             clear_upstream_connect_timeout_seconds=payload.clear_upstream_connect_timeout_seconds,
@@ -351,6 +399,18 @@ class SettingsService:
                 payload.clear_http_responses_session_bridge_codex_prewarm_enabled
             ),
             # end M3 codex prewarm
+            # M1 stream/bridge budgets
+            http_responses_stream_request_budget_seconds=payload.http_responses_stream_request_budget_seconds,
+            clear_http_responses_stream_request_budget_seconds=(
+                payload.clear_http_responses_stream_request_budget_seconds
+            ),
+            http_responses_session_bridge_request_budget_seconds=(
+                payload.http_responses_session_bridge_request_budget_seconds
+            ),
+            clear_http_responses_session_bridge_request_budget_seconds=(
+                payload.clear_http_responses_session_bridge_request_budget_seconds
+            ),
+            # end M1 stream/bridge budgets
         )
         return _settings_data(row)
 
@@ -375,6 +435,7 @@ _ENVIRONMENT_INHERITABLE_SETTINGS = (
     # M3 codex prewarm: bool; a NULL column inherits the deprecated env alias.
     "http_responses_session_bridge_codex_prewarm_enabled",
     # end M3 codex prewarm
+    CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive (bool, env alias)
 )
 # Retention has no environment fallback: NULL = never set from the dashboard =
 # disabled; 0 = explicitly disabled.
@@ -394,6 +455,16 @@ def _resolve_environment_toggle(row: DashboardSettings, name: str) -> Inheritabl
     return resolve_inheritable(getattr(row, name), bool(getattr(get_settings(), name, default)), default)
 
 
+def _auth_guardian_blocked_by_topology() -> bool:
+    # M2 background jobs: read the two topology fields defensively, the way
+    # ``_resolve_environment_toggle`` reads its field, so a stub startup-settings
+    # object without them reads as "not blocked" instead of raising.
+    startup = get_settings()
+    ring = getattr(startup, "http_responses_session_bridge_instance_ring", ())
+    leader_election_enabled = bool(getattr(startup, "leader_election_enabled", True))
+    return len(ring) > 1 and not leader_election_enabled
+
+
 def warn_environment_shadowed_by_dashboard(row: DashboardSettings, settings: Settings | None = None) -> list[str]:
     """Log one startup WARN naming env vars that are set but ignored because the dashboard owns the value.
 
@@ -404,7 +475,8 @@ def warn_environment_shadowed_by_dashboard(row: DashboardSettings, settings: Set
     environment = settings if settings is not None else get_settings()
     shadowed = [
         name
-        for name in _ENVIRONMENT_INHERITABLE_SETTINGS
+        # M2 background jobs: their env aliases are shadowed the same way.
+        for name in (*_ENVIRONMENT_INHERITABLE_SETTINGS, *BACKGROUND_JOB_SETTINGS)
         if name in environment.model_fields_set and getattr(row, name, None) is not None
     ]
     if shadowed:
@@ -429,6 +501,8 @@ def _resolve_inheritable_settings(
         row.usage_history_retention_days, None, _RETENTION_DISABLED_DAYS
     )
     for name in RESILIENCE_TOGGLE_SETTINGS:  # C2-3 resilience toggles
+        resolved[name] = _resolve_environment_toggle(row, name)
+    for name in BACKGROUND_JOB_SETTINGS:  # M2 background jobs
         resolved[name] = _resolve_environment_toggle(row, name)
     return resolved
 
@@ -516,6 +590,15 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         soft_drain_enabled=bool(resolved["soft_drain_enabled"].value),
         deterministic_failover_enabled=bool(resolved["deterministic_failover_enabled"].value),
         circuit_breaker_enabled=bool(resolved["circuit_breaker_enabled"].value),
+        # M2 background jobs
+        auth_guardian_enabled=bool(resolved["auth_guardian_enabled"].value),
+        auth_guardian_blocked_by_topology=_auth_guardian_blocked_by_topology(),
+        automations_scheduler_enabled=bool(resolved["automations_scheduler_enabled"].value),
+        rate_limit_reset_credits_refresh_enabled=bool(resolved["rate_limit_reset_credits_refresh_enabled"].value),
+        # end M2 background jobs
+        # M5 conversation archive
+        conversation_archive_enabled=bool(resolved[CONVERSATION_ARCHIVE_SETTING].value),
+        # end M5 conversation archive
         version=row.version,
         # C2-1 timeouts
         upstream_connect_timeout_seconds=float(resolved["upstream_connect_timeout_seconds"].value),
@@ -528,6 +611,14 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         ),
         sse_keepalive_interval_seconds=float(resolved["sse_keepalive_interval_seconds"].value),
         # end C2-1 timeouts
+        # M1 stream/bridge budgets
+        http_responses_stream_request_budget_seconds=float(
+            resolved["http_responses_stream_request_budget_seconds"].value
+        ),
+        http_responses_session_bridge_request_budget_seconds=float(
+            resolved["http_responses_session_bridge_request_budget_seconds"].value
+        ),
+        # end M1 stream/bridge budgets
         provenance=resolved,
     )
 

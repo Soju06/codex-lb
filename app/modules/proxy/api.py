@@ -156,6 +156,7 @@ from app.core.openai.parsing import classify_event_type, parse_response_payload
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
+    extract_input_file_ids,
     normalize_tool_type,
     responses_request_has_explicit_prompt_cache_controls,
     strip_replayed_tool_call_namespaces_from_payload,
@@ -225,6 +226,7 @@ from app.modules.model_sources.forwarding import (
     SourceUsage,
     SourceUsageHolder,
     forward_chat_completion,
+    forward_compact_responses,
 )
 from app.modules.model_sources.forwarding import (
     empty_stream_error as source_empty_stream_error,
@@ -4838,6 +4840,43 @@ async def _select_responses_model_source_with_continuity(
     return source_selection, False
 
 
+async def _select_compact_model_source_with_continuity(
+    request: Request,
+    payload: ResponsesCompactRequest,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None,
+) -> tuple[tuple[ModelSource, str] | None, bool]:
+    selection = await _select_responses_model_source(payload.model, api_key, raw_model=raw_model)
+    if selection is None:
+        disabled = await _select_responses_model_source(payload.model, api_key, raw_model=raw_model, only_disabled=True)
+        if disabled is None:
+            return None, False
+    # A disabled source cannot veto an existing native owner. Returning to the
+    # compact service keeps complete owner-conflict reconciliation in one place.
+    previous_response_id = getattr(payload, "previous_response_id", None)
+    if isinstance(previous_response_id, str) and previous_response_id.strip():
+        owner = await context.service._resolve_websocket_previous_response_owner(
+            previous_response_id=previous_response_id,
+            api_key=api_key,
+            session_id=proxy_affinity_module._owner_lookup_session_id_from_headers(request.headers),
+            surface="compact_source_route",
+        )
+        if owner is not None:
+            return None, True
+    turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(request.headers)
+    if turn_state is not None:
+        owner = await context.service._resolve_compact_turn_state_owner(
+            turn_state=turn_state,
+            api_key=api_key,
+            fail_on_missing=not proxy_affinity_module._is_synthesized_turn_state(turn_state),
+        )
+        if owner is not None:
+            return None, True
+    return selection, False
+
+
 async def _disabled_model_source_denial(
     request: Request,
     model: str,
@@ -5240,7 +5279,7 @@ async def _overflow_source_response(
 
 async def _source_responses_response(
     request: Request,
-    payload: ResponsesRequest,
+    payload: ResponsesRequest | ResponsesCompactRequest,
     *,
     source: ModelSource,
     api_key: ApiKeyData | None,
@@ -5284,11 +5323,18 @@ async def _source_responses_response(
             _model_source_busy_error(),
             headers={**rate_limit_headers, "Retry-After": "1"},
         )
+    compact_source_payload: dict[str, JsonValue] | None = None
     try:
         # Inside the route-helper latch (I13): the budget serializer can raise
         # (a lone surrogate in the body) and a claimed slot must never outlive
         # the request that claimed it.
-        admission_budget = estimate_api_key_request_usage(payload)
+        if isinstance(payload, ResponsesCompactRequest):
+            compact_source_payload = strip_source_telemetry(payload.model_dump(mode="json", exclude_none=True))
+            compact_source_payload.pop("store", None)
+            compact_source_payload.pop("stream", None)
+            if api_key is not None and api_key.enforced_reasoning_effort is not None:
+                normalize_source_reasoning_aliases(compact_source_payload)
+        admission_budget = estimate_api_key_request_usage(payload, upstream_payload=compact_source_payload)
         reservation = await _enforce_request_limits(
             api_key,
             request_model=payload.model,
@@ -5316,6 +5362,40 @@ async def _source_responses_response(
         claims.release_if_unowned()
         raise
     try:
+        if isinstance(payload, ResponsesCompactRequest):
+            assert compact_source_payload is not None
+            result = await open_with_disconnect_watch(
+                request, owner, forward_compact_responses(source, compact_source_payload)
+            )
+            try:
+                compact_result = CompactResponsePayload.model_validate(result.payload)
+            except ValidationError:
+                await owner.finish(
+                    status="error",
+                    error_code="invalid_upstream_response",
+                    error_message="model source returned an invalid compact response",
+                    usage=result.usage,
+                    timings=result.timings,
+                    upstream_status_code=result.upstream_status_code,
+                )
+                return _logged_error_json_response(
+                    request,
+                    502,
+                    openai_error(
+                        "invalid_upstream_response",
+                        "OpenAI-compatible model source returned an invalid compact response",
+                        error_type="server_error",
+                    ),
+                    headers=rate_limit_headers,
+                )
+            if not enforce_openai_sdk_contract:
+                result = replace(
+                    result,
+                    payload=_normalize_codex_remote_compaction_v2_result(compact_result, result.payload),
+                )
+            return await _finish_non_stream_source_dispatch(
+                request, owner, result, rate_limit_headers=rate_limit_headers
+            )
         source_payload = _shape_source_responses_payload(
             payload,
             source,
@@ -7112,7 +7192,7 @@ async def responses_compact(
     _raw_trigger_validation: None = Depends(_capture_raw_compaction_trigger_error),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
-) -> JSONResponse:
+) -> Response:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
@@ -7139,7 +7219,7 @@ async def v1_responses_compact(
     payload: V1ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
-) -> JSONResponse:
+) -> Response:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
@@ -7170,22 +7250,52 @@ async def _compact_responses(
     codex_session_affinity: bool = False,
     openai_cache_affinity: bool = False,
     prohibit_fast_mode: bool = False,
-) -> JSONResponse:
-    # The replaced effort is discarded: this path is subscription-only, so the
-    # rewrite that works around the backend hang must stick.
-    service_tier_was_enforced = apply_api_key_enforcement(
+) -> Response:
+    raw_source_model = _effective_optional_model_for_api_key(api_key, payload.model)
+    enforcement = apply_api_key_enforcement(
         payload,
         api_key,
         prohibit_fast_mode=prohibit_fast_mode,
-    ).service_tier_was_enforced
-    apply_enforced_service_tier_model_fallback(
-        payload,
-        service_tier_was_enforced=service_tier_was_enforced,
     )
+    if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
+        raw_source_model = payload.model
     validate_model_access(api_key, payload.model)
     pin_denial = await compact_pin_denial(request, payload, context=context)
     if pin_denial is not None:
         return pin_denial
+    source_route_excluded = bool(extract_input_file_ids(payload.input))
+    try:
+        source_selection, continuity_suppressed = (
+            (None, False)
+            if source_route_excluded
+            else await _select_compact_model_source_with_continuity(
+                request, payload, context, api_key, raw_model=raw_source_model
+            )
+        )
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    if source_selection is not None:
+        source, payload.model = source_selection
+        return await _source_responses_response(
+            request,
+            payload,
+            source=source,
+            api_key=api_key,
+            rate_limit_headers=await _rate_limit_headers_for_request(context, api_key),
+            pre_normalization_effort=enforcement.pre_normalization_reasoning_effort,
+            enforce_openai_sdk_contract=not codex_session_affinity,
+            context=context,
+        )
+    if not source_route_excluded and not continuity_suppressed:
+        disabled_denial = await _disabled_model_source_denial(
+            request, payload.model, api_key, route="responses", raw_model=raw_source_model
+        )
+        if disabled_denial is not None:
+            return disabled_denial
+    apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=enforcement.service_tier_was_enforced,
+    )
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)
     except ClientPayloadError as exc:

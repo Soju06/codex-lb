@@ -791,7 +791,7 @@ async def test_overflow_route_helper_releases_the_decisions_claims_when_admissio
     dispatch = _dispatch_double(source, model="overflow-latch-model", route=ROUTE_V1_RESPONSES)
     assert get_source_bulkhead().in_flight(source_id) == 1
 
-    def exploding_estimate(_payload: object) -> object:
+    def exploding_estimate(_payload: object, *, upstream_payload: object = None) -> object:
         raise RuntimeError("estimate exploded")
 
     async def never_opened(*_args: object, **_kwargs: object) -> object:

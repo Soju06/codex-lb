@@ -56,6 +56,17 @@ Each signal needs at least eight samples on at least three accounts (per model, 
 
 Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account when one of its quota windows is confirmed to have newly reset, verifying that the account responds. It consumes a small amount of quota. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts before traffic arrives; the configured cooldown applies to these staggered idle probes, while ordinary reset-confirmed probes fire once per confirmed reset. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
 
+## Direct model-source compaction
+
+For an external model served by a Responses-compatible source, explicit requests to
+`/v1/responses/compact` and `/backend-api/codex/responses/compact` forward to that
+source's `/responses/compact` endpoint. No subscription account is required. Native
+continuation and uploaded-file ownership still take precedence. The source must
+support compaction; its errors are returned without switching models or falling
+back to subscription accounts. This does not enable terminal `compaction_trigger`
+requests or compaction for overflow-pinned conversations. Owning spec:
+[responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat).
+
 ## Subscription-exhaustion overflow to a model source
 
 > **Status: shipped, ship-dark.** Overflow routing is in this release and inactive until a source is designated: with the control **Off** (both settings columns `null`) the request path performs no probe, pin lookup, source selection or body walk and an exhausted pool answers exactly as before, byte for byte. **Production flip gate:** do not designate a source in production before every replica runs the release that contains the wired anchors and the WebSocket parity (this one); rehearse on a canary first (see [Canary and drills](#canary-and-drills)). Owning spec: [model-source-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-source-routing); design: issue [#2123](https://github.com/Soju06/codex-lb/issues/2123), which supersedes the earlier proposals in #428 and #1664.

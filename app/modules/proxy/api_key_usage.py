@@ -43,10 +43,11 @@ def estimate_api_key_request_usage(
     ``None`` means the proxy cannot size that side of the request locally, so
     API-key enforcement should use its conservative default for that dimension.
 
-    ``upstream_payload`` lets callers that already hold ``payload.to_payload()``
-    share it instead of paying for another full dump. It must be the pristine
-    ``to_payload()`` result for ``payload`` (``to_payload`` is deterministic, so
-    the budget is identical either way).
+    ``upstream_payload`` must be the exact payload the selected transport will
+    send. Native callers can share their pristine ``payload.to_payload()``
+    result instead of serializing twice. Source compact callers supply their
+    source projection because native serialization removes tool definitions
+    and can trim history that the source still receives.
     """
 
     if upstream_payload is None:

@@ -297,3 +297,23 @@ stream. Predispatch failures and cancellation release origin-owned reservations;
 accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
+
+## Direct external compact forwarding
+
+Explicit compact requests use the configured Responses source when native
+continuity or an uploaded file does not pin the request to subscription accounts.
+For example, `/v1/responses/compact` for an external model can succeed with no
+subscription accounts when the source implements `/responses/compact`.
+
+The source receives retained history and tool definitions. Its exact outgoing
+payload determines reservation admission, so definitions removed only by native
+compact serialization cannot escape the source's usage budget. The existing
+source dispatcher owns concurrency, disconnect handling, settlement and redaction.
+Native compact ownership and serialization stay in the native service.
+
+Responses capability does not guarantee provider compact support. An unsupported
+endpoint returns its source error without fallback. This feature covers explicit
+compact endpoints; terminal-trigger and overflow-pinned compaction retain their
+existing behavior. It supplies no provider history store or tool translator.
+See issue [#2318](https://github.com/Soju06/codex-lb/issues/2318) and the requirements
+in [spec.md](spec.md).

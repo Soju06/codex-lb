@@ -29,6 +29,11 @@ def _rate_limited_freshness_entry(
         and capacity_for_routing_plan(account.plan_type, AccountStatus.RATE_LIMITED, "monthly") is None
     ):
         long_window_entry = None
+    if capacity_for_routing_plan(account.plan_type, AccountStatus.RATE_LIMITED, "primary") == 0.0:
+        # A synthetic primary row is not an applicable quota window for these
+        # plans, so it cannot prove that the usable long window refreshed after
+        # the block.
+        return long_window_entry
     if long_window_entry is not None and long_window_entry.window == "monthly":
         return long_window_entry
     if primary_entry is None:

@@ -1,0 +1,5 @@
+- [x] Reproduce a buffered response burst through the native client with an active consumer.
+- [x] Give consumers a scheduling opportunity between dispatched events.
+- [x] Verify burst delivery and stalled-consumer isolation, then validate the spec.
+- [x] Verify direct and routed Responses paths with buffered SSE, JSON, and error bursts on current main.
+- [x] Validate current tests and specs, then sync and archive the verified change.

@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from dotenv import dotenv_values
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
@@ -59,63 +59,65 @@ OAUTH_CALLBACK_PORT = 1455  # Do not change the port. OpenAI dislikes changes.
 # Env names of settings removed from the Settings surface (issue #1340,
 # PRINCIPLES.md P2). ``extra="ignore"`` already makes them harmless; startup
 # emits one WARN for one release as a courtesy to operators who still set them.
+# Names whose warning release has shipped are pruned from this tuple (the
+# July 2026 phases 1-4 shipped in v1.22-v1.24 and were dropped by
+# ``remove-dead-env-settings``, the first release after v1.24.0).
 _REMOVED_SETTINGS: tuple[str, ...] = (
-    # Phase 1 (reduce-settings-surface-phase-1)
-    "CODEX_LB_AUTH_BASE_URL",
-    "CODEX_LB_OAUTH_CLIENT_ID",
-    "CODEX_LB_OAUTH_ORIGINATOR",
-    "CODEX_LB_OAUTH_SCOPE",
-    "CODEX_LB_OAUTH_REDIRECT_URI",
-    "CODEX_LB_OAUTH_CALLBACK_PORT",
-    "CODEX_LB_AUTH_GUARDIAN_INTERVAL_SECONDS",
-    "CODEX_LB_AUTH_GUARDIAN_MAX_REFRESH_AGE_SECONDS",
-    "CODEX_LB_AUTH_GUARDIAN_BATCH_SIZE",
-    "CODEX_LB_AUTH_GUARDIAN_CONCURRENCY",
-    "CODEX_LB_AUTH_GUARDIAN_JITTER_SECONDS",
-    "CODEX_LB_AUTH_GUARDIAN_FAILURE_BACKOFF_BASE_SECONDS",
-    "CODEX_LB_AUTH_GUARDIAN_FAILURE_BACKOFF_MAX_SECONDS",
-    "CODEX_LB_LOG_PROXY_REQUEST_SHAPE",
-    "CODEX_LB_LOG_PROXY_REQUEST_SHAPE_RAW_CACHE_KEY",
-    "CODEX_LB_LOG_PROXY_REQUEST_PAYLOAD",
-    "CODEX_LB_LOG_PROXY_SERVICE_TIER_TRACE",
-    "CODEX_LB_LOG_UPSTREAM_REQUEST_SUMMARY",
-    "CODEX_LB_LOG_UPSTREAM_REQUEST_PAYLOAD",
-    "CODEX_LB_BULKHEAD_PROXY_HTTP_LIMIT",
-    "CODEX_LB_BULKHEAD_PROXY_WEBSOCKET_LIMIT",
-    "CODEX_LB_BULKHEAD_PROXY_COMPACT_LIMIT",
-    "CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS",
-    "CODEX_LB_TOKEN_REFRESH_CLAIM_POLL_SECONDS",
-    # Phase 2 (reduce-settings-surface-phase-2)
-    "CODEX_LB_QUOTA_PLANNER_TICK_SECONDS",
-    "CODEX_LB_AUTOMATIONS_SCHEDULER_INTERVAL_SECONDS",
-    "CODEX_LB_MODEL_REGISTRY_REFRESH_INTERVAL_SECONDS",
-    "CODEX_LB_STICKY_SESSION_CLEANUP_INTERVAL_SECONDS",
-    "CODEX_LB_CODEX_FINGERPRINT_OS",
-    "CODEX_LB_CODEX_FINGERPRINT_ARCH",
-    "CODEX_LB_CODEX_FINGERPRINT_TERMINAL",
-    "CODEX_LB_LIVE_USAGE_WRITE_MIN_INTERVAL_SECONDS",
-    "CODEX_LB_LIVE_USAGE_QUEUE_SIZE",
-    "CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS",
-    "CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
-    "CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS",
-    "CODEX_LB_MEMORY_WARNING_THRESHOLD_MB",
-    "CODEX_LB_IMAGES_HOST_MODEL",
-    "CODEX_LB_IMAGES_MAX_PARTIAL_IMAGES",
-    # Phase 3 (reduce-settings-surface-phase-3)
-    "CODEX_LB_DATABASE_BACKGROUND_POOL_SIZE",
-    "CODEX_LB_DATABASE_BACKGROUND_MAX_OVERFLOW",
-    "CODEX_LB_DATABASE_POOL_TIMEOUT_SECONDS",
-    "CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS",
-    "CODEX_LB_DRAIN_PRIMARY_THRESHOLD_PCT",
-    "CODEX_LB_DRAIN_SECONDARY_THRESHOLD_PCT",
-    "CODEX_LB_DRAIN_ERROR_WINDOW_SECONDS",
-    "CODEX_LB_DRAIN_ERROR_COUNT_THRESHOLD",
-    "CODEX_LB_PROBE_QUIET_SECONDS",
-    "CODEX_LB_PROBE_SUCCESS_STREAK_REQUIRED",
-    # Phase 4 (reduce-settings-surface-phase-4)
-    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT",
-    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS",
-    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_DENY_API_KEY_IDS",
+    # remove-dead-env-settings (first release after v1.24.0): retention is a
+    # dashboard runtime setting (Settings -> Advanced -> Data retention);
+    # NULL now means disabled.
+    "CODEX_LB_REQUEST_LOG_RETENTION_DAYS",
+    "CODEX_LB_USAGE_HISTORY_RETENTION_DAYS",
+    # remove-dead-env-settings (first release after v1.24.0): dashboard-owned
+    # columns that the env value only seeded on first boot (or never read).
+    "CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY",
+    "CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS",
+    "CODEX_LB_WARMUP_MODEL",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_GATEWAY_SAFE_MODE",
+    # Dashboard-authoritative settings (remove-upstream-stream-transport-env):
+    # the dashboard row is the only source of the upstream stream transport.
+    "CODEX_LB_UPSTREAM_STREAM_TRANSPORT",
+    # constantize-core-tunables (first release after v1.25.0-beta.5): never-tuned
+    # core tunables became fixed constants (see the openspec change context).
+    "CODEX_LB_UPSTREAM_COMPACT_TIMEOUT_SECONDS",
+    "CODEX_LB_MAX_SSE_EVENT_BYTES",
+    "CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES",
+    "CODEX_LB_OAUTH_TIMEOUT_SECONDS",
+    "CODEX_LB_TOKEN_REFRESH_TIMEOUT_SECONDS",
+    "CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS",
+    "CODEX_LB_PROXY_REFRESH_FAILURE_COOLDOWN_SECONDS",
+    "CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS",
+    "CODEX_LB_USAGE_FETCH_TIMEOUT_SECONDS",
+    "CODEX_LB_USAGE_FETCH_MAX_RETRIES",
+    "CODEX_LB_USAGE_REFRESH_ENABLED",
+    "CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS",
+    "CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS",
+    "CODEX_LB_LIVE_USAGE_INGESTION_ENABLED",
+    "CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS",
+    "CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED",
+    "CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED",
+    "CODEX_LB_MODEL_REGISTRY_ENABLED",
+    "CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES",
+    "CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES",
+    "CODEX_LB_IMAGE_INLINE_FETCH_ENABLED",
+    "CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS",
+    "CODEX_LB_IMAGES_DEFAULT_MODEL",
+    "CODEX_LB_OPENAI_PROMPT_CACHE_KEY_DERIVATION_ENABLED",
+    "CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT",
+    "CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT",
+    "CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT",
+    # K2 bridge (constantize-session-bridge-tunables): never-tuned HTTP session
+    # bridge tunables are fixed module constants now (see
+    # app/modules/proxy/_service/http_bridge/helpers.py, retry_circuit.py,
+    # request_submit.py and app/modules/proxy/api.py).
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_IDLE_TTL_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ANCHOR_POISON_FAILURE_THRESHOLD",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED",
+    # end K2 bridge
 )
 
 
@@ -131,10 +133,11 @@ def warn_removed_settings(environ: Mapping[str, str] | None = None) -> list[str]
         source: Mapping[str, str | None] = _effective_environ()
     else:
         source = environ
-    found = [name for name in _REMOVED_SETTINGS if name in source]
+    found = [name for name in _REMOVED_SETTINGS if _env_key(source, name) is not None]
     if found:
         logger.warning(
-            "removed setting(s) ignored: %s — values are now fixed; see PRINCIPLES.md P2 / issue #1340",
+            "removed setting(s) ignored: %s — each is now a fixed default or a dashboard runtime setting; "
+            "see PRINCIPLES.md P2 / issue #1340",
             ", ".join(found),
         )
     return found
@@ -175,12 +178,34 @@ def _default_upstream_websocket_trust_env() -> bool:
     return outbound_proxy_env_configured(_effective_environ())
 
 
+# Startup guard, not a setting: the only supported value is 1 (see
+# ``Settings._reject_multiple_workers_per_instance``).
+_WORKERS_PER_INSTANCE_ENV = "CODEX_LB_WORKERS_PER_INSTANCE"
+
+
 def _effective_environ() -> dict[str, str | None]:
     environ: dict[str, str | None] = {}
     for env_file in ENV_FILES:
         environ.update(dotenv_values(env_file))
     environ.update(os.environ)
     return environ
+
+
+def _env_key(environ: Mapping[str, str | None], name: str) -> str | None:
+    """Return the key under which ``name`` is declared, matching case-insensitively.
+
+    pydantic-settings resolves ``CODEX_LB_*`` names case-insensitively
+    (``case_sensitive=False`` is the ``BaseSettings`` default), so the env
+    guards that replaced former fields must accept the same spellings a field
+    did. An exact-case declaration wins over other casings.
+    """
+    if name in environ:
+        return name
+    upper = name.upper()
+    for key in environ:
+        if key.upper() == upper:
+            return key
+    return None
 
 
 DEFAULT_HOME_DIR = _default_home_dir()
@@ -277,69 +302,43 @@ class Settings(BaseSettings):
     database_alembic_auto_remap_enabled: bool = True
     database_migration_lock_timeout_seconds: float = Field(default=300.0, gt=0)
     upstream_base_url: str = "https://chatgpt.com/backend-api"
-    upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
-    http_downstream_transport_policy: Literal["smart", "always_http", "always_websocket", "pinned"] = "smart"
+    # T3 → dashboard (deprecated env alias, remove next minor)
     upstream_connect_timeout_seconds: float = 8.0
-    upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     stream_idle_timeout_seconds: float = Field(default=7200.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
-    # Applies to both upstream SSE event buffering and upstream websocket message
-    # frames. Keep the default aligned with the common 16 MiB websocket ceiling so
-    # large built-in tool payloads (for example image_generation outputs) do not
-    # fail locally with a 1009 before upstream completion.
-    max_sse_event_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
-    upstream_response_create_max_bytes: int = Field(default=15 * 1024 * 1024, gt=0)
-    oauth_timeout_seconds: float = 30.0
     oauth_callback_host: str = _default_oauth_callback_host()
-    token_refresh_timeout_seconds: float = 8.0
-    # Cross-replica token-refresh claim (account_refresh_claims table).
-    # The TTL bounds how long a crashed claimant can block refresh for one
-    # account; it is validated to stay >= proxy_admission_wait_timeout_seconds
-    # + 2x token_refresh_timeout_seconds because the claim is held across the
-    # refresh-admission wait AND the OAuth exchange, and a healthy claimant
-    # must not lose its claim mid-work.
-    token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     auth_guardian_enabled: bool = True
+    # T3 → dashboard (deprecated env alias, remove next minor)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
     token_refresh_interval_days: int = 8
-    usage_fetch_timeout_seconds: float = 10.0
-    usage_fetch_max_retries: int = 2
-    usage_refresh_enabled: bool = True
-    usage_refresh_interval_seconds: int = Field(default=60, gt=0)
-    live_usage_ingestion_enabled: bool = True
+    # T1 (topology). Path to a JSON registry of additional usage quota keys
+    # that replaces the bundled ``config/additional_quota_registry.json``.
+    # Unset (or blank) keeps the bundled registry. The Alembic backfill
+    # migration ``20260312_000000`` reads the same env name directly because
+    # migrations must not depend on ``Settings``.
+    additional_quota_registry_file: Path | None = None
+    # T3 → dashboard (deprecated env alias, remove next minor)
     rate_limit_reset_credits_refresh_enabled: bool = True
-    rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
-    openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
-    warmup_model: str = "gpt-5.4-mini"
-    openai_prompt_cache_key_derivation_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
+    # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
-    http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
-    http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor): the same-name
+    # ``dashboard_settings`` column wins when set (M3 codex prewarm).
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
-    http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
-    http_responses_session_bridge_anchor_poison_failure_threshold: int = Field(default=7, ge=1, le=100)
-    # Cap on server-owned recovery attempts while the client stream is held
-    # open after an eligible eventless terminal (`server_indefinite_recovery`
-    # mode). Once exhausted, the bridge emits one terminal `response.failed`.
-    http_responses_session_bridge_server_recovery_max_attempts: int = Field(default=6, ge=1, le=100)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
-    http_responses_session_bridge_clean_close_retry_jitter_max_seconds: float = Field(
-        default=2.0,
-        ge=0,
-        le=30.0,
-    )
-    http_responses_session_bridge_gateway_safe_mode: bool = False
-    # Attach the durable operation identity to response.create client metadata.
-    # The upstream must explicitly support/deduplicate this value before any
-    # automatic replay is enabled; metadata-only propagation is safe by default.
-    http_responses_session_bridge_operation_ledger_enabled: bool = True
     # Bound durable replay storage per operation so a long response cannot
     # exhaust the database. An incomplete spool is never replayed.
     http_responses_session_bridge_operation_event_spool_max_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
@@ -375,22 +374,14 @@ class Settings(BaseSettings):
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None
-    sticky_session_cleanup_enabled: bool = True
     # TTL backstop for the per-account upstream-route resolution cache; 0
     # disables caching. Admin mutations invalidate durably through the
     # cache-invalidation bus, so this only bounds out-of-band database edits.
     upstream_route_cache_ttl_seconds: float = Field(default=60.0, ge=0)
-    # Data retention (0 = disabled). Non-zero values have safety floors so
-    # every in-product consumer window stays inside retained data.
-    # DEPRECATED: retention is managed from the dashboard runtime settings
-    # (`dashboard_settings.request_log_retention_days` /
-    # `usage_history_retention_days`); a non-NULL dashboard value wins. These
-    # env fields remain one release as aliases for unset dashboard values and
-    # will be removed in a later phase.
-    request_log_retention_days: int = Field(default=0, ge=0, le=3650)
-    usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
-    quota_planner_scheduler_enabled: bool = True
+    # T3 → dashboard (deprecated env alias, remove next minor)
     automations_scheduler_enabled: bool = True
+    # T3 (dashboard home: dashboard_settings.telemetry_consent). Headless
+    # first-boot opt-out fallback; a persisted dashboard decision always wins.
     telemetry_enabled: bool | None = None
     telemetry_endpoint: str = "https://telemetry.tokmaxxing.com"
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
@@ -407,41 +398,58 @@ class Settings(BaseSettings):
     # (upstream request summary/completion), ``upstream_payload`` (upstream
     # request payload). Interactive incident use only, not steady-state config.
     trace: str = ""
+    # T3 → dashboard (deprecated env alias, remove next minor): the
+    # ``dashboard_settings.conversation_archive_enabled`` column wins when set;
+    # the archive writer resolves it from the settings-cache snapshot.
     conversation_archive_enabled: bool = False
     conversation_archive_dir: Path = DEFAULT_CONVERSATION_ARCHIVE_DIR
     conversation_archive_queue_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
-    max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
-    max_decompressed_responses_body_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
-    image_inline_fetch_enabled: bool = True
-    image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    # OpenAI Images API compatibility (POST /v1/images/{generations,edits})
-    # ``images_default_model`` is the public model returned to clients when
-    # they omit ``model``; it must remain in the ``gpt-image-*`` family. The
-    # internal Responses host model used to invoke the ``image_generation``
-    # tool is a fixed constant in ``app/modules/proxy/api.py``.
-    images_default_model: str = "gpt-image-2"
-    # NOTE: there is intentionally no ``images_max_n`` setting. The
-    # upstream ``image_generation`` tool path accepts only a single
-    # image per call and codex-lb does not yet implement client-side
-    # fan-out, so ``n > 1`` is hard-rejected at the API boundary. The
-    # cap is lifted in the same change that introduces fan-out.
-    model_registry_enabled: bool = True
+    # OpenAI Images API compatibility (POST /v1/images/{generations,edits}):
+    # the public default model (``gpt-image-2``) and the internal Responses
+    # host model are fixed constants (``app/core/openai/images.py`` /
+    # ``app/modules/proxy/api.py``). There is intentionally no ``images_max_n``
+    # setting: the upstream ``image_generation`` tool path accepts only a
+    # single image per call and codex-lb does not yet implement client-side
+    # fan-out, so ``n > 1`` is hard-rejected at the API boundary. The cap is
+    # lifted in the same change that introduces fan-out.
     # Fallback Codex client version used when the live release lookup fails.
     # Must stay >= the highest ``minimal_client_version`` in the bootstrap
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
     # receive an upstream catalog without those models.
-    model_registry_client_version: str = "0.144.0"
+    model_registry_client_version: str = "0.153.4"
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
+    # T3 → dashboard (deprecated env alias, remove next minor). Per-slug fallback:
+    # a ``model_context_window_overrides`` dashboard row wins for its slug; slugs
+    # without a row still read this dict.
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
+    # T1 (topology). Raw socket-peer CIDRs allowed to call the proxy without an
+    # API key: a fact of this replica's network namespace (sidecar, pod CIDR),
+    # like the trusted-proxy CIDRs below.
     proxy_unauthenticated_client_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     firewall_trust_proxy_headers: bool = False
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
     firewall_ip_cache_ttl_seconds: int = Field(default=30, gt=0)
+    # T1 (topology). Uvicorn-compatible proxy-projection trust list consumed by
+    # ``TrustedProxyHeadersMiddleware``. Semantics are Uvicorn's, unchanged:
+    # unset trusts ``127.0.0.1``, empty trusts no peer, ``*`` trusts every
+    # peer, anything else is a comma-separated host/network list. The bare
+    # ``FORWARDED_ALLOW_IPS`` env name stays authoritative for compatibility
+    # with Uvicorn deployments; ``CODEX_LB_FORWARDED_ALLOW_IPS`` is the
+    # prefixed alias. This governs ``scope["client"]``/scheme projection only;
+    # ``firewall_trusted_proxy_cidrs`` governs firewall and auth client
+    # resolution from the raw socket peer.
+    forwarded_allow_ips: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FORWARDED_ALLOW_IPS", "CODEX_LB_FORWARDED_ALLOW_IPS"),
+    )
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
+    # T1 (topology). Last link of the ``dashboard_auth_mode`` trust chain:
+    # whether a loopback ``Host`` header may unlock a >30d session TTL depends
+    # on how this deployment's reverse proxy rewrites it (policy D2).
     dashboard_trust_loopback_host_header_for_long_sessions: bool = False
 
     def upstream_websocket_proxy_env(self) -> Mapping[str, str | None]:
@@ -462,11 +470,15 @@ class Settings(BaseSettings):
     leader_election_ttl_seconds: int = Field(default=60, ge=5)
 
     # Circuit breaker (failure threshold and recovery timeout are fixed
-    # constants in ``app/core/resilience/circuit_breaker.py``)
+    # constants in ``app/core/resilience/circuit_breaker.py``).
+    # T3 → dashboard (deprecated env alias, remove next minor): the
+    # ``dashboard_settings.circuit_breaker_enabled`` column wins when set.
     circuit_breaker_enabled: bool = False
 
     # Soft drain & deterministic failover (drain/probe thresholds are fixed
-    # constants in ``app/core/balancer/logic.py``)
+    # constants in ``app/core/balancer/logic.py``).
+    # T3 → dashboard (deprecated env alias, remove next minor): the same-name
+    # ``dashboard_settings`` columns win when set.
     soft_drain_enabled: bool = True
     deterministic_failover_enabled: bool = True
 
@@ -478,34 +490,44 @@ class Settings(BaseSettings):
     bulkhead_proxy_limit: int = Field(default=512, ge=0)
     bulkhead_dashboard_limit: int = Field(default=50, ge=0)
     dashboard_bootstrap_token: str | None = None
-    proxy_token_refresh_limit: int = Field(default=64, ge=0)
-    proxy_upstream_websocket_connect_limit: int = Field(default=128, ge=0)
+    # T1 (topology). Address the dashboard tells operators to point clients at
+    # (``GET /api/settings/runtime/connect-address``). Unset derives it from
+    # the request host; a blank value collapses to unset.
+    connect_address: str | None = None
+    # T1 (topology). Capacity of a per-process asyncio.Semaphore, sized with
+    # the replica's resources like ``bulkhead_proxy_limit``.
     proxy_response_create_limit: int = Field(default=256, ge=0)
-    proxy_compact_response_create_limit: int = Field(default=64, ge=0)
-    proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
     proxy_account_response_create_limit: int = Field(default=4, ge=0)
     proxy_account_stream_limit: int = Field(default=8, ge=0)
     proxy_account_stream_recovery_reserve: int = Field(default=1, ge=0)
     # Pool-congestion utilization percentage at which per-API-key stream
     # fair-share throttling engages; 0 disables the gate entirely.
     proxy_api_key_fair_share_congestion_threshold_pct: int = Field(default=0, ge=0, le=100)
+    # C2-2 routing/overload: the five fields below have a same-name
+    # ``dashboard_settings`` column; the environment is only the fallback the
+    # dashboard inherits while its column is NULL (``RoutingTunables``).
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
+    # Upstream overload (``server_is_overloaded``) handling. Soft backoff and
+    # the isolation trip level are fixed constants in
+    # ``app/modules/proxy/_load_balancer/overload_backoff.py``; this is how long
+    # a sustained-overload account is isolated (fresh selection avoids it and
+    # soft sticky owners are rerouted while another candidate exists). ``0``
+    # disables the isolation stage and keeps the soft backoff only.
+    # T3 → dashboard (deprecated env alias, remove next minor)
+    proxy_overload_isolation_seconds: int = Field(default=1800, ge=0)
+    # Weighted routing strategies (``capacity_weighted``, ``relative_availability``)
+    # discount each candidate's draw weight by its recent upstream error rate
+    # (window, sample floor and weight floor are fixed constants in
+    # ``app/modules/proxy/_load_balancer/error_rate.py``).
+    # T3 → dashboard (deprecated env alias, remove next minor)
+    proxy_account_error_rate_weighting_enabled: bool = True
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
+    # T3 → dashboard (deprecated env alias, remove next minor)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
     proxy_account_caps_scope: Literal["partitioned", "replica"] = "partitioned"
     proxy_account_cap_partition_scale_down_seconds: int = Field(default=60, ge=30)
-    # Explicit operator declaration of how many worker processes
-    # (uvicorn/gunicorn) this instance runs behind a single bridge-ring instance
-    # id. Only ``1`` (the default) is supported: per-account concurrency caps are
-    # partitioned per REPLICA via the bridge ring, and intra-pod multi-worker
-    # cap partitioning cannot be made reliable (there is no portable per-worker
-    # index — standard multi-worker launches inherit the same environment into
-    # every child). A declared value greater than 1 is rejected at startup by
-    # ``_validate_workers_per_instance``; operators scale horizontally via
-    # replicas instead. Default 1 is a no-op requiring zero operator action.
-    workers_per_instance: int = Field(default=1, ge=1)
-    proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
-    usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
     timeout_invariant_validation_strict: bool = False
 
     # Local memory-pressure guard (0 = disabled). Requests are rejected with
@@ -530,20 +552,6 @@ class Settings(BaseSettings):
     # HTTP connector limits
     http_connector_limit: int = 100
     http_connector_limit_per_host: int = 50
-
-    @field_validator("request_log_retention_days")
-    @classmethod
-    def _validate_request_log_retention(cls, value: int) -> int:
-        if value != 0 and value < 30:
-            raise ValueError("request_log_retention_days must be 0 (disabled) or >= 30")
-        return value
-
-    @field_validator("usage_history_retention_days")
-    @classmethod
-    def _validate_usage_history_retention(cls, value: int) -> int:
-        if value != 0 and value < 45:
-            raise ValueError("usage_history_retention_days must be 0 (disabled) or >= 45")
-        return value
 
     @field_validator("data_dir", mode="before")
     @classmethod
@@ -585,23 +593,13 @@ class Settings(BaseSettings):
             return Path(value).expanduser()
         raise TypeError("conversation_archive_dir must be a path")
 
-    @field_validator("image_inline_allowed_hosts", mode="before")
+    @field_validator("connect_address", "additional_quota_registry_file", mode="before")
     @classmethod
-    def _normalize_image_inline_allowed_hosts(cls, value: StringListInput) -> list[str]:
-        if value is None:
-            return []
+    def _blank_optional_to_none(cls, value: object) -> object:
         if isinstance(value, str):
-            entries = [entry.strip().lower().rstrip(".") for entry in value.split(",")]
-            return [entry for entry in entries if entry]
-        if isinstance(value, list):
-            normalized: list[str] = []
-            for entry in value:
-                if isinstance(entry, str):
-                    host = entry.strip().lower().rstrip(".")
-                    if host:
-                        normalized.append(host)
-            return normalized
-        raise TypeError("image_inline_allowed_hosts must be a list or comma-separated string")
+            stripped = value.strip()
+            return stripped or None
+        return value
 
     @field_validator("firewall_trusted_proxy_cidrs", mode="before")
     @classmethod
@@ -673,25 +671,6 @@ class Settings(BaseSettings):
             return _validate_context_window_entries(value)
         raise TypeError("model_context_window_overrides must be a JSON object string or dict")
 
-    @field_validator("upstream_compact_timeout_seconds")
-    @classmethod
-    def _validate_upstream_compact_timeout_seconds(cls, value: float | None) -> float | None:
-        if value is None:
-            return None
-        if value <= 0:
-            raise ValueError("upstream_compact_timeout_seconds must be greater than zero")
-        return value
-
-    @field_validator("warmup_model", mode="before")
-    @classmethod
-    def _normalize_warmup_model(cls, value: object) -> str:
-        if not isinstance(value, str):
-            raise TypeError("warmup_model must be a string")
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("warmup_model must not be blank")
-        return normalized
-
     @model_validator(mode="after")
     def _apply_data_dir_defaults(self) -> "Settings":
         if self.data_dir == DEFAULT_HOME_DIR:
@@ -737,31 +716,6 @@ class Settings(BaseSettings):
         return frozenset(entry.strip().lower() for entry in self.trace.split(",") if entry.strip())
 
     @model_validator(mode="after")
-    def _validate_token_refresh_claim_ttl(self) -> "Settings":
-        # The claim is acquired BEFORE the refresh-admission wait and held
-        # through the OAuth exchange, so the TTL floor must cover both: the
-        # admission wait ceiling plus the HTTP exchange (2x for margin). A TTL
-        # sized only around the HTTP timeout can expire under a healthy
-        # claimant stuck in admission, letting another replica claim the same
-        # account and reuse the single-use refresh token.
-        minimum_ttl = self.proxy_admission_wait_timeout_seconds + 2.0 * self.token_refresh_timeout_seconds
-        if "token_refresh_claim_ttl_seconds" not in self.model_fields_set:
-            # The operator has not opted into the new setting. Derive the
-            # default from the related timeouts so a deployment that only
-            # raised the refresh/admission timeouts before this setting
-            # existed still boots with a TTL that satisfies the invariant,
-            # instead of crashing at startup against the fixed 30s default.
-            self.token_refresh_claim_ttl_seconds = max(self.token_refresh_claim_ttl_seconds, minimum_ttl)
-            return self
-        if self.token_refresh_claim_ttl_seconds < minimum_ttl:
-            raise ValueError(
-                "token_refresh_claim_ttl_seconds must be at least proxy_admission_wait_timeout_seconds "
-                f"+ 2x token_refresh_timeout_seconds ({minimum_ttl}s) so a healthy claimant cannot lose "
-                "its claim while waiting for refresh admission or mid-exchange"
-            )
-        return self
-
-    @model_validator(mode="after")
     def _validate_metrics_port(self) -> "Settings":
         http_port = _configured_http_port()
         if self.metrics_port == http_port:
@@ -786,24 +740,41 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_workers_per_instance(self) -> "Settings":
+    def _reject_multiple_workers_per_instance(self) -> "Settings":
         # Only one worker process per instance is supported. Per-account
         # concurrency caps are partitioned per REPLICA via the bridge ring, which
         # is correct only when a single process runs behind each ring instance
         # id. Running multiple worker processes per instance cannot be made
         # reliable for shared caps: there is no portable per-worker index, and a
         # standard uvicorn/gunicorn multi-worker launch inherits the SAME
-        # environment into every child, so the workers cannot self-partition. Fail
-        # fast on the explicit declaration rather than silently over-admitting.
-        if self.workers_per_instance > 1:
+        # environment into every child, so the workers cannot self-partition.
+        # ``CODEX_LB_WORKERS_PER_INSTANCE`` is therefore not a setting (the only
+        # accepted value is the default, 1) but a startup guard: an explicit
+        # declaration of anything else fails fast rather than silently
+        # over-admitting.
+        environ = _effective_environ()
+        key = _env_key(environ, _WORKERS_PER_INSTANCE_ENV)
+        raw = environ.get(key) if key is not None else None
+        if raw is None or not raw.strip():
+            return self
+        try:
+            declared = int(raw.strip())
+        except ValueError:
+            declared = 0
+        if declared < 1:
             raise ValueError(
-                "workers_per_instance (CODEX_LB_WORKERS_PER_INSTANCE="
-                f"{self.workers_per_instance}) is not supported: running more than one worker "
+                f"{_WORKERS_PER_INSTANCE_ENV}={raw.strip()!r} is not a positive integer; "
+                f"only {_WORKERS_PER_INSTANCE_ENV}=1 (the default) is supported."
+            )
+        if declared > 1:
+            raise ValueError(
+                f"workers_per_instance ({_WORKERS_PER_INSTANCE_ENV}="
+                f"{declared}) is not supported: running more than one worker "
                 "process per instance would multiply per-account concurrency caps, because those "
                 "caps are partitioned per replica via the bridge ring and intra-pod worker "
                 "partitioning cannot be made reliable. Run ONE worker per pod/container and scale "
                 "horizontally via replicas (the bridge ring partitions caps per replica); set "
-                "CODEX_LB_WORKERS_PER_INSTANCE=1 (the default)."
+                f"{_WORKERS_PER_INSTANCE_ENV}=1 (the default)."
             )
         return self
 

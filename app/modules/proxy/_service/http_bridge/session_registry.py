@@ -3,17 +3,22 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import Any
 
 from app.core.clients.proxy import ProxyResponseError
-from app.core.config.settings import Settings
+from app.core.clock import scheduler_for
+from app.core.config.dashboard_overrides import effective_settings
 from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_durable_recover_total,
     bridge_instance_mismatch_total,
+    http_bridge_operation_abandonment_total,
 )
+from app.core.utils.time import utcnow
 from app.db.models import StickySessionKind
+from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _forget_http_bridge_denied_anchor_fence_owner,
@@ -23,6 +28,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_live_turn_state_alias_owner,
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_previous_response_alias_key,
+    _http_bridge_request_budget_seconds,
     _http_bridge_turn_state_alias_key,
     _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
@@ -32,6 +38,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_reattach,
     _register_http_bridge_turn_state_aliases_locked,
     _renew_durable_http_bridge_lease,
+    _service_get_settings_cache,
     _track_alias_registration,
 )
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
@@ -92,6 +99,83 @@ class _HTTPBridgeSessionRegistryMixin:
         self._schedule_http_bridge_session_closes(pruned_sessions, reason="idle_sweep")
         return len(pruned_sessions)
 
+    async def abandon_stale_http_bridge_operations(self: Any) -> int:
+        """Fence ownerless ambiguous operations after the bridge budget.
+
+        The in-memory registry and event batcher are both part of the safety
+        proof. A durable row is only eligible when no canonical or detached
+        generation, including terminal event settlement, still references it.
+        """
+        # M1 stream/bridge budgets: this pass runs from the ring heartbeat, outside
+        # any request binding, so the dashboard-managed bridge budget is applied
+        # from one snapshot read here (``effective_settings``), never the bare
+        # environment value. A snapshot failure keeps the environment budget.
+        settings = _service_get_settings()
+        try:
+            settings = effective_settings(await _service_get_settings_cache().get(), settings)
+        except Exception:
+            logger.warning(
+                "HTTP bridge stale operation abandonment could not read the dashboard settings snapshot; "
+                "using the environment budget",
+                exc_info=True,
+            )
+        inactivity_seconds = max(30.0 * 60.0, _http_bridge_request_budget_seconds(settings))
+        maintenance_now = utcnow()
+        cutoff = maintenance_now - timedelta(seconds=inactivity_seconds)
+        lease_expired_before = maintenance_now - timedelta(seconds=_http_bridge_durable_lease_ttl_seconds())
+        protected_operation_ids: set[str] = set()
+        async with self._http_bridge_lock:
+            local_sessions = [
+                *self._http_bridge_sessions.values(),
+                *self._http_bridge_detached_sessions.values(),
+            ]
+            for session in local_sessions:
+                protected_operation_ids.update(
+                    operation_id
+                    for request_state in tuple(session.pending_requests)
+                    if (operation_id := getattr(request_state, "operation_id", None))
+                )
+
+        batcher = getattr(self, "_http_bridge_operation_event_batcher", None)
+        pending_operation_ids = getattr(batcher, "pending_operation_ids", None)
+        if callable(pending_operation_ids):
+            try:
+                protected_operation_ids.update(await pending_operation_ids())
+            except Exception:
+                logger.warning(
+                    "Failed to snapshot HTTP bridge operation spool protection",
+                    exc_info=True,
+                )
+                return 0
+
+        abandon_stale_operations = getattr(self._durable_bridge, "abandon_stale_operations", None)
+        if not callable(abandon_stale_operations):
+            return 0
+        try:
+            abandonments = await abandon_stale_operations(
+                cutoff=cutoff,
+                lease_expired_before=lease_expired_before,
+                protected_operation_ids=protected_operation_ids,
+            )
+        except Exception:
+            logger.warning("HTTP bridge stale operation abandonment failed", exc_info=True)
+            return 0
+        for abandonment in abandonments:
+            source_state = str(abandonment.source_state)
+            if PROMETHEUS_AVAILABLE and http_bridge_operation_abandonment_total is not None:
+                http_bridge_operation_abandonment_total.labels(source_state=source_state).inc()
+            logger.warning(
+                "Abandoned stale HTTP bridge operation",
+                extra={
+                    "source_state": source_state,
+                    "reason": "stale_owner",
+                    "age_seconds": round(float(abandonment.age_seconds), 3),
+                    "owner_lease_outcome": abandonment.owner_lease_outcome,
+                    "session_hash": abandonment.session_hash,
+                },
+            )
+        return len(abandonments)
+
     def _initialize_http_bridge_session_registry(self: _HTTPBridgeServiceProtocol) -> None:
         # Canonical and detached registries both own live generations until
         # common resource finalization removes the latter entry.
@@ -138,7 +222,7 @@ class _HTTPBridgeSessionRegistryMixin:
                     raise result
             return background_cleanup_drained
 
-        shutdown_task = asyncio.create_task(finish_shutdown(), name="http-bridge-shutdown-close-all")
+        shutdown_task = scheduler_for(self).create_task(finish_shutdown(), name="http-bridge-shutdown-close-all")
         result, cancellation = await _await_task_deferring_cancellation(shutdown_task)
         if cancellation is not None:
             raise cancellation
@@ -226,7 +310,7 @@ class _HTTPBridgeSessionRegistryMixin:
                 session.codex_session = True
                 session.idle_ttl_seconds = max(
                     session.idle_ttl_seconds,
-                    float(_service_get_settings().http_responses_session_bridge_codex_idle_ttl_seconds),
+                    float(_http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
                 )
                 session.headers = without_http_bridge_session_affinity_headers(session.headers)
             registration_generation = _track_alias_registration(session, turn_state, turn_state=True)
@@ -545,7 +629,6 @@ class _HTTPBridgeSessionRegistryMixin:
         session: _HTTPBridgeSession,
         *,
         turn_state: str,
-        settings: Settings,
     ) -> None:
         session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
         session.codex_session = True
@@ -553,7 +636,7 @@ class _HTTPBridgeSessionRegistryMixin:
         session.downstream_turn_state_aliases.add(turn_state)
         session.idle_ttl_seconds = max(
             session.idle_ttl_seconds,
-            float(settings.http_responses_session_bridge_codex_idle_ttl_seconds),
+            float(_http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
         )
         session.headers = _headers_with_turn_state(session.headers, turn_state)
 

@@ -51,12 +51,16 @@ import {
 } from "@/features/dashboard/schemas";
 import type {
 	DashboardSettings,
+	ModelContextWindowOverrides,
+	SubscriptionOverflowPreflight,
 	TelemetryConsent,
 	TelemetrySnapshotEnvelope,
 	UpstreamProxyAdmin,
 } from "@/features/settings/schemas";
 import {
 	DashboardSettingsSchema,
+	ModelContextWindowOverridesSchema,
+	SubscriptionOverflowPreflightSchema,
 	TelemetryConsentSchema,
 	TelemetrySnapshotEnvelopeSchema,
 	UpstreamProxyAdminSchema,
@@ -82,6 +86,7 @@ export type ConversationDetails = z.infer<typeof ConversationDetailsSchema>;
 export type ConversationModelStat = z.infer<typeof ConversationModelStatSchema>;
 export type { QuotaPlannerDecision, QuotaPlannerForecast, QuotaPlannerSettings };
 export type QuotaPlannerWarmupActionResponse = z.infer<typeof QuotaPlannerWarmupActionResponseSchema>;
+export type { ModelContextWindowOverrides };
 export type OauthCompleteResponse = z.infer<typeof OauthCompleteResponseSchema>;
 
 export type {
@@ -500,7 +505,7 @@ export function createDashboardSettings(
 ): DashboardSettings {
 	return DashboardSettingsSchema.parse({
 		stickyThreadsEnabled: true,
-		upstreamStreamTransport: "default",
+		upstreamStreamTransport: "auto",
 		httpDownstreamTransportPolicy: "smart",
 		upstreamProxyRoutingEnabled: false,
 		upstreamProxyDefaultPoolId: null,
@@ -513,6 +518,9 @@ export function createDashboardSettings(
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,
 		singleAccountId: null,
+		subscriptionOverflowSourceId: null,
+		subscriptionOverflowDrainUntil: null,
+		subscriptionOverflowPinsExpireBy: null,
 		proxyAccountResponseCreateLimit: 4,
 		proxyAccountResponseCreateLimitEnvironmentValue: 4,
 		proxyAccountResponseCreateLimitOverride: 4,
@@ -525,6 +533,11 @@ export function createDashboardSettings(
 		proxyApiKeyFairShareCongestionThresholdPct: 0,
 		proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue: 0,
 		proxyApiKeyFairShareCongestionThresholdPctOverride: 0,
+		proxyOverloadIsolationSeconds: 1800,
+		proxyAccountErrorRateWeightingEnabled: true,
+		proxyAccountInflightPenaltyPct: 2.5,
+		proxyAccountLeaseTokenWeight: 1,
+		proxyAccountLeaseTtlSeconds: 900,
 		weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
 		weeklyPaceSmoothingMinutes: 30,
 		openaiCacheAffinityMaxAgeSeconds: 300,
@@ -549,6 +562,17 @@ export function createDashboardSettings(
 		guestAccessEnabled: false,
 		guestPasswordConfigured: false,
 		limitWarmupStaggeredIdleEnabled: false,
+		softDrainEnabled: true,
+		deterministicFailoverEnabled: true,
+		circuitBreakerEnabled: false,
+		httpResponsesSessionBridgeCodexPrewarmEnabled: false,
+		authGuardianEnabled: true,
+		authGuardianBlockedByTopology: false,
+		automationsSchedulerEnabled: true,
+		rateLimitResetCreditsRefreshEnabled: true,
+		// M5 conversation archive
+		conversationArchiveEnabled: false,
+		conversationArchiveDir: "/var/lib/codex-lb/conversation-archive",
 		...overrides,
 	});
 }
@@ -724,6 +748,50 @@ export function createQuotaPlannerWarmupActionResponse(
 	});
 }
 
+export function createSubscriptionOverflowPreflight(
+	overrides: Partial<SubscriptionOverflowPreflight> = {},
+): SubscriptionOverflowPreflight {
+	return SubscriptionOverflowPreflightSchema.parse({
+		sourceId: "src_vllm",
+		sourceName: "vLLM",
+		sourceEnabled: true,
+		eligible: true,
+		blockers: [],
+		drainUntil: null,
+		servedModels: [
+			{
+				slug: "gpt-5.4",
+				enabled: true,
+				neverOverflows: false,
+				neverOverflowsReason: null,
+				undeclaredToolTypes: ["shell", "tool_search"],
+				supportsVision: false,
+				supportsStreaming: true,
+				priced: false,
+				contextWindowMismatch: { registry: 272000, source: 8192, maxOutputTokens: 1024 },
+				warnings: ["undeclared_tool_types", "no_vision", "unpriced", "context_window_smaller"],
+			},
+			{
+				slug: "gpt-5.6-sol",
+				enabled: true,
+				neverOverflows: true,
+				neverOverflowsReason: "responses_lite",
+				undeclaredToolTypes: [],
+				supportsVision: true,
+				supportsStreaming: true,
+				priced: true,
+				contextWindowMismatch: null,
+				warnings: ["responses_lite_excluded"],
+			},
+		],
+		missingModels: ["gpt-5.5"],
+		scopedApiKeyCount: 1,
+		livePinCount: 2,
+		tombstoneCount: 1,
+		...overrides,
+	});
+}
+
 export function createUpstreamProxyAdmin(
 	overrides: Partial<UpstreamProxyAdmin> = {},
 ): UpstreamProxyAdmin {
@@ -750,6 +818,18 @@ export function createUpstreamProxyAdmin(
 			},
 		],
 		bindings: [],
+		...overrides,
+	});
+}
+
+export function createModelContextWindowOverrides(
+	overrides: Partial<ModelContextWindowOverrides> = {},
+): ModelContextWindowOverrides {
+	return ModelContextWindowOverridesSchema.parse({
+		overrides: [
+			{ slug: "gpt-5.4", contextWindow: 515000, source: "dashboard", envValue: 300000 },
+			{ slug: "gpt-5.5", contextWindow: 400000, source: "env", envValue: 400000 },
+		],
 		...overrides,
 	});
 }

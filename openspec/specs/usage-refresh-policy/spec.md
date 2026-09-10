@@ -18,10 +18,33 @@ Background usage refresh MUST apply a cooldown to accounts that repeatedly fail 
 
 ### Requirement: Usage refresh deactivates on clear deactivation signals
 
-The system MUST deactivate accounts when usage refresh receives a permanent
-account deactivation signal. Credential/session invalidation codes such as
-`token_invalidated`, `token_expired`, and `app_session_terminated` MUST be
-marked `reauth_required` instead of `deactivated`.
+The system MUST change an account to `deactivated` or `reauth_required` during
+usage refresh only when the upstream error contains an explicit,
+account-specific terminal signal. A recognized permanent-failure error code
+MUST be mapped through the existing permanent-failure account-status policy,
+and an error message that explicitly says the account is deactivated MUST mark
+the account `deactivated`. For example, the re-authentication codes
+`token_invalidated`, `token_expired`, and `app_session_terminated` map to
+`reauth_required` through that policy (non-normative; the code list lives in
+`app/core/balancer/logic.py`). A bare HTTP status, including `402` or `404`, MUST
+NOT change account status or routing availability and MUST remain a refresh
+failure for existing logging, error accounting, and later refresh retries.
+
+#### Scenario: Bare usage 404 preserves account status
+
+- **GIVEN** an account eligible for background usage refresh
+- **WHEN** the usage endpoint returns HTTP `404` without an explicit permanent-failure code or deactivation message
+- **THEN** the account's current status is unchanged
+- **AND** the account is not marked routing-unavailable
+- **AND** the response is recorded as a refresh failure and a later refresh cycle may retry it
+
+#### Scenario: Bare usage 402 preserves account status
+
+- **GIVEN** an account eligible for background usage refresh
+- **WHEN** the usage endpoint returns HTTP `402` without an explicit permanent-failure code or deactivation message
+- **THEN** the account's current status is unchanged
+- **AND** the account is not marked routing-unavailable
+- **AND** the response is recorded as a refresh failure and a later refresh cycle may retry it
 
 #### Scenario: Usage 401 app session terminated requires re-authentication
 
@@ -29,6 +52,13 @@ marked `reauth_required` instead of `deactivated`.
 - **AND** the upstream error code is `app_session_terminated`
 - **THEN** the account is marked `reauth_required`
 - **AND** later usage refresh cycles skip that account until re-authentication
+
+#### Scenario: Explicit usage deactivation message deactivates account
+
+- **WHEN** usage refresh receives an error whose message says `your OpenAI account has been deactivated`
+- **AND** the error has no recognized permanent-failure code
+- **THEN** the account is marked `deactivated`
+- **AND** the account is marked routing-unavailable
 
 ### Requirement: token_expired at the refresh boundary deactivates the account
 
@@ -189,6 +219,10 @@ The system MUST treat stored `prolite` account plan types as Pro-equivalent when
 
 Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exceeded` accounts back to `active` after it writes fresh usage snapshots that prove the blocked window has recovered. This reconciliation SHALL be recovery-only and SHALL NOT promote `active` accounts into blocked statuses. For `rate_limited` accounts, recovery evidence SHALL come from the most recently recorded main-window row: when a post-block refresh no longer reports a short primary window and the last primary sample's own reset deadline has elapsed (or no primary sample exists), a fresh long-window row recorded after the block that still reports usage below `100%` proves recovery. While the last primary sample still claims an unexpired window (or omits reset metadata), or the newer long-window row is itself exhausted, primary freshness SHALL keep gating recovery.
 
+A future persisted `reset_at` SHALL continue to block ordinary recovery except for a `rate_limited` Free account whose monthly usage history proves that the specific monthly window associated with the current block reset. This exception MUST require `blocked_at` and a future persisted `reset_at`, at least 30 seconds elapsed after `blocked_at`, a monthly baseline recorded strictly after `blocked_at` whose `reset_at` matches the persisted marker within five seconds, a real temporal reset in an adjacent monthly pair at or after that baseline, and both the transition's after sample and the latest monthly sample recorded after `blocked_at` with usage below `100%`. The reset pair MAY come from the current refresh or be selected from adjacent persisted post-block samples so recovery survives a process restart and tolerates sliding reset deadlines without comparing non-neighboring rows. Availability without that matching anchored transition, reset timestamp jitter, an exhausted latest window, or evidence for a non-Free account MUST NOT override the persisted cooldown.
+
+Every recovery write MUST compare the current status, deactivation reason, `reset_at`, and `blocked_at`. A successful write SHALL set the account to `active` and clear the deactivation reason and both block markers. A compare-and-set miss MUST preserve the newer row and MUST NOT make the stale account snapshot eligible for warm-up.
+
 #### Scenario: Scheduler recovers a stale rate-limited account from fresh primary usage
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** the persisted rate-limit reset deadline has already elapsed
@@ -217,7 +251,8 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** the last primary usage sample predates the block but still claims an unexpired reset deadline
 - **AND** a later refresh recorded only a fresh long-window row
-- **THEN** the account stays `rate_limited` until fresh primary evidence arrives or the primary sample's reset deadline elapses
+- **AND** no qualifying reset-confirmed Free monthly transition matches the current block
+- **THEN** the account stays `rate_limited` until fresh primary evidence arrives, the primary sample's reset deadline elapses, or a qualifying monthly reset is confirmed
 
 #### Scenario: Scheduler recovers a legacy rate-limited account without a block marker
 - **WHEN** an account is persisted as `rate_limited`
@@ -238,9 +273,64 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 #### Scenario: Scheduler preserves an unexpired rate-limit cooldown
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** its persisted rate-limit reset deadline is still in the future
-- **AND** a later background usage refresh writes a fresh primary usage row recorded after the persisted block marker
-- **AND** that primary usage row reports usage below `100%`
+- **AND** a later background usage refresh writes fresh available usage
+- **AND** no qualifying reset-confirmed Free monthly transition matches the current block
 - **THEN** the scheduler leaves the account `rate_limited`
+
+#### Scenario: Confirmed Free monthly reset recovers before a stale deadline
+- **GIVEN** a Free account is persisted as `rate_limited` with `blocked_at` more than 30 seconds ago and a future `reset_at`
+- **AND** a monthly baseline recorded strictly after `blocked_at` has a reset deadline within five seconds of the persisted marker
+- **WHEN** background usage refresh confirms a real transition in an adjacent monthly pair at or after that matching baseline
+- **AND** the transition's after sample and latest monthly sample were recorded after `blocked_at` and report usage below `100%`
+- **THEN** the scheduler atomically marks the account `active` before the stale persisted deadline
+- **AND** it clears `reset_at`, `blocked_at`, and the deactivation reason
+
+#### Scenario: Persisted monthly transition recovers after scheduler restart
+- **GIVEN** a qualifying Free monthly reset transition was persisted after `blocked_at`
+- **AND** the scheduler process restarts after the transition is no longer the current in-memory before/after pair
+- **WHEN** the restarted scheduler refreshes the still-`rate_limited` account before its stale persisted deadline
+- **THEN** it may use a matching persisted baseline plus a later adjacent monthly transition pair as reset evidence
+- **AND** it recovers the account through the same marker-guarded transition
+
+#### Scenario: A baseline at the exact block timestamp cannot shadow a later valid baseline
+- **GIVEN** persisted monthly history contains a reset-matching row recorded exactly at `blocked_at`
+- **AND** a later row recorded strictly after `blocked_at` matches the same persisted reset marker
+- **AND** an adjacent reset transition follows that later row
+- **WHEN** the restarted scheduler resolves persisted recovery evidence
+- **THEN** it MUST ignore the row recorded exactly at `blocked_at`
+- **AND** it MUST use the later matching baseline to evaluate the qualifying transition
+
+#### Scenario: An unanchored current transition cannot mask persisted recovery evidence
+- **GIVEN** the current monthly before/after pair confirms a reset whose baseline does not match the blocked Free account's persisted reset marker
+- **AND** persisted monthly history contains an eligible post-block baseline plus a qualifying adjacent reset transition
+- **WHEN** the scheduler resolves monthly reset evidence
+- **THEN** it MUST scan persisted history instead of short-circuiting on the unanchored current pair
+- **AND** it MUST use evidence anchored to the persisted block marker for recovery and warm-up
+
+#### Scenario: Minimum post-block floor prevents immediate recovery
+- **GIVEN** a Free account was marked `rate_limited` less than 30 seconds ago
+- **AND** monthly samples otherwise appear to prove a reset with available quota
+- **WHEN** background usage refresh evaluates recovery
+- **THEN** the account remains `rate_limited` with both block markers intact
+
+#### Scenario: Mismatched monthly baseline does not recover the current block
+- **GIVEN** a Free account has a future persisted rate-limit deadline
+- **AND** monthly history contains a real reset transition whose baseline deadline differs from that marker by more than five seconds
+- **WHEN** background usage refresh evaluates recovery
+- **THEN** the transition is not treated as evidence for the current block
+- **AND** the account remains `rate_limited`
+
+#### Scenario: Later exhausted monthly state defeats older recovery evidence
+- **GIVEN** a Free account has a qualifying post-block monthly reset transition whose after sample reports available quota
+- **AND** its latest monthly sample reports usage at or above `100%`
+- **WHEN** background usage refresh evaluates recovery
+- **THEN** the account remains blocked
+
+#### Scenario: Plus primary exhaustion is not released by monthly evidence
+- **GIVEN** a Plus account is persisted as `rate_limited`
+- **AND** its current primary usage reports `100%`
+- **WHEN** background usage refresh observes available long-window usage or an unrelated reset transition
+- **THEN** the account remains `rate_limited`
 
 #### Scenario: Scheduler recovers a stale quota-exceeded account from fresh secondary usage
 - **WHEN** an account is persisted as `quota_exceeded`
@@ -255,13 +345,14 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 #### Scenario: Scheduler ignores stale pre-block recovery evidence
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** the latest primary usage row was recorded before the persisted block marker
-- **AND** no newer long-window row was recorded after the persisted block marker
+- **AND** no newer long-window row or qualifying post-block monthly reset transition proves recovery
 - **THEN** the scheduler leaves the account blocked
 
 #### Scenario: Scheduler skips recovery when the account row changed concurrently
 - **WHEN** background usage refresh determines that a blocked account is recoverable
-- **AND** the persisted account status or reset markers change before the scheduler writes recovery
+- **AND** the persisted account status, reason, or reset markers change before the scheduler writes recovery
 - **THEN** the scheduler skips the stale recovery write
+- **AND** warm-up does not use that stale recovery decision
 
 #### Scenario: Scheduler clears stale deactivation reasons on recovery
 - **WHEN** background usage refresh recovers a `rate_limited` or `quota_exceeded` account to `active`
@@ -344,18 +435,33 @@ This credit-aware interpretation MUST be shared by proxy account selection and a
 
 ### Requirement: Reset-confirmed limit warm-up
 
-The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window has moved from an exhausted sample to a newly available reset window.
+The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window moved into a newly available reset window. Eligibility SHALL depend on a real reset transition and the configured post-reset availability gate, not on whether the previous window was exhausted. The legacy `limit_warmup_exhausted_threshold_percent` setting MUST NOT gate reset-confirmed eligibility.
+
+Background usage refresh MUST complete any applicable blocked-status reconciliation before warm-up evaluation. Candidate evaluation and the sender's fresh preflight check MUST both require the account to be `active`; paused, deactivated, `reauth_required`, `rate_limited`, and `quota_exceeded` accounts MUST NOT receive warm-up traffic. When a reset-confirmed recovery uses persisted transition evidence, warm-up SHALL reuse that same before/after pair so the new account/window/reset tuple enters the ordinary durable deduplication path.
+
+The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle warm-up candidates. It MUST NOT suppress a reset-confirmed candidate for a distinct account/window/reset tuple, which remains protected by the durable atomic attempt claim for that tuple.
+
+#### Scenario: Warm-up follows a real reset regardless of prior usage
+- **GIVEN** limit warm-up is enabled globally and for an active account
+- **AND** the account's previous usage sample for a selected window reports any usage below or at exhaustion
+- **WHEN** background usage refresh records a newer sample that proves a real reset for that window and satisfies the configured availability gate
+- **THEN** the system sends at most one warm-up request for that account/window/reset tuple
+
+#### Scenario: Staggered idle cooldown does not suppress a distinct reset tuple
+- **GIVEN** an account has a recent warm-up attempt inside `limit_warmup_cooldown_seconds`
+- **AND** background usage refresh confirms a different selected account/window/reset tuple
+- **WHEN** reset-confirmed warm-up evaluates the new tuple
+- **THEN** the staggered idle cooldown MUST NOT suppress that candidate
+- **AND** the durable attempt claim MUST still prevent another send for an already claimed identical tuple
 
 #### Scenario: Warm-up is skipped unless reset is confirmed
 - **GIVEN** limit warm-up is enabled globally and for an account
-- **AND** the account's previous usage sample for a selected window was exhausted
-- **WHEN** background usage refresh records a newer sample for that window with `used_percent < 100` and a later `reset_at`
-- **THEN** the system sends at most one warm-up request for that account/window/reset tuple
+- **WHEN** background usage refresh records a newer available sample without a real selected-window reset transition
+- **THEN** the system MUST NOT send a reset-confirmed warm-up request for that sample
 
 #### Scenario: Warm-up is not triggered by upstream reset_at timestamp jitter
 - **GIVEN** limit warm-up is enabled globally and for an account
-- **AND** the account's previous usage sample was exhausted
-- **WHEN** background usage refresh records a newer sample whose `reset_at` advanced by less than 60 seconds (upstream timestamp jitter)
+- **WHEN** background usage refresh records a newer sample whose `reset_at` advanced by less than 60 seconds as upstream timestamp jitter
 - **THEN** the system MUST NOT send a warm-up request for that account/window/reset tuple
 
 #### Scenario: Warm-up is opt-in and safe by default
@@ -371,13 +477,37 @@ The system SHALL support an optional limit warm-up mechanism that is disabled by
 - **THEN** the scheduler MUST evaluate the latest persisted opt-in value rather than the stale in-session account object
 
 #### Scenario: Warm-up respects unsafe account states
-- **WHEN** an account is paused, deactivated, rate-limited, quota-exceeded, or in an auth-refresh failure path
+- **WHEN** an account is paused, deactivated, `reauth_required`, rate-limited, quota-exceeded, or in an auth-refresh failure path
 - **THEN** limit warm-up MUST NOT send traffic for that account
+
+#### Scenario: Reset recovery completes before warm-up
+- **GIVEN** an opted-in Free account is `rate_limited` and has qualifying monthly reset evidence
+- **WHEN** marker-guarded recovery succeeds
+- **THEN** the scheduler first persists the account as `active` and clears its block markers
+- **AND** only then may it evaluate the same monthly reset tuple for warm-up
+
+#### Scenario: Recovery race prevents warm-up from stale evidence
+- **GIVEN** reset evidence makes a blocked account appear recoverable
+- **AND** a concurrent write changes its status or block markers before recovery persists
+- **WHEN** the recovery compare-and-set misses
+- **THEN** the stale scheduler snapshot remains ineligible for warm-up
+
+#### Scenario: Sender rejects an account re-blocked after candidate creation
+- **GIVEN** an active account produced a valid warm-up candidate
+- **AND** the account becomes blocked before upstream warm-up traffic begins
+- **WHEN** the sender reloads the account state
+- **THEN** it does not send the warm-up request
 
 #### Scenario: Warm-up attempts are durable and deduplicated
 - **WHEN** multiple refresh workers observe the same account/window/reset candidate
 - **THEN** the database permits at most one persisted attempt for that tuple
 - **AND** later refresh cycles skip that tuple after a prior attempt exists
+
+#### Scenario: Persisted recovery evidence shares the warm-up tuple
+- **GIVEN** a scheduler restart causes recovery to use a persisted monthly before/after transition
+- **WHEN** the recovered active account reaches warm-up evaluation
+- **THEN** warm-up derives the candidate from that same transition's new reset deadline
+- **AND** an existing attempt for the account/monthly/reset tuple prevents another send
 
 #### Scenario: Staggered idle warm-up pre-starts rolling primary windows
 - **GIVEN** limit warm-up and staggered idle warm-up are enabled globally
@@ -505,7 +635,7 @@ The system SHALL NOT infer weekly secondary semantics solely because a primary-s
 
 ### Requirement: Background usage refresh is staggered across accounts
 
-Background usage refresh MUST distribute account refresh attempts across the configured usage refresh interval instead of refreshing every eligible account in one burst. Each scheduler slice MUST attempt at most one eligible account. Over a full cycle, all eligible accounts SHOULD be considered once.
+Background usage refresh MUST distribute account refresh attempts across the fixed 60-second usage refresh interval (`USAGE_REFRESH_INTERVAL_SECONDS` in `app/core/usage/refresh_policy.py`, which also derives the 180-second usage freshness horizon) instead of refreshing every eligible account in one burst. Background usage refresh MUST always run; the request-path refreshes (account import, post-`usage_limit_reached` request refresh) MUST NOT be gated by an operator switch, and `CODEX_LB_USAGE_REFRESH_ENABLED` / `CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS` are removed settings that startup reports and ignores. Each scheduler slice MUST attempt at most one eligible account. Over a full cycle, all eligible accounts SHOULD be considered once.
 
 Each slice MUST select its account before reading usage history and MUST scope its latest-usage lookups, updater input, warm-up candidate evaluation, and recoverable-status evaluation to that selected account. The scheduler MAY retain the full eligible account roster only to choose the deterministic rotation and calculate staggered warm-up phases; that roster MUST NOT cause usage-history reads, upstream refresh attempts, warm-up sends, or status mutations for an unrelated account in the slice. A selected-account refresh failure MUST NOT trigger same-slice fallback to another account. Database sessions used to load scheduler state MUST close before upstream network I/O begins, and concurrent follow-up work MUST NOT share an `AsyncSession`.
 
@@ -568,11 +698,19 @@ token, these transitions MUST be treated as legitimate plan changes rather than
 account-slot identity mismatches. This requirement applies to scheduled usage
 refresh and the forced refresh performed after an operator's Force probe.
 
-A workspace-less usage payload MUST still be rejected, leaving the stored plan
-unchanged, when it reports `free` or an unrecognized plan that differs from the
-stored plan, since that is the signature of a degraded or wrong-identity usage
-response. A usage payload whose `workspace_id` differs from the workspace the
-account is bound to MUST continue to be rejected as a slot mismatch.
+A workspace-less usage payload that reports a recognized paid plan MUST be
+trusted on its first observation. A workspace-less usage payload that reports
+`free` for an account whose stored plan is a recognized paid plan MUST NOT be
+applied on a single observation, and MUST be applied once a second consecutive
+workspace-less refresh of the same account reports `free`, as specified in
+"Usage refresh confirms a workspace-less downgrade to Free before persisting it".
+
+A workspace-less usage payload MUST still be rejected outright, leaving the
+stored plan unchanged and with no confirmation path, when it reports an
+unrecognized plan that differs from the stored plan, since that remains the
+signature of a degraded or wrong-identity usage response. A usage payload whose
+`workspace_id` differs from the workspace the account is bound to MUST continue
+to be rejected as a slot mismatch.
 
 #### Scenario: Plus to Pro upgrade without a workspace is persisted
 
@@ -591,6 +729,12 @@ account is bound to MUST continue to be rejected as a slot mismatch.
 - **GIVEN** an active account with stored `plan_type` `business` and no `workspace_id`
 - **WHEN** background usage refresh returns a payload with `plan_type` `free` and no `workspace_id`
 - **THEN** the account's stored `plan_type` stays `business` and no usage mutation is applied
+
+#### Scenario: Unrecognized workspace-less plan is rejected without confirmation
+
+- **GIVEN** an active account with stored `plan_type` `business` and no `workspace_id`
+- **WHEN** background usage refresh repeatedly returns payloads with an unrecognized `plan_type` and no `workspace_id`
+- **THEN** the account's stored `plan_type` stays `business` for every observation and no usage mutation is applied
 
 #### Scenario: Conflicting workspace identity is rejected
 
@@ -698,7 +842,7 @@ Usage refresh MUST write usage and change account status only for the credential
 
 ### Requirement: Proactive active account credential refresh
 
-Codex-LB SHALL periodically refresh active account credentials in the background when an active account's last refresh is older than a configured maximum age.
+Codex-LB SHALL periodically refresh account credentials in the background when an account's last refresh is older than a configured maximum age. Accounts with status `active` or `paused` SHALL be eligible for proactive credential refresh; accounts with status `reauth_required` or `deactivated` SHALL NOT be selected. Proactive credential refresh MUST NOT change a paused account's routing eligibility: a paused account remains excluded from request routing regardless of refresh outcome, except that a permanent refresh failure transitions the account to its documented permanent-failure status the same way it does for active accounts. The proactive refresh scheduler SHALL be enabled by default with zero required configuration. Whether a refresh pass runs SHALL be decided by the dashboard setting `auth_guardian_enabled` (a nullable `dashboard_settings` column; NULL inherits the deprecated `CODEX_LB_AUTH_GUARDIAN_ENABLED` environment variable, then the default `true`), exposed with provenance on `GET`/`PUT /api/settings`. The scheduler loop SHALL always start; each refresh pass SHALL read the effective value from the dashboard-settings snapshot at the start of the pass and SHALL skip the pass while it is `false`, so a change made in the dashboard applies on the next pass on every replica without a restart. The multi-replica leader guard remains a precondition for any refresh work.
 
 #### Scenario: Idle active account becomes stale
 
@@ -706,6 +850,43 @@ Codex-LB SHALL periodically refresh active account credentials in the background
 - **AND** its `last_refresh` is older than the configured Auth Guardian max age
 - **WHEN** Auth Guardian runs on the elected leader
 - **THEN** Codex-LB force-refreshes that account without requiring request traffic to select it first
+
+#### Scenario: Idle paused account keeps its refresh token alive
+
+- **GIVEN** an account has status `paused`
+- **AND** its `last_refresh` is older than the configured Auth Guardian max age
+- **WHEN** Auth Guardian runs on the elected leader
+- **THEN** Codex-LB force-refreshes that account's credentials
+- **AND** the account's status remains `paused`
+- **AND** the account remains excluded from request routing
+
+#### Scenario: Known-bad credentials are not refreshed
+
+- **GIVEN** an account has status `reauth_required` or `deactivated`
+- **AND** its `last_refresh` is older than the configured Auth Guardian max age
+- **WHEN** Auth Guardian selects refresh candidates
+- **THEN** the account is not selected
+
+#### Scenario: Guardian runs on a default install
+
+- **GIVEN** a single-replica deployment with no `CODEX_LB_AUTH_GUARDIAN_*` configuration and no dashboard value for `auth_guardian_enabled`
+- **WHEN** the Auth Guardian scheduler is built
+- **THEN** the scheduler is enabled and its passes run
+
+#### Scenario: Dashboard pause applies on the next pass without a restart
+
+- **GIVEN** the scheduler was started with `auth_guardian_enabled` effectively `true`
+- **WHEN** an operator sets `auth_guardian_enabled` to `false` in the dashboard
+- **THEN** the next refresh pass skips without refreshing any account
+- **AND** when the operator sets it back to `true` (or clears it so the inherited `true` applies) the pass after that refreshes stale accounts again
+- **AND** no replica was restarted
+
+#### Scenario: Environment alias applies only while the dashboard value is unset
+
+- **GIVEN** `CODEX_LB_AUTH_GUARDIAN_ENABLED=false` and no dashboard value
+- **WHEN** an operator sets `auth_guardian_enabled` to `true` in the dashboard
+- **THEN** refresh passes run and `provenance.auth_guardian_enabled.source` is `dashboard`
+- **AND** clearing the dashboard value returns to the environment value (`source` `env`)
 
 ### Requirement: Auth Guardian bounded and safe execution
 
@@ -721,7 +902,7 @@ Auth Guardian SHALL bound each run by configured batch size and concurrency, add
 
 ### Requirement: Multi-replica leader guard
 
-Auth Guardian SHALL use the existing leader-election mechanism so only the elected replica performs proactive refresh work. When leader election is disabled, the guardian MUST detect multi-replica operation dynamically from live bridge ring membership (members with a heartbeat within the staleness threshold) in addition to the static instance ring, MUST skip the refresh pass when more than one live replica is detected, and MUST log a warning identifying the leader-election setting.
+Auth Guardian SHALL use the existing leader-election mechanism so only the elected replica performs proactive refresh work. When leader election is disabled, the guardian MUST detect multi-replica operation dynamically from live bridge ring membership (members with a heartbeat within the staleness threshold) in addition to the static instance ring, MUST skip the refresh pass when more than one live replica is detected, and MUST log a warning identifying the leader-election setting. The dashboard setting `auth_guardian_enabled` MUST NOT override this gate: with a static instance ring of more than one member and leader election disabled, every pass skips whatever the dashboard value is, and `GET /api/settings` SHALL report `auth_guardian_blocked_by_topology` as `true` so the dashboard can show why the guardian is idle.
 
 #### Scenario: Replica is not leader
 
@@ -738,6 +919,14 @@ Auth Guardian SHALL use the existing leader-election mechanism so only the elect
 - **WHEN** an Auth Guardian tick runs on either replica
 - **THEN** the guardian performs no refresh work
 - **AND** logs a warning identifying the leader-election setting
+
+#### Scenario: Dashboard cannot enable the guardian in a multi-replica ring without leader election
+
+- **GIVEN** a static instance ring of two members and leader election disabled
+- **AND** `auth_guardian_enabled` is `true` in the dashboard
+- **WHEN** an Auth Guardian tick runs
+- **THEN** the guardian performs no refresh work and logs a warning identifying the leader-election setting
+- **AND** `GET /api/settings` reports `auth_guardian_blocked_by_topology` as `true` while the effective `auth_guardian_enabled` stays `true`
 
 ### Requirement: Aggregated rate-limit surfaces expire elapsed windows
 
@@ -760,7 +949,7 @@ Aggregated downstream rate-limit surfaces — the pooled `x-codex-{window}-*` re
 
 ### Requirement: Cross-replica token refresh serialization
 
-Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. The claim expiry — BOTH the stored `claim_expires_at` AND the takeover predicate that treats an existing claim as expired — MUST be evaluated on the DATABASE server clock (`clock_timestamp()`/`now()` on PostgreSQL; in-statement `strftime(..., 'now')` on SQLite), never against a replica-local Python wall-clock instant captured before the statement executes, so inter-replica clock skew can never let one replica treat another replica's still-live claim as expired and steal it (which would let two replicas exchange the same single-use refresh token concurrently). This mirrors the clock-domain guarantee of the scheduler leader election. When the claim TTL is not explicitly configured, the system MUST derive its default to at least this floor from the related timeout settings, so a deployment that predates the claim-TTL setting but raised the refresh or admission timeouts still starts up (never crashing during settings construction against a fixed default); the system MUST reject only an explicitly configured TTL below the floor. The claimant identity MUST remain unique per OS process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix). The per-process suffix MUST be derived per OS process and resolved at claim-build time (for example incorporating `os.getpid()`), never frozen at module import: in pre-fork/multi-worker deployments a module imported before the fork boundary MUST NOT hand every forked child an identical suffix, so two sibling workers sharing one instance id build DISTINCT claimant identities (and thus distinct `claimed_by` values) rather than both satisfying the re-entrant claim upsert and refreshing the single-use token concurrently. The suffix MUST also remain stable across repeated calls within a single process so genuine same-process re-entrant claims still match. The same fork-safety MUST hold for the coordinator that composes claims: a process-default/auto-derived claimant identity MUST NOT be frozen when the coordinator is constructed (the process-default coordinator is commonly built during preload/startup, before a pre-fork server forks its workers, and a frozen identity would be inherited identically by every child). It MUST instead be resolved per OS process at use time so two forked children build DISTINCT claimant identities; a claimant identity that a caller explicitly injects MUST remain stable and unchanged (including across a fork), and repeated reads within one process MUST stay stable.
+Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. The claim expiry — BOTH the stored `claim_expires_at` AND the takeover predicate that treats an existing claim as expired — MUST be evaluated on the DATABASE server clock (`clock_timestamp()`/`now()` on PostgreSQL; in-statement `strftime(..., 'now')` on SQLite), never against a replica-local Python wall-clock instant captured before the statement executes, so inter-replica clock skew can never let one replica treat another replica's still-live claim as expired and steal it (which would let two replicas exchange the same single-use refresh token concurrently). This mirrors the clock-domain guarantee of the scheduler leader election. The claim TTL is not operator-configurable: it is the fixed helper `max(30 s, admission wait + 2 x refresh HTTP timeout)` in `app/modules/accounts/auth_manager.py` (30 s with the fixed 10 s admission wait and 8 s refresh timeout), so it always satisfies the floor by construction, and `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS` is a removed setting that startup reports and ignores. The claimant identity MUST remain unique per OS process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix). The per-process suffix MUST be derived per OS process and resolved at claim-build time (for example incorporating `os.getpid()`), never frozen at module import: in pre-fork/multi-worker deployments a module imported before the fork boundary MUST NOT hand every forked child an identical suffix, so two sibling workers sharing one instance id build DISTINCT claimant identities (and thus distinct `claimed_by` values) rather than both satisfying the re-entrant claim upsert and refreshing the single-use token concurrently. The suffix MUST also remain stable across repeated calls within a single process so genuine same-process re-entrant claims still match. The same fork-safety MUST hold for the coordinator that composes claims: a process-default/auto-derived claimant identity MUST NOT be frozen when the coordinator is constructed (the process-default coordinator is commonly built during preload/startup, before a pre-fork server forks its workers, and a frozen identity would be inherited identically by every child). It MUST instead be resolved per OS process at use time so two forked children build DISTINCT claimant identities; a claimant identity that a caller explicitly injects MUST remain stable and unchanged (including across a fork), and repeated reads within one process MUST stay stable.
 
 After acquiring the claim and re-reading the account fresh, and BEFORE starting a new upstream exchange, the system MUST honor a TERMINAL account status committed by a prior claim holder. When the fresh row's refresh-token fingerprint is UNCHANGED from the material the refresh was requested with (so no peer rotation repaired it) AND the fresh row's status is terminal (`REAUTH_REQUIRED` or `DEACTIVATED`) — for example a prior holder that hit a permanent `invalid_grant`, or the safe-terminal persist-conflict path that flags `REAUTH_REQUIRED` while leaving the consumed token stored — the system MUST NOT re-exchange that unchanged consumed/dead token; it MUST instead surface the terminal state as a PERMANENT refresh failure (fail closed), so a waiter that wins the released claim cannot blindly retry the consumed token and generate another permanent failure for an account a peer already removed from rotation. This decision MUST use the FRESH re-read status and fingerprint, never the stale selection snapshot, and MUST compose with the adopt-vs-exchange logic so that a CHANGED fingerprint (a peer genuinely re-authenticated/rotated and repaired the account) still causes the system to ADOPT the rotated stored tokens and proceed rather than treating a repaired account as terminal.
 
@@ -793,11 +982,10 @@ Removing the unconditional write resolves — structurally, not by picking a sid
 
 #### Scenario: Timeout-only config predating the claim TTL setting still boots
 
-- **GIVEN** a deployment that raised the refresh HTTP timeout or the admission wait timeout above the values that keep the fixed 30s default above the floor
-- **AND** that deployment does not explicitly configure the claim TTL
-- **WHEN** settings are constructed
-- **THEN** construction succeeds with a claim-TTL default derived to at least the floor (admission wait plus twice the refresh timeout)
-- **AND** an explicitly configured claim TTL below the floor is still rejected
+- **GIVEN** a deployment whose environment still sets `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS`, `CODEX_LB_TOKEN_REFRESH_TIMEOUT_SECONDS` or `CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS` to any value
+- **WHEN** settings are constructed and a replica later acquires a refresh claim
+- **THEN** construction succeeds (the values are ignored and startup logs the removed-setting warning once; nothing is rejected)
+- **AND** the claim TTL is the fixed 30 s (`max(30 s, 10 s admission wait + 2 x 8 s refresh timeout)`), which covers the admission wait plus twice the refresh timeout
 
 #### Scenario: Two refreshes in one process with different fingerprints contend
 
@@ -1643,4 +1831,379 @@ Auth Guardian MUST preserve stable account identities while its candidate-query 
 - **WHEN** the candidate-query session closes before per-account refresh work begins
 - **THEN** Auth Guardian refreshes the selected account without a detached-instance failure
 - **AND** the refresh worker re-reads the account in its own session before refreshing it
+
+### Requirement: Streaming usage-limit failures request an immediate coalesced usage refresh
+
+When an upstream stream fails with the error code `usage_limit_reached`, the proxy
+MUST request an immediate usage refresh for the failing account in addition to
+marking it rate limited. The refresh MUST run as a tracked background task that
+never blocks or alters the response, MUST load the account from a fresh
+background-session row rather than the request's `Account` instance, and MUST
+bypass the usage freshness gate. Usage refreshes run on two per-account
+singleflight lanes: the background scheduler and forced refreshes use the bare
+account key with caller-bound sessions, while the rate-limit payload, fleet and
+request-triggered refreshes use the owned-session key. A requested refresh MUST
+join a refresh already in flight on either lane rather than starting a third
+concurrent upstream fetch, and concurrent requests for the same account MUST
+share a single in-flight owned-session refresh without queueing a successor
+fetch. Repeated requests for the same account within a fixed 15 second window
+MUST be dropped. The request MUST be
+skipped when usage refresh is disabled, when the account is in usage-refresh auth
+cooldown, or when the fresh row is missing, `paused`, `reauth_required`, or
+`deactivated`. When the requested (or joined) refresh writes usage rows it MUST
+invalidate the account selection cache, so the next selection observes the new
+usage evidence without waiting out the cache TTL. Plain `rate_limit_exceeded`
+throttling and quota error codes MUST NOT request a refresh.
+
+#### Scenario: A 429 storm produces a single upstream fetch
+
+- **GIVEN** twenty concurrent streams on one account fail upstream with `usage_limit_reached`
+- **WHEN** each failure requests a usage refresh
+- **THEN** at most one upstream usage fetch runs for that account
+- **AND** every failure's response is unaffected by the refresh
+
+#### Scenario: A request joins the scheduler's in-flight refresh
+
+- **GIVEN** the background scheduler is refreshing an account on the bare account singleflight key
+- **WHEN** a stream on that account fails with `usage_limit_reached`
+- **THEN** the requested refresh waits on the scheduler's in-flight refresh and records its outcome
+- **AND** no additional upstream fetch starts
+
+#### Scenario: A request joins an in-flight owned-session refresh
+
+- **GIVEN** the rate-limit payload path or another request is refreshing an account on the owned-session singleflight key
+- **WHEN** a stream on that account fails with `usage_limit_reached`
+- **THEN** the requested refresh joins that in-flight refresh
+- **AND** no additional upstream fetch starts
+
+#### Scenario: Repeats inside the debounce window are dropped
+
+- **GIVEN** a usage refresh was requested for an account less than 15 seconds ago
+- **WHEN** another stream on that account fails with `usage_limit_reached`
+- **THEN** no new refresh is requested
+- **AND** a failure after the window elapses requests a refresh again
+
+#### Scenario: The pool reports usage exhaustion on the next selection
+
+- **GIVEN** the last selectable account's stream fails upstream with `usage_limit_reached`
+- **AND** a selection between the rate-limit mark and the refresh's row write repopulated the selection cache without usage evidence
+- **AND** the requested refresh writes a usage row at or above 100 % with its reset time
+- **WHEN** the next request selects an account
+- **THEN** the written row has invalidated the selection cache
+- **AND** selection fails with the structured `usage_limit_reached` failure carrying that `resets_at`
+- **AND** it does not wait for the next scheduled refresh interval or the selection cache TTL
+
+#### Scenario: The request never mutates the streaming request's account
+
+- **GIVEN** a stream fails with `usage_limit_reached` for an `Account` bound to the request session
+- **WHEN** the requested refresh runs
+- **THEN** it reads and updates only the fresh background-session row
+- **AND** the request's `Account` instance is neither read nor written by the refresh
+
+#### Scenario: Ineligible rows and disabled refresh are skipped
+
+- **GIVEN** usage refresh is disabled, or the account is in auth cooldown, or its fresh row is missing, `paused`, `reauth_required`, or `deactivated`
+- **WHEN** a stream on that account fails with `usage_limit_reached`
+- **THEN** no upstream usage fetch runs
+
+### Requirement: Permanent refresh failure preserves request eligibility
+
+Permanent refresh credential or session errors MUST mark the account `reauth_required`. This requirement refines existing refresh-failure requirements: any instruction to remove that status from request routing, tear down affinity, or add a process-local unavailable overlay MUST defer to the canonical status matrix in `account-routing`. Proactive and background refresh MUST continue to skip known-bad refresh material.
+
+A separate upstream account-deactivation signal MUST continue to mark the account `deactivated` and apply existing hard-unavailable behavior.
+
+#### Scenario: Refresh failure separates access and refresh eligibility
+
+- **WHEN** refresh-token exchange fails permanently without an account-deactivation signal
+- **THEN** the account becomes `reauth_required`
+- **AND** proactive refresh stops
+- **AND** ordinary requests may still use the stored access token
+
+#### Scenario: Account deactivation remains hard-unavailable
+
+- **WHEN** upstream reports that the account itself is deactivated
+- **THEN** the account becomes `deactivated`
+- **AND** it is removed from request routing and affinity
+
+### Requirement: Claimless forced refresh reconciles fresh account state before exchange
+
+When refresh coordination is unavailable or omitted, forced refresh MUST freshly re-read the account before exchange. A genuinely changed refresh-token fingerprint MUST cause the caller to adopt the peer row without exchange. Unchanged plaintext under new ciphertext MUST use the fresh ciphertext as the compare-and-set guard. Unchanged material in `reauth_required` or `deactivated` state MUST fail permanently without exchange.
+
+#### Scenario: Same material uses the fresh guard
+
+- **GIVEN** the fresh row contains the same refresh-token plaintext under different ciphertext
+- **AND** the fresh status is non-terminal
+- **WHEN** claimless forced refresh runs
+- **THEN** successful rotation is persisted against the fresh ciphertext guard
+
+#### Scenario: Genuine peer rotation is adopted
+
+- **GIVEN** the fresh row contains a different refresh-token fingerprint
+- **WHEN** claimless forced refresh runs
+- **THEN** the peer row is adopted without upstream exchange or persistence
+
+#### Scenario: Unchanged terminal material fails closed
+
+- **GIVEN** the fresh row remains `reauth_required` with the same refresh-token fingerprint
+- **WHEN** forced refresh runs
+- **THEN** it fails permanently without exchanging the token
+
+### Requirement: Refresh singleflight settlement cannot poison a successor
+
+When a refresh task completes, it MUST mutate the inflight entry and
+refresh-failure cache only if it is still the current inflight task for that
+singleflight key. A completion from an older attempt MUST NOT publish or clear
+negative-cache state belonging to a successor refresh.
+
+#### Scenario: Failed attempt is followed by a live successor
+
+- **GIVEN** a refresh task fails for a key
+- **AND** a successor task for the same key is installed before the failed
+  task's completion settlement runs
+- **WHEN** another caller arrives while the successor is still in flight
+- **THEN** the caller joins the successor task
+- **AND** the failed attempt's error is not served from the negative cache
+
+#### Scenario: Existing failure settlement has no successor
+
+- **GIVEN** a refresh task fails and remains the current inflight task
+- **WHEN** its completion settlement runs
+- **THEN** the configured negative-cache cooldown behavior is preserved
+
+### Requirement: Confirmed paid-to-Free transitions warm the new monthly window
+
+When background usage refresh confirms that an opted-in active account changed
+from a recognized paid plan to `free`, and that confirming refresh writes a
+fresh monthly usage sample with a reset deadline and enough available quota for
+the configured warm-up threshold, the system SHALL attempt one long-window
+warm-up for that monthly quota window. Eligibility MUST NOT depend on the usage
+percentage reported before the plan change.
+
+The plan-transition exception SHALL apply only to an actual paid-to-Free change
+confirmed by the refresh that wrote the monthly sample. It MUST NOT apply to a
+single unconfirmed Free observation, an account that was already Free, or a
+monthly sample left over from an earlier refresh. Ordinary same-window reset
+detection MUST remain unchanged. The durable warm-up identity SHALL remain the
+account, canonical `monthly` window, and monthly reset deadline. The confirming
+monthly sample MUST report `used_percent < 100`; the configured minimum-
+available threshold MAY impose a stricter lower usage limit.
+
+#### Scenario: Confirmed paid-to-Free transition warms fresh monthly quota
+
+- **GIVEN** an active opted-in account whose stored plan is a recognized paid plan
+- **WHEN** background usage refresh confirms its transition to `free`
+- **AND** that confirming refresh writes a monthly sample with a reset deadline and enough available quota
+- **THEN** the system attempts one warm-up identified by the account, `monthly` window, and monthly reset deadline
+
+#### Scenario: Previous usage percentage does not gate plan-transition warm-up
+
+- **GIVEN** an active opted-in paid account whose previous selected quota sample was not exhausted
+- **WHEN** background usage refresh confirms its transition to `free` and writes an eligible fresh monthly sample
+- **THEN** the system attempts the monthly warm-up regardless of the previous usage percentage
+
+#### Scenario: One unconfirmed Free observation does not warm
+
+- **GIVEN** an active opted-in account whose stored plan is a recognized paid plan
+- **WHEN** one background usage refresh reports `free` without satisfying downgrade confirmation
+- **THEN** no plan-transition warm-up is attempted
+
+#### Scenario: Already-Free account does not use the plan-transition exception
+
+- **GIVEN** an active opted-in account whose stored plan was already `free`
+- **WHEN** background usage refresh writes its first monthly sample without confirming a plan change
+- **THEN** no plan-transition warm-up is attempted
+
+#### Scenario: Stale monthly history does not warm after a plan change
+
+- **GIVEN** an active opted-in account whose transition from a paid plan to `free` is confirmed
+- **WHEN** the latest monthly sample predates the confirming refresh
+- **THEN** no plan-transition warm-up is attempted
+
+#### Scenario: Existing durable identity deduplicates the transition warm-up
+
+- **GIVEN** a warm-up attempt already exists for an account, `monthly` window, and monthly reset deadline
+- **WHEN** the same confirmed paid-to-Free transition is evaluated again
+- **THEN** no second warm-up request is sent for that durable identity
+
+### Requirement: Usage refresh confirms a workspace-less downgrade to Free before persisting it
+
+Usage refresh MUST persist a stored account's transition from a recognized paid
+plan to `free` for a workspace-less account once two consecutive workspace-less
+usage refreshes of that account report `free`. Because each usage payload is
+fetched with that account's own token, two consecutive agreeing observations
+distinguish a real subscription expiry from the single degraded or
+wrong-identity response the workspace-less plan guard defends against.
+
+The first such observation MUST NOT mutate the stored plan and MUST NOT write
+the usage sample; it MUST only record that a downgrade is pending for that
+account. The pending downgrade MUST be discarded as soon as a subsequent
+workspace-less refresh of that account reports a recognized paid plan, so a
+transient `free` response never accumulates toward a downgrade. Confirmation
+MUST be tracked per account and MUST NOT be shared between accounts.
+
+Confirmation applies only to `free`. An unrecognized plan value MUST NOT be
+confirmable, and a payload whose `workspace_id` conflicts with the account's
+bound workspace MUST remain rejected regardless of repetition.
+
+Only a recognized paid plan discards a pending downgrade. An unrecognized plan
+value is absence of evidence rather than evidence that the account is still paid,
+so it MUST NOT reset the pending state; otherwise a persistently degraded
+upstream could prevent a real expiry from ever converging.
+
+Plan values MUST be compared after normalization, so upstream differences in
+letter case or surrounding whitespace MUST NOT change whether an observation
+counts toward confirmation.
+
+Confirmation applies only to accounts that are not bound to a workspace. When
+the stored account has a `workspace_id`, a usage payload that omits
+`workspace_id` cannot establish that it describes that account's slot, so such a
+payload MUST NOT downgrade the account's plan regardless of repetition.
+
+Pending observations MUST be persisted in shared storage rather than in process
+memory, so that every replica operating against the same database observes and
+advances the same sequence for a given account. A `free` observation recorded by
+one replica MUST count toward confirmation on any other replica, and a recognized
+paid plan observed by one replica MUST discard the pending evidence for all of
+them. Persisted evidence MUST NOT reduce the confirmation threshold: a downgrade
+is still applied only on the second agreeing observation.
+
+Recording an observation MUST be atomic with respect to concurrent refreshes of
+the same account: two refreshes observing `free` MUST advance the count twice
+rather than both reading the same prior value and writing the same result.
+
+Pending observations MUST be invalidated when the account's credentials are
+replaced. Account identifiers are deterministic, so deleting and re-importing an
+account, or reauthenticating it in place, reuses the identifier with new token
+material; evidence gathered under the previous credential MUST NOT count toward a
+downgrade for the new one, which MUST begin its own count. Evidence MUST also be
+removed when the account itself is deleted.
+
+Routine token rotation is not a credential replacement. Refresh tokens rotate on
+every successful token refresh, so rotation occurring between two observations
+MUST NOT reset the pending count; otherwise an account whose token-refresh
+cadence interleaves with usage refresh could have a real expiry postponed
+indefinitely.
+
+Security notes: the stored evidence MUST NOT contain usable token material or
+any other secret. The persisted credential fingerprint is a non-reversible
+digest — an HMAC under a fixed, public, versioned salt — over the account's
+stable seat-identity fields (the ChatGPT workspace and principal identifiers,
+the email address, and the codex installation id), stored outside the encrypted
+token columns. Deriving it involves no decryption, so encryption-key rotation,
+re-encryption, or an undecryptable credential row cannot perturb it.
+
+This requirement applies to scheduled usage refresh and to the forced refresh
+performed after an operator's Force probe. The confirmation threshold MUST work
+with zero configuration and MUST NOT require an operator setting.
+
+#### Scenario: Second consecutive Free observation persists the downgrade
+
+- **GIVEN** an active account with stored `plan_type` `plus` and no `workspace_id`
+- **WHEN** background usage refresh returns a payload with `plan_type` `free` and no `workspace_id`
+- **AND** a second background usage refresh returns another payload with `plan_type` `free` and no `workspace_id`
+- **THEN** the account's stored `plan_type` becomes `free` and the usage sample from the confirming refresh is written
+
+#### Scenario: Intervening paid payload clears the pending downgrade
+
+- **GIVEN** an active account with stored `plan_type` `plus` and no `workspace_id`
+- **AND** one workspace-less refresh has reported `plan_type` `free`
+- **WHEN** the next workspace-less refresh reports `plan_type` `plus`
+- **AND** a later workspace-less refresh reports `plan_type` `free` again
+- **THEN** the stored `plan_type` remains `plus` after that later single `free` observation
+
+#### Scenario: Force probe confirms a downgrade on its second observation
+
+- **GIVEN** an active account with stored `plan_type` `pro` and no `workspace_id`
+- **WHEN** an operator runs Force probe twice and both refreshes report `plan_type` `free` with no `workspace_id`
+- **THEN** the account's stored `plan_type` becomes `free` without reauthentication
+
+#### Scenario: Workspace-bound account is never downgraded by a workspace-less payload
+
+- **GIVEN** an active account bound to `workspace_id` `ws_team` with stored `plan_type` `business`
+- **WHEN** repeated usage refreshes return payloads with `plan_type` `free` and no `workspace_id`
+- **THEN** the account's stored `plan_type` stays `business` for every observation and no usage mutation is applied
+
+#### Scenario: A degraded payload between two Free observations does not reset confirmation
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** one workspace-less refresh has reported `plan_type` `free`
+- **WHEN** the next workspace-less refresh reports an unrecognized `plan_type`
+- **AND** a later workspace-less refresh reports `plan_type` `free` again
+- **THEN** the account's stored `plan_type` becomes `free`
+
+#### Scenario: Plan casing and surrounding whitespace do not change confirmation
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **WHEN** two consecutive workspace-less refreshes report `plan_type` values that
+  normalize to `free` but differ in letter case or surrounding whitespace
+- **THEN** the first observation leaves the stored `plan_type` unchanged
+- **AND** the second observation persists the downgrade to `free`
+
+#### Scenario: Clearing one account's pending downgrade leaves another's intact
+
+- **GIVEN** two active workspace-less accounts with stored `plan_type` `plus`
+- **AND** each has recorded one workspace-less refresh reporting `plan_type` `free`
+- **WHEN** the first account's next workspace-less refresh reports a recognized paid plan
+- **THEN** the first account's pending downgrade is discarded
+- **AND** the second account still persists its downgrade on its own next `free` observation
+
+#### Scenario: Confirmation applies to a refresh performed with an access-token override
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **WHEN** two consecutive refreshes performed with an explicit access-token override
+  report `plan_type` `free` with no `workspace_id`
+- **THEN** the account's stored `plan_type` becomes `free`
+
+#### Scenario: Confirmation is tracked per account
+
+- **GIVEN** two active workspace-less accounts with stored `plan_type` `plus`
+- **WHEN** each account receives exactly one workspace-less refresh reporting `plan_type` `free`
+- **THEN** both accounts keep stored `plan_type` `plus`
+
+#### Scenario: Observations split across replicas still confirm the downgrade
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** two replicas operating against the same database
+- **WHEN** one replica's workspace-less refresh reports `plan_type` `free`
+- **AND** the other replica's next workspace-less refresh also reports `plan_type` `free`
+- **THEN** the account's stored `plan_type` becomes `free`
+
+#### Scenario: A paid payload on one replica clears pending evidence for all replicas
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** one replica has recorded a workspace-less refresh reporting `plan_type` `free`
+- **WHEN** another replica's workspace-less refresh reports a recognized paid plan
+- **AND** the first replica's next workspace-less refresh reports `plan_type` `free` again
+- **THEN** the stored `plan_type` remains `plus` after that later single `free` observation
+
+#### Scenario: A single Force probe records durable pending evidence
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **WHEN** an operator runs Force probe once and the payload reports `plan_type` `free`
+- **THEN** the pending observation is stored in shared storage with a count of one
+- **AND** the stored evidence records the plan value observed and no usable token material
+- **AND** the stored evidence is removed once the downgrade is applied
+
+#### Scenario: A replaced credential does not inherit pending evidence
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** one workspace-less refresh has reported `plan_type` `free`
+- **WHEN** the account is re-imported or reauthenticated with new token material under the same identifier
+- **AND** the next workspace-less refresh reports `plan_type` `free`
+- **THEN** the stored `plan_type` remains `plus`
+- **AND** the account's stored `plan_type` becomes `free` only on a further `free` observation
+
+#### Scenario: Routine token rotation between observations does not reset confirmation
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** one workspace-less refresh has reported `plan_type` `free`
+- **WHEN** a successful token refresh rotates the account's tokens
+- **AND** the next workspace-less refresh reports `plan_type` `free`
+- **THEN** the account's stored `plan_type` becomes `free`
+
+#### Scenario: Concurrent observations each advance the count
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **WHEN** two refreshes of that account observe `plan_type` `free` concurrently
+- **THEN** the recorded observation count reflects both observations rather than one
 

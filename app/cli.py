@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sqlite3
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
+from app.core.ingress_limits import MAX_DECOMPRESSED_RESPONSES_BODY_BYTES
 
 if TYPE_CHECKING:
     from app.core.runtime_logging import LogConfig
@@ -61,16 +63,19 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ssl-keyfile", default=os.getenv("SSL_KEYFILE"))
     parser.add_argument(
         "--timeout-keep-alive",
-        default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "7200"),
+        default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "300"),
         help=(
-            "Seconds to keep idle HTTP connections open. Codex CLI reuses local "
-            "connections for large compact POSTs; short keepalive windows can leave the "
-            "client writing to a stale socket before the request reaches the app."
+            "Seconds an idle keep-alive HTTP connection stays open between requests "
+            "(env: UVICORN_TIMEOUT_KEEP_ALIVE). Keep it above any client's connection-pool "
+            "idle timeout (reqwest default 90s; Codex CLI opens a fresh connection per "
+            "/responses request, so this mainly matters for other SDKs and reverse proxies) "
+            "and well under an hour, because every idle connection is held for the full "
+            "window. uvicorn's stock 5s default is too short for pooled clients."
         ),
     )
     parser.add_argument(
         "--ws-max-size",
-        default=os.getenv("UVICORN_WS_MAX_SIZE", str(128 * 1024 * 1024)),
+        default=os.getenv("UVICORN_WS_MAX_SIZE", str(MAX_DECOMPRESSED_RESPONSES_BODY_BYTES)),
         help=(
             "Maximum decompressed size in bytes of a single incoming websocket message. "
             "Codex clients resend the full conversation history (inline screenshots "
@@ -138,6 +143,10 @@ def _load_shutdown_drain_timeout_seconds() -> int:
 
 
 def _run_server(app: str, **kwargs: Any) -> None:
+    # Route warnings.warn() output (for example aiohttp ResourceWarning reprs
+    # that embed connection keys) through the redacting log handlers instead
+    # of raw stderr.
+    logging.captureWarnings(True)
     uvicorn = _load_uvicorn()
     drain_timeout_seconds = _load_shutdown_drain_timeout_seconds()
     config = uvicorn.Config(

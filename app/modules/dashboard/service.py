@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.core import usage as usage_core
-from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import UsageHistory
@@ -26,7 +26,7 @@ from app.modules.dashboard.schemas import (
     WeeklyCreditApiKeyAttribution,
     WeeklyCreditPaceResponse,
 )
-from app.modules.dashboard.weekly_pace import DEMAND_WINDOW, build_weekly_credit_pace
+from app.modules.dashboard.weekly_pace import DEMAND_WINDOW, FLEET_BURN_WINDOW, build_weekly_credit_pace
 from app.modules.usage.builders import (
     align_bucket_window_start,
     build_activity_summaries,
@@ -44,19 +44,29 @@ from app.modules.usage.repository import NormalizedUsageWindow
 
 # Newest-first per-account row bound for the projections history fetch
 # (PostgreSQL; the SQLite snapshot cache keeps the shared floor). Live
-# snapshot ingestion appends usage rows per proxied request, so one busy
-# account's 7-day secondary window can hold tens of thousands of rows while
-# the consumers only read the recent tail. The cap alone covers the
-# tail-weighted consumers: the EWMA depletion/burn rates (alpha 0.4 — a
-# sample's contribution decays by 0.6^n within a few dozen newer samples)
-# are insensitive to samples this deep regardless of write cadence. The one
-# equal-weight consumer — the weekly-pace smoothing mean over the configured
-# window (<= 240 minutes) — is protected by ``uncapped_recent_floor``
-# instead, because ingestion writes on every fingerprint change and a burst
-# could out-write any fixed cap inside the smoothing window. 4320 rows cover
-# the 6-hour recent-burn window at the ingestor's 5-second per-account write
-# throttle floor; sparse accounts stay under the cap entirely.
-_PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP = 4320
+# snapshot ingestion appends a usage row whenever an account's usage
+# fingerprint moves, so one busy account's 7-day window can hold tens of
+# thousands of rows while the consumers only read the recent tail. Rows
+# older than the equal-weight floor below feed only count-decaying EWMAs
+# (depletion rate, weekly-pace recent burn; alpha 0.4). The first tail row
+# only seeds the EWMA, so a cap-row tail performs cap-1 updates and the
+# pre-tail state's residual on the replayed rate is at most
+# ``0.6**(cap-1)`` times the largest per-second sample slope: below
+# ~1.1e-12 %/s even at the theoretical 100 %/s step, and far below that at
+# real slopes, so the tail reproduces the full-window replay to
+# floating-point noise on the rate. Fields derived from the rate inherit
+# that residual scaled by their formulas (burn rate multiplies it by
+# seconds-until-reset over remaining percent), and the exhaustion ETA,
+# which is emitted only for a strictly positive rate, may be absent from
+# the tail replay when the full replay still carries a ghost rate below
+# the residual (an account flat at 100%). The EWMA advances once per
+# distinct integer epoch second (``ewma_update`` skips a sample whose
+# ``naive_utc_to_epoch`` equals the previous one), so rows written faster
+# than one per second share an update: a tail packed into fewer distinct
+# seconds than the cap — a same-second write burst older than the floor
+# with no newer rows to decay it — may diverge from the full replay.
+# Every equal-weight consumer is protected by the floor instead.
+_PROJECTION_EWMA_TAIL_ROWS = 64
 
 
 def _parse_weekly_pace_working_days(value: str) -> set[int]:
@@ -185,7 +195,6 @@ class DashboardService:
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
             include_primary=False,
         )
-        settings = get_settings()
         trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
             _weekly_history_windows(primary_usage, secondary_usage),
             since=now - DEMAND_WINDOW,
@@ -196,7 +205,7 @@ class DashboardService:
             account_summaries=account_summaries,
             secondary_history=secondary_history,
             now=now,
-            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
@@ -237,7 +246,6 @@ class DashboardService:
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
         )
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
-        settings = get_settings()
         trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
             _weekly_history_windows(primary_usage, secondary_usage),
             since=now - DEMAND_WINDOW,
@@ -248,7 +256,7 @@ class DashboardService:
             account_summaries=account_summaries,
             secondary_history=secondary_history,
             now=now,
-            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
@@ -363,19 +371,22 @@ async def _load_projection_histories(
             if acct_since < sec_since:
                 sec_since = acct_since
 
-    # The weekly-pace smoothing mean weighs every sample in its window
-    # equally, so rows inside the configured smoothing window are exempt from
-    # the row cap (ingestion writes per fingerprint change; a burst could
-    # otherwise out-write the cap and silently shift the smoothed values).
-    smoothing_floor = now - timedelta(minutes=smoothing_window_minutes)
+    # The weekly-pace smoothing mean (configured window) and fleet burn
+    # (fixed 3h window) weigh every sample in their windows equally, so rows
+    # inside the wider of the two are exempt from the row cap (ingestion
+    # writes per fingerprint change; a burst could otherwise out-write the
+    # cap and silently shift those values). The floor applies to both
+    # fetches: weekly-only accounts sourced from the primary stream feed
+    # ``secondary_history`` too, so the primary fetch cannot go floorless.
+    uncapped_floor = now - max(timedelta(minutes=smoothing_window_minutes), FLEET_BURN_WINDOW)
     all_pri_rows = (
         await repo.bulk_usage_history_since(
             pri_fetch_ids,
             "primary",
             pri_since,
             cutoffs=pri_cutoffs,
-            per_account_row_cap=_PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP,
-            uncapped_recent_floor=smoothing_floor,
+            per_account_row_cap=_PROJECTION_EWMA_TAIL_ROWS,
+            uncapped_recent_floor=uncapped_floor,
         )
         if pri_fetch_ids
         else {}
@@ -386,8 +397,8 @@ async def _load_projection_histories(
             "secondary",
             sec_since,
             cutoffs=sec_cutoffs,
-            per_account_row_cap=_PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP,
-            uncapped_recent_floor=smoothing_floor,
+            per_account_row_cap=_PROJECTION_EWMA_TAIL_ROWS,
+            uncapped_recent_floor=uncapped_floor,
         )
         if sec_fetch_ids
         else {}

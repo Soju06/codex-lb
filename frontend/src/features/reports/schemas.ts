@@ -65,7 +65,15 @@ const ReportComparisonSchema = z.object({
   previous: ReportComparisonPreviousSchema,
 });
 
+export const ReportsOptionsResponseSchema = z.object({
+  models: z.array(z.string()),
+  useragents: z.array(z.string()),
+});
+
 export const ReportsResponseSchema = z.object({
+  generatedAt: z.string().optional(),
+  speedMetricsAvailable: z.boolean().optional(),
+  speedMetricsMaxDays: z.number().optional(),
   summary: ReportSummarySchema,
   comparison: ReportComparisonSchema,
   daily: z.array(DailyReportRowSchema),

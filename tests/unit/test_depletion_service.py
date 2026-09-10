@@ -352,8 +352,8 @@ def test_signature_cache_stores_compact_digest_not_per_row_tuple() -> None:
     assert result is not None
     signature = depletion_service._history_signatures[("acc1", "codex_other", "primary")]
     assert signature.row_count == 100
-    assert isinstance(signature.content_digest, str)
-    assert len(signature.content_digest) == 32
+    # A single fixed-width hash, not a per-row structure.
+    assert isinstance(signature.content_digest, int)
 
 
 def test_prune_depletion_cache_drops_absent_account_window_entries() -> None:
@@ -589,3 +589,262 @@ def test_post_reset_window_returns_none() -> None:
     now = BASE_TIME + timedelta(minutes=10)
     result = compute_depletion_for_account("acc1", "codex_other", "primary", history, now=now)
     assert result is None
+
+
+def _dense_history(
+    row_count: int,
+    *,
+    reset_at: int,
+    start: datetime,
+    reset_drop_at: int | None = None,
+) -> list[_FakeEntry]:
+    """Monotonic 1-minute cadence with a non-uniform slope; optionally one
+    usage drop (window reset) ``reset_drop_at`` rows before the end."""
+    rows: list[_FakeEntry] = []
+    used = 5.0
+    for index in range(row_count):
+        used += 0.012 + 0.006 * ((index * 7919) % 13) / 13.0
+        if reset_drop_at is not None and index == row_count - reset_drop_at:
+            used = 1.0
+        rows.append(_entry(round(used, 6), start + timedelta(minutes=index), reset_at=reset_at, window_minutes=10080))
+    return rows
+
+
+@pytest.mark.parametrize("reset_drop_at", [None, 20])
+def test_depletion_over_ewma_tail_matches_full_history_replay(reset_drop_at: int | None) -> None:
+    """The dashboard fetch caps rows older than the equal-weight floor to the
+    newest 64: the first tail row seeds the EWMA and the other 63 update it,
+    so with alpha 0.4 the pre-tail residual on the rate is at most 0.6**63
+    times the largest per-second slope (~1e-14 %/s at this history's slopes),
+    and at this per-minute cadence (one update per row) the tail replay must
+    reproduce the full replay to floating-point noise.
+    A usage drop (window reset) inside the tail discards all earlier state,
+    so those cases must match exactly."""
+    from app.modules.dashboard.service import _PROJECTION_EWMA_TAIL_ROWS
+
+    start = BASE_TIME - timedelta(minutes=5000)
+    now = BASE_TIME + timedelta(seconds=30)
+    reset_epoch = int((BASE_TIME + timedelta(days=2)).timestamp())
+    full = _dense_history(5000, reset_at=reset_epoch, start=start, reset_drop_at=reset_drop_at)
+    tail = full[-_PROJECTION_EWMA_TAIL_ROWS:]
+
+    reset_ewma_state()
+    full_result = compute_depletion_for_account("acc1", "standard", "secondary", _signed(full), now=now)
+    reset_ewma_state()
+    tail_result = compute_depletion_for_account("acc1", "standard", "secondary", _signed(tail), now=now)
+
+    assert full_result is not None
+    assert tail_result is not None
+    assert tail_result.risk_level == full_result.risk_level
+    assert tail_result.safe_usage_percent == full_result.safe_usage_percent
+    if reset_drop_at is not None:
+        # The reset inside the tail makes both replays start from the same row.
+        assert tail_result.rate_per_second == full_result.rate_per_second
+        assert tail_result.burn_rate == full_result.burn_rate
+        assert tail_result.risk == full_result.risk
+        assert tail_result.seconds_until_exhaustion == full_result.seconds_until_exhaustion
+        return
+    assert tail_result.rate_per_second == pytest.approx(full_result.rate_per_second, abs=1e-12, rel=1e-12)
+    assert tail_result.burn_rate == pytest.approx(full_result.burn_rate, abs=1e-12, rel=1e-12)
+    assert tail_result.risk == pytest.approx(full_result.risk, abs=1e-12, rel=1e-12)
+    assert full_result.seconds_until_exhaustion is not None
+    assert tail_result.seconds_until_exhaustion == pytest.approx(full_result.seconds_until_exhaustion, rel=1e-12)
+
+
+def _burst_history(rows_per_second: int, *, seconds: int, reset_at: int, end: datetime) -> list[_FakeEntry]:
+    """48h of sparse rows followed by ``seconds`` recorded seconds each
+    holding ``rows_per_second`` fingerprint-changing rows, ending at ``end``."""
+    burst_start = end - timedelta(seconds=seconds)
+    rows: list[_FakeEntry] = []
+    used = 1.0
+    for index in range(288):
+        used += 0.01
+        recorded_at = burst_start - timedelta(minutes=10 * (288 - index))
+        rows.append(_entry(round(used, 6), recorded_at, reset_at=reset_at, window_minutes=10080))
+    for second in range(seconds):
+        for slot in range(rows_per_second):
+            used += 0.01 + 0.003 * ((second * 31 + slot * 7) % 5)
+            recorded_at = burst_start + timedelta(seconds=second, microseconds=(slot * 1_000_000) // rows_per_second)
+            rows.append(_entry(round(used, 6), recorded_at, reset_at=reset_at, window_minutes=10080))
+    return rows
+
+
+@pytest.mark.parametrize("rows_per_second", [1, 3, 8])
+def test_depletion_ewma_tail_guarantee_counts_distinct_recorded_seconds(rows_per_second: int) -> None:
+    """``ewma_update`` advances once per distinct integer epoch second
+    (``naive_utc_to_epoch`` truncates and ``dt == 0`` keeps the state), so
+    the tail cap's ``0.6**64`` argument counts distinct recorded seconds, not
+    rows. A tail spanning 64 distinct seconds must match the full replay
+    within 1e-12 however many rows share each second. A 64-row tail packed
+    into fewer distinct seconds is the documented boundary of the guarantee:
+    it diverges, which is why the spec states the bound per distinct second.
+    The burst is followed by 3h of idleness so nothing newer decays it — the
+    shape the projections fetch hands the depletion EWMA."""
+    from app.modules.dashboard.service import _PROJECTION_EWMA_TAIL_ROWS
+
+    cap = _PROJECTION_EWMA_TAIL_ROWS
+    burst_end = BASE_TIME - timedelta(hours=3)
+    now = BASE_TIME
+    reset_epoch = int((BASE_TIME + timedelta(days=2)).timestamp())
+    full = _burst_history(rows_per_second, seconds=cap, reset_at=reset_epoch, end=burst_end)
+
+    def _depletion(history: list[_FakeEntry]) -> DepletionMetrics | None:
+        reset_ewma_state()
+        return compute_depletion_for_account("acc1", "standard", "secondary", _signed(history), now=now)
+
+    full_result = _depletion(full)
+    assert full_result is not None
+
+    # cap-many distinct seconds, regardless of rows per second: equivalent.
+    by_seconds = _depletion(full[-(cap * rows_per_second) :])
+    assert by_seconds is not None
+    assert by_seconds.rate_per_second == pytest.approx(full_result.rate_per_second, abs=1e-12, rel=1e-12)
+    assert by_seconds.burn_rate == pytest.approx(full_result.burn_rate, abs=1e-12, rel=1e-12)
+    assert by_seconds.risk == pytest.approx(full_result.risk, abs=1e-12, rel=1e-12)
+
+    # cap-many rows: only equivalent when that is also cap-many distinct seconds.
+    by_rows = _depletion(full[-cap:])
+    assert by_rows is not None
+    if rows_per_second == 1:
+        assert by_rows.rate_per_second == pytest.approx(full_result.rate_per_second, abs=1e-12, rel=1e-12)
+        return
+    assert full_result.rate_per_second is not None and by_rows.rate_per_second is not None
+    assert abs(by_rows.rate_per_second - full_result.rate_per_second) > 1e-12 * abs(full_result.rate_per_second)
+
+
+def test_depletion_ewma_tail_residual_is_bounded_by_seed_row_arithmetic() -> None:
+    """The first tail row only seeds the EWMA, so a 64-row tail performs 63
+    updates and the pre-tail residual on the rate is bounded by ``0.6**63``
+    times the largest per-second sample slope — not ``0.6**64``. Pin the
+    boundary with the worst-case history: one 0 -> 99 step in a single
+    recorded second, then 64 flat rows one second apart older than the floor.
+    The full replay keeps a ghost rate of ``99 * 0.6**63`` (~1.05e-12 %/s,
+    above a flat 1e-12 bound) while the tail decays to exactly 0.0; burn rate
+    inherits the residual scaled by seconds-until-reset over remaining
+    percent. If ``ewma_update`` ever blends the first sample instead of
+    seeding, this assertion of divergence fails on purpose so the spec's
+    stated bound gets revisited."""
+    from app.modules.dashboard.service import _PROJECTION_EWMA_TAIL_ROWS
+
+    cap = _PROJECTION_EWMA_TAIL_ROWS
+    burst_end = BASE_TIME - timedelta(hours=3)
+    now = BASE_TIME
+    reset_epoch = int((BASE_TIME + timedelta(days=2)).timestamp())
+    step_slope = 99.0  # percent per second: the only positive sample slope in the history
+    full = [_entry(0.0, burst_end - timedelta(seconds=cap), reset_at=reset_epoch, window_minutes=10080)]
+    full += [
+        _entry(99.0, burst_end - timedelta(seconds=cap - 1 - index), reset_at=reset_epoch, window_minutes=10080)
+        for index in range(cap)
+    ]
+
+    def _depletion(history: list[_FakeEntry]) -> DepletionMetrics | None:
+        reset_ewma_state()
+        return compute_depletion_for_account("acc1", "standard", "secondary", _signed(history), now=now)
+
+    full_result = _depletion(full)
+    tail_result = _depletion(full[-cap:])
+    assert full_result is not None and tail_result is not None
+    assert full_result.rate_per_second is not None and tail_result.rate_per_second is not None
+
+    residual_bound = 0.6 ** (cap - 1) * step_slope
+    rate_diff = abs(full_result.rate_per_second - tail_result.rate_per_second)
+    assert tail_result.rate_per_second == 0.0
+    assert rate_diff > 1e-12, "seed-row residual must exceed a flat 1e-12 bound for this history"
+    assert rate_diff <= residual_bound
+    assert rate_diff > 0.6**cap * step_slope, "the residual is governed by cap-1 updates, not cap"
+
+    seconds_until_reset = reset_epoch - int(now.replace(tzinfo=timezone.utc).timestamp())
+    remaining_percent = 100.0 - 99.0
+    burn_diff = abs(full_result.burn_rate - tail_result.burn_rate)
+    assert tail_result.burn_rate == 0.0
+    assert burn_diff <= residual_bound * seconds_until_reset / remaining_percent
+    assert abs(full_result.risk - tail_result.risk) <= residual_bound * seconds_until_reset / 100.0
+    assert tail_result.risk_level == full_result.risk_level
+    # A ghost rate this small never projects exhaustion inside the window either.
+    assert full_result.seconds_until_exhaustion is None
+    assert tail_result.seconds_until_exhaustion is None
+
+
+def test_depletion_saturated_account_tail_replay_reports_no_exhaustion_eta() -> None:
+    """An account flat at 100% for longer than the floor: the full replay
+    keeps a positive ghost rate (``0.6 * r`` never reaches 0.0 — it is sticky
+    at the smallest denormal), so ``remaining / rate`` yields an immediate
+    exhaustion ETA (0.0 s, now), while the 64-row tail sees only flat rows,
+    replays a rate of exactly 0.0, and reports no ETA. Risk and burn rate
+    are identical (1.0 and 0.0) either way. Pins the documented divergence
+    so the spec's MAY stays honest."""
+    from app.modules.dashboard.service import _PROJECTION_EWMA_TAIL_ROWS
+
+    cap = _PROJECTION_EWMA_TAIL_ROWS
+    reset_epoch = int((BASE_TIME + timedelta(days=2)).timestamp())
+    start = BASE_TIME - timedelta(hours=60)
+    rows: list[_FakeEntry] = []
+    used = 0.0
+    index = 0
+    while used < 100.0:
+        rows.append(_entry(used, start + timedelta(minutes=index), reset_at=reset_epoch, window_minutes=10080))
+        used += 0.5
+        index += 1
+    for _ in range(48 * 60):  # 48h saturated at the 60s poller cadence
+        rows.append(_entry(100.0, start + timedelta(minutes=index), reset_at=reset_epoch, window_minutes=10080))
+        index += 1
+    now = rows[-1].recorded_at + timedelta(seconds=30)
+    floor = now - timedelta(hours=3)
+
+    def _fetch(history: list[_FakeEntry], row_cap: int, uncapped_floor: datetime) -> list[_FakeEntry]:
+        older = [row for row in history if row.recorded_at < uncapped_floor]
+        recent = [row for row in history if row.recorded_at >= uncapped_floor]
+        return older[-row_cap:] + recent
+
+    def _depletion(history: list[_FakeEntry]) -> DepletionMetrics | None:
+        reset_ewma_state()
+        return compute_depletion_for_account("acc1", "standard", "secondary", _signed(history), now=now)
+
+    full_result = _depletion(rows)
+    tail_result = _depletion(_fetch(rows, cap, floor))
+    assert full_result is not None and tail_result is not None
+    assert full_result.rate_per_second is not None and full_result.rate_per_second > 0.0
+    assert full_result.rate_per_second <= 0.6 ** (cap - 1) * 0.5 / 60.0
+    assert tail_result.rate_per_second == 0.0
+
+    assert tail_result.risk == full_result.risk == 1.0
+    assert tail_result.burn_rate == full_result.burn_rate == 0.0
+    assert tail_result.risk_level == full_result.risk_level
+    assert full_result.seconds_until_exhaustion == 0.0
+    assert full_result.projected_exhaustion_at == now
+    assert tail_result.seconds_until_exhaustion is None
+    assert tail_result.projected_exhaustion_at is None
+
+
+def test_history_signature_content_hash_tracks_row_content() -> None:
+    """The compact signature must be stable for identical content and change
+    for any value-bearing field, including ``None`` variants (id/reset_at)."""
+    from app.modules.usage.depletion_service import _history_signature_from_rows
+
+    reset_epoch = int((BASE_TIME + timedelta(minutes=30)).timestamp())
+    rows = [
+        _entry(10.0, BASE_TIME, reset_at=reset_epoch, window_minutes=60),
+        _entry(20.0, BASE_TIME + timedelta(minutes=1), reset_at=reset_epoch, window_minutes=60),
+        _entry(30.0, BASE_TIME + timedelta(minutes=2), reset_at=reset_epoch, window_minutes=60),
+    ]
+    baseline = _history_signature_from_rows(rows)
+    assert _history_signature_from_rows(list(rows)) == baseline
+    assert isinstance(baseline.content_digest, int)
+
+    middle = rows[1]
+    variants = [
+        [rows[0], _entry(25.0, middle.recorded_at, reset_at=reset_epoch, window_minutes=60), rows[2]],
+        [rows[0], _entry(20.0, middle.recorded_at, reset_at=None, window_minutes=60), rows[2]],
+        [rows[0], _entry(20.0, middle.recorded_at, reset_at=reset_epoch, window_minutes=None), rows[2]],
+        [
+            rows[0],
+            _entry(20.0, middle.recorded_at + timedelta(seconds=1), reset_at=reset_epoch, window_minutes=60),
+            rows[2],
+        ],
+    ]
+    for variant in variants:
+        changed = _history_signature_from_rows(variant)
+        assert changed.row_count == baseline.row_count
+        assert changed.first == baseline.first
+        assert changed.latest == baseline.latest
+        assert changed.content_digest != baseline.content_digest

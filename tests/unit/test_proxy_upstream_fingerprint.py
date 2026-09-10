@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from app.core.clients import proxy as proxy_module
 from app.core.clients.proxy import (
     _build_upstream_headers,
+    _build_upstream_transcribe_headers,
     _build_upstream_websocket_headers,
     build_codex_user_agent,
 )
@@ -12,6 +15,17 @@ from app.core.clients.proxy import (
 
 def _lower_keys(headers: dict[str, str]) -> set[str]:
     return {key.lower() for key in headers}
+
+
+@pytest.mark.parametrize("builder", [_build_upstream_headers, _build_upstream_websocket_headers])
+def test_absent_effective_tier_uses_official_model_only_hint(builder):
+    headers = builder(
+        {"X-Codex-Routing-Hint": "model=untrusted;tier=priority"},
+        "fixture-access",
+        "fixture-account",
+        routing_hint=("gpt-6-astra", None),
+    )
+    assert headers["x-codex-routing-hint"] == "model=gpt-6-astra"
 
 
 def test_build_codex_user_agent_matches_codex_cli_format():
@@ -58,6 +72,26 @@ def test_routing_hint_is_hop_local_for_responses_http_and_websocket():
 
     assert "x-codex-routing-hint" not in _lower_keys(http_headers)
     assert "x-codex-routing-hint" not in _lower_keys(websocket_headers)
+
+
+def test_chatgpt_account_route_synthesizes_priority_routing_hint_with_api_key():
+    headers = _build_upstream_headers(
+        {"User-Agent": "OpenAI/Python", "X-Codex-Routing-Hint": "model=evil;tier=default"},
+        "tok",
+        "acct-1",
+        routing_hint=("gpt-6-astra", "priority"),
+    )
+    assert headers["x-codex-routing-hint"] == "model=gpt-6-astra;tier=priority"
+
+
+def test_api_key_authentication_does_not_disable_account_backend_hint():
+    headers = _build_upstream_websocket_headers(
+        {"User-Agent": "OpenAI/Python", "X-Codex-Routing-Hint": "model=evil;tier=default"},
+        "tok",
+        "acct-1",
+        routing_hint=("gpt-6-astra", "priority"),
+    )
+    assert headers["x-codex-routing-hint"] == "model=gpt-6-astra;tier=priority"
 
 
 def test_non_native_request_uses_pascalcase_account_header():
@@ -282,6 +316,41 @@ def test_non_native_request_strips_x_stainless_sdk_headers():
         headers = _build_upstream_headers(inbound, "tok", None)
     assert headers["User-Agent"].startswith("codex_cli_rs/")
     assert not any(key.lower().startswith("x-stainless-") for key in headers)
+
+
+def test_non_native_transcription_request_is_rewritten_to_codex_cli_fingerprint():
+    inbound = {
+        "User-Agent": "OpenAI/JS 4.104.0",
+        "x-stainless-lang": "js",
+        "x-stainless-package-version": "4.104.0",
+        "x-openai-client-version": "4.104.0",
+        "originator": "sdk",
+        "version": "4.104.0",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_transcribe_headers(inbound, "tok", "acct-123")
+
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.142.0"
+    assert headers["Authorization"] == "Bearer tok"
+    assert headers["chatgpt-account-id"] == "acct-123"
+    lowered = _lower_keys(headers)
+    assert "x-openai-client-version" not in lowered
+    assert not any(key.startswith("x-stainless-") for key in lowered)
+
+
+def test_native_transcription_request_keeps_existing_fingerprint():
+    native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
+    headers = _build_upstream_transcribe_headers(
+        {"User-Agent": native_ua, "originator": "codex_cli_rs", "version": "0.142.0"},
+        "tok",
+        "acct-123",
+    )
+
+    assert headers["User-Agent"] == native_ua
+    assert "originator" not in headers
+    assert "version" not in headers
 
 
 def test_websocket_non_native_request_strips_x_stainless_sdk_headers():

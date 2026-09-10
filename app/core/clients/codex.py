@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import secrets
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from app.core.clients.native_egress import (
     NativeEgressRequest,
     NativeEgressTransportError,
     NativeEgressUnavailable,
+    NativeSseOptions,
     NativeWebSocketRequest,
     discover_native_egress_client,
 )
@@ -28,7 +30,8 @@ from app.core.resilience.network_recovery import (
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
-_RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"})
+_RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy", "proxy_headers"})
+_TLS_TARGET_SCHEMES = frozenset({"https", "wss"})
 _CODEX_SKIP_AUTO_IDENTITY_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
 
 
@@ -115,24 +118,44 @@ class _PreparedNativeRequest:
     url: str
     headers: dict[str, str]
     body: bytes | None
-    timeout_seconds: float
+    timeout_seconds: float | None
     connect_timeout_seconds: float | None
     response_head_timeout_seconds: float | None
 
 
+async def release_codex_response(response: Any) -> None:
+    """Release an unbuffered upstream response once its consumer stops reading.
+
+    Streams routinely end before body EOF (terminal SSE event, idle timeout,
+    cancellation, downstream disconnect). Closing the owning session alone
+    leaves the aiohttp ``Connection`` acquired, so the cyclic GC later finalizes
+    it as ``Unclosed connection``. Duck-typed on purpose: aiohttp exposes
+    ``release()``, the native egress response exposes ``aclose()``, and buffered
+    or test responses expose neither.
+    """
+    for name in ("release", "close", "aclose"):
+        method = getattr(response, name, None)
+        if callable(method):
+            result = method()
+            if inspect.isawaitable(result):
+                await result
+            return
+
+
 class _SessionOwnedContent:
-    def __init__(self, content: Any, session: aiohttp.ClientSession) -> None:
-        self._content = content
+    def __init__(self, response: Any, session: aiohttp.ClientSession) -> None:
+        self._response = response
         self._session = session
 
     def iter_chunked(self, size: int) -> Any:
-        return self._iter_and_close(self._content.iter_chunked(size))
+        return self._iter_and_close(self._response.content.iter_chunked(size))
 
     async def _iter_and_close(self, iterator: Any) -> Any:
         try:
             async for chunk in iterator:
                 yield chunk
         finally:
+            await release_codex_response(self._response)
             await self._session.close()
 
 
@@ -143,7 +166,13 @@ class _SessionOwnedResponse:
         self.status = getattr(response, "status", getattr(response, "status_code", 0))
         self.status_code = getattr(response, "status_code", self.status)
         self.headers = getattr(response, "headers", {}) or {}
-        self.content = _SessionOwnedContent(response.content, session)
+        self.content = _SessionOwnedContent(response, session)
+
+    async def release(self) -> None:
+        try:
+            await release_codex_response(self._response)
+        finally:
+            await self._session.close()
 
     async def read(self) -> bytes:
         try:
@@ -156,7 +185,7 @@ class _SessionOwnedResponse:
                 return result.encode()
             return b""
         finally:
-            await self._session.close()
+            await self.release()
 
     async def text(self) -> str:
         return (await self.read()).decode("utf-8", errors="replace")
@@ -206,16 +235,25 @@ class CodexClient:
         return (await self.request_with_route_metadata(method, url, route=route, **kwargs)).response
 
     async def request_with_route_metadata(
-        self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any
+        self,
+        method: str,
+        url: str,
+        *,
+        route: ResolvedUpstreamRoute,
+        native_sse: NativeSseOptions | None = None,
+        **kwargs: Any,
     ) -> CodexRequestResult:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
         buffer_response = bool(kwargs.pop("buffer_response", True))
+        if native_sse is not None and buffer_response:
+            raise ValueError("Native SSE framing requires buffer_response=False")
         _reject_reserved(kwargs)
         native_request = _prepare_native_request(url, kwargs)
         aiohttp_kwargs = dict(kwargs)
         _normalize_aiohttp_request_kwargs(aiohttp_kwargs)
         endpoints = (route.endpoint, *route.fallbacks)
+        _reject_credentialed_plaintext_target(url, endpoints)
         allow_fallback = _is_idempotent_method(method)
         for index, endpoint in enumerate(endpoints):
             candidate = route.with_endpoint(endpoint, tuple(endpoints[index + 1 :]))
@@ -233,6 +271,7 @@ class CodexClient:
                                 connect_timeout_seconds=native_request.connect_timeout_seconds,
                                 response_head_timeout_seconds=native_request.response_head_timeout_seconds,
                                 proxy_url=endpoint.proxy_url,
+                                sse=native_sse,
                             )
                         )
                         if buffer_response:
@@ -256,7 +295,7 @@ class CodexClient:
                         response = await self._session.request(
                             method,
                             url,
-                            proxy=endpoint.proxy_url,
+                            **endpoint.aiohttp_proxy_kwargs(),
                             **aiohttp_kwargs,
                         )
                     except Exception as exc:
@@ -309,7 +348,8 @@ class CodexClient:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
         _reject_reserved(kwargs)
-        result = self._session.ws_connect(url, proxy=route.proxy_url, **kwargs)
+        _reject_credentialed_plaintext_target(url, (route.endpoint,))
+        result = self._session.ws_connect(url, **route.endpoint.aiohttp_proxy_kwargs(), **kwargs)
         if asyncio.iscoroutine(result):
             return await result
         return result
@@ -325,8 +365,10 @@ class CodexClient:
     ) -> CodexWebSocketResult:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
+        interpret_responses = bool(kwargs.pop("native_interpret_responses", False))
         _reject_reserved(kwargs)
         endpoints = (route.endpoint, *route.fallbacks)
+        _reject_credentialed_plaintext_target(url, endpoints)
         for index, endpoint in enumerate(endpoints):
             candidate = route.with_endpoint(endpoint, tuple(endpoints[index + 1 :]))
             context: Any | None = None
@@ -337,6 +379,7 @@ class CodexClient:
                     url,
                     endpoint.proxy_url,
                     kwargs,
+                    interpret_responses=interpret_responses,
                 )
                 if self._native_egress_client is not None and native_request is not None:
                     try:
@@ -359,7 +402,7 @@ class CodexClient:
                 else:
                     context = self._session.ws_connect(
                         url,
-                        proxy=endpoint.proxy_url,
+                        **endpoint.aiohttp_proxy_kwargs(),
                         **kwargs,
                     )
                     if asyncio.iscoroutine(context):
@@ -430,9 +473,9 @@ class CodexClient:
 
 
 def create_codex_session(*, max_clients: int = 10) -> Any:
-    from app.core.clients.http import _build_ssl_context
+    from app.core.clients.http import _shared_ssl_context
 
-    connector = aiohttp.TCPConnector(limit=max_clients, ssl=_build_ssl_context())
+    connector = aiohttp.TCPConnector(limit=max_clients, ssl=_shared_ssl_context())
     return aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
@@ -507,7 +550,7 @@ async def _open_ws_via_socks_proxy(url: str, endpoint: ResolvedProxyEndpoint, **
 
 
 def _socks_proxy_connector(endpoint: ResolvedProxyEndpoint) -> ProxyConnector:
-    from app.core.clients.http import _build_ssl_context
+    from app.core.clients.http import _shared_ssl_context
 
     proxy_scheme = endpoint.proxy_url.split(":", 1)[0]
     return ProxyConnector(
@@ -517,7 +560,7 @@ def _socks_proxy_connector(endpoint: ResolvedProxyEndpoint) -> ProxyConnector:
         username=endpoint.username,
         password=endpoint.password,
         rdns=proxy_scheme == "socks5h",
-        ssl=_build_ssl_context(),
+        ssl=_shared_ssl_context(),
     )
 
 
@@ -605,11 +648,10 @@ def _prepare_native_request(
     else:
         return None
 
-    timeout_seconds, connect_timeout_seconds, response_head_timeout_seconds = _native_timeout_parts(
-        kwargs.get("timeout")
-    )
-    if timeout_seconds is None:
+    timeouts = _native_timeout_parts(kwargs.get("timeout"))
+    if timeouts is None:
         return None
+    timeout_seconds, connect_timeout_seconds, response_head_timeout_seconds = timeouts
     return _PreparedNativeRequest(
         url=url,
         headers=headers,
@@ -620,22 +662,22 @@ def _prepare_native_request(
     )
 
 
-def _native_timeout_parts(value: Any) -> tuple[float | None, float | None, float | None]:
+def _native_timeout_parts(value: Any) -> tuple[float | None, float | None, float | None] | None:
     if value is None:
         return 60.0, None, None
     if isinstance(value, aiohttp.ClientTimeout):
-        total = float(value.total) if value.total is not None else 60.0
+        total = float(value.total) if value.total is not None else None
         connect = float(value.sock_connect) if value.sock_connect is not None else None
         response_head = float(value.sock_read) if value.sock_read is not None else None
     else:
         try:
             total = float(value)
         except (TypeError, ValueError):
-            return None, None, None
+            return None
         connect = None
         response_head = None
-    if total <= 0 or (connect is not None and connect <= 0) or (response_head is not None and response_head <= 0):
-        return None, None, None
+    if any(part is not None and part <= 0 for part in (total, connect, response_head)):
+        return None
     return total, connect, response_head
 
 
@@ -715,6 +757,8 @@ def _prepare_native_websocket_request(
     url: str,
     proxy_url: str,
     kwargs: Mapping[str, Any],
+    *,
+    interpret_responses: bool = False,
 ) -> NativeWebSocketRequest | None:
     supported = {
         "compress",
@@ -760,6 +804,7 @@ def _prepare_native_websocket_request(
         ping_interval_seconds=ping_interval_seconds,
         ping_timeout_seconds=ping_timeout_seconds,
         proxy_url=proxy_url,
+        interpret_responses=interpret_responses,
     )
 
 
@@ -813,6 +858,23 @@ async def _read_response_body(response: Any) -> bytes | None:
 def _response_status(response: Any) -> int:
     value = getattr(response, "status", getattr(response, "status_code", 0))
     return int(value or 0)
+
+
+def _reject_credentialed_plaintext_target(url: str, endpoints: tuple[ResolvedProxyEndpoint, ...]) -> None:
+    # Proxy credentials ride in a Proxy-Authorization header (never URL
+    # userinfo, which aiohttp reprs into ConnectionKey/ClientHttpProxyError).
+    # aiohttp only forwards proxy_headers on the CONNECT tunnel, so a
+    # credentialed endpoint requires a TLS target. Checked once for the whole
+    # ordered pool, ahead of every transport branch and before any dispatch,
+    # so a credential-free fallback cannot quietly absorb a misconfigured
+    # primary. Raised as a connect-phase transport error so callers map it to
+    # the usual upstream-unavailable response instead of an unhandled failure.
+    if any(endpoint.username for endpoint in endpoints) and URL(url).scheme not in _TLS_TARGET_SCHEMES:
+        raise CodexTransportError(
+            "credentialed aiohttp proxy routes require an https/wss upstream target",
+            failure_phase="connect",
+            retryable_same_contract=False,
+        )
 
 
 def _reject_reserved(kwargs: Mapping[str, Any]) -> None:

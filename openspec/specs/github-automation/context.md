@@ -1,8 +1,8 @@
 # Context: github-automation
 
 Normative requirements live in [`spec.md`](./spec.md). This document currently
-covers the Simplicity budgets check; the codex-review label-sync machinery is
-summarized in the spec's Purpose.
+covers the Simplicity budgets check and the Release guards workflow; the
+codex-review label-sync machinery is summarized in the spec's Purpose.
 
 ## Simplicity budgets check
 
@@ -83,3 +83,52 @@ one-line, reviewable diff rather than an argument.
   graph (not stdlib-only) — deferred to the simplicity backlog.
 - Docs-site pages are intentionally unbudgeted: depth is supposed to move
   there.
+
+## Release guards workflow
+
+### Purpose
+
+`release-guards.yml` runs `scripts/guard_beta_release.py --mode pr` and
+`scripts/guard_stable_release.py` for pull requests. The beta guard reads the
+release PR body (checked validation checklist + exact head SHA), so it must
+re-run when the body is edited. Those two jobs used to live in `ci.yml`, which
+therefore had to subscribe to `pull_request: edited`.
+
+### Decisions
+
+- **Separate workflow, never ci.yml — same reasoning as Simplicity budgets.**
+  `ci.yml` uses a per-ref concurrency group with `cancel-in-progress: true`, so
+  every PR title/body edit cancelled the in-flight matrix and re-queued ~30
+  jobs for an unchanged head. On 2026-09-08 eight campaign PRs each lost at
+  least one run this way (runs 34216592285, 34216916484, 34217216971,
+  34218615301, 34223748971, 34223782953, 34225099491, 34226177365,
+  34226719090 all show `cancelled` for the head that later went green) and the
+  runner queue was starved for hours. Agents finalizing descriptions after a
+  push and review bots rewriting summaries both PATCH the body. The guards are
+  stdlib-only and finish in seconds, so re-running them per edit is free.
+- **Remove `edited` from ci.yml instead of skipping jobs on it.** A
+  `github.event.action != 'edited'` condition would still create a new run in
+  which every heavy job reports `skipped`; branch protection reads the newest
+  check run per context and treats skipped as satisfied, so a body-only edit
+  could turn a red or untested head green. Not triggering at all leaves the
+  head's existing check runs authoritative. `tests/unit/test_ci_workflow_required_checks.py`
+  pins both halves of this decision.
+- **Check context names unchanged.** `Beta release guard` and
+  `Stable release guard` report exactly as before. They no longer feed
+  `CI Required` (cross-workflow `needs` is impossible). Neither the guards nor
+  `CI Required` are in the `protect main` ruleset today, so no enforcement was
+  removed; the publish-time guard in `publish-beta-release.yml` is the hard
+  gate for tags. To make the beta guard a pre-merge hard gate, require
+  `Beta release guard` in the ruleset directly.
+- **`push`/`merge_group` kept.** The guards are no-ops without a
+  `pull_request` payload, but keeping the events preserves parity with the old
+  placement and gives the contexts a report on `main` (a context that has never
+  reported cannot be added to the ruleset).
+
+### Failure modes
+
+- A base-branch retarget also arrives as `edited`; it now re-runs only the
+  guards. A push or manual re-run refreshes the matrix, and the merge queue
+  runs the full suite regardless.
+- If the guards ever need the matrix result, do not fold them back into
+  `ci.yml`; gate on the separate contexts instead.

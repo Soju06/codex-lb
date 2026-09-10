@@ -3,9 +3,7 @@
 ## Purpose
 
 Define private Codex Live Voice call-owner continuity, authenticated sideband routing, transport privacy, and dashboard/operator contracts without implementing the public OpenAI Realtime API.
-
 ## Requirements
-
 ### Requirement: Realtime call creation binds the final account under a required proxy key
 
 The proxy SHALL require a registered proxy API key for `POST /backend-api/codex/realtime/calls` even when ordinary proxy API-key authentication is disabled. After a successful upstream response with a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{call_id}`, where `{call_id}` is a bounded ASCII `rtc_...` or canonical UUID, it MUST bind the call immutably to the final ChatGPT account that completed the request. Relative paths without the leading `/`, unrelated path prefixes, abbreviated `/live/...` or `/realtime/calls/...` paths, and paths with extra segments are unsupported. The binding MUST be scoped to the proxy key, MUST persist across replicas as only a bounded digest in a reserved non-user-forgeable namespace, MUST expire after a fixed interval, and MUST NOT persist the raw call id, API key, OAuth token, SDP, attestation value, or frame body. Private call-creation diagnostics, including caller-local AuthManager metadata work and process-global shared refresh work, MUST redact internal account identifiers and suppress exception details; shared refresh diagnostics MUST use the strict policy regardless of which caller creates the singleflight task.
@@ -110,7 +108,7 @@ The live connector MUST replace downstream proxy authorization, account identity
 - **THEN** the proxy preserves the normalized status without route or credential details and does not replay the denial
 - **WHEN** the live connector raises `InvalidProxy`, `InvalidHandshake`, or `OSError`
 - **THEN** the sideband receives a fixed capability-specific, credential-safe message
-- **AND** ordinary Responses WebSocket exception behavior remains unchanged
+- **AND** the Responses WebSocket connector returns the same fixed credential-safe message for `InvalidProxy`, logging only the connector's URL-free reason, while its `InvalidHandshake` and `OSError` behavior remains unchanged
 
 #### Scenario: either peer disconnects or connection is cancelled
 
@@ -154,3 +152,46 @@ The capability MUST use existing configuration and key registration. It MUST add
 - **WHEN** an operator starts the base proxy and dashboard without adding configuration for this capability
 - **THEN** existing startup and ordinary proxy/dashboard behavior remain available
 - **AND** no public model or documented public Realtime route advertises this private transport
+
+### Requirement: Live cancellation completes account-lease cleanup
+
+The Live WebSocket proxy MUST release its selected account lease exactly once
+when the downstream handler is cancelled. Cancellation MUST be deferred while
+that release is in progress, without changing the established upstream and
+downstream close behavior.
+
+#### Scenario: Cancelled Live handler waits for lease release
+
+- **WHEN** the downstream Live handler is cancelled while account-lease release
+  is waiting on load-balancer cleanup
+- **THEN** the release completes exactly once
+- **AND** both peer cleanup paths retain their existing close semantics
+- **AND** the original cancellation is raised afterward
+
+### Requirement: Daybreak capability intent fails closed on private Realtime transports
+
+Capability-bearing private Realtime requests MUST authenticate and fail closed on unsupported transports. `POST /backend-api/codex/realtime/calls` and non-Responses WebSocket handshakes at `/backend-api/codex/{call_id}`, `/v1/live/{call_id}`, and `/v1/realtime` MUST validate the registered proxy API key before returning HTTP 400 with `error.code = "required_capability_transport_unsupported"`. Call creation MUST deny before account selection or owner binding. WebSocket handshakes MUST deny before acceptance, call-owner lookup, lease acquisition, or upstream connection. Headerless Realtime requests MUST retain their existing required-key and exact-owner behavior.
+
+#### Scenario: Capability-bearing call creation is denied before selection
+
+- **WHEN** a valid registered key sends private Realtime call creation with the Daybreak carrier
+- **THEN** the route returns HTTP 400 `required_capability_transport_unsupported`
+- **AND** no account is selected, no upstream call is created, and no owner is bound
+
+#### Scenario: Capability-bearing Live WebSocket is denied before owner lookup
+
+- **WHEN** a valid registered key opens any supported non-Responses Realtime WebSocket with the Daybreak carrier
+- **THEN** the handshake receives HTTP 400 `required_capability_transport_unsupported`
+- **AND** the route does not accept the WebSocket, resolve a call owner, acquire a lease, or connect upstream
+
+#### Scenario: Realtime carrier authenticates before transport denial
+
+- **WHEN** a capability-bearing call-creation request or Live WebSocket omits its key or supplies an invalid key
+- **THEN** ingress returns the existing HTTP 401 `invalid_api_key` response
+- **AND** no account or owner resolution occurs
+
+#### Scenario: Headerless Realtime behavior remains unchanged
+
+- **WHEN** a Realtime call or sideband request omits the required-capability carrier
+- **THEN** the existing registered-key, immutable-owner, and transport behavior remains in effect
+

@@ -7,12 +7,10 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
-from app.core.exceptions import DashboardNotFoundError
 from app.db.models import StickySessionKind
 from app.dependencies import StickySessionsContext, get_sticky_sessions_context
 from app.modules.sticky_sessions.schemas import (
     StickySessionDeleteFailure,
-    StickySessionDeleteResponse,
     StickySessionEntryResponse,
     StickySessionIdentifier,
     StickySessionsDeleteFilteredRequest,
@@ -112,16 +110,3 @@ async def delete_filtered_sticky_sessions(
         key_query=payload.key_query,
     )
     return StickySessionsDeleteFilteredResponse(deleted_count=deleted_count)
-
-
-@router.delete("/{kind}/{key:path}", response_model=StickySessionDeleteResponse)
-async def delete_sticky_session(
-    kind: StickySessionKind,
-    key: str,
-    _write_access=Depends(require_dashboard_write_access),
-    context: StickySessionsContext = Depends(get_sticky_sessions_context),
-) -> StickySessionDeleteResponse:
-    deleted = await context.service.delete_entry(key, kind=kind)
-    if not deleted:
-        raise DashboardNotFoundError("Sticky session not found", code="sticky_session_not_found")
-    return StickySessionDeleteResponse(status="deleted")

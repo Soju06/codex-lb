@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Literal, Protocol, TypeVar, cast
+from typing import Literal
 
 from app.core import startup as startup_module
-from app.core.config.settings import Settings, get_settings
+from app.core.config.settings import get_settings
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     http_bridge_spool_cleanup_backlog_likely,
@@ -19,9 +17,11 @@ from app.core.metrics.prometheus import (
     http_bridge_spool_cleanup_duration_seconds,
     http_bridge_spool_cleanup_runs_total,
 )
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
 from app.db.session import SessionLocal, get_background_session
+from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy.durable_bridge_repository import (
     DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
     DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS,
@@ -180,22 +180,7 @@ def _merge_backlog_signal(previous: bool, attempted: bool | None) -> bool:
     return previous if attempted is None else attempted
 
 
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
-
-
-def _abandoned_bridge_retention_seconds(
-    dashboard_settings: DashboardSettings,
-    app_settings: Settings,
-) -> float:
+def _abandoned_bridge_retention_seconds(dashboard_settings: DashboardSettings) -> float:
     """Retention for abandoned durable bridge rows.
 
     An idle local bridge session stays reusable until its effective idle TTL —
@@ -208,8 +193,8 @@ def _abandoned_bridge_retention_seconds(
     return max(
         float(dashboard_settings.openai_cache_affinity_max_age_seconds),
         float(dashboard_settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds),
-        float(app_settings.http_responses_session_bridge_idle_ttl_seconds),
-        float(app_settings.http_responses_session_bridge_codex_idle_ttl_seconds),
+        float(_http_bridge_helpers.HTTP_BRIDGE_IDLE_TTL_SECONDS),
+        float(_http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
     )
 
 
@@ -396,7 +381,7 @@ class StickySessionCleanupScheduler:
                             if bridge_deleted_count > 0:
                                 logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)
                             abandoned_cutoff = utcnow() - timedelta(
-                                seconds=_abandoned_bridge_retention_seconds(settings, get_settings())
+                                seconds=_abandoned_bridge_retention_seconds(settings)
                             )
                             abandoned_deleted_count = await bridge_repo.purge_abandoned_before(abandoned_cutoff)
                             if abandoned_deleted_count > 0:
@@ -408,8 +393,7 @@ class StickySessionCleanupScheduler:
                                 # Abandonment tombstones guard continuity for
                                 # the bridge-retention window, not the circuit
                                 # TTL.
-                                tombstone_cutoff_epoch=time.time()
-                                - _abandoned_bridge_retention_seconds(settings, get_settings()),
+                                tombstone_cutoff_epoch=time.time() - _abandoned_bridge_retention_seconds(settings),
                             )
                             if retry_circuit_deleted_count > 0:
                                 logger.info(
@@ -431,8 +415,4 @@ class StickySessionCleanupScheduler:
 
 
 def build_sticky_session_cleanup_scheduler() -> StickySessionCleanupScheduler:
-    settings = get_settings()
-    return StickySessionCleanupScheduler(
-        interval_seconds=_CLEANUP_INTERVAL_SECONDS,
-        enabled=settings.sticky_session_cleanup_enabled,
-    )
+    return StickySessionCleanupScheduler(interval_seconds=_CLEANUP_INTERVAL_SECONDS, enabled=True)

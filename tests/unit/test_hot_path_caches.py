@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import inspect
 
 import app.core.auth.dependencies as auth_dependencies
 import app.core.middleware.api_firewall as api_firewall_module
@@ -243,6 +244,19 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
     assert usage_repo.primary_calls == 2
     assert usage_repo.secondary_calls == 2
     assert usage_repo.monthly_calls == 2
+
+    # Every read hands out private transient snapshots: mutating a returned row
+    # must not reach the cached copy or the repository row.
+    refreshed.accounts[0].status = AccountStatus.PAUSED
+    refreshed.latest_monthly[account.id].used_percent = 99.0
+    reread = await balancer._load_selection_inputs(model=None)
+    assert reread.accounts[0] is not refreshed.accounts[0]
+    assert reread.accounts[0].status is AccountStatus.ACTIVE
+    assert reread.latest_monthly[account.id].used_percent == 35.0
+    assert inspect(reread.accounts[0]).transient is True
+    assert account.status is AccountStatus.ACTIVE
+    assert monthly.used_percent == 35.0
+    assert accounts_repo.calls == 2
 
 
 # ---------------------------------------------------------------------------

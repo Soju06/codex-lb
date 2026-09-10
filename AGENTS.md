@@ -2,7 +2,7 @@
 
 ## Environment
 
-- Python: .venv/bin/python (uv, CPython 3.13.3)
+- Python: `>=3.13` via `uv` (`uv sync --frozen`; interpreter at `.venv/bin/python`)
 - GitHub auth for git/API is available via env vars: `GITHUB_USER`, `GITHUB_TOKEN` (PAT). Do not hardcode or commit tokens.
 - For authenticated git over HTTPS in automation, use: `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<repo>.git`
 
@@ -69,8 +69,8 @@ an AI assistant most often needs are:
 - [Merge gates](.github/CONTRIBUTING.md#merge-gates) — CI green +
   actionable CodeRabbit findings addressed + `mergeable=CLEAN` +
   OpenSpec change folder for behavior changes + `Fixes #N` /
-  `Closes #N` for issue cover + the five simplicity rules
-  (PRINCIPLES.md P1-P5; see
+  `Closes #N` for issue cover + the six simplicity rules
+  (PRINCIPLES.md P1-P6; see
   [Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates)).
 - [Collaborator rules](.github/CONTRIBUTING.md#collaborator-rules) —
   no self-merge by default; large PRs get split (≈1-concern per PR,

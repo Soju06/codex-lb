@@ -10,20 +10,31 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import time
+from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
 
+import app.modules.proxy.account_cache as account_cache_module
+import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clock import RealScheduler
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
+from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.proxy._service import observability as proxy_observability_module
+from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.usage import updater as usage_updater_module
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -400,7 +411,7 @@ async def test_stream_body_read_client_error_surfaces_without_replay(async_clien
             yield ""
         raise aiohttp.ServerDisconnectedError("Server disconnected")
 
-    async def fake_sleep(delay: float) -> None:
+    async def fake_sleep(delay: float, result: None = None) -> None:
         pass
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
@@ -521,7 +532,7 @@ async def test_stream_pinned_previsible_close_exhaustion_surfaces_stream_incompl
             yield ""
         return
 
-    async def fake_sleep(delay: float) -> None:
+    async def fake_sleep(delay: float, result: None = None) -> None:
         pass
 
     monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
@@ -705,7 +716,7 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 @pytest.mark.asyncio
 async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch):
     """Connect-phase 429/usage_limit_reached on A should fail over to B before any downstream event."""
-    await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
+    account_a_id = await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
     await _import_account(async_client, "acc_stream_429_b", "stream429b@example.com")
 
     seen_account_ids: list[str | None] = []
@@ -733,6 +744,184 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
     assert len(completed) == 1
     assert len(failed) == 0
     assert seen_account_ids[:2] == ["acc_stream_429_a", "acc_stream_429_b"]
+
+    async with SessionLocal() as session:
+        exhausted_account = await session.get(Account, account_a_id)
+        assert exhausted_account is not None
+        assert exhausted_account.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_stream_code_less_429_retries_same_account_then_succeeds(async_client, monkeypatch):
+    """Code-less 429 (upstream burst) on an owner-bound payload backs off and retries the owner.
+
+    Contrast with the coded-429 test above: the account is never marked
+    RATE_LIMITED and the request never crosses accounts (``reasoning`` input
+    items bind the dispatched payload to the first account).
+    """
+    account_a_id = await _import_account(async_client, "acc_stream_burst_a", "streambursta@example.com")
+    await _import_account(async_client, "acc_stream_burst_b", "streamburstb@example.com")
+
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise ProxyResponseError(
+                429,
+                {"error": {"message": "Rate limit exceeded"}},
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_stream_burst_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"type": "reasoning", "id": "rs_stream_burst", "encrypted_content": "owner-bound"}],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    completed = [e for e in events if e.get("type") == "response.completed"]
+    failed = [e for e in events if e.get("type") == "response.failed"]
+    assert len(completed) == 1
+    assert len(failed) == 0
+    assert seen_account_ids == ["acc_stream_burst_a", "acc_stream_burst_a"]
+    assert 1.0 in slept
+
+    async with SessionLocal() as session:
+        burst_account = await session.get(Account, account_a_id)
+        assert burst_account is not None
+        assert burst_account.status == AccountStatus.ACTIVE
+
+
+def _record_burst_backoff_sleeps(monkeypatch) -> list[float]:
+    """Intercept the bounded burst backoff through the scheduler seam it actually uses.
+
+    The wait runs through ``RealScheduler.sleep`` (``scheduler_for(proxy)``), so
+    patching that seam observes exactly the backoff schedule. Patching the
+    process-wide ``asyncio.sleep`` instead would also reach the lifespan
+    ``run_event_loop_lag_monitor`` task, whose ``asyncio.sleep(1.0)`` loop then
+    spins without yielding for the rest of the test and floods the recording.
+    The fake still yields once so the loop keeps turning.
+    """
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    def fake_sleep(self, delay: float, result: None = None):
+        if delay > 0:
+            slept.append(delay)
+        return real_sleep(0, result)
+
+    monkeypatch.setattr(RealScheduler, "sleep", fake_sleep)
+    return slept
+
+
+_NATIVE_CODEX_HEADERS = {"originator": "codex_cli_rs"}
+_BURST_OWNER_BOUND_PAYLOAD = {
+    "model": "gpt-5.1",
+    "instructions": "hi",
+    "input": [{"type": "reasoning", "id": "rs_stream_burst_native", "encrypted_content": "owner-bound"}],
+    "stream": True,
+}
+
+
+def _install_always_burst_upstream(monkeypatch, *, retry_after_seconds=None, retry_after_header=None):
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        raise ProxyResponseError(
+            429,
+            {"error": {"message": "Rate limit exceeded"}},
+            failure_phase="status",
+            retry_after_seconds=retry_after_seconds,
+            retry_after_header=retry_after_header,
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    return seen_account_ids, slept
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_code_less_429_exhaustion_surfaces_http_429_with_retry_after(
+    async_client, monkeypatch, caplog
+):
+    """Codex CLI (native headers, propagate_http_errors, no SDK contract): the bounded same-account
+    backoff must hold the HTTP headers -- no keepalive frame commits a 200 -- so the exhausted
+    burst is still a real HTTP 429 carrying ``Retry-After: 5``."""
+    await _import_account(async_client, "acc_stream_burst_native_a", "streamburstnativea@example.com")
+    await _import_account(async_client, "acc_stream_burst_native_b", "streamburstnativeb@example.com")
+    seen_account_ids, slept = _install_always_burst_upstream(monkeypatch)
+    caplog.set_level("INFO", logger="app.modules.proxy.service")
+
+    async with async_client.stream(
+        "POST", "/backend-api/codex/responses", json=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS
+    ) as resp:
+        body = json.loads(await resp.aread())
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "5"
+
+    assert body == {"error": {"message": "Rate limit exceeded"}}
+    # Never crossed accounts; three backoffs then the original rejection.
+    assert len(seen_account_ids) == 4
+    assert len(set(seen_account_ids)) == 1
+    assert slept == [1.0, 2.0, 4.0]
+    assert caplog.text.count("action=retry_same_account") == 3
+    assert "failure_class=retryable_transient action=surface" in caplog.text
+    assert "action=failover_next" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_code_less_429_exhaustion_preserves_upstream_retry_after(async_client, monkeypatch):
+    await _import_account(async_client, "acc_stream_burst_native_ra", "streamburstnativera@example.com")
+    _seen, slept = _install_always_burst_upstream(monkeypatch, retry_after_seconds=3, retry_after_header="3")
+
+    async with async_client.stream(
+        "POST", "/backend-api/codex/responses", json=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS
+    ) as resp:
+        await resp.aread()
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "3"
+
+    # Retry-After floors the schedule: 3, 3, then the exponential 4.
+    assert slept == [3.0, 3.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_code_less_429_retry_success_emits_no_capacity_keepalive(async_client, monkeypatch):
+    """The held-header wait must not leak a ``waiting_for_account_capacity`` keepalive into the stream."""
+    await _import_account(async_client, "acc_stream_burst_native_ok", "streamburstnativeok@example.com")
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise ProxyResponseError(429, {"error": {"message": "Rate limit exceeded"}}, failure_phase="status")
+        yield _success_sse_event("resp_stream_burst_native_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST", "/backend-api/codex/responses", json=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert [e["type"] for e in events if e.get("type") == "response.completed"] == ["response.completed"]
+    assert all(e.get("status") != "waiting_for_account_capacity" for e in events)
+    assert seen_account_ids == ["acc_stream_burst_native_ok", "acc_stream_burst_native_ok"]
+    assert 1.0 in slept
 
 
 @pytest.mark.asyncio
@@ -1317,3 +1506,198 @@ async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failo
     assert response.status_code == 200
     assert response.json()["object"] == "response.compaction"
     assert seen_account_ids[:2] == ["acc_sticky_503_a", "acc_sticky_503_b"]
+
+
+# ===========================================================================
+# Streaming — usage_limit_reached requests an immediate usage refresh (#2123 WP-F)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.usage_refresh_request_path
+async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exhaustion(
+    async_client, app_instance, monkeypatch
+):
+    """A streamed usage_limit_reached marks the account rate limited *and* writes the >= 100 %
+    usage row seconds later without a scheduler tick, so the next selection reports the
+    structured pool exhaustion with the row's reset time instead of waiting for the next
+    refresh interval.
+
+    Runs with the production selection-cache TTL (pytest defaults it to 0): ``mark_rate_limit``
+    invalidates the cache before the row exists, and a selection in between repopulates it
+    without usage evidence, so the refresh must invalidate again once the row is written.
+    The cross-replica invalidation poller is detached so its echo of the earlier
+    ``mark_rate_limit`` bump cannot stand in for the refresh's own invalidation.
+    """
+    usage_updater_module._clear_usage_refresh_state()
+    monkeypatch.setattr(account_cache_module, "get_cache_invalidation_poller", lambda: None)
+    selection_cache = get_account_selection_cache()
+    monkeypatch.setattr(selection_cache, "_ttl_seconds", 5)
+    selection_cache.invalidate()
+    raw_account_id = "acc_usage_limit_refresh"
+    account_id = await _import_account(async_client, raw_account_id, "usage-limit-refresh@example.com")
+    reset_at = int(time.time()) + 1800
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        raise ProxyResponseError(
+            429,
+            openai_error("usage_limit_reached", "usage limit reached"),
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    fetched: list[str | None] = []
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def fake_fetch_usage(*, access_token, account_id, route=None, allow_direct_egress=True):
+        fetched.append(account_id)
+        fetch_started.set()
+        await release_fetch.wait()
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(used_percent=100.0, reset_at=reset_at, limit_window_seconds=18000),
+                secondary_window=UsageWindow(
+                    used_percent=35.0,
+                    reset_at=reset_at + 6 * 86400,
+                    limit_window_seconds=604800,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_api_module, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 30.0)
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", fake_fetch_usage)
+
+    async def latest_primary_row():
+        async with SessionLocal() as session:
+            return await UsageRepository(session).latest_entry_for_account(account_id, window="primary")
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    try:
+        assert await latest_primary_row() is None
+        first = await async_client.post("/backend-api/codex/responses", json=payload)
+        assert first.status_code == 429
+        assert first.json()["error"]["code"] == "usage_limit_reached"
+        await asyncio.wait_for(fetch_started.wait(), timeout=5)
+        assert fetched == [raw_account_id]
+        assert await latest_primary_row() is None
+
+        # Production race: a selection between ``mark_rate_limit`` and the refresh's row write
+        # repopulates the cache from a row set that carries no usage evidence yet.
+        load_balancer = app_instance.state.proxy_service._load_balancer
+        await load_balancer._load_selection_inputs(model=payload["model"])
+        assert selection_cache._cache, "the stale selection must be cached before the row lands"
+        stale_generation = selection_cache.generation
+
+        release_fetch.set()
+        # The refresh is a tracked background task: poll briefly for its row instead of a
+        # scheduler tick (USAGE_REFRESH_INTERVAL_SECONDS).
+        latest = None
+        deadline = time.monotonic() + 5.0
+        while latest is None and time.monotonic() < deadline:
+            latest = await latest_primary_row()
+            if latest is None:
+                await asyncio.sleep(0.02)
+        assert latest is not None, "a streamed usage_limit_reached must request an immediate usage refresh"
+        assert latest.used_percent == 100.0
+        assert latest.reset_at == reset_at
+
+        deadline = time.monotonic() + 5.0
+        while selection_cache.generation == stale_generation and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert selection_cache.generation > stale_generation, "the written row must invalidate the selection cache"
+        assert selection_cache._cache == {}
+
+        async with SessionLocal() as session:
+            account = await session.get(Account, account_id)
+            assert account is not None
+            assert account.status in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
+
+        # With the >= 100 % row written and the stale selection dropped, the pool is
+        # usage-proven exhausted on the very next selection and surfaces the structured
+        # failure with the row's reset time -- without waiting out the cache TTL.
+        second = await async_client.post("/backend-api/codex/responses", json=payload)
+        assert second.status_code == 429
+        error = second.json()["error"]
+        assert error["code"] == "usage_limit_reached"
+        assert error["type"] == "usage_limit_reached"
+        assert error["resets_at"] == reset_at
+        assert fetched == [raw_account_id], "the second selection failure must not fetch upstream again"
+    finally:
+        release_fetch.set()
+        usage_updater_module._clear_usage_refresh_state()
+        selection_cache.invalidate()
+
+
+# ===========================================================================
+# Streaming — upstream reasoning-replay rejections are counted once per failure (#2123 CP-15)
+# ===========================================================================
+
+
+_REASONING_REPLAY_MESSAGE = (
+    "Item with id 'rs_0f3a' of type 'reasoning' was provided without its required following item."
+)
+
+
+@pytest.mark.parametrize(
+    ("upstream_shape", "message", "expected_increments"),
+    [
+        ("status_400", _REASONING_REPLAY_MESSAGE, 1),
+        ("error_frame", _REASONING_REPLAY_MESSAGE, 1),
+        ("error_frame_enveloped", _REASONING_REPLAY_MESSAGE, 1),
+        ("response_failed_frame", _REASONING_REPLAY_MESSAGE, 1),
+        ("error_frame", "Selected model is at capacity. Please try a different model.", 0),
+        ("response_failed_frame", "No tool output found for function call call_abc.", 0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_reasoning_replay_rejection_counted_once_for_status_and_terminal_frames(
+    async_client, monkeypatch, upstream_shape: str, message: str, expected_increments: int
+):
+    """invalid_request_error is never penalized, so terminal ``error``/``response.failed`` frames
+    never reach ``_handle_stream_error``; the counter must fire at frame classification for them
+    and exactly once for the HTTP-400 status path."""
+    counter = MagicMock()
+    monkeypatch.setattr(proxy_observability_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_observability_module, "upstream_reasoning_replay_400_total", counter)
+    await _import_account(async_client, "acc_reasoning_replay", "reasoning-replay@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        if upstream_shape == "status_400":
+            raise ProxyResponseError(
+                400,
+                openai_error("invalid_request_error", message),
+                failure_phase="status",
+            )
+        if upstream_shape == "error_frame":
+            yield _sse_event({"type": "error", "code": "invalid_request_error", "message": message})
+        elif upstream_shape == "error_frame_enveloped":
+            yield _sse_event({"type": "error", "error": {"code": "invalid_request_error", "message": message}})
+        else:
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": {"error": {"code": "invalid_request_error", "message": message}},
+                }
+            )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    if upstream_shape == "status_400":
+        response = await async_client.post("/backend-api/codex/responses", json=payload)
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request_error"
+    else:
+        async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+            assert resp.status_code == 200
+            lines = [line async for line in resp.aiter_lines() if line]
+        events = _extract_events(lines)
+        terminal = [event for event in events if event.get("type") in {"error", "response.failed"}]
+        assert len(terminal) == 1
+
+    assert counter.inc.call_count == expected_increments

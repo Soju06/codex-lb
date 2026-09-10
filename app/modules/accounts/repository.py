@@ -299,9 +299,6 @@ class AccountsRepository:
             return dict(summaries)
         return summaries
 
-    async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
-        return await self.get_active_by_chatgpt_account_id(chatgpt_account_id) is not None
-
     async def get_active_by_chatgpt_account_id(self, chatgpt_account_id: str) -> Account | None:
         result = await self._session.execute(
             select(Account)

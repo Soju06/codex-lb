@@ -47,6 +47,10 @@ _BRIDGE_REQUEST_BUDGET_DEFAULT: Final[float] = float(Settings.model_fields[_BRID
 # Floor of the stale-operation abandonment sweep's inactivity window
 # (``session_registry.abandon_stale_http_bridge_operations``).
 _STALE_OPERATION_ABANDONMENT_FLOOR_SECONDS: Final[float] = 30.0 * 60.0
+# An ever-claimed retry circuit gets one extra TTL of grace in both
+# ``retry_circuit`` and ``purge_retry_circuits_before``, because a claim leaves
+# ``updated_at_epoch`` untouched.
+_CLAIMED_RETRY_CIRCUIT_TTL_MULTIPLIER: Final[float] = 2.0
 
 
 def _effective_seconds(dashboard_settings: object | None, name: str, environment_value: float, default: float) -> float:
@@ -96,8 +100,11 @@ def spool_retention_floor_terms_seconds(
     - ``stale_operation_abandonment_window``: until the abandonment sweep
       fences an ownerless nonterminal operation, that operation is still
       reading and appending its own spool.
-    - ``retry_circuit_state_ttl``: a surviving retry circuit can admit a replay
-      of an operation whose spool must therefore still exist.
+    - ``claimed_retry_circuit_lifetime``: a surviving retry circuit can admit a
+      replay of an operation whose spool must therefore still exist. A claim
+      advances only the admission generation and leaves the row timestamp
+      alone, so an ever-claimed circuit is honoured -- by both the loader and
+      the scheduled purge -- for two TTLs, not one.
 
     The terms are read from the configuration in force, so this is a
     steady-state bound. A live bridge session keeps the idle TTL it captured
@@ -118,7 +125,8 @@ def spool_retention_floor_terms_seconds(
     return {
         "bridge_session_reuse_window": bridge_session_reuse_window_seconds(dashboard_settings),
         "stale_operation_abandonment_window": max(_STALE_OPERATION_ABANDONMENT_FLOOR_SECONDS, bridge_request_budget),
-        "retry_circuit_state_ttl": float(DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS),
+        "claimed_retry_circuit_lifetime": _CLAIMED_RETRY_CIRCUIT_TTL_MULTIPLIER
+        * float(DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS),
     }
 
 

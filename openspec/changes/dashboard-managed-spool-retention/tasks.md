@@ -16,7 +16,7 @@
 
 ## 3. Verification
 
-- [x] 3.1 Unit: resolver states (NULL→env, NULL+env unset→default, dashboard wins), floor terms at defaults and when a dashboard reuse window is raised, idle TTLs read at call time. Integration: API round trip (default → dashboard → cleared/env → unchanged on omit, column stays NULL), floor accept/reject in both directions, migration upgrade/downgrade.
+- [x] 3.1 Unit: resolver states (NULL→env, NULL+env unset→default, dashboard wins), floor terms at defaults, when a dashboard reuse window is raised, and when a lowered bridge budget leaves the claimed-circuit grace binding; idle TTLs read at call time. Integration: API round trip (default → dashboard → cleared/env → unchanged on omit, column stays NULL), floor accept/reject in both directions and under a lowered bridge budget, migration upgrade/downgrade.
 - [x] 3.2 Consumer: the retention pass cuts at the dashboard window rather than the environment alias.
 - [x] 3.3 Frontend: the card saves and rejects around the floor, reset-to-inherited PUTs null, busy disables the input; i18n parity.
 - [x] 3.4 `make lint`, `uv run ty check`, `make migration-check`, frontend lint/typecheck/vitest, simplicity budgets, `openspec validate dashboard-managed-spool-retention --strict`, `docs/reference/settings.md` regenerated.

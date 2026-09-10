@@ -74,15 +74,24 @@ def test_floor_covers_every_window_that_can_still_read_the_spool() -> None:
         "bridge_session_reuse_window": 3600.0,
         # max(1800 sweep floor, 7200 bridge request budget)
         "stale_operation_abandonment_window": 7200.0,
-        "retry_circuit_state_ttl": float(DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS),
+        # An ever-claimed circuit gets one extra TTL of grace, so the term is
+        # two TTLs, not one (retry_circuit.py / purge_retry_circuits_before).
+        "claimed_retry_circuit_lifetime": 2 * float(DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS),
     }
     assert operation_spool_retention_floor_seconds(_row(), startup_settings=_environment()) == 7200.0
-    assert binding_spool_retention_floor_term(_row(), startup_settings=_environment()) == (
-        "stale_operation_abandonment_window",
-        7200.0,
-    )
     # The shipped default clears the floor by a wide margin.
     assert _DEFAULT > 7200.0
+
+
+def test_claimed_retry_circuit_grace_binds_below_the_default_bridge_budget() -> None:
+    """A lowered bridge budget must not drop the floor below a claimed circuit's lifetime."""
+    environment = _environment(http_responses_session_bridge_request_budget_seconds=3600.0)
+    terms = spool_retention_floor_terms_seconds(_row(), startup_settings=environment)
+    assert terms["stale_operation_abandonment_window"] == 3600.0
+    assert binding_spool_retention_floor_term(_row(), startup_settings=environment) == (
+        "claimed_retry_circuit_lifetime",
+        2 * float(DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS),
+    )
 
 
 def test_floor_follows_the_dashboard_reuse_windows() -> None:

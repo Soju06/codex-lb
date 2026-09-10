@@ -27,7 +27,8 @@ takes effect on the next tick on every replica without a restart.
 Because the spool is the replay source for durable bridge recovery, the
 effective window MUST cover every *configured* window in which a spooled
 operation can still be read: the bridge session reuse window, the
-stale-operation abandonment window, and the retry-circuit state TTL. That floor
+stale-operation abandonment window, and the lifetime of a retry circuit that
+has already admitted a claim. That floor
 MUST be derived from those terms rather than fixed, because two of them are
 themselves operator-tunable, and the settings API MUST refuse an update that
 would leave the effective window below it, naming the binding term. The floor

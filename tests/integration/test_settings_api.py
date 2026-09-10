@@ -2585,6 +2585,30 @@ async def test_settings_api_rejects_spool_retention_below_the_replay_floor(async
 
 
 @pytest.mark.asyncio
+async def test_settings_api_floor_keeps_claimed_retry_circuit_grace_under_a_lowered_budget(async_client):
+    """Lowering the bridge budget must not drop the floor below a claimed circuit's two TTLs."""
+    lowered = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeRequestBudgetSeconds": 3600})
+    assert lowered.status_code == 200
+    # The abandonment window fell to 3600s, but an ever-claimed retry circuit is
+    # still honoured for two TTLs, so the reported floor stays at 7200s.
+    assert lowered.json()["httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds"] == 7200.0
+
+    below = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 3600}
+    )
+    assert below.status_code == 400
+    body = below.json()
+    assert body["error"]["code"] == "spool_retention_below_floor"
+    assert "claimed_retry_circuit_lifetime" in body["error"]["message"]
+
+    at_floor = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7200}
+    )
+    assert at_floor.status_code == 200
+    assert at_floor.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 7200.0
+
+
+@pytest.mark.asyncio
 async def test_settings_api_rejects_raising_a_reuse_window_above_the_spool_retention(async_client):
     """Raising a reuse window past the stored spool retention introduces the same violation."""
     configured = await async_client.put(

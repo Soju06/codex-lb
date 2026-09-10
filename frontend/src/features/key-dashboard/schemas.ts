@@ -83,6 +83,28 @@ export type KeyUsageLimit = z.infer<typeof KeyUsageLimitSchema>;
 export type KeyDashboardProfile = z.infer<typeof KeyDashboardProfileSchema>;
 export type KeyDashboardRequestLogsResponse = z.infer<typeof KeyDashboardRequestLogsResponseSchema>;
 
+export const KeyDashboardGroupSchema = z.strictObject({
+  groupName: z.string().nullable(),
+  from: z.iso.datetime({ offset: true }),
+  until: z.iso.datetime({ offset: true }),
+  members: z.array(z.strictObject({
+    name: z.string(),
+    keyPrefix: z.string(),
+    isCurrentKey: z.boolean(),
+    requestCount: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(),
+    cachedInputTokens: z.number().int().nonnegative(),
+    totalCostUsd: z.number().nonnegative(),
+    dailyUsage: z.array(z.strictObject({
+      date: z.iso.date(),
+      totalTokens: z.number().int().nonnegative(),
+      totalCostUsd: z.number().nonnegative(),
+    })),
+  })),
+});
+
+export type KeyDashboardGroup = z.infer<typeof KeyDashboardGroupSchema>;
+
 export function toDashboardRequestLog(
   request: z.infer<typeof KeyDashboardRequestLogSchema>,
 ): RequestLog {

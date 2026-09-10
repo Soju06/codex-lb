@@ -1,19 +1,34 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request, Security
+from fastapi import APIRouter, Depends, Query, Request, Response, Security
 from fastapi.responses import PlainTextResponse
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_usage_api_key
 from app.dependencies import KeyDashboardContext, get_key_dashboard_context
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.key_dashboard.install import InstallPlatform, build_install_script
-from app.modules.key_dashboard.schemas import KeyDashboardProfile, KeyDashboardRequestLogsResponse
+from app.modules.key_dashboard.schemas import (
+    KeyDashboardGroupResponse,
+    KeyDashboardProfile,
+    KeyDashboardRequestLogsResponse,
+)
 
 router = APIRouter(
     prefix="/api/key-dashboard",
     tags=["key-dashboard"],
     dependencies=[Depends(set_dashboard_error_format)],
 )
+
+
+@router.get("/group", response_model=KeyDashboardGroupResponse)
+async def get_key_dashboard_group(
+    response: Response,
+    context: KeyDashboardContext = Depends(get_key_dashboard_context),
+    api_key: ApiKeyData = Security(validate_usage_api_key),
+) -> KeyDashboardGroupResponse:
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Authorization"
+    return await context.service.get_group_usage(api_key.id)
 
 
 @router.get("/install-script", response_class=PlainTextResponse)

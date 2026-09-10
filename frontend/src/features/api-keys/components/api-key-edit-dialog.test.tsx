@@ -13,6 +13,17 @@ import { ApiKeyEditDialog } from "./api-key-edit-dialog";
 import { hasLimitRuleChanges } from "./limit-rules-utils";
 
 describe("ApiKeyEditDialog", () => {
+  it.each(["", "Team B"])("updates group membership to %s", async (group) => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    renderWithProviders(<ApiKeyEditDialog open busy={false} apiKey={createApiKey({ usageGroup: "Team A" })} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    expect(screen.getByLabelText("Usage group")).toHaveValue("Team A");
+    await user.clear(screen.getByLabelText("Usage group"));
+    if (group) await user.type(screen.getByLabelText("Usage group"), group);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ usageGroup: group || null })));
+  });
+
   function ControlledApiKeyEditDialog({
     apiKey = createApiKey({ allowedModels: [] }),
   }: {

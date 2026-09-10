@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import Field
 
@@ -64,3 +64,27 @@ class KeyDashboardRequestLogsResponse(DashboardModel):
     requests: list[KeyDashboardRequestLog] = Field(default_factory=list)
     total: int
     has_more: bool
+
+
+class KeyDashboardGroupDay(DashboardModel):
+    date: date
+    total_tokens: int
+    total_cost_usd: float
+
+
+class KeyDashboardGroupMember(DashboardModel):
+    name: str
+    key_prefix: str
+    is_current_key: bool
+    request_count: int
+    total_tokens: int
+    cached_input_tokens: int
+    total_cost_usd: float
+    daily_usage: list[KeyDashboardGroupDay]
+
+
+class KeyDashboardGroupResponse(DashboardModel):
+    group_name: str | None
+    from_: datetime = Field(alias="from")
+    until: datetime
+    members: list[KeyDashboardGroupMember]

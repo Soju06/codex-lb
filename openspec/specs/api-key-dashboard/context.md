@@ -2,7 +2,19 @@
 
 ## Purpose
 
-`/key-dashboard` is a self-service surface for an API key holder, not an alternate administrator dashboard. It lets a key holder inspect only that key's lifetime usage and recent request activity without receiving a dashboard password or learning anything about the backing account pool.
+`/key-dashboard` is a self-service surface for an API key holder, not an alternate administrator dashboard. It lets a key holder inspect that key's lifetime usage and recent request activity, plus shared aggregate usage when an administrator assigns a usage group, without receiving a dashboard password or learning anything about the backing account pool.
+
+## Usage groups
+
+An optional Usage group field in the administrator key creation/edit forms enables mutual aggregate visibility. Set Alice's and Bob's keys to `Team A`, then either holder can open Group keys to compare both keys' request counts, tokens, cached tokens, and cost for the preceding 30 days. This shares the full recent window, including activity before joining. Clear the field to remove membership; exact case-sensitive names are compared after trimming surrounding whitespace. Empty groups have no independent lifecycle.
+
+Membership is read from persisted key rows on each group request, independent of cached authentication metadata. Only names, masked prefixes, a caller indicator, and totals leave the dedicated allowlist response. Inactive and expired members still contribute historical usage; deleted or reassigned members disappear on refresh. Group membership does not change quotas, routing, or access to peer request logs.
+
+The group view also includes a dense daily series for every member across the rolling 30-day UTC window. The chart can switch between tokens and USD cost, hide or show member lines, and expose the same values in a scrollable data table. The server supplies zero-valued days so lines and tables stay aligned; the summary totals are calculated from that same series. Tooltips show the exact date and value without another request.
+
+The nullable indexed field leaves existing installs ungrouped and needs no runtime setting. Retained hourly rollups and their complementary raw windows provide historical statistics without double counting; warmup and limit-warmup traffic are excluded. Preserved usage remains countable after account deletion. As with existing rollup readers, raw retention may remove a partial-hour boundary that cannot be reconstructed more precisely from an hourly total.
+
+Group data loads only while its tab is mounted, uses cookie-free Bearer requests, and is discarded on disconnect, unauthorized responses, or tab unmount. Refresh replaces the prior group state so a removed membership does not leave an obsolete table visible during reload.
 
 ## Decisions
 

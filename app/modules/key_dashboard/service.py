@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import cast
 
 from app.core.usage.logs import (
@@ -9,10 +10,15 @@ from app.core.usage.logs import (
     output_tokens_from_log,
     total_tokens_from_log,
 )
+from app.core.utils.time import utcnow
 from app.db.models import RequestLog
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.key_dashboard.repository import GroupDailyUsage, KeyDashboardRepository
 from app.modules.key_dashboard.schemas import (
     KeyDashboardCostBreakdown,
+    KeyDashboardGroupDay,
+    KeyDashboardGroupMember,
+    KeyDashboardGroupResponse,
     KeyDashboardProfile,
     KeyDashboardRequestLog,
     KeyDashboardRequestLogsResponse,
@@ -22,8 +28,46 @@ from app.modules.request_logs.repository import RequestLogsRepository
 
 
 class KeyDashboardService:
-    def __init__(self, repository: RequestLogsRepository) -> None:
+    def __init__(self, repository: RequestLogsRepository, group_repository: KeyDashboardRepository) -> None:
         self._repository = repository
+        self._group_repository = group_repository
+
+    async def get_group_usage(self, api_key_id: str) -> KeyDashboardGroupResponse:
+        until = utcnow()
+        since = until - timedelta(days=30)
+        group = await self._group_repository.group_usage(api_key_id, since, until)
+        days = [
+            since.date() + timedelta(days=offset)
+            for offset in range(((until - timedelta(microseconds=1)).date() - since.date()).days + 1)
+        ]
+        members: list[KeyDashboardGroupMember] = []
+        for member in group.members:
+            daily_usage = [
+                KeyDashboardGroupDay(
+                    date=day,
+                    total_tokens=(usage := member.daily_usage.get(day, GroupDailyUsage())).total_tokens,
+                    total_cost_usd=round(usage.total_cost_usd, 6),
+                )
+                for day in days
+            ]
+            members.append(
+                KeyDashboardGroupMember(
+                    name=member.name,
+                    key_prefix=f"{member.key_prefix}…",
+                    is_current_key=member.key_id == api_key_id,
+                    request_count=sum(usage.request_count for usage in member.daily_usage.values()),
+                    total_tokens=sum(day.total_tokens for day in daily_usage),
+                    cached_input_tokens=sum(usage.cached_input_tokens for usage in member.daily_usage.values()),
+                    total_cost_usd=round(sum(day.total_cost_usd for day in daily_usage), 6),
+                    daily_usage=daily_usage,
+                )
+            )
+        return KeyDashboardGroupResponse(
+            group_name=group.name,
+            from_=since,
+            until=until,
+            members=members,
+        )
 
     @staticmethod
     def get_profile(api_key: ApiKeyData) -> KeyDashboardProfile:

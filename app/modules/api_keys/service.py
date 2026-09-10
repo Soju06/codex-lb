@@ -84,6 +84,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         key_id: str,
         *,
         name: str | _Unset = ...,
+        usage_group: str | None | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
         apply_to_codex_model: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
@@ -283,6 +284,7 @@ class ApiKeyCreateData:
     enforced_service_tier: str | None = None
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
+    usage_group: str | None = None
     usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
@@ -294,6 +296,8 @@ class ApiKeyCreateData:
 class ApiKeyUpdateData:
     name: str | None = None
     name_set: bool = False
+    usage_group: str | None = None
+    usage_group_set: bool = False
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
     apply_to_codex_model: bool | None = None
@@ -342,6 +346,7 @@ class ApiKeyData:
     apply_to_codex_model: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
+    usage_group: str | None = None
     usage_sections: str = "upstream_limits,account_pool_usage"
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
@@ -493,6 +498,7 @@ class ApiKeysService:
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
             name=_normalize_name(payload.name),
+            usage_group=_normalize_usage_group(payload.usage_group),
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
@@ -705,6 +711,7 @@ class ApiKeysService:
             row = await self._repository.update(
                 key_id,
                 name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
+                usage_group=_normalize_usage_group(payload.usage_group) if payload.usage_group_set else _UNSET,
                 allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
                 apply_to_codex_model=apply_to_codex_model,
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
@@ -762,6 +769,7 @@ class ApiKeysService:
             or payload.assigned_source_ids_set
             or limit_rows is not None
             or payload.name_set
+            or payload.usage_group_set
             or payload.allowed_models_set
             or payload.apply_to_codex_model_set
             or payload.enforced_model_set
@@ -1358,6 +1366,13 @@ class ApiKeySelfUsageData:
     limits: list[ApiKeySelfLimitData] = field(default_factory=list)
 
 
+def _normalize_usage_group(value: str | None) -> str | None:
+    normalized = value.strip() if value is not None else ""
+    if len(normalized) > 128:
+        raise ApiKeyValidationError("Usage group must be at most 128 characters")
+    return normalized or None
+
+
 def _normalize_name(name: str) -> str:
     normalized = name.strip()
     if not normalized:
@@ -1798,6 +1813,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
     return ApiKeyCreatedData(
         id=data.id,
         name=data.name,
+        usage_group=data.usage_group,
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
         apply_to_codex_model=data.apply_to_codex_model,
@@ -1834,6 +1850,7 @@ def _to_api_key_data(
     return ApiKeyData(
         id=row.id,
         name=row.name,
+        usage_group=row.usage_group,
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
         apply_to_codex_model=getattr(row, "apply_to_codex_model", False),

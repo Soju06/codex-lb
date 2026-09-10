@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -69,6 +70,7 @@ type ApiKeyCreateDraft = {
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
   usageSections: string;
+  usageGroup: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   enforcedModel: string;
@@ -85,6 +87,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   selectedSourceIds: [],
   selectedReasoningEfforts: [],
   usageSections: "upstream_limits,account_pool_usage",
+  usageGroup: "",
   limitRules: [],
   expiresAt: null,
   enforcedModel: "",
@@ -118,6 +121,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
     const validLimits = draft.limitRules.filter((rule) => rule.maxValue > 0);
     const payload: ApiKeyCreateRequest = {
       name: values.name,
+      ...(draft.usageGroup.trim() ? { usageGroup: draft.usageGroup.trim() } : {}),
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
@@ -171,6 +175,21 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                 </FormItem>
               )}
             />
+
+            <div className="space-y-1">
+              <Label htmlFor="api-key-usage-group">{t("apiKeys.form.usageGroup")}</Label>
+              <Input
+                id="api-key-usage-group"
+                value={draft.usageGroup}
+                maxLength={128}
+                autoComplete="off"
+                aria-describedby="api-key-usage-group-help"
+                onChange={(event) => updateDraft({ usageGroup: event.target.value })}
+              />
+              <p id="api-key-usage-group-help" className="text-xs text-muted-foreground">
+                {t("apiKeys.form.usageGroupDescription")}
+              </p>
+            </div>
 
             <div className="space-y-1">
               <p className="text-sm font-medium">{t("apiKeys.form.allowedModels")}</p>

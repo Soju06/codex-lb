@@ -348,6 +348,7 @@ class ApiKeysRepository:
         key_id: str,
         *,
         name: str | _Unset = _UNSET,
+        usage_group: str | None | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
@@ -368,6 +369,9 @@ class ApiKeysRepository:
         row = await self.get_by_id(key_id)
         if row is None:
             return None
+        if usage_group is not _UNSET:
+            assert usage_group is None or isinstance(usage_group, str)
+            row.usage_group = usage_group
         if name is not _UNSET:
             assert isinstance(name, str)
             row.name = name

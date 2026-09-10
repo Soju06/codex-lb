@@ -1157,6 +1157,7 @@ class ApiKey(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)
+    usage_group: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
     apply_to_codex_model: Mapped[bool] = mapped_column(
         Boolean,

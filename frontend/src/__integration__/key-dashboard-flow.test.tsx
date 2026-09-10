@@ -1,5 +1,5 @@
 import { HttpResponse, http } from "msw";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -82,6 +82,9 @@ describe("API key dashboard integration", () => {
     window.history.pushState({}, "", "/key-dashboard");
     window.localStorage.removeItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY);
     useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+    server.use(http.get("/api/key-dashboard/group", () => HttpResponse.json({
+      groupName: null, from: "2026-08-11T12:00:00Z", until: "2026-09-10T12:00:00Z", members: [],
+    })));
   });
 
   afterEach(() => {
@@ -193,6 +196,113 @@ describe("API key dashboard integration", () => {
     await screen.findByRole("tab", { name: "Install" });
   }
 
+  const groupPayload = {
+    groupName: "Team A", from: "2026-08-11T12:00:00Z", until: "2026-09-10T12:00:00Z",
+    members: [
+      { name: "Alice", keyPrefix: "sk-clb-alice…", isCurrentKey: true, requestCount: 10, totalTokens: 1250, cachedInputTokens: 200, totalCostUsd: 0.5, dailyUsage: [
+        { date: "2026-08-11", totalTokens: 0, totalCostUsd: 0 },
+        { date: "2026-08-12", totalTokens: 1250, totalCostUsd: 0.5 },
+      ] },
+      { name: "Bob", keyPrefix: "sk-clb-bob…", isCurrentKey: false, requestCount: 20, totalTokens: 2500, cachedInputTokens: 400, totalCostUsd: 1, dailyUsage: [
+        { date: "2026-08-11", totalTokens: 2500, totalCostUsd: 1 },
+        { date: "2026-08-12", totalTokens: 0, totalCostUsd: 0 },
+      ] },
+    ],
+  };
+
+  it("loads group members only on tab entry and refreshes current membership", async () => {
+    mockDashboard();
+    let calls = 0;
+    server.use(http.get("/api/key-dashboard/group", ({ request }) => {
+      calls += 1;
+      expect(request.headers.get("Authorization")).toBe(`Bearer ${TEST_KEY}`);
+      expect(request.credentials).toBe("omit");
+      expect(new URL(request.url).search).toBe("");
+      return HttpResponse.json(calls === 1 ? groupPayload : { ...groupPayload, groupName: null, members: [] });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    await connect(user);
+    expect(calls).toBe(0);
+    await user.click(screen.getByRole("tab", { name: "Group keys" }));
+    expect(await screen.findByRole("heading", { name: "Team A" })).toBeInTheDocument();
+    const table = screen.getByRole("table", { name: "Group member usage for the last 30 days" });
+    expect(within(table).getByText("Alice")).toBeInTheDocument();
+    expect(within(table).getByText("Bob")).toBeInTheDocument();
+    expect(within(table).getByText("You")).toBeInTheDocument();
+    expect(within(table).getByText("1,250")).toBeInTheDocument();
+    expect(screen.getByText("3.75K")).toBeInTheDocument();
+    expect(screen.getByText("Last 30 days")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(TEST_KEY);
+    expect(await screen.findByRole("heading", { name: "Daily usage by key" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Tokens" })).toBeChecked();
+    await user.click(screen.getByText("View daily data"));
+    const tokenTable = await screen.findByRole("table", { name: "Daily Tokens by key" });
+    expect(within(tokenTable).getByRole("row", { name: "2026-08-11 0 2,500" })).toBeInTheDocument();
+    expect(within(tokenTable).getByRole("row", { name: "2026-08-12 1,250 0" })).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "Cost (USD)" }));
+    const costTable = screen.getByRole("table", { name: "Daily Cost (USD) by key" });
+    expect(within(costTable).getByRole("row", { name: "2026-08-11 $0.00 $1.00" })).toBeInTheDocument();
+    expect(within(costTable).getByRole("row", { name: "2026-08-12 $0.50 $0.00" })).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Alice · sk-clb-alice…" }));
+    expect(within(costTable).queryByRole("columnheader", { name: "Alice · sk-clb-alice…" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Bob · sk-clb-bob…" }));
+    expect(screen.getByText("Select a key to display its daily usage.")).toBeInTheDocument();
+    expect(calls).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("No key group yet")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Daily usage by key" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Bob")).not.toBeInTheDocument();
+    expect(calls).toBe(2);
+  });
+
+  it("retries group failures and clears remembered credentials after group 401", async () => {
+    mockDashboard();
+    let status = 500;
+    server.use(http.get("/api/key-dashboard/group", () => status === 200
+      ? HttpResponse.json(groupPayload)
+      : HttpResponse.json({ error: { code: "failed", message: "Group unavailable" } }, { status })));
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    await user.click(await screen.findByRole("checkbox", { name: /Remember on this browser/ }));
+    await connect(user);
+    await user.click(screen.getByRole("tab", { name: "Group keys" }));
+    expect(await screen.findByText("Group unavailable")).toBeInTheDocument();
+    status = 200;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Bob")).toBeInTheDocument();
+    status = 401;
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByRole("button", { name: "Open dashboard" })).toBeInTheDocument();
+    expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
+    expect(screen.queryByText("Bob")).not.toBeInTheDocument();
+  });
+
+  it.each(["tab", "disconnect"])("discards a late group response after %s", async (action) => {
+    mockDashboard();
+    let resolveResponse!: () => void;
+    const pending = new Promise<void>((resolve) => { resolveResponse = resolve; });
+    let started = false;
+    server.use(http.get("/api/key-dashboard/group", async () => {
+      started = true;
+      await pending;
+      return HttpResponse.json(groupPayload);
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<App />);
+    await connect(user);
+    await user.click(screen.getByRole("tab", { name: "Group keys" }));
+    await waitFor(() => expect(started).toBe(true));
+    await user.click(action === "tab"
+      ? screen.getByRole("tab", { name: "Overview" })
+      : screen.getByRole("button", { name: "Disconnect" }));
+    await act(async () => { resolveResponse(); await pending; });
+    expect(screen.queryByText("Bob")).not.toBeInTheDocument();
+    expect(action === "tab"
+      ? screen.getByRole("tab", { name: "Overview" })
+      : screen.getByRole("button", { name: "Open dashboard" })).toBeInTheDocument();
+  });
+
   it.each([null, "gpt-5.6-sol"])("renders unrestricted or enforced models and missing lifecycle dates (%s)", async (model) => {
     mockDashboard();
     server.use(http.get("/api/key-dashboard/profile", () => HttpResponse.json({
@@ -206,7 +316,8 @@ describe("API key dashboard integration", () => {
     expect(screen.getByText("Not used yet")).toBeInTheDocument();
     screen.getByRole("tab", { name: "Overview" }).focus();
     await user.keyboard("{ArrowRight}");
-    expect(screen.getByRole("tab", { name: "Install" })).toHaveFocus();
+    expect(screen.getByRole("tab", { name: "Group keys" })).toHaveFocus();
+    expect(await screen.findByText("No key group yet")).toBeInTheDocument();
   });
 
   it("supports keyboard platform selection and shows setup guidance outside the preview", async () => {

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import Field
+from pydantic import Field, StringConstraints
 
 from app.modules.shared.schemas import DashboardModel
 
@@ -25,6 +26,7 @@ class LimitRuleResponse(DashboardModel):
 
 
 class ApiKeyCreateRequest(DashboardModel):
+    usage_group: Annotated[str, StringConstraints(strip_whitespace=True, max_length=128)] | None = None
     name: str = Field(min_length=1, max_length=128)
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool = False
@@ -45,6 +47,7 @@ class ApiKeyCreateRequest(DashboardModel):
 
 
 class ApiKeyUpdateRequest(DashboardModel):
+    usage_group: Annotated[str, StringConstraints(strip_whitespace=True, max_length=128)] | None = None
     name: str | None = Field(default=None, min_length=1, max_length=128)
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool | None = None
@@ -74,6 +77,7 @@ class ApiKeyUsageSummaryResponse(DashboardModel):
 
 
 class ApiKeyResponse(DashboardModel):
+    usage_group: Annotated[str, StringConstraints(strip_whitespace=True, max_length=128)] | None = None
     id: str
     name: str
     key_prefix: str

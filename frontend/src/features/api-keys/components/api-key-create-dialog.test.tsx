@@ -11,6 +11,17 @@ import { renderWithProviders } from "@/test/utils";
 import { ApiKeyCreateDialog } from "./api-key-create-dialog";
 
 describe("ApiKeyCreateDialog", () => {
+  it("assigns a usage group while creating a key", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    renderWithProviders(<ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    expect(screen.getByLabelText("Usage group")).toHaveValue("");
+    await user.type(screen.getByLabelText("Name"), "Team key");
+    await user.type(screen.getByLabelText("Usage group"), " Team A ");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ usageGroup: "Team A" })));
+  });
+
   it("labels the reasoning effort trigger with its field and state", () => {
     renderWithProviders(
       <ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={vi.fn()} />,

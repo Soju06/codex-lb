@@ -28,6 +28,7 @@ from app.modules.dashboard_auth.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
+from app.modules.key_dashboard.repository import KeyDashboardRepository
 from app.modules.key_dashboard.service import KeyDashboardService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.model_sources.repository import ModelSourcesRepository
@@ -297,7 +298,7 @@ def get_key_dashboard_context(
     session: AsyncSession = Depends(get_session),
 ) -> KeyDashboardContext:
     repository = RequestLogsRepository(session)
-    service = KeyDashboardService(repository)
+    service = KeyDashboardService(repository, KeyDashboardRepository(session))
     return KeyDashboardContext(session=session, repository=repository, service=service)
 
 

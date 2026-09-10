@@ -15,6 +15,7 @@ import type { RequestLogColumnWidths } from "@/features/dashboard/request-log-co
 import type { DashboardStat } from "@/features/dashboard/utils";
 import { getKeyDashboardData } from "@/features/key-dashboard/api";
 import { KeyProfileCard } from "@/features/key-dashboard/components/key-profile-card";
+import { KeyGroupPanel } from "@/features/key-dashboard/components/key-group-panel";
 import { KeyInstallPanel } from "@/features/key-dashboard/components/key-install-panel";
 import {
   toDashboardRequestLog,
@@ -58,6 +59,8 @@ export function KeyDashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [connectedKey, setConnectedKey] = useState("");
+  const [activeTab, setActiveTab] = useState("overview");
+  const [groupRefreshVersion, setGroupRefreshVersion] = useState(0);
 
   const connected = profile !== null && usage !== null && logs !== null;
   const requests = useMemo(
@@ -105,6 +108,7 @@ export function KeyDashboardPage() {
   const clearConnection = useCallback(() => {
     requestGenerationRef.current += 1;
     setConnectedKey("");
+    setActiveTab("overview");
     setInitialRememberedKey(null);
     forgetRememberedApiKey();
     setDraftKey("");
@@ -199,7 +203,9 @@ export function KeyDashboardPage() {
                 variant="outline"
                 size="sm"
                 disabled={isLoading}
-                onClick={() => handlePageChange(limit, offset)}
+                onClick={() => activeTab === "group"
+                  ? setGroupRefreshVersion((value) => value + 1)
+                  : handlePageChange(limit, offset)}
               >
                 {isLoading ? <Spinner size="sm" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
                 {t("keyDashboard.refresh")}
@@ -263,9 +269,9 @@ export function KeyDashboardPage() {
               <p className="mt-1 text-sm text-muted-foreground">{t("keyDashboard.description")}</p>
             </div>
             {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
-            <Tabs.Root defaultValue="overview" className="space-y-6">
+            <Tabs.Root value={activeTab} onValueChange={setActiveTab} className="space-y-6">
               <Tabs.List aria-label={t("keyDashboard.title")} className="flex gap-1 border-b">
-                {(["overview", "install"] as const).map((tab) => (
+                {(["overview", "group", "install"] as const).map((tab) => (
                   <Tabs.Trigger
                     key={tab}
                     value={tab}
@@ -303,6 +309,9 @@ export function KeyDashboardPage() {
                     />
                   )}
                 </section>
+              </Tabs.Content>
+              <Tabs.Content value="group" className="min-w-0 outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <KeyGroupPanel key={groupRefreshVersion} apiKey={connectedKey} onUnauthorized={handleInstallUnauthorized} />
               </Tabs.Content>
               <Tabs.Content value="install" className="outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <KeyInstallPanel apiKey={connectedKey} onUnauthorized={handleInstallUnauthorized} />

@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { get } from "@/lib/api-client";
 import {
+  KeyDashboardGroupSchema,
   KeyDashboardProfileSchema,
   KeyDashboardRequestLogsResponseSchema,
   KeyUsageSchema,
@@ -9,6 +10,10 @@ import {
   type KeyDashboardRequestLogsResponse,
   type KeyUsage,
 } from "@/features/key-dashboard/schemas";
+
+export function getKeyDashboardGroup(apiKey: string, signal: AbortSignal) {
+  return get("/api/key-dashboard/group", KeyDashboardGroupSchema, { ...keyRequestOptions(apiKey), signal });
+}
 
 export type InstallPlatform = "macos" | "linux" | "windows";
 

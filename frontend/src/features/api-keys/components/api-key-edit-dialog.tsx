@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -97,6 +98,7 @@ type ApiKeyEditDraft = {
   selectedReasoningEfforts: ReasoningEffortType[];
   clearSourceScope: boolean;
   usageSections: string;
+  usageGroup: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   applyToCodexModel: boolean;
@@ -115,6 +117,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
     clearSourceScope: false,
     usageSections: apiKey.usageSections,
+    usageGroup: apiKey.usageGroup ?? "",
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
     applyToCodexModel: apiKey.applyToCodexModel,
@@ -166,6 +169,8 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       (apiKey.sourceAssignmentScopeEnabled && draft.selectedSourceIds.length === 0 && draft.clearSourceScope);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
+      ...((draft.usageGroup.trim() || null) !== (apiKey.usageGroup ?? null)
+        ? { usageGroup: draft.usageGroup.trim() || null } : {}),
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
       applyToCodexModel: draft.applyToCodexModel,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
@@ -220,6 +225,21 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                 </FormItem>
               )}
             />
+
+            <div className="space-y-1">
+              <Label htmlFor="api-key-usage-group">{t("apiKeys.form.usageGroup")}</Label>
+              <Input
+                id="api-key-usage-group"
+                value={draft.usageGroup}
+                maxLength={128}
+                autoComplete="off"
+                aria-describedby="api-key-usage-group-help"
+                onChange={(event) => updateDraft({ usageGroup: event.target.value })}
+              />
+              <p id="api-key-usage-group-help" className="text-xs text-muted-foreground">
+                {t("apiKeys.form.usageGroupDescription")}
+              </p>
+            </div>
 
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.allowedModels")}</div>

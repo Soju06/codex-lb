@@ -45,6 +45,7 @@ export const ApiKeySchema = z.object({
   id: z.string(),
   name: z.string(),
   keyPrefix: z.string(),
+  usageGroup: z.string().nullable().optional(),
   allowedModels: z.array(z.string()).nullable(),
   applyToCodexModel: z.boolean().default(false),
   enforcedModel: z.string().nullable().default(null),
@@ -84,6 +85,7 @@ export const USAGE_SECTION_LABELS: Record<UsageSection, string> = {
 
 export const ApiKeyCreateRequestSchema = z.object({
   name: z.string().min(1).max(128),
+  usageGroup: z.string().trim().max(128).nullable().optional(),
   allowedModels: z.array(z.string()).optional(),
   applyToCodexModel: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
@@ -109,6 +111,7 @@ export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
 
 export const ApiKeyUpdateRequestSchema = z.object({
   name: z.string().min(1).max(128).optional(),
+  usageGroup: z.string().trim().max(128).nullable().optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
   applyToCodexModel: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),

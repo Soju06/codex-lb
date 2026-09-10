@@ -3581,6 +3581,10 @@ class DurableBridgeRepository:
                     HttpBridgeRetryCircuit.session_key_kind,
                     HttpBridgeRetryCircuit.session_key_hash,
                     HttpBridgeRetryCircuit.api_key_scope,
+                    HttpBridgeRetryCircuit.updated_at_epoch,
+                    HttpBridgeRetryCircuit.admission_generation,
+                    HttpBridgeRetryCircuit.consecutive_failures,
+                    HttpBridgeRetryCircuit.last_detail,
                 )
                 .where(stale_predicate)
                 .limit(batch_size)
@@ -3590,20 +3594,34 @@ class DurableBridgeRepository:
                 return deleted_count
             batch_deleted_count = 0
             async with sqlite_writer_section():
-                for session_key_kind, session_key_hash, api_key_scope in keys:
+                for (
+                    session_key_kind,
+                    session_key_hash,
+                    api_key_scope,
+                    updated_at_epoch,
+                    admission_generation,
+                    consecutive_failures,
+                    last_detail,
+                ) in keys:
                     deleted = await self._session.execute(
                         delete(HttpBridgeRetryCircuit)
                         .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
                         .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
                         .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
+                        .where(HttpBridgeRetryCircuit.updated_at_epoch == updated_at_epoch)
+                        .where(HttpBridgeRetryCircuit.admission_generation == admission_generation)
+                        .where(HttpBridgeRetryCircuit.consecutive_failures == consecutive_failures)
+                        .where(HttpBridgeRetryCircuit.last_detail.is_not_distinct_from(last_detail))
                         .where(stale_predicate)
                         .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )
                     batch_deleted_count += len(deleted.scalars().all())
                 await self._session.commit()
-            if batch_deleted_count == 0:
-                return deleted_count
             deleted_count += batch_deleted_count
+            if batch_deleted_count != len(keys):
+                # A changed row belongs to a later pass. Recapturing it here
+                # would let this pass delete the generation it just spared.
+                return deleted_count
 
     async def upsert_alias(
         self,

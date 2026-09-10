@@ -12,9 +12,9 @@
 ## 3. Verification
 
 - [x] 3.1 Run the frontend typecheck, lint, and model-sources component tests.
-- [x] 3.2 Run the dashboard browser-smoke suite (6 passed).
+- [x] 3.2 Run the dashboard browser-smoke suite (7 passed).
 - [x] 3.3 Validate the scoped OpenSpec change with strict validation.
-- [x] 3.4 Capture before/after browser measurements at 320x568 and 1440x900.
+- [x] 3.4 Capture before/after screenshots and browser measurements at 320x568 and 1440x900 (see evidence/README.md).
 
 ## 4. Follow-up (out of scope)
 

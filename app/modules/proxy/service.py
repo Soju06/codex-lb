@@ -772,7 +772,13 @@ from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
 from app.modules.proxy.selection_errors import selection_failure_response
-from app.modules.proxy.work_admission import WorkAdmissionController
+from app.modules.proxy.work_admission import (
+    ADMISSION_WAIT_TIMEOUT_SECONDS,
+    COMPACT_RESPONSE_CREATE_LIMIT,
+    TOKEN_REFRESH_LIMIT,
+    UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+    WorkAdmissionController,
+)
 
 
 def get_settings() -> _Settings:
@@ -795,21 +801,12 @@ _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 # error probe window. If a keepalive becomes the first yielded chunk, the HTTP
 # status is committed as 200 and startup ProxyResponseError handling is masked.
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
-_DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    settings = settings or get_settings()
-    raw_timeout = getattr(
-        settings,
-        "proxy_admission_wait_timeout_seconds",
-        _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS,
-    )
-    try:
-        timeout = float(raw_timeout)
-    except (TypeError, ValueError):
-        timeout = _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS
-    return max(0.001, timeout)
+def _proxy_admission_wait_timeout_seconds() -> float:
+    # Module-level indirection so the HTTP bridge helpers and tests share one
+    # patch point for the fixed admission wait.
+    return ADMISSION_WAIT_TIMEOUT_SECONDS
 
 
 # Maximum time (seconds) to wait for a prewarm upstream response before
@@ -972,13 +969,12 @@ class ProxyService(
 
     def _get_work_admission(self) -> WorkAdmissionController:
         if self._work_admission is None:
-            settings = get_settings()
             self._work_admission = WorkAdmissionController(
-                token_refresh_limit=settings.proxy_token_refresh_limit,
-                websocket_connect_limit=settings.proxy_upstream_websocket_connect_limit,
-                response_create_limit=settings.proxy_response_create_limit,
-                compact_response_create_limit=settings.proxy_compact_response_create_limit,
-                admission_wait_timeout_seconds=getattr(settings, "proxy_admission_wait_timeout_seconds", 10.0),
+                token_refresh_limit=TOKEN_REFRESH_LIMIT,
+                websocket_connect_limit=UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+                response_create_limit=get_settings().proxy_response_create_limit,
+                compact_response_create_limit=COMPACT_RESPONSE_CREATE_LIMIT,
+                admission_wait_timeout_seconds=_proxy_admission_wait_timeout_seconds(),
                 scheduler=self._scheduler,
             )
         return self._work_admission

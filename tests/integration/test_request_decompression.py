@@ -7,7 +7,7 @@ import pytest
 import zstandard as zstd
 from httpx import ASGITransport, AsyncByteStream, AsyncClient
 
-from app.core.config.settings import get_settings
+import app.core.middleware.request_body_limit as request_body_limit_module
 
 pytestmark = pytest.mark.integration
 
@@ -30,8 +30,7 @@ async def test_zstd_request_decompression(async_client, monkeypatch):
     body = json.dumps(payload).encode("utf-8")
 
     compressed = zstd.ZstdCompressor().compress(body)
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", str(max(len(body), len(compressed)) + 8))
-    get_settings.cache_clear()
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", max(len(body), len(compressed)) + 8)
 
     response = await async_client.put(
         "/api/settings",
@@ -53,8 +52,7 @@ async def test_zstd_request_decompression_rejects_large_payload(async_client, mo
     }
     body = json.dumps(payload).encode("utf-8")
 
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
-    get_settings.cache_clear()
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 128)
 
     compressed = zstd.ZstdCompressor().compress(body)
     response = await async_client.put(
@@ -69,8 +67,7 @@ async def test_zstd_request_decompression_rejects_large_payload(async_client, mo
 
 @pytest.mark.asyncio
 async def test_uncompressed_chunked_typed_body_is_bounded(async_client, monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
-    get_settings.cache_clear()
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 128)
     body = json.dumps(
         {
             "stickyThreadsEnabled": True,
@@ -94,8 +91,7 @@ async def test_uncompressed_chunked_typed_body_is_bounded(async_client, monkeypa
 
 @pytest.mark.asyncio
 async def test_proxy_raw_overflow_uses_openai_envelope_before_auth(async_client, monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "32")
-    get_settings.cache_clear()
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 32)
 
     response = await async_client.post(
         "/v1/chat/completions",
@@ -115,8 +111,7 @@ async def test_proxy_raw_overflow_uses_openai_envelope_before_auth(async_client,
 
 @pytest.mark.asyncio
 async def test_proxy_malformed_compression_uses_openai_envelope(async_client, monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
-    get_settings.cache_clear()
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 128)
 
     response = await async_client.post(
         "/v1/chat/completions",
@@ -134,9 +129,8 @@ async def test_proxy_malformed_compression_uses_openai_envelope(async_client, mo
 
 @pytest.mark.asyncio
 async def test_trailing_slash_responses_route_bounds_chunked_body_without_redirect(async_client, monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "8")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "32")
-    get_settings.cache_clear()
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 8)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 32)
 
     response = await async_client.post(
         "/v1/responses/",
@@ -152,9 +146,8 @@ async def test_trailing_slash_responses_route_bounds_chunked_body_without_redire
 
 @pytest.mark.asyncio
 async def test_aliased_responses_budget_preserves_real_proxy_authorization(app_instance, monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "8")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "256")
-    get_settings.cache_clear()
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 8)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 256)
     body = json.dumps(
         {
             "model": "gpt-5.1",

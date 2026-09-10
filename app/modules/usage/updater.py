@@ -20,11 +20,11 @@ from app.core.balancer import (
     plausible_rate_limit_reset_at,
 )
 from app.core.clients.usage import UsageFetchError, fetch_usage
-from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import ACCOUNT_PLAN_TYPES, coerce_account_plan_type, normalize_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload, UsageWindow
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.utils.request_id import get_request_id
 from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.time import utcnow
@@ -157,6 +157,9 @@ _usage_refresh_auth_cooldowns: dict[str, float] = {}
 # window collapses a 429 storm into a single call. Deliberately a constant
 # rather than a CODEX_LB_* setting (PRINCIPLES.md P2).
 _REQUEST_REFRESH_DEBOUNCE_SECONDS: Final[float] = 15.0
+# Accounts whose usage fetch failed with an ambiguous 401/403 are skipped for
+# this long before the next attempt (fixed; issue #1340 / PRINCIPLES.md P2).
+_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS = 300.0
 _usage_request_refresh_deadlines: dict[str, float] = {}
 
 # Fallback for consecutive workspace-less "free" observations (issue #1456) used
@@ -301,15 +304,12 @@ class UsageUpdater:
         ``not own_singleflight_sessions`` so existing callers keep their
         semantics.
         """
-        settings = get_settings()
-        if not settings.usage_refresh_enabled:
-            return False
         if join_existing is None:
             join_existing = not own_singleflight_sessions
 
         refreshed = False
         now = utcnow()
-        interval = settings.usage_refresh_interval_seconds
+        interval = USAGE_REFRESH_INTERVAL_SECONDS
         _prune_usage_refresh_auth_cooldowns()
         for account in accounts:
             if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -401,28 +401,19 @@ class UsageUpdater:
         self,
         account: Account,
         *,
-        ignore_refresh_disabled: bool = False,
         access_token_override: str | None = None,
     ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
-        result = await self.force_refresh_result(
-            account,
-            ignore_refresh_disabled=ignore_refresh_disabled,
-            access_token_override=access_token_override,
-        )
+        result = await self.force_refresh_result(account, access_token_override=access_token_override)
         return result.usage_written
 
     async def force_refresh_result(
         self,
         account: Account,
         *,
-        ignore_refresh_disabled: bool = False,
         access_token_override: str | None = None,
     ) -> AccountRefreshResult:
         """Refresh one account and expose whether the upstream fetch completed."""
-        settings = get_settings()
-        if not settings.usage_refresh_enabled and not ignore_refresh_disabled:
-            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         try:
@@ -459,10 +450,10 @@ class UsageUpdater:
         bypasses freshness, and joins an in-flight refresh of the account on
         either singleflight lane (the scheduler's caller-session key or the
         owned-session key) instead of fetching again. Repeats within
-        ``_REQUEST_REFRESH_DEBOUNCE_SECONDS`` are dropped, as are disabled
-        refresh and accounts in auth cooldown.
+        ``_REQUEST_REFRESH_DEBOUNCE_SECONDS`` are dropped, as are accounts in
+        auth cooldown.
         """
-        if not get_settings().usage_refresh_enabled or _is_usage_refresh_in_cooldown(account_id):
+        if _is_usage_refresh_in_cooldown(account_id):
             return None
         now = time.monotonic()
         deadline = _usage_request_refresh_deadlines.get(account_id)
@@ -1462,7 +1453,7 @@ async def _resolve_upstream_route_for_account(account: Account, *, operation: st
 def _mark_usage_refresh_auth_cooldown(account_id: str, status_code: int) -> None:
     if status_code not in {401, 403}:
         return
-    cooldown_seconds = max(0.0, float(get_settings().usage_refresh_auth_failure_cooldown_seconds))
+    cooldown_seconds = _USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS
     if cooldown_seconds <= 0:
         return
     _usage_refresh_auth_cooldowns[account_id] = time.monotonic() + cooldown_seconds

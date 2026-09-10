@@ -201,6 +201,13 @@ async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
     blocked_archive_payload = blocked_archive_records.json()
     assert blocked_archive_payload["error"]["code"] == "admin_access_required"
     assert not {"records", "payload", "headers"} & blocked_archive_payload.keys()
+    # M5 conversation archive: a guest may read the settings page (and the
+    # effective toggle) but not the filesystem path of this replica's shard.
+    guest_settings = await client.get("/api/settings")
+    assert guest_settings.status_code == 200
+    guest_payload = guest_settings.json()
+    assert guest_payload["conversationArchiveDir"] is None
+    assert guest_payload["conversationArchiveEnabled"] is False
 
 
 @pytest.mark.asyncio

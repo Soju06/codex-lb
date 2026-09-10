@@ -16,7 +16,9 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import func, select, update
 
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, QuotaPlannerDecision, RequestLog
@@ -29,6 +31,7 @@ from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.quota_planner.scheduler import QuotaPlannerScheduler
 from app.modules.quota_planner.warmup import QuotaWarmupService, WarmupUsage, _warmup_request_id
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.settings.repository import SettingsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -352,6 +355,79 @@ async def test_warm_now_claim_ttl_covers_stream_budget(monkeypatch, db_setup):
         assert result.status == "executed"
     finally:
         settings.http_responses_stream_request_budget_seconds = original_budget
+
+
+@pytest.mark.asyncio
+async def test_warm_now_claim_ttl_honours_dashboard_stream_budget_over_environment(monkeypatch, db_setup):
+    """M1: a dashboard stream budget (3000 s) sets the claim lease, not the 7200 s environment value.
+
+    ``warm_now`` resolves the effective budget from the dashboard snapshot the
+    scheduler tick (or, here, the call itself) holds, so the operator's change
+    applies to the next probe without a restart.
+    """
+    del db_setup
+    await _seed_planner(_account("acc-dashboard-ttl"), max_warmups_per_day=5)
+    assert get_settings().http_responses_stream_request_budget_seconds == 7200.0
+    async with SessionLocal() as session:
+        row = await SettingsRepository(session).get_or_create()
+        row.http_responses_stream_request_budget_seconds = 3000.0
+        await session.commit()
+    await get_settings_cache().invalidate(propagate=False)
+    decision_id: str | None = None
+
+    async def fake_send(self, *, account, model, request_id):
+        del self, account, model, request_id
+        assert decision_id is not None
+        async with SessionLocal() as verification_session:
+            claimed = await verification_session.get(QuotaPlannerDecision, decision_id)
+            assert claimed is not None
+            assert claimed.executed_at is not None
+            assert claimed.lease_expires_at is not None
+            ttl_seconds = (claimed.lease_expires_at - claimed.executed_at).total_seconds()
+            # The dashboard value, not the 7200 s environment value and not the 300 s floor.
+            assert 2999.0 <= ttl_seconds <= 3001.0
+        # The probe itself runs under the same effective budget the lease floors
+        # at, so a healthy probe provably outlives its claim.
+        assert with_dashboard_overrides(get_settings()).http_responses_stream_request_budget_seconds == 3000.0
+        return WarmupUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+    async def noop_record_effect(self, account, model, *, source, confidence):
+        del self, account, model, source, confidence
+
+    monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+    monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+
+    try:
+        async with SessionLocal() as session:
+            repo = QuotaPlannerRepository(session)
+            await repo.add_window_observation(
+                account_id="acc-dashboard-ttl",
+                model="gpt-5.4-mini",
+                source="warmup_probe",
+                confidence="observed",
+            )
+            decision = await repo.log_decision(
+                mode="auto",
+                action="warmup",
+                idempotency_key="dashboard-ttl",
+                account_id="acc-dashboard-ttl",
+                status="planned",
+            )
+            decision_id = decision.id
+            result = await QuotaWarmupService(session).warm_now(
+                account_id="acc-dashboard-ttl",
+                model="gpt-5.4-mini",
+                force_probe=True,
+                decision_id=decision.id,
+            )
+        assert result.status == "executed"
+    finally:
+        # The process-wide SettingsCache outlives the per-test database.
+        async with SessionLocal() as session:
+            row = await SettingsRepository(session).get_or_create()
+            row.http_responses_stream_request_budget_seconds = None
+            await session.commit()
+        await get_settings_cache().invalidate(propagate=False)
 
 
 @pytest.mark.asyncio

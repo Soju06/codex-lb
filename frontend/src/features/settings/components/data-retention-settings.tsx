@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { InheritBadge } from "@/features/settings/components/inherit-badge";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 
@@ -77,8 +78,6 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
     void onSave(buildSettingsUpdateRequest(settings, patch));
   };
 
-  const showRequestLogInheritedHint = requestLogDays.trim() === "";
-  const showUsageHistoryInheritedHint = usageHistoryDays.trim() === "";
   const showRequestLogDisabledInfo = settings.requestLogRetentionDays === 0;
 
   return (
@@ -132,14 +131,16 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
 
         <div className="divide-y rounded-lg border">
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
+            <div className="space-y-1">
               <p className="text-sm font-medium">{t("settings.retention.requestLogs.label")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.retention.requestLogs.description")}</p>
-              {showRequestLogInheritedHint ? (
-                <p className="text-xs text-muted-foreground">
-                  {t("settings.retention.inheritedHint", { value: settings.requestLogRetentionDays })}
-                </p>
-              ) : null}
+              <InheritBadge
+                settings={settings}
+                name="request_log_retention_days"
+                field="requestLogRetentionOverrideDays"
+                busy={busy}
+                onSave={onSave}
+              />
             </div>
             <div className="flex items-center gap-2">
               <Input
@@ -159,14 +160,16 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
             </div>
           </div>
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
+            <div className="space-y-1">
               <p className="text-sm font-medium">{t("settings.retention.usageHistory.label")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.retention.usageHistory.description")}</p>
-              {showUsageHistoryInheritedHint ? (
-                <p className="text-xs text-muted-foreground">
-                  {t("settings.retention.inheritedHint", { value: settings.usageHistoryRetentionDays })}
-                </p>
-              ) : null}
+              <InheritBadge
+                settings={settings}
+                name="usage_history_retention_days"
+                field="usageHistoryRetentionOverrideDays"
+                busy={busy}
+                onSave={onSave}
+              />
             </div>
             <div className="flex items-center gap-2">
               <Input

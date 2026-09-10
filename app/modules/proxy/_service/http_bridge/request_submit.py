@@ -77,6 +77,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy._service.http_bridge.accepted_replay import (
     _claim_websocket_replay_create_gate,
     _http_bridge_accepted_replay_may_exclude_account,
@@ -674,21 +675,7 @@ class _HTTPBridgeRequestSubmitMixin:
 
     @staticmethod
     def _http_bridge_clean_close_retry_jitter_seconds() -> float:
-        settings = _service_get_settings()
-        maximum = max(
-            0.0,
-            min(
-                30.0,
-                float(
-                    getattr(
-                        settings,
-                        "http_responses_session_bridge_clean_close_retry_jitter_max_seconds",
-                        _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS,
-                    )
-                ),
-            ),
-        )
-        return random.uniform(0.0, maximum) if maximum > 0 else 0.0
+        return random.uniform(0.0, _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS)
 
     def _prepare_http_bridge_request(
         self: Any,
@@ -937,8 +924,6 @@ class _HTTPBridgeRequestSubmitMixin:
         allowing the upstream to hang.
         """
         settings = _service_get_settings()
-        if not settings.image_inline_fetch_enabled:
-            return text_data
         # Quick string-level pre-check: skip the parse/fetch cycle when the
         # payload contains no ``input_image`` items with an ``http`` URL.
         if "input_image" not in text_data:
@@ -1342,14 +1327,10 @@ class _HTTPBridgeRequestSubmitMixin:
         # Apply and size-check it before recording the operation so a local
         # payload-too-large rejection cannot leave a submitted retry fence.
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
-        operation_ledger_enabled = bool(
-            getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
-        )
         operation_ledger_for_hard_continuity = _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
         record_operation = getattr(self._durable_bridge, "record_operation", None)
         if (
-            operation_ledger_enabled
-            and callable(record_operation)
+            callable(record_operation)
             and (
                 request_state.previous_response_id is not None
                 or operation_ledger_for_hard_continuity
@@ -2565,6 +2546,15 @@ class _HTTPBridgeRequestSubmitMixin:
         if not session.codex_session or session.prewarmed or request_state.previous_response_id is not None:
             request_state.prewarm_status = request_state.prewarm_status or "not_applicable"
             return
+        # M3 codex prewarm: the switch is dashboard-managed, and it reaches this
+        # path through the request-bound overlay already applied by
+        # ``_service_get_settings()`` above (the field is in
+        # ``DASHBOARD_OVERRIDE_SETTINGS``, and the entry-point middleware bound
+        # the snapshot once for this request). Resolving it is therefore a plain
+        # memory read that adds neither a settings read nor an ``await`` -- here
+        # or, more importantly, under ``prewarm_lock`` below, where a cache
+        # refresh could run a DB query and suspend (issues #1971 and #1972
+        # wedged every keyed submit on exactly that pattern).
         if not _http_bridge_prewarm_enabled(settings):
             request_state.prewarm_status = "not_applicable"
             return
@@ -3233,9 +3223,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 poison_episode, poison_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=consecutive_failures,
-                    configured_threshold=(
-                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                    ),
                 )
                 if poison_episode is None:
                     return
@@ -3323,9 +3310,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         now: float,
     ) -> _HTTPBridgeStaleGateSnapshot:
-        threshold_seconds = float(
-            getattr(_service_get_settings(), "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
-        )
+        threshold_seconds = float(_http_bridge_helpers.HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS)
         async with session.pending_lock:
             pending_states = list(session.pending_requests)
             stale_request_states, should_retire = self._classify_http_bridge_stale_gate_holders(
@@ -3620,9 +3605,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 poison_episode, poison_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=consecutive_failures,
-                    configured_threshold=(
-                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                    ),
                 )
             if poison_detail is not None and poison_episode is not None:
                 # Consecutive eventless failures on one bridge key are

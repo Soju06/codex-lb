@@ -932,6 +932,11 @@ class DashboardSettings(Base):
     proxy_downstream_websocket_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     sse_keepalive_interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     # end C2-1 timeouts
+    # M1 stream/bridge budgets: dashboard-managed Responses stream and HTTP
+    # session bridge request budgets. NULL = inherit the ``Settings`` field.
+    http_responses_stream_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    http_responses_session_bridge_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end M1 stream/bridge budgets
     # C2-2 routing/overload: dashboard-managed routing weights and overload
     # isolation. NULL inherits the process environment value (or the code
     # default) at read time; a non-NULL value wins over the environment.
@@ -1061,6 +1066,11 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
+    # M3 codex prewarm: dashboard-managed Codex HTTP-bridge session prewarm.
+    # NULL inherits the deprecated ``CODEX_LB_*`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    http_responses_session_bridge_codex_prewarm_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M3 codex prewarm
     upstream_proxy_routing_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1188,6 +1198,17 @@ class DashboardSettings(Base):
     soft_drain_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     deterministic_failover_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     circuit_breaker_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # M2 background jobs: NULL inherits the deprecated ``CODEX_LB_*`` env alias
+    # (then the code default); schedulers read the value at every cycle entry.
+    auth_guardian_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    automations_scheduler_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    rate_limit_reset_credits_refresh_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M2 background jobs
+    # M5 conversation archive: NULL inherits the deprecated
+    # ``CODEX_LB_CONVERSATION_ARCHIVE_ENABLED`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    conversation_archive_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M5 conversation archive
     version: Mapped[int] = mapped_column(
         Integer,
         default=1,
@@ -1203,6 +1224,31 @@ class DashboardSettings(Base):
     )
 
     __mapper_args__ = {"version_id_col": version}
+
+
+# M4 model catalogue: dashboard-managed per-model context window overrides.
+class ModelContextWindowOverride(Base):
+    """One dashboard-stored context window override for a model slug.
+
+    A row wins over the ``CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES`` entry for
+    the same slug; slugs without a row inherit the environment entry (or have
+    no override). The migration never copies the environment into rows.
+    """
+
+    __tablename__ = "model_context_window_overrides"
+
+    slug: Mapped[str] = mapped_column(String, primary_key=True)
+    context_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+# end M4 model catalogue
 
 
 class RuntimeSentinel(Base):
@@ -1671,6 +1717,12 @@ class AutomationRun(Base):
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    # Compact request budget (seconds) in effect when this row was last
+    # claimed; the stale-claim reclaim window covers the larger of this value
+    # and the current budget so a later dashboard change cannot reclaim an
+    # in-flight run early. NULL on rows claimed before the column existed
+    # (they use the current budget).
+    claim_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="runs")

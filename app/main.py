@@ -510,9 +510,7 @@ async def lifespan(app: FastAPI):
     if bridge_durable_schema_ready is True:
         startup_module.mark_bridge_durable_schema_ready()
         dashboard_settings = await get_settings_cache().get()
-        ownerless_cutoff = utcnow() - timedelta(
-            seconds=_abandoned_bridge_retention_seconds(dashboard_settings, settings)
-        )
+        ownerless_cutoff = utcnow() - timedelta(seconds=_abandoned_bridge_retention_seconds(dashboard_settings))
         deleted_bridge_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_owned_sessions_on_startup(
             instance_id=settings.http_responses_session_bridge_instance_id,
             owner_process_epoch=http_bridge_owner_process_epoch(),
@@ -548,6 +546,7 @@ async def lifespan(app: FastAPI):
         get_cache_invalidation_poller,
         set_cache_invalidation_poller,
     )
+    from app.core.config.context_window_overrides import get_model_context_window_overrides_cache
     from app.core.middleware.firewall_cache import get_firewall_ip_cache
     from app.core.upstream_proxy.cache import get_upstream_route_cache
     from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
@@ -573,25 +572,36 @@ async def lifespan(app: FastAPI):
         NAMESPACE_SETTINGS,
         lambda: get_settings_cache().invalidate(propagate=False),
     )
+    # Then pull the new row in. Readers that cannot await the cache (the
+    # conversation archive gate runs per archived frame) would otherwise keep
+    # the pre-change snapshot on a replica that is only carrying already-open
+    # streams; the invalidate above already expired it, so a failed refresh
+    # degrades to the ordinary TTL reload instead of serving a stale value.
+    cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_settings_cache().refresh)
     cache_poller.on_invalidation(NAMESPACE_UPSTREAM_ROUTE, get_upstream_route_cache().clear)
     # The route resolver also reads the dashboard settings row (routing enabled
     # + default pool id), so settings bumps clear resolved routes as well.
     cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_upstream_route_cache().clear)
+    # M4 model catalogue: the per-model context window override rows are
+    # invalidated through the settings namespace as well.
+    cache_poller.on_invalidation(
+        NAMESPACE_SETTINGS,
+        lambda: get_model_context_window_overrides_cache().invalidate(propagate=False),
+    )
     # The bus carries no payload, so a peer redeem clears this replica's whole
     # reset-credits store; the refresh scheduler repopulates it on its next tick.
     cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
-    if settings.model_registry_enabled:
-        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
+    from app.core.openai.model_registry_store import reconcile_model_registry_from_store
 
-        # raise_on_error=True so a transient load failure leaves the
-        # model_registry version unacknowledged and is retried on the next poll
-        # cycle (matching the account_routing refresh callback) instead of being
-        # swallowed, which would strand this replica on the stale catalog until
-        # the non-leader scheduler backstop.
-        cache_poller.on_invalidation(
-            NAMESPACE_MODEL_REGISTRY,
-            lambda: reconcile_model_registry_from_store(raise_on_error=True),
-        )
+    # raise_on_error=True so a transient load failure leaves the
+    # model_registry version unacknowledged and is retried on the next poll
+    # cycle (matching the account_routing refresh callback) instead of being
+    # swallowed, which would strand this replica on the stale catalog until
+    # the non-leader scheduler backstop.
+    cache_poller.on_invalidation(
+        NAMESPACE_MODEL_REGISTRY,
+        lambda: reconcile_model_registry_from_store(raise_on_error=True),
+    )
     set_cache_invalidation_poller(cache_poller)
 
     # Seed the invalidation version baseline BEFORE loading the routing snapshot
@@ -622,13 +632,10 @@ async def lifespan(app: FastAPI):
         # account_routing bump retries the refresh via the poller callback.
         logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
 
-    if settings.model_registry_enabled:
-        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
-
-        # Warm the in-memory registry from the persisted snapshot before any
-        # scheduler starts so a restarted replica serves the refreshed catalog
-        # instead of the bootstrap floor. Never fails startup.
-        await reconcile_model_registry_from_store()
+    # Warm the in-memory registry from the persisted snapshot before any
+    # scheduler starts so a restarted replica serves the refreshed catalog
+    # instead of the bootstrap floor. Never fails startup.
+    await reconcile_model_registry_from_store()
 
     await cache_poller.start()
 

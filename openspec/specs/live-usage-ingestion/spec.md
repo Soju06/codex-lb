@@ -1,7 +1,7 @@
 # live-usage-ingestion Specification
 
 ## Purpose
-TBD - created by archiving change live-rate-limit-ingestion. Update Purpose after archive.
+Governs the passive usage source that reads rate-limit headers and `codex.rate_limits` stream events from proxied traffic. Polling upstream usage alone leaves selection state up to a refresh interval behind real usage, so bursty traffic could exhaust a window before the poller noticed. This capability turns every proxied turn into a usage snapshot while guaranteeing that ingestion never impairs the serving path, is throttled per account, can be switched off, and has an instance-scoped lifecycle.
 ## Requirements
 ### Requirement: Proxied responses feed passive usage snapshots
 
@@ -50,21 +50,6 @@ Live snapshot writes SHALL be throttled per account by a change fingerprint and 
 
 - **WHEN** a snapshot's used percentage or reset timestamp differs from the last persisted values
 - **THEN** the write is not deferred by the unchanged-write interval
-
-### Requirement: Live ingestion is decoupled and switchable
-
-The core client layer SHALL publish snapshots through a hub that no-ops until the module layer registers an ingestor at startup. Ingestion SHALL be enabled by default and disableable via `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED`.
-
-#### Scenario: Kill switch disables ingestion
-
-- **WHEN** `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` is false
-- **THEN** proxied responses do not produce usage writes
-- **AND** the background poller remains the only usage source
-
-#### Scenario: Unregistered hub is inert
-
-- **WHEN** snapshots are published before an ingestor is registered
-- **THEN** they are discarded without error
 
 ### Requirement: Captured live snapshots survive account consolidation
 
@@ -229,4 +214,19 @@ leave it registered-less while it still runs.
   restoration tracking before its shutdown started)
 - **WHEN** the current registration stops concurrently
 - **THEN** A is never restored, even if its consumer task has not yet finished
+
+### Requirement: Live ingestion is decoupled and always on
+
+The core client layer SHALL publish snapshots through a hub that no-ops until the module layer registers an ingestor at startup. The module layer SHALL register the ingestor unconditionally at startup; there is no operator switch for live ingestion, and `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` is a removed setting that startup reports and ignores.
+
+#### Scenario: Removed kill switch is ignored
+
+- **WHEN** the process starts with `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED=false`
+- **THEN** the ingestor is still registered and proxied responses produce usage writes
+- **AND** startup logs the removed-setting warning once
+
+#### Scenario: Unregistered hub is inert
+
+- **WHEN** snapshots are published before an ingestor is registered
+- **THEN** they are discarded without error
 

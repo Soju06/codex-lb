@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from unittest.mock import Mock
 
 import bcrypt
 import pytest
 
+from app.core.audit.service import AuditService
 from app.core.auth.dashboard_access import DashboardPermission, DashboardRole
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.modules.dashboard_auth.service import (
@@ -16,6 +18,23 @@ from app.modules.dashboard_auth.service import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _stub_audit_log(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    """Keep the login paths from scheduling real audit-log writes.
+
+    ``verify_password`` / ``verify_guest_password`` / ``verify_totp`` call
+    ``AuditService.log_async``, which is fire-and-forget: it spawns an
+    ``audit-log-login_*`` task that writes through the real database session.
+    These tests return synchronously right after the call, before the loop
+    ever steps that task, so it stays pending on the shared session loop and
+    trips later suites that assert the audit registry is empty
+    (tests/unit/test_otel.py lifespan drain test, issue #2209).
+    """
+    log_async = Mock()
+    monkeypatch.setattr(AuditService, "log_async", log_async)
+    return log_async
 
 
 @dataclass(slots=True)

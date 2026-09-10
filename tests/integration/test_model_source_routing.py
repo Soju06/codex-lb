@@ -2947,7 +2947,7 @@ async def test_v1_models_metadata_reflects_reasoning_optin(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_models_context_window_override_applies_to_source_model(async_client, monkeypatch):
+async def test_v1_models_context_window_override_applies_to_source_model(async_client):
     # Source-catalog models synthesize `max_context_window == context_window`
     # purely so Codex clients can parse the entry; that parseability default
     # must not clamp an operator raise override to the un-raised window.
@@ -2958,11 +2958,11 @@ async def test_v1_models_context_window_override_applies_to_source_model(async_c
         base_url="http://127.0.0.1:9/v1",
     )
 
-    from app.core.config.settings import get_settings
-    from app.modules.proxy import api as proxy_api_module
-
-    patched = get_settings().model_copy(update={"model_context_window_overrides": {"override-source-model": 32_768}})
-    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+    # M4 model catalogue: the override is a dashboard row (not an env monkeypatch).
+    seeded = await async_client.put(
+        "/api/settings/model-context-window-overrides/override-source-model", json={"contextWindow": 32_768}
+    )
+    assert seeded.status_code == 200, seeded.text
 
     response = await async_client.get("/v1/models")
     assert response.status_code == 200

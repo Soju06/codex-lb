@@ -46,6 +46,7 @@ print(json.dumps({
         "http_compact_sse_v1",
         "http_sse_v1",
         "http_responses_events_v1",
+        "http_responses_completion_v1",
         "websocket",
         "websocket_responses_events_v1",
         "websocket_send_ack",
@@ -960,7 +961,14 @@ async def test_native_sse_failure_releases_owned_stream(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "capability", ["http_sse_v1", "http_compact_sse_v1", "http_compact_collect_v1", "http_responses_events_v1"]
+    "capability",
+    [
+        "http_sse_v1",
+        "http_compact_sse_v1",
+        "http_compact_collect_v1",
+        "http_responses_events_v1",
+        "http_responses_completion_v1",
+    ],
 )
 async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path, capability: str) -> None:
     helper = tmp_path / "native-helper"
@@ -1293,12 +1301,35 @@ for line in sys.stdin:
             {"type": "end"},
         ],
         [{"type": "sse", "text": "data: {}\n\n", "more": False}],
+        *[
+            [
+                {
+                    "type": "responses_event",
+                    "text": "data: {}\n\n",
+                    "more": more,
+                    "event_type": kind,
+                    "python_normalization": False,
+                    "stream_complete": complete,
+                }
+            ]
+            for more, kind, complete in [
+                (False, "response.completed", None),
+                (False, "response.completed", 1),
+                (False, "response.completed", "true"),
+                (True, None, True),
+                (False, "response.output_text.delta", True),
+                (False, "error", True),
+            ]
+        ],
     ],
 )
 async def test_interpreted_sse_rejects_invalid_metadata_without_replay(
     tmp_path: Path, events: list[dict[str, object]]
 ) -> None:
     helper = tmp_path / "native-helper"
+    for event in events:
+        if event.get("type") == "responses_event":
+            event.setdefault("stream_complete", False)
     source = _sse_helper_source(events).replace('"interpret_responses": False', '"interpret_responses": True')
     _write_helper(helper, source)
     client = SubprocessNativeEgressClient(helper)

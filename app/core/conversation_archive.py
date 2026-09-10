@@ -14,9 +14,11 @@ import zlib
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
-from app.core.config.settings import get_settings
+from app.core.config.inheritable import resolve_inheritable
+from app.core.config.settings import Settings, get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.utils.request_id import get_request_id
 
 logger = logging.getLogger(__name__)
@@ -57,8 +59,48 @@ _ARCHIVE_DIR_MODE = 0o700
 _ARCHIVE_FILE_MODE = 0o600
 
 
+# M5 conversation archive: ``dashboard_settings`` column, ``Settings`` field and
+# provenance key share one name (configuration-tiers).
+CONVERSATION_ARCHIVE_SETTING = "conversation_archive_enabled"
+# Audit action written by the settings API whenever the effective toggle flips:
+# enabling turns the proxy into a full prompt/response recorder readable by the
+# same dashboard admin, so the on/off event carries the actor explicitly.
+CONVERSATION_ARCHIVE_TOGGLED_ACTION = "conversation_archive_toggled"
+# Hoisted out of the resolver: ``archive_enabled()`` runs once per archived
+# frame, and a ``model_fields`` lookup per call showed up in the gate's cost.
+_CONVERSATION_ARCHIVE_DEFAULT: Final[bool] = bool(Settings.model_fields[CONVERSATION_ARCHIVE_SETTING].default)
+
+
+def resolve_archive_enabled(dashboard_settings: object | None, startup_settings: object | None = None) -> bool:
+    """Effective archive toggle: dashboard column, else the deprecated env alias, else off.
+
+    ``dashboard_settings`` is the cached ``DashboardSettings`` row (``None``
+    before the settings cache loaded, or in tests); ``startup_settings``
+    defaults to the process ``Settings``. Missing attributes resolve to the
+    code default so partial fakes keep working.
+    """
+    environment = startup_settings if startup_settings is not None else get_settings()
+    return bool(
+        resolve_inheritable(
+            getattr(dashboard_settings, CONVERSATION_ARCHIVE_SETTING, None),
+            bool(getattr(environment, CONVERSATION_ARCHIVE_SETTING, _CONVERSATION_ARCHIVE_DEFAULT)),
+            _CONVERSATION_ARCHIVE_DEFAULT,
+        ).value
+    )
+
+
 def archive_enabled() -> bool:
-    return bool(getattr(get_settings(), "conversation_archive_enabled", False))
+    """Whether the writer records traffic, as of the last dashboard-settings snapshot.
+
+    Reads ``SettingsCache.cached_row()`` — never the database — so the twenty
+    ``archive_*`` call sites in the upstream clients stay synchronous and
+    lock-free; before the first cache load the environment alias applies, and
+    an invalidation never takes the gate back to that layer. Every replica
+    refreshes the snapshot off the cache-invalidation bus, so a dashboard
+    toggle reaches frames of already-open streams without a restart and
+    without a request having to arrive first.
+    """
+    return resolve_archive_enabled(get_settings_cache().cached_row())
 
 
 def archive_json(

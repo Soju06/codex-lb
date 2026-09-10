@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.config.settings import get_settings
 from app.modules.proxy._load_balancer.types import RuntimeState
 
 _BUCKET_SECONDS = 60
@@ -36,16 +35,15 @@ ERROR_RATE_WEIGHT_FLOOR = 0.05
 
 @dataclass(frozen=True, slots=True)
 class ErrorRateWeightingPolicy:
-    """Operator knob (``CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED``)."""
+    """Operator knob: the dashboard setting ``proxy_account_error_rate_weighting_enabled``
+    (environment fallback ``CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED``),
+    resolved by the caller into ``RoutingTunables`` and passed in -- this module
+    never reads settings itself (C2-2 routing/overload)."""
 
     enabled: bool = True
     window_seconds: float = ERROR_RATE_WINDOW_SECONDS
     min_samples: int = ERROR_RATE_MIN_SAMPLES
     weight_floor: float = ERROR_RATE_WEIGHT_FLOOR
-
-    @classmethod
-    def from_settings(cls) -> ErrorRateWeightingPolicy:
-        return cls(enabled=bool(get_settings().proxy_account_error_rate_weighting_enabled))
 
 
 def _bucket(now: float) -> int:
@@ -75,7 +73,7 @@ def record_outcome_locked(
     """Record ``count`` outcomes at ``now``. Caller holds the per-account lock."""
     if count < 1:
         return
-    window = window_seconds if window_seconds is not None else ErrorRateWeightingPolicy.from_settings().window_seconds
+    window = window_seconds if window_seconds is not None else ERROR_RATE_WINDOW_SECONDS
     buckets = _prune_locked(runtime, now, window)
     entry = buckets.setdefault(_bucket(now), [0, 0])
     entry[0 if success else 1] += count
@@ -98,7 +96,7 @@ def error_rate_weight_multiplier(
     runtime: RuntimeState | None,
     now: float,
     *,
-    policy: ErrorRateWeightingPolicy | None = None,
+    policy: ErrorRateWeightingPolicy,
 ) -> float:
     """Draw-weight multiplier in ``[floor, 1.0]`` for the account's recent error rate.
 
@@ -106,7 +104,7 @@ def error_rate_weight_multiplier(
     ``min_samples`` outcomes, so a quiet or brand-new account is never
     penalized on thin evidence.
     """
-    effective = policy if policy is not None else ErrorRateWeightingPolicy.from_settings()
+    effective = policy
     if not effective.enabled:
         return 1.0
     successes, failures = recent_outcomes(runtime, now, window_seconds=effective.window_seconds)

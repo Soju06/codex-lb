@@ -41,11 +41,10 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture(autouse=True)
 async def _force_usage_weighted_routing(async_client) -> None:
-    current = await async_client.get("/api/settings")
-    assert current.status_code == 200
-    payload = current.json()
-    payload["routingStrategy"] = "usage_weighted"
-    response = await async_client.put("/api/settings", json=payload)
+    # Minimal patch on purpose: echoing the GET body back would store every
+    # inheritable effective value (account caps, timeouts) as an explicit
+    # dashboard value and override the Settings these tests monkeypatch.
+    response = await async_client.put("/api/settings", json={"routingStrategy": "usage_weighted"})
     assert response.status_code == 200
 
 
@@ -2788,6 +2787,79 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_keepalive_interval_honours_dashboard_value_over_environment(async_client, monkeypatch):
+    """A dashboard ``sse_keepalive_interval_seconds`` (0.01 s) beats the 10 s environment value.
+
+    The dashboard value is stored through the settings API, read back through
+    the ``SettingsCache`` snapshot and bound the way ``DashboardOverridesMiddleware``
+    binds it for a request; the keepalive injector then sees it through the
+    settings facade. Outside the binding the environment value applies and no
+    keepalive shows up within the same window.
+    """
+    from app.core.config.dashboard_overrides import dashboard_overrides_bound, with_dashboard_overrides
+    from app.core.config.settings import get_settings as get_environment_settings
+    from app.core.config.settings_cache import get_settings_cache
+
+    response = await async_client.put("/api/settings", json={"sseKeepaliveIntervalSeconds": 0.01})
+    assert response.status_code == 200
+    snapshot = await get_settings_cache().get()
+    assert snapshot.sse_keepalive_interval_seconds == 0.01
+
+    # Real startup settings (10 s keepalive) minus the HTTP bridge, which this
+    # fake service does not model; the facade overlay is what is under test.
+    base_settings = get_environment_settings().model_copy(update={"http_responses_session_bridge_enabled": False})
+    assert base_settings.sse_keepalive_interval_seconds == 10.0
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: with_dashboard_overrides(base_settings))
+    monkeypatch.setattr(
+        proxy_api_module.proxy_service_module, "get_settings", lambda: with_dashboard_overrides(base_settings)
+    )
+
+    class _FakeService:
+        async def rate_limit_headers(self):
+            return {}
+
+        async def stream_responses(self, *args, **kwargs):
+            del args, kwargs
+            _signal_propagated_capacity_startup_ready()
+            await asyncio.sleep(0.3)
+            yield _sse_event({"type": "response.completed", "response": {"id": "resp_dashboard_keepalive"}})
+
+    def _request() -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/backend-api/codex/responses",
+                "headers": [],
+                "client": ("203.0.113.7", 54321),
+            }
+        )
+
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    )
+    context = ProxyContext(service=cast(proxy_module.ProxyService, _FakeService()))
+
+    try:
+        with dashboard_overrides_bound(snapshot):
+            bound = await proxy_api_module._stream_responses(_request(), payload, context, api_key=None)
+            assert isinstance(bound, StreamingResponse)
+            first_chunk = await asyncio.wait_for(bound.body_iterator.__aiter__().__anext__(), timeout=0.2)
+        assert first_chunk == SSE_KEEPALIVE_FRAME
+
+        unbound = await proxy_api_module._stream_responses(_request(), payload, context, api_key=None)
+        assert isinstance(unbound, StreamingResponse)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(unbound.body_iterator.__aiter__().__anext__(), timeout=0.15)
+    finally:
+        # The database is reset per test, but the process-wide SettingsCache is
+        # not: clear the dashboard value and drop the cached row so a following
+        # test cannot observe the 0.01 s keepalive within the cache TTL.
+        await async_client.put("/api/settings", json={"sseKeepaliveIntervalSeconds": None})
+        await get_settings_cache().invalidate(propagate=False)
+
+
+@pytest.mark.asyncio
 async def test_source_responses_stream_starts_sse_keepalive_before_first_upstream_event(monkeypatch):
     """Source-routed /v1/responses must keep SSE alive like account streams."""
     from app.db.models import ModelSource
@@ -3172,7 +3244,7 @@ async def test_wrap_source_responses_native_codex_preserves_codex_events_and_kee
             b'data: {"type":"response.completed","response":{"id":"resp_codex_src","output":[]}}\n\n'
         )
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0.01, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0.01)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
     monkeypatch.setattr(
         proxy_api_module,
@@ -3211,7 +3283,7 @@ async def test_wrap_source_responses_closes_source_on_early_error_and_client_clo
         finally:
             closed.append("source")
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3267,7 +3339,7 @@ async def test_wrap_source_responses_closes_raw_source_after_initial_heartbeat_d
         async def aclose(self) -> None:
             self.closed = True
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     raw_source = _RawSource()
@@ -3293,7 +3365,7 @@ async def test_source_stream_retry_control_block_keeps_truncation_failure(monkey
         yield b"retry: 1000\n\n"
         yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_ctrl"}}\n\n'
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3317,7 +3389,7 @@ async def test_source_stream_data_substring_in_field_value_keeps_truncation_fail
         yield b"id: data:1\n\n"
         yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_idfield"}}\n\n'
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3341,7 +3413,7 @@ async def test_source_stream_unicode_separator_in_field_value_keeps_truncation_f
         yield "id: metadata\u2028data:oops\n\n".encode("utf-8")
         yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_u2028"}}\n\n'
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3364,7 +3436,7 @@ async def test_source_stream_bare_data_field_suppresses_synthetic_terminal(monke
     async def bare_data_body():
         yield b"data\n\n"
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
@@ -3396,7 +3468,7 @@ async def test_wrap_source_responses_preserves_crlf_framing_of_unchanged_events(
             b'data: {"type":"response.completed","response":{"id":"resp_crlf_frame","output":[]}}\n\n'
         )
 
-    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [

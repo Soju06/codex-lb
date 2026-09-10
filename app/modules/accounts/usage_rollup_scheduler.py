@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.modules.accounts.usage_rollup import run_fold_pass
 from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
+from app.modules.reports.rollup import run_report_fold_pass
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,10 @@ class AccountUsageRollupScheduler:
                 await run_conversation_fold_pass()
             except Exception:
                 logger.exception("Conversation rollup fold pass failed")
+            try:
+                await run_report_fold_pass()
+            except Exception:
+                logger.exception("Report rollup fold pass failed")
 
 
 def build_account_usage_rollup_scheduler() -> AccountUsageRollupScheduler:

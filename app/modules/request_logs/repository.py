@@ -1180,9 +1180,9 @@ class RequestLogsRepository:
 
         Only rows in the un-folded live tail — strictly above the lifetime
         watermark (its fold interval is ``(start, end]``) AND at or above the
-        hourly watermark (half-open ``[start, end)``) — are rewritten:
+        hourly and report watermarks (half-open ``[start, end)``) — are rewritten:
         ``model`` is a rollup dimension and ``cost_usd`` a folded measure, so
-        mutating a row either rollup already captured would silently diverge
+        mutating a row any rollup already captured would silently diverge
         that rollup from raw (and the divergence becomes unrepairable once
         retention prunes the raw row).
         A matching row below the watermarks can only be a client-reused
@@ -1203,6 +1203,7 @@ class RequestLogsRepository:
                         select(
                             AccountUsageRollupState.folded_through,
                             AccountUsageRollupState.hourly_folded_through,
+                            AccountUsageRollupState.reports_folded_through,
                         ).where(AccountUsageRollupState.id == 1)
                     )
                 ).first()
@@ -1214,14 +1215,15 @@ class RequestLogsRepository:
                 stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
                 if watermarks is not None:
                     # A row is un-folded by EVERY rollup only when it clears
-                    # both bounds, each matching its fold's own interval
+                    # all bounds, each matching its fold's own interval
                     # convention: the lifetime fold is `(start, end]`
                     # (inclusive end — a row AT the watermark is folded), the
-                    # hourly fold is `[start, end)`.
-                    folded_through, hourly_folded_through = watermarks
+                    # hourly and report folds are `[start, end)`.
+                    folded_through, hourly_folded_through, reports_folded_through = watermarks
                     stmt = stmt.where(
                         RequestLog.requested_at > folded_through,
                         RequestLog.requested_at >= hourly_folded_through,
+                        RequestLog.requested_at >= reports_folded_through,
                     )
                 result_rows = await self._session.execute(stmt)
                 logs = list(result_rows.scalars())
@@ -1558,17 +1560,27 @@ class RequestLogsRepository:
     async def _distinct_skip_scan(
         self,
         column: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
-        conditions: list,
+        conditions: list[ColumnElement[bool]],
+        *,
+        prefix_conditions: tuple[ColumnElement[bool], ...] = (),
     ) -> list[str]:
         """Loose-index-scan emulation: seed min(column), then min(column) >
         previous, one btree probe per distinct value. NULLs never seed or
         chain (min() skips them); empty strings are preserved — the legacy
         DISTINCT path only drops falsy values per facet, in the callers."""
-        seed = select(func.min(column).label("val")).where(*conditions)
+        sqlite = self._session.get_bind().dialect.name == "sqlite"
+        # SQLite can choose the deleted_at index for MIN(facet), rescanning
+        # every live row per successor. Traverse the facet index first, then
+        # check visibility with an equality probe for each candidate value.
+        scan_conditions = prefix_conditions if sqlite else conditions
+        seed = select(func.min(column).label("val")).where(*scan_conditions)
         skip = seed.cte("facet_skip", recursive=True)
-        successor = select(func.min(column)).where(*conditions, column > skip.c.val).scalar_subquery()
+        successor = select(func.min(column)).where(*scan_conditions, column > skip.c.val).scalar_subquery()
         skip = skip.union_all(select(successor).where(skip.c.val.is_not(None)))
         stmt = select(skip.c.val).where(skip.c.val.is_not(None)).order_by(skip.c.val.asc())
+        if sqlite:
+            visible = select(RequestLog.id).where(*conditions, column == skip.c.val).correlate(skip).exists()
+            stmt = stmt.where(visible)
         rows = await self._session.execute(stmt)
         return [value for (value,) in rows.all() if value is not None]
 
@@ -1589,10 +1601,11 @@ class RequestLogsRepository:
             if not value:
                 # Legacy DISTINCT drops falsy leading values in Python.
                 continue
-            value_conditions = [*conditions, leading == value]
+            prefix = leading == value
+            value_conditions = [*conditions, prefix]
             null_probe = select(RequestLog.id).where(*value_conditions, second.is_(None)).limit(1)
             has_null = (await self._session.execute(null_probe)).scalar_one_or_none() is not None
-            second_values = await self._distinct_skip_scan(second, value_conditions)
+            second_values = await self._distinct_skip_scan(second, value_conditions, prefix_conditions=(prefix,))
             if has_null and nulls_first:
                 pairs.append((value, None))
             pairs.extend((value, second_value) for second_value in second_values)

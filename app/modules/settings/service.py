@@ -1,51 +1,31 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Any
 
+from app.core.config.background_jobs import BACKGROUND_JOB_SETTINGS
+from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
+
+# Re-exported: the resolver lives in ``app.core.config.inheritable`` so hot
+# paths in ``app.core`` share it without importing this module.
+from app.core.config.inheritable import InheritableValue as InheritableValue
+from app.core.config.inheritable import SettingScalar as SettingScalar
+from app.core.config.inheritable import SettingSource as SettingSource
+from app.core.config.inheritable import resolve_inheritable as resolve_inheritable
 from app.core.config.settings import Settings, get_settings
+from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING
+from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
     normalize_additional_quota_key,
 )
 
-type SettingSource = Literal["dashboard", "env", "default"]
-type SettingScalar = int | float | str | bool
-
-
-@dataclass(frozen=True, slots=True)
-class InheritableValue[T: SettingScalar]:
-    """Effective value of a dashboard-tier setting and where it came from.
-
-    ``source`` is ``"dashboard"`` when the dashboard column is non-NULL,
-    ``"env"`` when the column is NULL and the environment value differs from
-    the code default, and ``"default"`` otherwise. ``env_value`` is ``None``
-    for database-only settings that have no environment fallback.
-    """
-
-    value: T
-    source: SettingSource
-    env_value: T | None
-    default: T
-
-
-def resolve_inheritable[T: SettingScalar](
-    column_value: T | None, env_value: T | None, default: T
-) -> InheritableValue[T]:
-    """Resolve one inheritable setting as code default < environment < dashboard.
-
-    This is the only place that combines the three layers; call sites must not
-    re-implement the precedence (``configuration-tiers``).
-    """
-    if column_value is not None:
-        return InheritableValue(column_value, "dashboard", env_value, default)
-    if env_value is not None and env_value != default:
-        return InheritableValue(env_value, "env", env_value, default)
-    return InheritableValue(default, "default", env_value, default)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +42,14 @@ class DashboardSettingsData:
     proxy_account_stream_recovery_reserve_override: int | None
     proxy_api_key_fair_share_congestion_threshold_pct: int
     proxy_api_key_fair_share_congestion_threshold_pct_override: int | None
+    # C2-2 routing/overload: effective values; the dashboard-stored value and
+    # the fallbacks are reported through ``provenance``.
+    proxy_overload_isolation_seconds: int
+    proxy_account_error_rate_weighting_enabled: bool
+    proxy_account_inflight_penalty_pct: float
+    proxy_account_lease_token_weight: float
+    proxy_account_lease_ttl_seconds: float
+    # end C2-2 routing/overload
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -79,6 +67,10 @@ class DashboardSettingsData:
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
+    # M3 codex prewarm: effective value (dashboard column, else the deprecated
+    # env alias, else the code default); provenance carries the source.
+    http_responses_session_bridge_codex_prewarm_enabled: bool
+    # end M3 codex prewarm
     sticky_reallocation_budget_threshold_pct: float
     sticky_reallocation_primary_budget_threshold_pct: float
     sticky_reallocation_secondary_budget_threshold_pct: float
@@ -106,10 +98,41 @@ class DashboardSettingsData:
     usage_history_retention_days: int
     request_log_retention_override_days: int | None
     usage_history_retention_override_days: int | None
+    # C2-3 resilience toggles: effective values (dashboard column, else the
+    # deprecated env alias, else the code default); provenance carries the source.
+    soft_drain_enabled: bool
+    deterministic_failover_enabled: bool
+    circuit_breaker_enabled: bool
+    # M2 background jobs: effective values (dashboard column, else the deprecated
+    # env alias, else the code default); provenance carries the source. The
+    # guardian additionally reports whether the static topology blocks it.
+    auth_guardian_enabled: bool
+    auth_guardian_blocked_by_topology: bool
+    automations_scheduler_enabled: bool
+    rate_limit_reset_credits_refresh_enabled: bool
+    # end M2 background jobs
+    # M5 conversation archive: effective toggle; provenance carries the source.
+    conversation_archive_enabled: bool
+    # end M5 conversation archive
     version: int
+    # C2-1 timeouts: effective values (dashboard column, else environment,
+    # else code default); the column values are exposed through ``provenance``.
+    upstream_connect_timeout_seconds: float
+    proxy_request_budget_seconds: float
+    compact_request_budget_seconds: float
+    transcription_request_budget_seconds: float
+    stream_idle_timeout_seconds: float
+    proxy_downstream_websocket_idle_timeout_seconds: float
+    sse_keepalive_interval_seconds: float
+    # end C2-1 timeouts
+    # M1 stream/bridge budgets: effective values (dashboard column, else
+    # environment, else code default); provenance carries the source.
+    http_responses_stream_request_budget_seconds: float
+    http_responses_session_bridge_request_budget_seconds: float
+    # end M1 stream/bridge budgets
     # Effective value, source and fallbacks of every inheritable setting, keyed
     # by setting name; the settings API exposes it as ``provenance``.
-    provenance: Mapping[str, InheritableValue[int]] = field(default_factory=dict)
+    provenance: Mapping[str, InheritableValue[Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +149,18 @@ class DashboardSettingsUpdateData:
     clear_proxy_account_stream_recovery_reserve: bool
     proxy_api_key_fair_share_congestion_threshold_pct: int | None
     clear_proxy_api_key_fair_share_congestion_threshold_pct: bool
+    # C2-2 routing/overload (tri-state: value = store, clear flag = inherit)
+    proxy_overload_isolation_seconds: int | None
+    clear_proxy_overload_isolation_seconds: bool
+    proxy_account_error_rate_weighting_enabled: bool | None
+    clear_proxy_account_error_rate_weighting_enabled: bool
+    proxy_account_inflight_penalty_pct: float | None
+    clear_proxy_account_inflight_penalty_pct: bool
+    proxy_account_lease_token_weight: float | None
+    clear_proxy_account_lease_token_weight: bool
+    proxy_account_lease_ttl_seconds: float | None
+    clear_proxy_account_lease_ttl_seconds: bool
+    # end C2-2 routing/overload
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -174,6 +209,54 @@ class DashboardSettingsUpdateData:
     usage_history_retention_override_days: int | None
     clear_request_log_retention_override: bool
     clear_usage_history_retention_override: bool
+    # C2-3 resilience toggles: tri-state (value = store, clear flag = back to
+    # NULL so the env alias / default applies again, neither = untouched).
+    soft_drain_enabled: bool | None = None
+    clear_soft_drain_enabled: bool = False
+    deterministic_failover_enabled: bool | None = None
+    clear_deterministic_failover_enabled: bool = False
+    circuit_breaker_enabled: bool | None = None
+    clear_circuit_breaker_enabled: bool = False
+    # M2 background jobs: tri-state like the resilience toggles.
+    auth_guardian_enabled: bool | None = None
+    clear_auth_guardian_enabled: bool = False
+    automations_scheduler_enabled: bool | None = None
+    clear_automations_scheduler_enabled: bool = False
+    rate_limit_reset_credits_refresh_enabled: bool | None = None
+    clear_rate_limit_reset_credits_refresh_enabled: bool = False
+    # end M2 background jobs
+    # M5 conversation archive: tri-state like the resilience toggles.
+    conversation_archive_enabled: bool | None = None
+    clear_conversation_archive_enabled: bool = False
+    # end M5 conversation archive
+    # C2-1 timeouts (tri-state like the caps: value = store, clear = NULL,
+    # neither = untouched).
+    upstream_connect_timeout_seconds: float | None = None
+    clear_upstream_connect_timeout_seconds: bool = False
+    proxy_request_budget_seconds: float | None = None
+    clear_proxy_request_budget_seconds: bool = False
+    compact_request_budget_seconds: float | None = None
+    clear_compact_request_budget_seconds: bool = False
+    transcription_request_budget_seconds: float | None = None
+    clear_transcription_request_budget_seconds: bool = False
+    stream_idle_timeout_seconds: float | None = None
+    clear_stream_idle_timeout_seconds: bool = False
+    proxy_downstream_websocket_idle_timeout_seconds: float | None = None
+    clear_proxy_downstream_websocket_idle_timeout_seconds: bool = False
+    sse_keepalive_interval_seconds: float | None = None
+    clear_sse_keepalive_interval_seconds: bool = False
+    # end C2-1 timeouts
+    # M3 codex prewarm (tri-state: value = store, clear flag = back to NULL so
+    # the env alias / default applies again, neither = untouched).
+    http_responses_session_bridge_codex_prewarm_enabled: bool | None = None
+    clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False
+    # end M3 codex prewarm
+    # M1 stream/bridge budgets (tri-state like the C2-1 timeouts).
+    http_responses_stream_request_budget_seconds: float | None = None
+    clear_http_responses_stream_request_budget_seconds: bool = False
+    http_responses_session_bridge_request_budget_seconds: float | None = None
+    clear_http_responses_session_bridge_request_budget_seconds: bool = False
+    # end M1 stream/bridge budgets
 
 
 class SettingsService:
@@ -211,6 +294,18 @@ class SettingsService:
             clear_proxy_api_key_fair_share_congestion_threshold_pct=(
                 payload.clear_proxy_api_key_fair_share_congestion_threshold_pct
             ),
+            # C2-2 routing/overload
+            proxy_overload_isolation_seconds=payload.proxy_overload_isolation_seconds,
+            clear_proxy_overload_isolation_seconds=payload.clear_proxy_overload_isolation_seconds,
+            proxy_account_error_rate_weighting_enabled=payload.proxy_account_error_rate_weighting_enabled,
+            clear_proxy_account_error_rate_weighting_enabled=payload.clear_proxy_account_error_rate_weighting_enabled,
+            proxy_account_inflight_penalty_pct=payload.proxy_account_inflight_penalty_pct,
+            clear_proxy_account_inflight_penalty_pct=payload.clear_proxy_account_inflight_penalty_pct,
+            proxy_account_lease_token_weight=payload.proxy_account_lease_token_weight,
+            clear_proxy_account_lease_token_weight=payload.clear_proxy_account_lease_token_weight,
+            proxy_account_lease_ttl_seconds=payload.proxy_account_lease_ttl_seconds,
+            clear_proxy_account_lease_ttl_seconds=payload.clear_proxy_account_lease_ttl_seconds,
+            # end C2-2 routing/overload
             upstream_proxy_routing_enabled=payload.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
@@ -259,6 +354,63 @@ class SettingsService:
             usage_history_retention_days=payload.usage_history_retention_override_days,
             clear_request_log_retention=payload.clear_request_log_retention_override,
             clear_usage_history_retention=payload.clear_usage_history_retention_override,
+            # C2-3 resilience toggles
+            soft_drain_enabled=payload.soft_drain_enabled,
+            clear_soft_drain_enabled=payload.clear_soft_drain_enabled,
+            # M5 conversation archive
+            conversation_archive_enabled=payload.conversation_archive_enabled,
+            clear_conversation_archive_enabled=payload.clear_conversation_archive_enabled,
+            # end M5 conversation archive
+            deterministic_failover_enabled=payload.deterministic_failover_enabled,
+            clear_deterministic_failover_enabled=payload.clear_deterministic_failover_enabled,
+            circuit_breaker_enabled=payload.circuit_breaker_enabled,
+            clear_circuit_breaker_enabled=payload.clear_circuit_breaker_enabled,
+            # M2 background jobs
+            auth_guardian_enabled=payload.auth_guardian_enabled,
+            clear_auth_guardian_enabled=payload.clear_auth_guardian_enabled,
+            automations_scheduler_enabled=payload.automations_scheduler_enabled,
+            clear_automations_scheduler_enabled=payload.clear_automations_scheduler_enabled,
+            rate_limit_reset_credits_refresh_enabled=payload.rate_limit_reset_credits_refresh_enabled,
+            clear_rate_limit_reset_credits_refresh_enabled=payload.clear_rate_limit_reset_credits_refresh_enabled,
+            # end M2 background jobs
+            # C2-1 timeouts
+            upstream_connect_timeout_seconds=payload.upstream_connect_timeout_seconds,
+            clear_upstream_connect_timeout_seconds=payload.clear_upstream_connect_timeout_seconds,
+            proxy_request_budget_seconds=payload.proxy_request_budget_seconds,
+            clear_proxy_request_budget_seconds=payload.clear_proxy_request_budget_seconds,
+            compact_request_budget_seconds=payload.compact_request_budget_seconds,
+            clear_compact_request_budget_seconds=payload.clear_compact_request_budget_seconds,
+            transcription_request_budget_seconds=payload.transcription_request_budget_seconds,
+            clear_transcription_request_budget_seconds=payload.clear_transcription_request_budget_seconds,
+            stream_idle_timeout_seconds=payload.stream_idle_timeout_seconds,
+            clear_stream_idle_timeout_seconds=payload.clear_stream_idle_timeout_seconds,
+            proxy_downstream_websocket_idle_timeout_seconds=payload.proxy_downstream_websocket_idle_timeout_seconds,
+            clear_proxy_downstream_websocket_idle_timeout_seconds=(
+                payload.clear_proxy_downstream_websocket_idle_timeout_seconds
+            ),
+            sse_keepalive_interval_seconds=payload.sse_keepalive_interval_seconds,
+            clear_sse_keepalive_interval_seconds=payload.clear_sse_keepalive_interval_seconds,
+            # end C2-1 timeouts
+            # M3 codex prewarm
+            http_responses_session_bridge_codex_prewarm_enabled=(
+                payload.http_responses_session_bridge_codex_prewarm_enabled
+            ),
+            clear_http_responses_session_bridge_codex_prewarm_enabled=(
+                payload.clear_http_responses_session_bridge_codex_prewarm_enabled
+            ),
+            # end M3 codex prewarm
+            # M1 stream/bridge budgets
+            http_responses_stream_request_budget_seconds=payload.http_responses_stream_request_budget_seconds,
+            clear_http_responses_stream_request_budget_seconds=(
+                payload.clear_http_responses_stream_request_budget_seconds
+            ),
+            http_responses_session_bridge_request_budget_seconds=(
+                payload.http_responses_session_bridge_request_budget_seconds
+            ),
+            clear_http_responses_session_bridge_request_budget_seconds=(
+                payload.clear_http_responses_session_bridge_request_budget_seconds
+            ),
+            # end M1 stream/bridge budgets
         )
         return _settings_data(row)
 
@@ -272,28 +424,86 @@ _ENVIRONMENT_INHERITABLE_SETTINGS = (
     "proxy_account_stream_limit",
     "proxy_account_stream_recovery_reserve",
     "proxy_api_key_fair_share_congestion_threshold_pct",
+    *DASHBOARD_TIMEOUT_SETTINGS,  # C2-1 timeouts
+    # C2-2 routing/overload
+    "proxy_overload_isolation_seconds",
+    "proxy_account_error_rate_weighting_enabled",
+    "proxy_account_inflight_penalty_pct",
+    "proxy_account_lease_token_weight",
+    "proxy_account_lease_ttl_seconds",
+    # end C2-2 routing/overload
+    # M3 codex prewarm: bool; a NULL column inherits the deprecated env alias.
+    "http_responses_session_bridge_codex_prewarm_enabled",
+    # end M3 codex prewarm
+    CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive (bool, env alias)
 )
 # Retention has no environment fallback: NULL = never set from the dashboard =
 # disabled; 0 = explicitly disabled.
 _RETENTION_DISABLED_DAYS = 0
 
 
-def _resolve_environment_inheritable(row: DashboardSettings, name: str) -> InheritableValue[int]:
-    return resolve_inheritable(
-        getattr(row, name),
-        getattr(get_settings(), name),
-        Settings.model_fields[name].default,
-    )
+def _resolve_environment_inheritable(row: DashboardSettings, name: str) -> InheritableValue[Any]:
+    default = Settings.model_fields[name].default
+    # ``Settings`` always carries every field; startup-settings fakes in tests
+    # may carry only the fields they exercise, so fall back to the code default.
+    return resolve_inheritable(getattr(row, name), getattr(get_settings(), name, default), default)
 
 
-def _resolve_inheritable_settings(row: DashboardSettings) -> dict[str, InheritableValue[int]]:
-    resolved = {name: _resolve_environment_inheritable(row, name) for name in _ENVIRONMENT_INHERITABLE_SETTINGS}
+def _resolve_environment_toggle(row: DashboardSettings, name: str) -> InheritableValue[bool]:
+    # C2-3 resilience toggles: same precedence as the integer caps, typed bool.
+    default = bool(Settings.model_fields[name].default)
+    return resolve_inheritable(getattr(row, name), bool(getattr(get_settings(), name, default)), default)
+
+
+def _auth_guardian_blocked_by_topology() -> bool:
+    # M2 background jobs: read the two topology fields defensively, the way
+    # ``_resolve_environment_toggle`` reads its field, so a stub startup-settings
+    # object without them reads as "not blocked" instead of raising.
+    startup = get_settings()
+    ring = getattr(startup, "http_responses_session_bridge_instance_ring", ())
+    leader_election_enabled = bool(getattr(startup, "leader_election_enabled", True))
+    return len(ring) > 1 and not leader_election_enabled
+
+
+def warn_environment_shadowed_by_dashboard(row: DashboardSettings, settings: Settings | None = None) -> list[str]:
+    """Log one startup WARN naming env vars that are set but ignored because the dashboard owns the value.
+
+    Only settings whose environment variable is explicitly set (``model_fields_set``)
+    AND whose dashboard column is non-NULL are reported, so an operator who
+    edits the variable learns why nothing changed. Returns the names for tests.
+    """
+    environment = settings if settings is not None else get_settings()
+    shadowed = [
+        name
+        # M2 background jobs: their env aliases are shadowed the same way.
+        for name in (*_ENVIRONMENT_INHERITABLE_SETTINGS, *BACKGROUND_JOB_SETTINGS)
+        if name in environment.model_fields_set and getattr(row, name, None) is not None
+    ]
+    if shadowed:
+        logger.warning(
+            "environment value(s) ignored because the dashboard owns the setting: %s "
+            "(Settings -> Advanced; clear the dashboard value to inherit the environment again)",
+            ", ".join(f"CODEX_LB_{name.upper()}" for name in shadowed),
+        )
+    return shadowed
+
+
+def _resolve_inheritable_settings(
+    row: DashboardSettings,
+) -> dict[str, InheritableValue[Any]]:
+    resolved: dict[str, InheritableValue[Any]] = {
+        name: _resolve_environment_inheritable(row, name) for name in _ENVIRONMENT_INHERITABLE_SETTINGS
+    }
     resolved["request_log_retention_days"] = resolve_inheritable(
         row.request_log_retention_days, None, _RETENTION_DISABLED_DAYS
     )
     resolved["usage_history_retention_days"] = resolve_inheritable(
         row.usage_history_retention_days, None, _RETENTION_DISABLED_DAYS
     )
+    for name in RESILIENCE_TOGGLE_SETTINGS:  # C2-3 resilience toggles
+        resolved[name] = _resolve_environment_toggle(row, name)
+    for name in BACKGROUND_JOB_SETTINGS:  # M2 background jobs
+        resolved[name] = _resolve_environment_toggle(row, name)
     return resolved
 
 
@@ -316,6 +526,13 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         proxy_api_key_fair_share_congestion_threshold_pct_override=(
             row.proxy_api_key_fair_share_congestion_threshold_pct
         ),
+        # C2-2 routing/overload
+        proxy_overload_isolation_seconds=resolved["proxy_overload_isolation_seconds"].value,
+        proxy_account_error_rate_weighting_enabled=resolved["proxy_account_error_rate_weighting_enabled"].value,
+        proxy_account_inflight_penalty_pct=resolved["proxy_account_inflight_penalty_pct"].value,
+        proxy_account_lease_token_weight=resolved["proxy_account_lease_token_weight"].value,
+        proxy_account_lease_ttl_seconds=resolved["proxy_account_lease_ttl_seconds"].value,
+        # end C2-2 routing/overload
         upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
@@ -335,6 +552,11 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
             row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
         ),
         http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
+        # M3 codex prewarm
+        http_responses_session_bridge_codex_prewarm_enabled=bool(
+            resolved["http_responses_session_bridge_codex_prewarm_enabled"].value
+        ),
+        # end M3 codex prewarm
         sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
         sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
         sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
@@ -364,7 +586,39 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         usage_history_retention_days=resolved["usage_history_retention_days"].value,
         request_log_retention_override_days=row.request_log_retention_days,
         usage_history_retention_override_days=row.usage_history_retention_days,
+        # C2-3 resilience toggles
+        soft_drain_enabled=bool(resolved["soft_drain_enabled"].value),
+        deterministic_failover_enabled=bool(resolved["deterministic_failover_enabled"].value),
+        circuit_breaker_enabled=bool(resolved["circuit_breaker_enabled"].value),
+        # M2 background jobs
+        auth_guardian_enabled=bool(resolved["auth_guardian_enabled"].value),
+        auth_guardian_blocked_by_topology=_auth_guardian_blocked_by_topology(),
+        automations_scheduler_enabled=bool(resolved["automations_scheduler_enabled"].value),
+        rate_limit_reset_credits_refresh_enabled=bool(resolved["rate_limit_reset_credits_refresh_enabled"].value),
+        # end M2 background jobs
+        # M5 conversation archive
+        conversation_archive_enabled=bool(resolved[CONVERSATION_ARCHIVE_SETTING].value),
+        # end M5 conversation archive
         version=row.version,
+        # C2-1 timeouts
+        upstream_connect_timeout_seconds=float(resolved["upstream_connect_timeout_seconds"].value),
+        proxy_request_budget_seconds=float(resolved["proxy_request_budget_seconds"].value),
+        compact_request_budget_seconds=float(resolved["compact_request_budget_seconds"].value),
+        transcription_request_budget_seconds=float(resolved["transcription_request_budget_seconds"].value),
+        stream_idle_timeout_seconds=float(resolved["stream_idle_timeout_seconds"].value),
+        proxy_downstream_websocket_idle_timeout_seconds=float(
+            resolved["proxy_downstream_websocket_idle_timeout_seconds"].value
+        ),
+        sse_keepalive_interval_seconds=float(resolved["sse_keepalive_interval_seconds"].value),
+        # end C2-1 timeouts
+        # M1 stream/bridge budgets
+        http_responses_stream_request_budget_seconds=float(
+            resolved["http_responses_stream_request_budget_seconds"].value
+        ),
+        http_responses_session_bridge_request_budget_seconds=float(
+            resolved["http_responses_session_bridge_request_budget_seconds"].value
+        ),
+        # end M1 stream/bridge budgets
         provenance=resolved,
     )
 

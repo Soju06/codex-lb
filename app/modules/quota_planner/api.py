@@ -10,11 +10,13 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
+from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import DashboardBadRequestError
+from app.core.resilience.toggles import resolve_resilience_toggles
 from app.dependencies import QuotaPlannerContext, get_quota_planner_context
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
-from app.modules.proxy.load_balancer import _build_states
+from app.modules.proxy.load_balancer import _build_states, effective_routing_tunables
 from app.modules.quota_planner.logic import PlannerSettings, build_demand_forecast, simulate_pool
 from app.modules.quota_planner.schemas import (
     QuotaPlannerDecisionResponse,
@@ -206,6 +208,11 @@ async def get_quota_planner_forecast(
     horizon_hours: int = Query(default=36, ge=1, le=168, alias="horizonHours"),
     context: QuotaPlannerContext = Depends(get_quota_planner_context),
 ) -> QuotaPlannerForecastResponse:
+    # One dashboard-settings snapshot per request, taken before the first
+    # repository query: a cache refresh opens its own session, so it must not
+    # run while the request session already holds a pooled connection. No
+    # runtime lock is held here either.
+    dashboard_settings = await get_settings_cache().get()
     settings = await context.repository.get_settings()
     demand_slots = await context.repository.aggregate_demand_slot_units()
     forecast = build_demand_forecast(settings=settings, slot_units=demand_slots, horizon_hours=horizon_hours)
@@ -220,6 +227,8 @@ async def get_quota_planner_forecast(
         latest_secondary=latest_secondary,
         latest_monthly=latest_monthly,
         runtime={},
+        routing_tunables=effective_routing_tunables(dashboard_settings),
+        soft_drain_enabled=resolve_resilience_toggles(dashboard_settings).soft_drain_enabled,
     )
     simulation = simulate_pool(settings=settings, states=states, demand_forecast=forecast)
     return _forecast_response(forecast, simulation)

@@ -37,10 +37,30 @@ class RuntimeState:
     # Isolation stage deadline (subset of the backoff deadline): while set and
     # in the future, soft sticky owners are rerouted too.
     overload_isolated_until: float | None = None
+    # Short burst cooldown set by a code-less upstream HTTP 429 (per-account
+    # burst/concurrency rejection, no ``rate_limit_exceeded`` / usage code):
+    # fresh (unbound) selection and fresh sticky bindings avoid the account
+    # until this deadline while another candidate exists. Established sticky
+    # owners and hard continuity owners are untouched. Replica-local, never
+    # persisted, independent of ``cooldown_until`` / persisted RATE_LIMITED.
+    burst_backoff_until: float | None = None
     # Recent upstream outcome window (see ``_load_balancer/error_rate.py``):
     # minute bucket -> [successes, failures], pruned to the configured window.
     # Feeds the selection weight multiplier; replica-local, never persisted.
     outcome_buckets: dict[int, list[int]] | None = None
+    # Recent eligible first-token latencies (see ``_load_balancer/ttft_cohort.py``):
+    # ``(recorded_at, ttft_ms)`` pruned to the window/cap. Replica-local, never persisted.
+    ttft_samples: list[tuple[float, int]] | None = None
+    # Recent eligible output throughputs per model (see
+    # ``_load_balancer/throughput_cohort.py``): model -> ``(recorded_at, tokens_per_second)``
+    # pruned to the window/cap; models without in-window samples are dropped.
+    tps_samples: dict[str, list[tuple[float, float]]] | None = None
+    # Transition-log gates of ``_load_balancer/latency_cohort.py``: the last
+    # applied first-token multiplier (model-agnostic) and the last applied
+    # non-neutral throughput multiplier per model (neutral models are dropped,
+    # so the map only grows with models the account is discounted on).
+    ttft_weight: float = 1.0
+    tps_weights: dict[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)

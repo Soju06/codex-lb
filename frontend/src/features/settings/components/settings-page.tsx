@@ -16,13 +16,19 @@ import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
 import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
+import { ConversationArchiveSettings } from "@/features/settings/components/conversation-archive-settings";
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
+import { ModelCatalogueSettings } from "@/features/settings/components/model-catalogue-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
+import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
+import { SessionBridgeSettings } from "@/features/settings/components/session-bridge-settings";
+import { BackgroundJobsSettings } from "@/features/settings/components/background-jobs-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
+import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream-timeout-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
@@ -36,10 +42,23 @@ const TotpSettings = lazy(() =>
   import("@/features/settings/components/totp-settings").then((m) => ({ default: m.TotpSettings })),
 );
 
+// C2-2 routing/overload: a layer move (dashboard <-> inherited) without a
+// value change must still reset the routing form's drafts.
+const ROUTING_OVERLOAD_PROVENANCE_KEYS = [
+  "proxy_overload_isolation_seconds",
+  "proxy_account_error_rate_weighting_enabled",
+  "proxy_account_inflight_penalty_pct",
+  "proxy_account_lease_token_weight",
+  "proxy_account_lease_ttl_seconds",
+] as const;
+
 const FIREWALL_LAYOUT_QUERY_KEYS = [
   ["accounts", "list"],
   ["settings", "upstream-proxy"],
   ["model-sources", "list"],
+  // M4 model catalogue: the card sits above Firewall and grows by a table row
+  // per override, so a late response would push a #firewall scroll out of view.
+  ["settings", "model-context-window-overrides"],
 ] as const;
 
 export function SettingsPage() {
@@ -207,6 +226,12 @@ export function SettingsPage() {
                    settings.proxyAccountStreamRecoveryReserveOverride,
                    settings.proxyApiKeyFairShareCongestionThresholdPct,
                    settings.proxyApiKeyFairShareCongestionThresholdPctOverride,
+                   settings.proxyOverloadIsolationSeconds,
+                   settings.proxyAccountErrorRateWeightingEnabled,
+                   settings.proxyAccountInflightPenaltyPct,
+                   settings.proxyAccountLeaseTokenWeight,
+                   settings.proxyAccountLeaseTtlSeconds,
+                   ...ROUTING_OVERLOAD_PROVENANCE_KEYS.map((name) => settings.provenance?.[name]?.source ?? ""),
                 ].join(":")}
                 settings={settings}
                 accounts={accountsQuery.data ?? []}
@@ -217,6 +242,9 @@ export function SettingsPage() {
                 busy={controlsDisabled}
                 onSave={handleSave}
               />
+              <ResilienceSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+              <SessionBridgeSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+              <BackgroundJobsSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               {upstreamProxyQuery.data ? (
                 <UpstreamProxySettings
                   admin={upstreamProxyQuery.data}
@@ -231,6 +259,7 @@ export function SettingsPage() {
                 />
               ) : null}
               <ModelSourcesSettings disabled={controlsDisabled} />
+              <ModelCatalogueSettings disabled={controlsDisabled} />
               <FirewallSection disabled={controlsDisabled} />
               <QuotaPlannerSection disabled={controlsDisabled} />
               <StickySessionsSection disabled={controlsDisabled} />
@@ -240,6 +269,25 @@ export function SettingsPage() {
                   settings.usageHistoryRetentionOverrideDays,
                   settings.requestLogRetentionDays,
                   settings.usageHistoryRetentionDays,
+                ].join(":")}
+                settings={settings}
+                busy={controlsDisabled}
+                onSave={handleSave}
+              />
+              {/* M5 conversation archive: next to Data retention (same "what we keep" family). */}
+              <ConversationArchiveSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+              <UpstreamTimeoutSettings
+                key={[
+                  settings.version,
+                  settings.upstreamConnectTimeoutSeconds,
+                  settings.proxyRequestBudgetSeconds,
+                  settings.compactRequestBudgetSeconds,
+                  settings.transcriptionRequestBudgetSeconds,
+                  settings.httpResponsesStreamRequestBudgetSeconds,
+                  settings.httpResponsesSessionBridgeRequestBudgetSeconds,
+                  settings.streamIdleTimeoutSeconds,
+                  settings.proxyDownstreamWebsocketIdleTimeoutSeconds,
+                  settings.sseKeepaliveIntervalSeconds,
                 ].join(":")}
                 settings={settings}
                 busy={controlsDisabled}

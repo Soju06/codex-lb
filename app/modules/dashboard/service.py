@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.core import usage as usage_core
-from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import UsageHistory
@@ -195,7 +195,6 @@ class DashboardService:
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
             include_primary=False,
         )
-        settings = get_settings()
         trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
             _weekly_history_windows(primary_usage, secondary_usage),
             since=now - DEMAND_WINDOW,
@@ -206,7 +205,7 @@ class DashboardService:
             account_summaries=account_summaries,
             secondary_history=secondary_history,
             now=now,
-            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
@@ -247,7 +246,6 @@ class DashboardService:
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
         )
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
-        settings = get_settings()
         trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
             _weekly_history_windows(primary_usage, secondary_usage),
             since=now - DEMAND_WINDOW,
@@ -258,7 +256,7 @@ class DashboardService:
             account_summaries=account_summaries,
             secondary_history=secondary_history,
             now=now,
-            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,

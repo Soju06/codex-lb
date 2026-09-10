@@ -6,7 +6,7 @@ Define opt-in retention of request logs and usage history — dashboard-first co
 ## Requirements
 ### Requirement: Request-log pruning never deletes unfolded rows
 
-Request-log pruning MUST gate on every usage-rollup watermark — the lifetime `folded_through`, the time-axis `hourly_folded_through`, and the conversation satellite's `conversation_folded_through` — combined as their minimum. Pruning MUST run only while the combined fold is current (the minimum watermark within two fold lags of now) and MUST delete only rows with `requested_at` older than the retention cutoff AND at least one fold lag below the minimum watermark, so concurrent summary readers holding a slightly older watermark can never lose rows from a just-folded window and no rollup is ever robbed of raw it has not folded. When no rollup watermark exists, or any fold is catching up (initial backfill, stalled scheduler), request-log pruning MUST be skipped.
+Request-log pruning MUST gate on every usage-rollup watermark — the lifetime `folded_through`, the time-axis `hourly_folded_through`, the conversation satellite's `conversation_folded_through`, and the report history's `reports_folded_through` — combined as their minimum. Pruning MUST run only while the combined fold is current (the minimum watermark within two fold lags of now) and MUST delete only rows with `requested_at` older than the retention cutoff AND at least one fold lag below the minimum watermark, so concurrent summary readers holding a slightly older watermark can never lose rows from a just-folded window and no rollup is ever robbed of raw it has not folded. When no rollup watermark exists, or any fold is catching up (initial backfill, stalled scheduler), request-log pruning MUST be skipped.
 
 #### Scenario: Unfolded rows survive pruning
 
@@ -43,6 +43,13 @@ Request-log pruning MUST gate on every usage-rollup watermark — the lifetime `
 - **GIVEN** no `account_usage_rollup_state` row exists
 - **WHEN** the retention job runs with request-log retention enabled
 - **THEN** no `request_logs` rows are deleted
+
+#### Scenario: Report backfill gates pruning
+
+- **GIVEN** the other rollup watermarks are current but `reports_folded_through` is still behind
+- **WHEN** retention runs
+- **THEN** it SHALL leave request logs intact until the report watermark becomes current
+- **AND** report totals SHALL survive subsequent pruning of the folded period
 
 ### Requirement: Usage-history pruning preserves each identity's latest row
 

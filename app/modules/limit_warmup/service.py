@@ -17,6 +17,7 @@ from app.core.openai.models import OpenAIError, ResponseUsage
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.pricing import get_pricing_for_model
 from app.core.utils.time import naive_utc_to_epoch, utcnow
@@ -348,6 +349,9 @@ class LimitWarmupService:
     ) -> None:
         if not settings.limit_warmup_enabled:
             return
+        # C2-3 resilience toggles: bound before the warmup fan-out so the
+        # upstream probes gate their breaker on the dashboard value.
+        bind_resilience_toggles(settings)
         selected_windows = _selected_windows(settings.limit_warmup_windows)
         if not selected_windows:
             return

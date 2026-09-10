@@ -605,7 +605,6 @@ class _HTTPBridgeMixin(
                             self._promote_http_bridge_session_to_codex_affinity(
                                 alias_session,
                                 turn_state=incoming_turn_state,
-                                settings=settings,
                             )
                             _register_http_bridge_turn_state_aliases_locked(self, alias_session)
                             key = alias_session.key
@@ -635,7 +634,6 @@ class _HTTPBridgeMixin(
                                 self._promote_http_bridge_session_to_codex_affinity(
                                     previous_session,
                                     turn_state=incoming_turn_state,
-                                    settings=settings,
                                 )
                                 previous_session.downstream_turn_state_aliases.add(incoming_turn_state)
                                 for alias in previous_session.downstream_turn_state_aliases:
@@ -1178,7 +1176,6 @@ class _HTTPBridgeMixin(
                                     self._promote_http_bridge_session_to_codex_affinity(
                                         previous_session,
                                         turn_state=incoming_turn_state,
-                                        settings=settings,
                                     )
                                     previous_session.downstream_turn_state_aliases.add(incoming_turn_state)
                                     for alias in previous_session.downstream_turn_state_aliases:
@@ -1366,7 +1363,7 @@ class _HTTPBridgeMixin(
             if continuity_error is not None:
                 raise continuity_error
             if capacity_wait_future is not None:
-                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
+                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds()
                 try:
                     await self._await_http_bridge_registry_wait(capacity_wait_future, timeout=wait_timeout_seconds)
                 except asyncio.CancelledError:
@@ -1394,7 +1391,7 @@ class _HTTPBridgeMixin(
                     pass
                 continue
             if inflight_future is not None and not owns_creation:
-                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
+                wait_timeout_seconds = _proxy_admission_wait_timeout_seconds()
                 try:
                     session = await self._await_http_bridge_registry_wait(inflight_future, timeout=wait_timeout_seconds)
                 except asyncio.CancelledError:
@@ -1685,6 +1682,7 @@ class _HTTPBridgeMixin(
             request_id=f"http_bridge_connect_{uuid4().hex}",
             model=request_model,
             service_tier=request_service_tier,
+            requested_service_tier=request_service_tier,
             reasoning_effort=None,
             api_key_reservation=None,
             started_at=clock_for(self).monotonic(),

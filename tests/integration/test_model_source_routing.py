@@ -13,6 +13,7 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 from sqlalchemy import select
 
+from app.core.clients import http as http_module
 from app.core.clients.http import get_http_client
 from app.core.utils.time import utcnow
 from app.db.models import ApiKeyUsageReservation, RequestLog
@@ -494,6 +495,14 @@ def _model_source_connections_acquired() -> int:
     return len(connector._acquired)
 
 
+def _active_http_client_leases() -> int:
+    """Generation leases held (``lease_model_source_session`` takes one per source exchange until released)."""
+
+    managed = http_module._http_client
+    assert managed is not None
+    return managed.active_leases
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_client_leaving_during_prompt_processing_releases_the_source(async_client, source_upstream):
     """Direct chat route: the ``200`` and headers reach the client at the source's headers (as on ``main``), so a
@@ -560,6 +569,80 @@ async def test_chat_stream_client_leaving_during_prompt_processing_releases_the_
         assert log.model_source_id == source_id
         assert log.status == "cancelled"
         assert log.error_code == "client_disconnected"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_client_leaving_before_the_body_starts_releases_the_source(async_client, source_upstream):
+    """Direct chat route, the pre-body window: the client is gone between the route returning the streaming response
+    and Starlette's first write, so ``http.response.start`` never completes and the settlement generator wrapped
+    around the source body never starts. The response's transport owner must close the source connection, return
+    the pooled lease and record the attempt as ``cancelled`` (``client_disconnected_before_body``); ``main`` left the
+    upstream response, the lease and the row to garbage collection."""
+
+    prepared = asyncio.Event()
+    release_token = asyncio.Event()
+    upstream: dict[str, int] = {"cancelled": 0, "finished": 0}
+
+    async def slow_prompt_processing(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        prepared.set()
+        try:
+            await release_token.wait()
+            await response.write(b'data: {"id":"chatcmpl_late","choices":[{"index":0,"delta":{"content":"x"}}]}\n\n')
+            await response.write_eof()
+        except asyncio.CancelledError:
+            upstream["cancelled"] += 1
+            raise
+        upstream["finished"] += 1
+        return response
+
+    base_url = await source_upstream(slow_prompt_processing, handler_cancellation=True, shutdown_timeout=1.0)
+    model = "source-pre-body-model"
+    source_id = await _create_model_source(async_client, name="pre-body", model=model, base_url=base_url)
+    leases_before = _active_http_client_leases()
+
+    stream = _AsgiStream(
+        app=async_client._transport.app,
+        path="/v1/chat/completions",
+        headers={},
+        body=json.dumps({"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True}).encode(),
+        stall_response_start=True,
+    )
+    runner = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(prepared.wait(), timeout=5)
+        await stream.wait_for_response_start(timeout=5)
+        assert stream.status == 200
+        # The route returned with the source exchange open: one pooled connection, one generation lease.
+        assert _model_source_connections_acquired() == 1
+        assert _active_http_client_leases() == leases_before + 1
+
+        left_at = time.monotonic()
+        stream.disconnect()
+        await asyncio.wait_for(runner, timeout=5)
+        assert time.monotonic() - left_at < 2.0
+
+        # Nothing was written after the response start: the body never ran.
+        assert stream.received() == b""
+        deadline = time.monotonic() + 5
+        while upstream["cancelled"] == 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert upstream["cancelled"] == 1, "the source connection was not closed when the client left"
+        assert upstream["finished"] == 0
+        assert _model_source_connections_acquired() == 0
+        assert _active_http_client_leases() == leases_before
+    finally:
+        release_token.set()
+        if not runner.done():
+            runner.cancel()
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.model_source_id == source_id
+        assert log.status == "cancelled"
+        assert log.error_code == "client_disconnected_before_body"
 
 
 async def _empty_2xx_chat_stream(request: web.Request) -> web.StreamResponse:
@@ -2864,7 +2947,7 @@ async def test_v1_models_metadata_reflects_reasoning_optin(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_models_context_window_override_applies_to_source_model(async_client, monkeypatch):
+async def test_v1_models_context_window_override_applies_to_source_model(async_client):
     # Source-catalog models synthesize `max_context_window == context_window`
     # purely so Codex clients can parse the entry; that parseability default
     # must not clamp an operator raise override to the un-raised window.
@@ -2875,11 +2958,11 @@ async def test_v1_models_context_window_override_applies_to_source_model(async_c
         base_url="http://127.0.0.1:9/v1",
     )
 
-    from app.core.config.settings import get_settings
-    from app.modules.proxy import api as proxy_api_module
-
-    patched = get_settings().model_copy(update={"model_context_window_overrides": {"override-source-model": 32_768}})
-    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+    # M4 model catalogue: the override is a dashboard row (not an env monkeypatch).
+    seeded = await async_client.put(
+        "/api/settings/model-context-window-overrides/override-source-model", json={"contextWindow": 32_768}
+    )
+    assert seeded.status_code == 200, seeded.text
 
     response = await async_client.get("/v1/models")
     assert response.status_code == 200
@@ -4179,3 +4262,65 @@ async def test_source_embeddings_without_usage_fails_closed_for_limited_key(asyn
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "usage_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_direct_source_routing_forwards_only_constructed_headers(async_client, source_upstream) -> None:
+    """Direct routing is unchanged by construction (#2123 WP-C2, preflight finding v).
+
+    ``forwarding._source_headers`` builds the source request's headers from
+    scratch, so a native Codex request's ChatGPT-internal telemetry headers
+    (``x-openai-subagent``, ``x-codex-*``, ``session-id``, ``thread-id``, ...)
+    never reach a source and the client's ``User-Agent`` is replaced by the
+    HTTP client's own. The overflow path shares the builder; its capture lives
+    in ``test_subscription_overflow_routing.py``.
+    """
+    from tests.unit.test_model_source_request_headers import (
+        CODEX_TELEMETRY_REQUEST_HEADERS,
+        assert_source_saw_only_constructed_headers,
+    )
+
+    seen_headers: list[dict[str, str]] = []
+    seen_bodies: list[dict[str, object]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        seen_headers.append(dict(request.headers))
+        seen_bodies.append(await request.json())
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(
+            b'data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_hdr","object":"response",'
+            b'"status":"in_progress","output":[]}}\n\n'
+        )
+        await response.write(
+            b'data: {"type":"response.completed","sequence_number":1,"response":{"id":"resp_hdr","object":"response",'
+            b'"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+        await response.write_eof()
+        return response
+
+    base_url = await source_upstream(handler)
+    model = "source-header-proof-model"
+    await _create_model_source(
+        async_client, name="header-proof", model=model, base_url=base_url, supports_responses=True
+    )
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "stream": True,
+            "client_metadata": {"session_id": "sess_header_proof", "thread_id": "thr_header_proof"},
+            "stream_options": {"reasoning_summary_delivery": "final"},
+        },
+        headers=CODEX_TELEMETRY_REQUEST_HEADERS,
+    ) as response:
+        assert response.status_code == 200
+        await response.aread()
+
+    assert len(seen_headers) == 1
+    assert_source_saw_only_constructed_headers(seen_headers[0], source_token="token-header-proof")
+    assert "client_metadata" not in seen_bodies[0]
+    assert "stream_options" not in seen_bodies[0]

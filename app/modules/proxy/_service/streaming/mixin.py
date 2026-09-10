@@ -277,7 +277,9 @@ from app.modules.proxy._service.streaming.helpers import (
     _observe_terminal_stream_error_frame,
     _openai_error_fields,
     _rewrite_malformed_stream_error_event,
+    _stamp_terminal,
     _stream_transport_failure_event_or_raise,
+    _upstream_terminal_latency_ms,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _handle_stream_error as _handle_stream_error_helper,
@@ -508,10 +510,9 @@ class _StreamingMixin(_StreamingRetryMixin):
         actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
-        start = clock.monotonic()
         # Keep selection/failover waits out of latency and TTFT, record them as
         # queue time, then re-anchor after this attempt's admission wait.
-        attempt_started_at = start
+        attempt_started_at = start = clock.monotonic()
         latency_queue_ms = max(0, int((start - request_started_at) * 1000))
         status, error_code, error_message = "success", None, None
         failure_metadata = _RequestLogFailureMetadata()
@@ -520,12 +521,11 @@ class _StreamingMixin(_StreamingRetryMixin):
         route: ResolvedUpstreamRoute | None = None
         route_trace = UpstreamProxyRouteTrace()
         route_fail_closed_reason: str | None = None
-        saw_text_delta = terminal_event_seen = False
+        saw_text_delta = terminal_event_seen = suppressed_duplicate_tool_call = False
         latency_first_token_ms: int | None = None
         ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], Any] = {}
         if tool_call_dedupe is None:
             tool_call_dedupe = _WebSocketUpstreamControl()
-        suppressed_duplicate_tool_call = False
         response_create_lease = AdmissionLease(None, stage="response_create", request_id=request_id)
         account_response_create_lease: AccountLease | None = None
         api_key_reservation_touch_state = _ApiKeyReservationTouchState(last_touch_at=start)
@@ -580,6 +580,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 "codex_installation_id": account.codex_installation_id,
                 "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
                 "codex_lb_account_id": account.id,
+                # Selected subscription Account, independent of optional legacy header.
+                "synthesize_routing_hint": True,
             }
             if upstream_stream_transport is not None:
                 stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport
@@ -771,8 +773,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
-                    if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                        terminal_event_seen = True
+                    terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
                     if latency_first_token_ms is None:
                         latency_first_token_ms = _ttft_event_latency_ms(
                             event_type, first_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
@@ -945,8 +946,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.downstream_visible = True
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     settlement.downstream_text_visible = True
-                if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    terminal_event_seen = True
+                terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
                 yield line
             if not terminal_event_seen:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
@@ -1070,6 +1070,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 actual_service_tier=actual_service_tier,
                 latency_first_token_ms=latency_first_token_ms,
                 latency_queue_ms=latency_queue_ms,
+                latency_upstream_send_ms=0,  # attempt_started_at is re-anchored right before the upstream send
+                latency_upstream_terminal_ms=_upstream_terminal_latency_ms(settlement, attempt_started_at),
                 session_id=session_id,
                 failure_phase=failure_metadata.failure_phase,
                 failure_detail=failure_metadata.failure_detail,

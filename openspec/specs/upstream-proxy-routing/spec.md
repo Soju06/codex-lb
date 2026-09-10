@@ -1,7 +1,7 @@
 # upstream-proxy-routing Specification
 
 ## Purpose
-TBD - created by archiving change add-codex-proxy-pool-egress. Update Purpose after archive.
+Governs how account-scoped upstream traffic to ChatGPT/OpenAI/Codex leaves the process. Every upstream call for an account bound to a proxy pool must use that pool and fail closed before any network open when the route is unavailable, because a partial per-request proxy setting would let other surfaces leak through the default pool or direct egress. It also fixes the TLS fingerprint contract, the route metadata recorded in request logs, pool membership validation, and how proxy credentials are carried and validated.
 ## Requirements
 ### Requirement: Account-bound upstream traffic must use the bound proxy pool
 When an account has an explicit upstream proxy pool binding, every ChatGPT/OpenAI/Codex upstream operation using that account's credentials MUST resolve a route from the bound pool before opening a network connection.

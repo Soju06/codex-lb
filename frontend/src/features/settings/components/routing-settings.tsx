@@ -99,6 +99,11 @@ type RoutingSettingsDraft = {
   proxyAccountStreamLimit: string;
   proxyAccountStreamRecoveryReserve: string;
   proxyApiKeyFairShareCongestionThresholdPct: string;
+  // C2-2 routing/overload: empty = inherit (environment or default).
+  proxyOverloadIsolationSeconds: string;
+  proxyAccountInflightPenaltyPct: string;
+  proxyAccountLeaseTokenWeight: string;
+  proxyAccountLeaseTtlSeconds: string;
   relativeAvailabilityPower: string;
   relativeAvailabilityTopK: string;
   stickyPrimaryThreshold: string;
@@ -121,6 +126,18 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
     proxyAccountStreamRecoveryReserve: overrideToInput(settings.proxyAccountStreamRecoveryReserveOverride),
     proxyApiKeyFairShareCongestionThresholdPct: overrideToInput(
       settings.proxyApiKeyFairShareCongestionThresholdPctOverride,
+    ),
+    proxyOverloadIsolationSeconds: overrideToInput(
+      dashboardOwnedValue(settings, "proxy_overload_isolation_seconds", settings.proxyOverloadIsolationSeconds),
+    ),
+    proxyAccountInflightPenaltyPct: overrideToInput(
+      dashboardOwnedValue(settings, "proxy_account_inflight_penalty_pct", settings.proxyAccountInflightPenaltyPct),
+    ),
+    proxyAccountLeaseTokenWeight: overrideToInput(
+      dashboardOwnedValue(settings, "proxy_account_lease_token_weight", settings.proxyAccountLeaseTokenWeight),
+    ),
+    proxyAccountLeaseTtlSeconds: overrideToInput(
+      dashboardOwnedValue(settings, "proxy_account_lease_ttl_seconds", settings.proxyAccountLeaseTtlSeconds),
     ),
     relativeAvailabilityPower: String(settings.relativeAvailabilityPower),
     relativeAvailabilityTopK: String(settings.relativeAvailabilityTopK),
@@ -177,6 +194,41 @@ function parseCapacityOverride(value: string, max: number | null = null): Parsed
 
 function overrideToInput(value: number | null | undefined): string {
   return value == null ? "" : String(value);
+}
+
+/**
+ * The dashboard-stored value of an inheritable setting that has no flat
+ * `<name>Override` field: the effective value when `provenance` says the
+ * dashboard owns it, otherwise null (inherited from the environment or the
+ * default).
+ */
+function dashboardOwnedValue(settings: DashboardSettings, name: string, effective: number): number | null {
+  return settings.provenance?.[name]?.source === "dashboard" ? effective : null;
+}
+
+type InheritableNumberBounds = {
+  integer?: boolean;
+  min?: number;
+  exclusiveMin?: number;
+  max?: number;
+};
+
+/** Empty input = inherit (null); otherwise a number inside the backend bounds. */
+function parseInheritableNumber(value: string, bounds: InheritableNumberBounds): ParsedCapacityOverride {
+  const normalized = value.trim();
+  if (normalized === "") {
+    return { valid: true, value: null };
+  }
+  const parsed = bounds.integer ? (/^\d+$/.test(normalized) ? Number(normalized) : Number.NaN) : Number(normalized);
+  if (
+    !Number.isFinite(parsed) ||
+    (bounds.min !== undefined && parsed < bounds.min) ||
+    (bounds.exclusiveMin !== undefined && parsed <= bounds.exclusiveMin) ||
+    (bounds.max !== undefined && parsed > bounds.max)
+  ) {
+    return { valid: false, value: null };
+  }
+  return { valid: true, value: parsed };
 }
 
 export function RoutingSettings({
@@ -292,6 +344,50 @@ export function RoutingSettings({
     accountCapacityPatch.proxyApiKeyFairShareCongestionThresholdPct =
       parsedProxyApiKeyFairShareCongestionThresholdPct.value;
   }
+  // C2-2 routing/overload: four numeric inputs share one save action; the
+  // error-rate toggle saves on change. Bounds mirror the backend schema.
+  const routingOverloadFields = [
+    {
+      field: "proxyOverloadIsolationSeconds",
+      name: "proxy_overload_isolation_seconds",
+      parsed: parseInheritableNumber(draft.proxyOverloadIsolationSeconds, { integer: true, min: 0 }),
+      current: dashboardOwnedValue(settings, "proxy_overload_isolation_seconds", settings.proxyOverloadIsolationSeconds),
+    },
+    {
+      field: "proxyAccountInflightPenaltyPct",
+      name: "proxy_account_inflight_penalty_pct",
+      parsed: parseInheritableNumber(draft.proxyAccountInflightPenaltyPct, { min: 0, max: 100 }),
+      current: dashboardOwnedValue(settings, "proxy_account_inflight_penalty_pct", settings.proxyAccountInflightPenaltyPct),
+    },
+    {
+      field: "proxyAccountLeaseTokenWeight",
+      name: "proxy_account_lease_token_weight",
+      parsed: parseInheritableNumber(draft.proxyAccountLeaseTokenWeight, { min: 0 }),
+      current: dashboardOwnedValue(settings, "proxy_account_lease_token_weight", settings.proxyAccountLeaseTokenWeight),
+    },
+    {
+      field: "proxyAccountLeaseTtlSeconds",
+      name: "proxy_account_lease_ttl_seconds",
+      parsed: parseInheritableNumber(draft.proxyAccountLeaseTtlSeconds, { exclusiveMin: 0 }),
+      current: dashboardOwnedValue(settings, "proxy_account_lease_ttl_seconds", settings.proxyAccountLeaseTtlSeconds),
+    },
+  ] as const;
+  const routingOverloadValid = routingOverloadFields.every((entry) => entry.parsed.valid);
+  const routingOverloadPatch: Partial<
+    Pick<
+      SettingsUpdateRequest,
+      | "proxyOverloadIsolationSeconds"
+      | "proxyAccountInflightPenaltyPct"
+      | "proxyAccountLeaseTokenWeight"
+      | "proxyAccountLeaseTtlSeconds"
+    >
+  > = {};
+  for (const entry of routingOverloadFields) {
+    if (entry.parsed.value !== entry.current) {
+      routingOverloadPatch[entry.field] = entry.parsed.value;
+    }
+  }
+  const routingOverloadChanged = routingOverloadValid && Object.keys(routingOverloadPatch).length > 0;
   const warmupModelChanged = draft.warmupModel.trim() !== settings.warmupModel;
   const warmupModelValid = draft.warmupModel.trim().length > 0 && draft.warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
   const parsedLimitWarmupCooldown = Number(draft.limitWarmupCooldown);
@@ -770,6 +866,151 @@ export function RoutingSettings({
               ) : null}
             </div>
           ) : null}
+
+          <div className="space-y-3 p-3">
+            <div>
+              <p className="text-sm font-medium">{t("settings.routing.overload.title")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.routing.overload.description")}</p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.overload.isolationSecondsLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.overload.isolationSecondsLabel")}
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  className="h-8 text-xs"
+                  value={draft.proxyOverloadIsolationSeconds}
+                  placeholder={t("settings.routing.overload.inheritPlaceholder")}
+                  onChange={(event) => updateDraft({ proxyOverloadIsolationSeconds: event.target.value })}
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.overload.isolationSecondsDescription")}
+                </span>
+                <InheritBadge
+                  settings={settings}
+                  name="proxy_overload_isolation_seconds"
+                  field="proxyOverloadIsolationSeconds"
+                  busy={busy}
+                  onSave={onSave}
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.overload.inflightPenaltyPctLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.overload.inflightPenaltyPctLabel")}
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="any"
+                  inputMode="decimal"
+                  className="h-8 text-xs"
+                  value={draft.proxyAccountInflightPenaltyPct}
+                  placeholder={t("settings.routing.overload.inheritPlaceholder")}
+                  onChange={(event) => updateDraft({ proxyAccountInflightPenaltyPct: event.target.value })}
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.overload.inflightPenaltyPctDescription")}
+                </span>
+                <InheritBadge
+                  settings={settings}
+                  name="proxy_account_inflight_penalty_pct"
+                  field="proxyAccountInflightPenaltyPct"
+                  busy={busy}
+                  onSave={onSave}
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.overload.leaseTokenWeightLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.overload.leaseTokenWeightLabel")}
+                  type="number"
+                  min={0}
+                  step="any"
+                  inputMode="decimal"
+                  className="h-8 text-xs"
+                  value={draft.proxyAccountLeaseTokenWeight}
+                  placeholder={t("settings.routing.overload.inheritPlaceholder")}
+                  onChange={(event) => updateDraft({ proxyAccountLeaseTokenWeight: event.target.value })}
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.overload.leaseTokenWeightDescription")}
+                </span>
+                <InheritBadge
+                  settings={settings}
+                  name="proxy_account_lease_token_weight"
+                  field="proxyAccountLeaseTokenWeight"
+                  busy={busy}
+                  onSave={onSave}
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.overload.leaseTtlSecondsLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.overload.leaseTtlSecondsLabel")}
+                  type="number"
+                  min={0}
+                  step="any"
+                  inputMode="decimal"
+                  className="h-8 text-xs"
+                  value={draft.proxyAccountLeaseTtlSeconds}
+                  placeholder={t("settings.routing.overload.inheritPlaceholder")}
+                  onChange={(event) => updateDraft({ proxyAccountLeaseTtlSeconds: event.target.value })}
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.overload.leaseTtlSecondsDescription")}
+                </span>
+                <InheritBadge
+                  settings={settings}
+                  name="proxy_account_lease_ttl_seconds"
+                  field="proxyAccountLeaseTtlSeconds"
+                  busy={busy}
+                  onSave={onSave}
+                />
+              </label>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs sm:w-44"
+              disabled={busy || !routingOverloadChanged}
+              onClick={() => void save(routingOverloadPatch)}
+            >
+              {t("settings.routing.overload.save")}
+            </Button>
+            <div className="flex items-start justify-between gap-4 border-t pt-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">{t("settings.routing.overload.errorRateWeightingLabel")}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.routing.overload.errorRateWeightingDescription")}
+                </p>
+                <InheritBadge
+                  settings={settings}
+                  name="proxy_account_error_rate_weighting_enabled"
+                  field="proxyAccountErrorRateWeightingEnabled"
+                  busy={busy}
+                  onSave={onSave}
+                />
+              </div>
+              <Switch
+                aria-label={t("settings.routing.overload.errorRateWeightingAriaLabel")}
+                checked={settings.proxyAccountErrorRateWeightingEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) => save({ proxyAccountErrorRateWeightingEnabled: checked })}
+              />
+            </div>
+          </div>
 
           <SubscriptionOverflowSettings
             settings={settings}

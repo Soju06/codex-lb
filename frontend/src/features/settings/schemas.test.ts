@@ -8,7 +8,7 @@ import {
   TelemetrySnapshotEnvelopeSchema,
   UpstreamProxyAdminSchema,
 } from "@/features/settings/schemas";
-import { createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
+import { createDashboardSettings, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
 
 describe("DashboardSettingsSchema", () => {
   it("parses settings payload", () => {
@@ -91,6 +91,19 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
     expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(true);
+  });
+
+  it("reads an inherited in-flight penalty above the dashboard write cap", () => {
+    // The environment field has no upper bound; only dashboard writes cap at 100.
+    const parsed = DashboardSettingsSchema.parse({
+      ...createDashboardSettings(),
+      proxyAccountInflightPenaltyPct: 150,
+      provenance: { proxy_account_inflight_penalty_pct: { source: "env", envValue: 150, default: 2.5 } },
+    });
+    expect(parsed.proxyAccountInflightPenaltyPct).toBe(150);
+    expect(parsed.provenance?.proxy_account_inflight_penalty_pct?.source).toBe("env");
+    expect(SettingsUpdateRequestSchema.safeParse({ proxyAccountInflightPenaltyPct: 150 }).success).toBe(false);
+    expect(SettingsUpdateRequestSchema.safeParse({ proxyAccountInflightPenaltyPct: null }).success).toBe(true);
   });
 
   it("parses legacy settings payload and applies defaults for missing routing fields", () => {

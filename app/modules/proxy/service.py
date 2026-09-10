@@ -88,7 +88,9 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket as connect_responses_websocket,
 )
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
-from app.core.config.settings import get_settings
+from app.core.config.dashboard_overrides import with_dashboard_overrides
+from app.core.config.settings import Settings as _Settings
+from app.core.config.settings import get_settings as get_environment_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE
@@ -122,6 +124,7 @@ from app.core.openai.requests import (
 from app.core.resilience.network_recovery import (
     ProcessNetworkRecovery as ProcessNetworkRecovery,
 )
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.upstream_proxy.resolver import (
@@ -760,14 +763,34 @@ from app.modules.proxy.load_balancer import (
     AccountLeaseKind,
     AccountSelection,
     LoadBalancer,
+    RoutingTunables,
     effective_account_concurrency_caps,
+    effective_routing_tunables,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
 from app.modules.proxy.selection_errors import selection_failure_response
-from app.modules.proxy.work_admission import WorkAdmissionController
+from app.modules.proxy.work_admission import (
+    ADMISSION_WAIT_TIMEOUT_SECONDS,
+    COMPACT_RESPONSE_CREATE_LIMIT,
+    TOKEN_REFRESH_LIMIT,
+    UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+    WorkAdmissionController,
+)
+
+
+def get_settings() -> _Settings:
+    """Startup ``Settings`` with the request-bound dashboard overrides applied.
+
+    Every proxy consumer reads settings through this facade (directly or via
+    ``_service_get_settings()``), so the dashboard-managed timeouts (C2-1) take
+    effect here without touching each call site; outside a bound request context
+    the environment values apply unchanged.
+    """
+    return with_dashboard_overrides(get_environment_settings())
+
 
 logger = logging.getLogger(__name__)
 
@@ -778,21 +801,12 @@ _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 # error probe window. If a keepalive becomes the first yielded chunk, the HTTP
 # status is committed as 200 and startup ProxyResponseError handling is masked.
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
-_DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    settings = settings or get_settings()
-    raw_timeout = getattr(
-        settings,
-        "proxy_admission_wait_timeout_seconds",
-        _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS,
-    )
-    try:
-        timeout = float(raw_timeout)
-    except (TypeError, ValueError):
-        timeout = _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS
-    return max(0.001, timeout)
+def _proxy_admission_wait_timeout_seconds() -> float:
+    # Module-level indirection so the HTTP bridge helpers and tests share one
+    # patch point for the fixed admission wait.
+    return ADMISSION_WAIT_TIMEOUT_SECONDS
 
 
 # Maximum time (seconds) to wait for a prewarm upstream response before
@@ -955,13 +969,12 @@ class ProxyService(
 
     def _get_work_admission(self) -> WorkAdmissionController:
         if self._work_admission is None:
-            settings = get_settings()
             self._work_admission = WorkAdmissionController(
-                token_refresh_limit=settings.proxy_token_refresh_limit,
-                websocket_connect_limit=settings.proxy_upstream_websocket_connect_limit,
-                response_create_limit=settings.proxy_response_create_limit,
-                compact_response_create_limit=settings.proxy_compact_response_create_limit,
-                admission_wait_timeout_seconds=getattr(settings, "proxy_admission_wait_timeout_seconds", 10.0),
+                token_refresh_limit=TOKEN_REFRESH_LIMIT,
+                websocket_connect_limit=UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+                response_create_limit=get_settings().proxy_response_create_limit,
+                compact_response_create_limit=COMPACT_RESPONSE_CREATE_LIMIT,
+                admission_wait_timeout_seconds=_proxy_admission_wait_timeout_seconds(),
                 scheduler=self._scheduler,
             )
         return self._work_admission
@@ -983,6 +996,7 @@ class ProxyService(
         base_settings = get_settings()
         deadline = start + base_settings.proxy_request_budget_seconds
         settings = await get_settings_cache().get()
+        bind_resilience_toggles(settings, startup_settings=base_settings)  # C2-3 resilience toggles
         affinity = _sticky_key_for_thread_goal_request(
             payload, headers, codex_session_affinity, settings.openai_cache_affinity_max_age_seconds
         )
@@ -1271,6 +1285,7 @@ class ProxyService(
         compact: bool = False,
         account_id: str | None = None,
         surface: str = "websocket",
+        routing_tunables: RoutingTunables | None = None,
     ) -> None:
         scheduler = self._scheduler
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
@@ -1281,12 +1296,15 @@ class ProxyService(
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = self._clock.monotonic()
         if account_id is not None:
+            # One cached snapshot for this lease operation; a caller that already
+            # resolved the tunables for the same turn (bridge submit) passes them.
             settings = await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=account_id,
                 request_id=request_state.request_id,
                 surface=surface,
                 concurrency_caps=effective_account_concurrency_caps(settings),
+                routing_tunables=routing_tunables or effective_routing_tunables(settings),
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
@@ -1398,6 +1416,14 @@ class ProxyService(
             await self._release_request_state_account_response_create_lease(request_state)
             await _release_websocket_response_create_gate(request_state, response_create_gate, scheduler=scheduler)
             raise
+        # The global response-create admission is a queue wait too, and a direct
+        # WebSocket has no bridge-queue measurement: fold it into the gate wait
+        # so the row carries the whole pre-send wait (the TTFT cohort sampler
+        # skips any row with a non-zero wait).
+        if request_state.response_create_gate_wait_started_at is not None:
+            request_state.latency_response_create_gate_wait_ms = int(
+                max(0.0, self._clock.monotonic() - request_state.response_create_gate_wait_started_at) * 1000
+            )
 
     async def _release_request_state_account_response_create_lease(
         self,
@@ -1769,6 +1795,7 @@ class ProxyService(
             with self._scheduler.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
                 concurrency_caps = effective_account_concurrency_caps(settings)
+                routing_tunables = effective_routing_tunables(settings)  # C2-2 routing/overload
                 stream_reserve_slots = (
                     (
                         get_settings().proxy_account_stream_recovery_reserve
@@ -1853,6 +1880,7 @@ class ProxyService(
                         legacy_sticky_key,
                     )
                     preferred_selection = await self._load_balancer.select_account(
+                        dashboard_settings=settings,  # C2-3 resilience toggles
                         sticky_key=preferred_sticky_inputs[0],
                         sticky_kind=preferred_sticky_inputs[1],
                         reallocate_sticky=preferred_sticky_inputs[2],
@@ -1870,6 +1898,7 @@ class ProxyService(
                         routing_strategy=routing_strategy,
                         relative_availability_power=_relative_availability_power(settings),
                         relative_availability_top_k=_relative_availability_top_k(settings),
+                        routing_tunables=routing_tunables,
                         model=model,
                         service_tier=service_tier,
                         additional_limit_name=additional_limit_name,
@@ -1917,6 +1946,7 @@ class ProxyService(
                         )
                         return preferred_selection
                 selection = await self._load_balancer.select_account(
+                    dashboard_settings=settings,  # C2-3 resilience toggles
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
@@ -1955,6 +1985,7 @@ class ProxyService(
                     redact_sensitive_details=redact_sensitive_details,
                     api_key_id=api_key_id,
                     api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
+                    routing_tunables=routing_tunables,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(
@@ -1996,11 +2027,13 @@ class ProxyService(
         request_id: str,
         surface: str,
         concurrency_caps: AccountConcurrencyCaps,
+        routing_tunables: RoutingTunables | None = None,
     ) -> AccountLease:
         lease = await self._load_balancer.acquire_account_lease(
             account_id,
             kind="response_create",
             concurrency_caps=concurrency_caps,
+            routing_tunables=routing_tunables,
         )
         if lease is not None:
             return lease
@@ -2037,6 +2070,7 @@ class ProxyService(
     ) -> AccountSelection:
         settings = await get_settings_cache().get()
         return await self._load_balancer.check_opportunistic_admission(
+            dashboard_settings=settings,  # C2-3 resilience toggles
             model=model,
             service_tier=service_tier,
             observe_only=observe_only,
@@ -2048,6 +2082,7 @@ class ProxyService(
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,
             concurrency_caps=effective_account_concurrency_caps(settings),
+            routing_tunables=effective_routing_tunables(settings),
             stream_reserve_slots=(
                 (
                     get_settings().proxy_account_stream_recovery_reserve
@@ -2084,6 +2119,7 @@ class ProxyService(
                 code,
                 http_status=exc.status_code,
                 privacy_policy=privacy_policy,
+                retry_after_seconds=exc.retry_after_seconds,
             )
             return
         await self._handle_stream_error(
@@ -2091,6 +2127,7 @@ class ProxyService(
             _upstream_error_from_openai(error),
             code,
             http_status=exc.status_code,
+            retry_after_seconds=exc.retry_after_seconds,
         )
 
 

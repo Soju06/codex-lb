@@ -301,6 +301,96 @@ async def test_recovery_ready_rereads_level_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_ready_window_rearms_on_newer_wait_marker() -> None:
+    """A wait marker raised during the bounded post-ready window keeps holding the headers.
+
+    The resumed upstream can reject again and park the stream on a further
+    bounded wait (the owner-bound burst backoff does exactly this up to three
+    times). The probe must treat the newer marker like any other wait -- re-read
+    the level state and arm the recovery wait -- instead of letting the
+    post-ready window expire and hand off a 200/SSE that can no longer carry the
+    surfaced HTTP 429.
+    """
+
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    # 1st redispatch rejected at +0.2 s, second wait 2 s, then the first item.
+    first_task = _virtual_first_item_task(scheduler, delay=0.01 + 0.2 + 2.0 + 0.2)
+    capacity_wait_event = asyncio.Event()
+    capacity_wait_event.set()
+    capacity_ready_event = proxy_api._CapacityStartupReadyEvent(clock=clock)
+    probe_task = scheduler.create_task(
+        proxy_api._wait_for_first_stream_probe(
+            first_task,
+            timeout_seconds=1.0,
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+            scheduler=scheduler,
+            clock=clock,
+        )
+    )
+    await scheduler.drain()
+    await scheduler.advance(0.01)
+    assert probe_task.done() is False
+
+    # Producer: the backoff elapsed and the same account was redispatched.
+    capacity_wait_event.clear()
+    capacity_ready_event.set()
+    await scheduler.drain()
+    assert probe_task.done() is False
+
+    # Upstream rejects again 0.2 s later; the stream parks on a 2 s wait that
+    # outlives the 1 s post-ready window.
+    await scheduler.advance(0.2)
+    capacity_ready_event.clear()
+    capacity_wait_event.set()
+    await scheduler.drain()
+    await scheduler.advance(2.0)
+    assert probe_task.done() is False
+    assert capacity_wait_event.is_set() is True
+
+    # Redispatch, then the first item arrives inside the re-armed window.
+    capacity_wait_event.clear()
+    capacity_ready_event.set()
+    await scheduler.drain()
+    await scheduler.advance(0.2)
+
+    assert await probe_task is True
+    await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_post_ready_window_still_expires_without_a_newer_wait_marker() -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    first_task = _virtual_first_item_task(scheduler, delay=10_000.0)
+    capacity_wait_event = asyncio.Event()
+    capacity_wait_event.set()
+    capacity_ready_event = proxy_api._CapacityStartupReadyEvent(clock=clock)
+    probe_task = scheduler.create_task(
+        proxy_api._wait_for_first_stream_probe(
+            first_task,
+            timeout_seconds=1.0,
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+            scheduler=scheduler,
+            clock=clock,
+        )
+    )
+    await scheduler.drain()
+    await scheduler.advance(0.01)
+    capacity_wait_event.clear()
+    capacity_ready_event.set()
+    await scheduler.drain()
+    assert probe_task.done() is False
+
+    await scheduler.advance(1.0)
+
+    assert await probe_task is False
+    await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
 async def test_capacity_probe_immediate_completion_keeps_real_scheduler_default() -> None:
     async def first_item() -> str:
         return "response.created"

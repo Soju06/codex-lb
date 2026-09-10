@@ -61,6 +61,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy._service.http_bridge.accepted_replay import (
     _http_bridge_accepted_anchored_replay_candidate,
     _http_bridge_accepted_capacity_retry_allowed,
@@ -1923,9 +1924,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                             poison_episode, poison_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                                 session,
                                 consecutive_failures=consecutive_failures,
-                                configured_threshold=(
-                                    _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                                ),
                             )
                         if poison_candidate_detail is None or poison_episode is None:
                             return False
@@ -2083,11 +2081,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                 )
                 stuck_gate_retire_after_seconds = float(
-                    getattr(
-                        runtime_settings,
-                        "http_responses_session_bridge_stuck_gate_retire_after_seconds",
-                        300.0,
-                    )
+                    _http_bridge_helpers.HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS
                 )
                 receive_timeout = await _http_bridge_receive_timeout_with_eventless_deadline(
                     session,
@@ -2833,6 +2827,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                         allow_precreated_terminal_fallback=True,
                         prefer_draining_requests=anonymous_event_prefers_draining,
                     )
+                if terminal_request_state is not None:
+                    # Upstream generation ends here; the durable alias, operation,
+                    # recovery and circuit-settlement writes below and the
+                    # finalizer's settlement are local and must not stretch the
+                    # throughput sample's span. A later terminal for the same turn
+                    # (capacity retry) replaces it; those rows are not sampled.
+                    terminal_request_state.upstream_terminal_at = clock.monotonic()
                 if (
                     matched_request_state is None
                     and terminal_request_state is not None
@@ -3208,9 +3209,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     grouped_poison_episode, grouped_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                         session,
                         consecutive_failures=grouped_clear_strike_failures,
-                        configured_threshold=(
-                            _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                        ),
                     )
                     if grouped_poison_episode is None:
                         return
@@ -4485,9 +4483,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     consult_episode, consult_expected_anchor = await self._http_bridge_poison_anchor_clear_owed(
                         session,
                         consecutive_failures=terminal_strike_failures,
-                        configured_threshold=(
-                            _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
-                        ),
                     )
                     if consult_episode is not None:
                         # A multiplexed survivor holding a verified safe

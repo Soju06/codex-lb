@@ -35,7 +35,7 @@ _ENV = SimpleNamespace(
     proxy_account_error_rate_weighting_enabled=True,
     proxy_account_inflight_penalty_pct=2.5,
     proxy_account_lease_token_weight=1.0,
-    proxy_account_lease_ttl_seconds=900.0,
+    proxy_account_lease_ttl_seconds=7200.0,
 )
 
 

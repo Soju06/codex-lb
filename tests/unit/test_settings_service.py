@@ -89,7 +89,7 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         "proxy_account_error_rate_weighting_enabled": InheritableValue(False, "dashboard", True, True),
         "proxy_account_inflight_penalty_pct": InheritableValue(2.5, "default", 2.5, 2.5),
         "proxy_account_lease_token_weight": InheritableValue(1.0, "default", 1.0, 1.0),
-        "proxy_account_lease_ttl_seconds": InheritableValue(300.0, "env", 300.0, 900.0),
+        "proxy_account_lease_ttl_seconds": InheritableValue(300.0, "env", 300.0, 7200.0),
         "request_log_retention_days": InheritableValue(30, "dashboard", None, 0),
         "usage_history_retention_days": InheritableValue(0, "default", None, 0),
         # C2-3 resilience toggles: NULL columns, env double without the fields

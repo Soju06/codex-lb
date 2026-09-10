@@ -295,6 +295,13 @@ from app.modules.proxy.overflow import (
     resolve_subscription_overflow,
     restore_client_store,
 )
+from app.modules.proxy.rate_limit_events import (
+    hide_upstream_quota_for_api_key_clients as _hide_upstream_quota_for_api_key_clients,
+)
+from app.modules.proxy.rate_limit_events import (
+    project_codex_rate_limit_event,
+    rate_limit_headers_for_client,
+)
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
@@ -2309,13 +2316,6 @@ async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLim
     )
 
 
-async def _hide_upstream_quota_for_api_key_clients(api_key: ApiKeyData | None) -> bool:
-    if api_key is None:
-        return False
-    settings = await get_settings_cache().get()
-    return bool(getattr(settings, "hide_upstream_quota_from_api_keys", False))
-
-
 async def _apply_api_key_enforcement_with_fast_mode_policy(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
@@ -2346,9 +2346,7 @@ async def _rate_limit_headers_for_request(
     context: ProxyContext,
     api_key: ApiKeyData | None,
 ) -> dict[str, str]:
-    if await _hide_upstream_quota_for_api_key_clients(api_key):
-        return {}
-    return await context.service.rate_limit_headers()
+    return await rate_limit_headers_for_client(api_key, context.service.rate_limit_headers)
 
 
 async def _release_reservation_deferring_cancellation(
@@ -5345,6 +5343,7 @@ async def _source_responses_response(
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                     native_codex_heartbeat=native_codex_heartbeat,
                     preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+                    codex_rate_limit_headers=rate_limit_headers,
                 ),
             )
             return SourceStreamingResponse(
@@ -6260,6 +6259,7 @@ async def _wrap_source_responses_public_stream(
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
     preserve_native_failure_lifecycle: bool = False,
+    codex_rate_limit_headers: Mapping[str, str] | None = None,
 ) -> AsyncIterator[str]:
     """Normalize and keep source-routed Responses SSE proxy-timeout friendly.
 
@@ -6280,6 +6280,7 @@ async def _wrap_source_responses_public_stream(
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         forward_unparseable_data=True,
         preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+        codex_rate_limit_headers=codex_rate_limit_headers,
     )
     keepalive_stream = (
         normalized
@@ -6952,6 +6953,7 @@ async def _stream_responses(
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+        codex_rate_limit_headers=rate_limit_headers,
     )
     service_stream = stream
     use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
@@ -9393,6 +9395,7 @@ async def _normalize_public_responses_stream(
     enforce_openai_sdk_contract: bool = True,
     forward_unparseable_data: bool = False,
     preserve_native_failure_lifecycle: bool = False,
+    codex_rate_limit_headers: Mapping[str, str] | None = None,
 ) -> AsyncIterator[str]:
     stream = _normalize_reasoning_summary_stream(stream)
     """Normalize the upstream SSE event stream for the public /v1 surface.
@@ -9405,9 +9408,8 @@ async def _normalize_public_responses_stream(
             item events, and synthesize a leading response.created event
             when the upstream stream's first standard event is not
             response.created. When False (used for /backend-api/codex/*,
-            which feeds the Codex CLI), all events including vendor events are
-            forwarded verbatim and no synthesis happens — the Codex CLI
-            relies on the upstream's native event shape.
+            which feeds the Codex CLI), preserve native events without synthesis,
+            except account quota events, which use the pooled header snapshot.
     """
     terminal_seen = False
     done_seen = False
@@ -9527,6 +9529,13 @@ async def _normalize_public_responses_stream(
                     failure_phase="upstream",
                 )
         raw_event_type = payload.get("type")
+        if raw_event_type == "codex.rate_limits":
+            if enforce_openai_sdk_contract:
+                continue
+            pooled_event = project_codex_rate_limit_event(payload, codex_rate_limit_headers or {})
+            if pooled_event is not None:
+                yield format_sse_event(pooled_event)
+            continue
         if (
             enforce_openai_sdk_contract
             and isinstance(raw_event_type, str)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from app.core.clock import Clock, Scheduler
@@ -72,3 +73,6 @@ class _WebSocketServiceProtocol(Protocol):
     _write_request_log: Any
     _write_websocket_connect_failure: Any
     proxy_responses_websocket: Any
+
+    @property
+    def rate_limit_headers(self) -> Callable[[], Awaitable[dict[str, str]]]: ...

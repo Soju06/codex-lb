@@ -3267,7 +3267,7 @@ async def test_wrap_source_responses_native_codex_preserves_codex_events_and_kee
     release_upstream.set()
     remaining = [chunk async for chunk in iterator]
     joined = "".join(remaining)
-    assert "codex.rate_limits" in joined
+    assert "codex.rate_limits" not in joined
     assert "response.created" not in joined
     assert "resp_codex_src" in joined
 
@@ -3665,7 +3665,7 @@ async def test_backend_desktop_openai_shape_preserves_native_event_order(
     )
 
     event_types = [event.get("type") for event in _sse_data_events(lines)]
-    assert event_types[0] == "codex.rate_limits"
+    assert "codex.rate_limits" not in event_types
     assert "codex.keepalive" not in event_types
     assert "response.created" not in event_types
     assert "response.completed" in event_types

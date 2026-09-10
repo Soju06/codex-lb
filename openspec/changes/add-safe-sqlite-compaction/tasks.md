@@ -18,6 +18,6 @@
 
 ## 4. Maintainer takeover
 
-- [ ] 4.1 Guarantee descriptor and lock release when cleanup or rollback raises.
-- [ ] 4.2 Acquire replacement recovery's maintenance lock before source reads.
-- [ ] 4.3 Reproduce both regressions and verify on current main.
+- [x] 4.1 Guarantee descriptor and lock release when cleanup or rollback raises.
+- [x] 4.2 Acquire replacement recovery's maintenance lock before source reads.
+- [x] 4.3 Reproduce both regressions and verify on current main.

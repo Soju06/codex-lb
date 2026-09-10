@@ -24,6 +24,16 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parents[3]
 
 
+def sqlite_temporary_directory_overrides() -> tuple[Path, ...]:
+    """Read SQLite's process-level temporary-directory overrides in precedence order.
+
+    These are library/POSIX conventions, not CODEX_LB settings. Read the actual
+    process environment so maintenance space checks follow SQLite, including
+    fallback when an override does not identify a writable directory.
+    """
+    return tuple(Path(value) for name in ("SQLITE_TMPDIR", "TMPDIR") if (value := os.environ.get(name)))
+
+
 def _resolve_env_files() -> tuple[Path, ...]:
     """Resolve the env files read at settings load.
 

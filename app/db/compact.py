@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from app.core.config.settings import sqlite_temporary_directory_overrides
 from app.db.sqlite_utils import (
     SqliteIntegrityCheckMode,
     check_sqlite_integrity,
@@ -252,7 +253,7 @@ def _incremental_auto_vacuum_output_bytes(connection: sqlite3.Connection) -> int
 
 
 def _sqlite_temporary_directory() -> Path:
-    candidates = [Path(value) for name in ("SQLITE_TMPDIR", "TMPDIR") if (value := os.environ.get(name))]
+    candidates = list(sqlite_temporary_directory_overrides())
     candidates.extend((Path("/var/tmp"), Path("/usr/tmp"), Path("/tmp"), Path.cwd()))
     for candidate in candidates:
         if candidate.is_dir() and os.access(candidate, os.W_OK | os.X_OK):

@@ -97,8 +97,14 @@ class _FakeSeedSession:
         self.rollbacks += 1
 
 
-@pytest.fixture(autouse=True)
-def _instant_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture
+def instant_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the retried tests fast.
+
+    Deliberately not autouse: ``test_retry_budget_stays_three_attempts_under_a_second``
+    asserts the shipped budget, and an autouse override would make it assert
+    the override instead.
+    """
     monkeypatch.setattr(sqlite_lock_retry, "SQLITE_LOCK_RETRY_DELAYS_SECONDS", (0.0, 0.0, 0.0))
 
 
@@ -111,7 +117,9 @@ def test_retry_budget_stays_three_attempts_under_a_second() -> None:
     assert sum(delays) < 1.0
 
 
-async def test_seed_retries_a_transient_lock_and_completes(caplog: pytest.LogCaptureFixture) -> None:
+async def test_seed_retries_a_transient_lock_and_completes(
+    instant_retries: None, caplog: pytest.LogCaptureFixture
+) -> None:
     session = _FakeSeedSession(failures=1)
     repository = AccountsRepository(cast(AsyncSession, session))
 
@@ -127,6 +135,7 @@ async def test_seed_retries_a_transient_lock_and_completes(caplog: pytest.LogCap
 
 
 async def test_seed_still_fails_startup_when_the_lock_outlives_the_budget(
+    instant_retries: None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     session = _FakeSeedSession(failures=99, error_name="SQLITE_BUSY")
@@ -143,6 +152,7 @@ async def test_seed_still_fails_startup_when_the_lock_outlives_the_budget(
 
 
 async def test_seed_gives_up_without_an_error_name_from_a_constructed_exception(
+    instant_retries: None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # ``sqlite3`` only populates ``sqlite_errorname`` on exceptions it raises
@@ -192,7 +202,7 @@ class _FakeFingerprintSession:
 
 
 async def test_fingerprint_retries_a_transient_lock_and_still_verifies(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    instant_retries: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     attempts = 0
 
@@ -216,7 +226,7 @@ async def test_fingerprint_retries_a_transient_lock_and_still_verifies(
 
 
 async def test_fingerprint_still_raises_when_the_lock_outlives_the_budget(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    instant_retries: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     attempts = 0
 

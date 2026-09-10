@@ -15,3 +15,9 @@
       source, corrupt output, insufficient disk, and replacement rollback.
 - [x] 3.2 Run focused CLI/DB tests, Ruff, and type checks.
 - [x] 3.3 Run strict OpenSpec validation and `git diff --check`.
+
+## 4. Maintainer takeover
+
+- [ ] 4.1 Guarantee descriptor and lock release when cleanup or rollback raises.
+- [ ] 4.2 Acquire replacement recovery's maintenance lock before source reads.
+- [ ] 4.3 Reproduce both regressions and verify on current main.

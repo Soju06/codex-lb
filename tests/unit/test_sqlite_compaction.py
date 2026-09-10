@@ -525,18 +525,43 @@ def test_compaction_rejects_source_path_replacement_before_install(tmp_path: Pat
     assert not Path(f"{source}.compact.lock").exists()
 
 
-def test_recovery_replace_respects_active_compaction_lock(tmp_path: Path) -> None:
+def test_recovery_replace_respects_active_compaction_lock(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "store.db"
     output = tmp_path / "recovered.db"
     _create_fragmented_database(source)
     lock_path = Path(f"{source}.compact.lock")
     lock_path.write_text("held", encoding="utf-8")
 
+    def reject_source_read(_source: Path):
+        pytest.fail("recovery inspected source before acquiring maintenance lock")
+
+    monkeypatch.setattr(recover, "check_sqlite_integrity", reject_source_read)
+
     with pytest.raises(RuntimeError, match="compaction lock already exists"):
         recover.recover_sqlite_db(recover.RecoveryOptions(source=source, output=output, replace=True))
 
     assert source.exists()
     assert _remaining_rows(source) == 100
+    assert not output.exists()
+    assert lock_path.read_text(encoding="utf-8") == "held"
+
+
+def test_compaction_cleanup_failure_releases_installed_database(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "store.db"
+    _create_fragmented_database(source)
+
+    def fail_cleanup(_directory: Path) -> None:
+        raise OSError("injected temporary cleanup failure")
+
+    monkeypatch.setattr(compact.shutil, "rmtree", fail_cleanup)
+
+    with pytest.raises(OSError, match="injected temporary cleanup failure"):
+        compact.execute_sqlite_compaction(_database_url(source), confirm_stopped=True)
+
+    assert not compact.sqlite_maintenance_lock_path(source).exists()
+    with sqlite3.connect(source, timeout=0) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM payloads").fetchone()[0] == 100
+        connection.execute("INSERT INTO payloads(payload) VALUES ('after cleanup')")
 
 
 def test_compaction_rejects_external_write_and_corrupt_output(tmp_path: Path, monkeypatch) -> None:

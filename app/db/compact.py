@@ -584,51 +584,53 @@ def execute_sqlite_compaction(
             reclaimed_bytes=max(source_bytes - after_bytes, 0),
         )
     finally:
-        if temporary.exists():
-            temporary.unlink()
-        if (
-            not completed
-            and replacement_installed
-            and backup is not None
-            and backup.exists()
-            and replacement_identity is not None
-            and _path_matches_identity(source, replacement_identity)
-        ):
-            _replace_path(backup, source)
-            backup_created = False
-            _restore_sidecars(moved_sidecars)
-            if source_sync_descriptor is not None:
-                _fsync_descriptor(source_sync_descriptor)
-            _fsync_directory(source.parent)
-        elif (
-            not completed
-            and replacement_installed
-            and backup is not None
-            and backup.exists()
-            and not os.path.lexists(source)
-        ):
-            _replace_path(backup, source)
-            backup_created = False
-            _restore_sidecars(moved_sidecars)
-            if source_sync_descriptor is not None:
-                _fsync_descriptor(source_sync_descriptor)
-            _fsync_directory(source.parent)
-        if not completed and backup_created and not replacement_installed and backup is not None:
-            backup.unlink(missing_ok=True)
-        shutil.rmtree(temporary_directory)
         try:
-            if replacement_connection is not None:
-                replacement_connection.close()
+            if temporary.exists():
+                temporary.unlink()
+            if (
+                not completed
+                and replacement_installed
+                and backup is not None
+                and backup.exists()
+                and replacement_identity is not None
+                and _path_matches_identity(source, replacement_identity)
+            ):
+                _replace_path(backup, source)
+                backup_created = False
+                _restore_sidecars(moved_sidecars)
+                if source_sync_descriptor is not None:
+                    _fsync_descriptor(source_sync_descriptor)
+                _fsync_directory(source.parent)
+            elif (
+                not completed
+                and replacement_installed
+                and backup is not None
+                and backup.exists()
+                and not os.path.lexists(source)
+            ):
+                _replace_path(backup, source)
+                backup_created = False
+                _restore_sidecars(moved_sidecars)
+                if source_sync_descriptor is not None:
+                    _fsync_descriptor(source_sync_descriptor)
+                _fsync_directory(source.parent)
+            if not completed and backup_created and not replacement_installed and backup is not None:
+                backup.unlink(missing_ok=True)
+            shutil.rmtree(temporary_directory)
         finally:
             try:
-                if temporary_sync_descriptor is not None:
-                    os.close(temporary_sync_descriptor)
+                if replacement_connection is not None:
+                    replacement_connection.close()
             finally:
                 try:
-                    if source_sync_descriptor is not None:
-                        os.close(source_sync_descriptor)
+                    if temporary_sync_descriptor is not None:
+                        os.close(temporary_sync_descriptor)
                 finally:
-                    release_sqlite_maintenance_lock(lock_path, lock_descriptor)
+                    try:
+                        if source_sync_descriptor is not None:
+                            os.close(source_sync_descriptor)
+                    finally:
+                        release_sqlite_maintenance_lock(lock_path, lock_descriptor)
 
 
 __all__ = [

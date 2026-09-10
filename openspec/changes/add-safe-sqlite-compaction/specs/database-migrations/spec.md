@@ -57,6 +57,24 @@ created inside an atomically allocated, owner-only directory under the source
 directory. Execution MUST reject platforms where directory-entry durability
 cannot be enforced.
 
+All maintenance locks and open descriptors MUST be released even if temporary
+cleanup or rollback raises. Replacement recovery MUST acquire the shared
+maintenance lock before integrity checking or export and hold it through
+replacement; contention MUST NOT create recovery output.
+
+#### Scenario: Cleanup failure releases installed database
+
+- **WHEN** temporary cleanup raises after a successful installation
+- **THEN** the error propagates and all maintenance handles are released
+- **AND** the installed database remains readable and writable
+
+#### Scenario: Replacement recovery fails before accessing a locked source
+
+- **GIVEN** compaction holds the source maintenance lock
+- **WHEN** replacement recovery starts
+- **THEN** recovery rejects the request before integrity checking or export
+- **AND** no recovery output is created
+
 #### Scenario: Verified compaction preserves data and rollback source
 
 - **GIVEN** the application is stopped and the SQLite database is healthy

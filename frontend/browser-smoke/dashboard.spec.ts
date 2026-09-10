@@ -427,6 +427,8 @@ test("the model source dialogs stay inside supported viewports", async ({ page }
       await expect(element).toBeInViewport({ ratio: 1 });
     }
 
+    await expect(dialog).toHaveCSS("overflow-y", "clip");
+
     const scrollRegion = dialog.getByTestId("model-source-create-scroll-region");
     await expect(scrollRegion).toHaveCount(1);
     await expect(scrollRegion).toHaveCSS("overflow-y", "auto");
@@ -486,6 +488,7 @@ test("the model source edit dialog keeps Save visible in compact viewports", asy
       const save = dialog.getByRole("button", { name: "Save", exact: true });
       const title = dialog.getByRole("heading", { name: "Edit model source" });
       const close = dialog.getByRole("button", { name: "Close" });
+      await expect(dialog).toHaveCSS("overflow-y", "clip");
       const scroll = dialog.getByTestId("model-source-edit-scroll-region");
       await expect(scroll).toHaveCount(1);
       await expect(scroll).toHaveCSS("overflow-y", "auto");

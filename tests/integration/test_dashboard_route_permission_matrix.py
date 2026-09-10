@@ -120,9 +120,10 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
 #: security field (handler-level, covered by ``test_step_up_auth.py``).
 STEP_UP_GATED: frozenset[tuple[str, str]] = frozenset(
     {
-        ("POST", "/api/accounts/{account_id}/export"),
+        # ``POST /api/accounts/{id}/export`` and ``.../export/opencode-auth`` are the
+        # retired predecessors that ``unified-auth-export`` forbids serving; only the
+        # single export route below exists.
         ("POST", "/api/accounts/{account_id}/export/auth"),
-        ("POST", "/api/accounts/{account_id}/export/opencode-auth"),
         ("POST", "/api/firewall/ips"),
         ("DELETE", "/api/firewall/ips/{ip_address}"),
         ("POST", "/api/settings/upstream-proxy/endpoints"),

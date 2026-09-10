@@ -5190,7 +5190,7 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
 ):
     from app.core.middleware import request_id as request_id_middleware_module
     from app.modules.proxy import api as proxy_api_module
-    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_request
 
     owner_settings = _make_app_settings(
         enabled=True,
@@ -5338,7 +5338,8 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
         original_affinity_kind=canonical_key.affinity_kind,
         original_affinity_key=canonical_key.affinity_key,
     )
-    forward_headers = build_owner_forward_headers(
+    owner_request = build_owner_forward_request(
+        body=priority_payload.model_dump_for_http_bridge_owner_forwarding(),
         headers={"x-request-id": "forwarded-priority-request"},
         payload=priority_payload,
         context=forward_context,
@@ -5356,8 +5357,8 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
 
         priority_response = await async_client.post(
             "/internal/bridge/responses",
-            json=priority_payload.model_dump_for_forwarding(),
-            headers=forward_headers,
+            json=owner_request.body,
+            headers=owner_request.headers,
         )
 
         assert priority_response.status_code == 200, priority_response.text
@@ -5385,7 +5386,7 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
 ):
     from app.modules.proxy import api as proxy_api_module
     from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
-    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_request
 
     target_settings = _make_app_settings(enabled=True, instance_id="instance-b")
     _install_proxy_settings(
@@ -5499,7 +5500,8 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
         original_affinity_kind=recovery_kind,
         original_affinity_key=recovery_key,
     )
-    forward_headers = build_owner_forward_headers(
+    owner_request = build_owner_forward_request(
+        body=payload.model_dump_for_http_bridge_owner_forwarding(),
         headers={
             "session_id": "stale-session",
             "session-id": "stale-session-dash",
@@ -5516,8 +5518,8 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
     response = await asyncio.wait_for(
         async_client.post(
             "/internal/bridge/responses",
-            json=payload.model_dump_for_forwarding(),
-            headers=forward_headers,
+            json=owner_request.body,
+            headers=owner_request.headers,
         ),
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
@@ -13630,10 +13632,12 @@ async def test_v1_responses_http_bridge_ambiguous_send_failure_does_not_restart_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reconnect_delay_seconds", [0.0, 0.25])
 async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacement(
     async_client,
     app_instance,
     monkeypatch,
+    reconnect_delay_seconds: float,
 ):
     app_settings = _make_app_settings(enabled=True)
     app_settings.sse_keepalive_interval_seconds = 0.01
@@ -13643,7 +13647,6 @@ async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacemen
         dashboard_settings=_make_dashboard_settings(),
     )
     monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.01)
-    monkeypatch.setattr(proxy_module, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_reader_handoff",
@@ -13707,6 +13710,8 @@ async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacemen
     ):
         del headers, access_token, account_id_header, base_url, session
         nonlocal connect_count
+        if connect_count == 1:
+            await asyncio.sleep(reconnect_delay_seconds)
         upstream = upstreams[connect_count]
         connect_count += 1
         return upstream
@@ -13715,6 +13720,24 @@ async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacemen
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
     service = get_proxy_service_for_app(app_instance)
+    next_receive_timeout = service._next_websocket_receive_timeout
+
+    async def short_reader_timeout(
+        pending_requests: deque[proxy_module._WebSocketRequestState],
+        *,
+        pending_lock: anyio.Lock,
+        proxy_request_budget_seconds: float,
+        stream_idle_timeout_seconds: float,
+    ) -> proxy_module._WebSocketReceiveTimeout | None:
+        # Trigger the silent reader without shrinking the downstream retry budget.
+        return await next_receive_timeout(
+            pending_requests,
+            pending_lock=pending_lock,
+            proxy_request_budget_seconds=proxy_request_budget_seconds,
+            stream_idle_timeout_seconds=0.1,
+        )
+
+    monkeypatch.setattr(service, "_next_websocket_receive_timeout", short_reader_timeout)
     record_retry_circuit_failure = AsyncMock(wraps=service._record_http_bridge_retry_circuit_failure)
     monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_retry_circuit_failure)
 

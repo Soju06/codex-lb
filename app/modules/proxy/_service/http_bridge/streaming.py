@@ -374,17 +374,22 @@ class _VerifiedDurableFullResend:
         cls,
         payload: ResponsesRequest,
         durable_lookup: DurableBridgeLookup,
+        *,
+        payload_looks_like_full_resend: bool | None = None,
     ) -> "_VerifiedDurableFullResend | None":
         owner_account_id = durable_lookup.account_id
         latest_response_id = durable_lookup.latest_response_id
         stored_count = durable_lookup.latest_input_item_count
         stored_fingerprint = durable_lookup.latest_input_full_fingerprint
+        if owner_account_id is None or latest_response_id is None or stored_count is None or stored_fingerprint is None:
+            return None
+        full_resend_shape = (
+            _http_bridge_payload_looks_like_full_resend(payload)
+            if payload_looks_like_full_resend is None
+            else payload_looks_like_full_resend
+        )
         if (
-            owner_account_id is None
-            or latest_response_id is None
-            or stored_count is None
-            or stored_fingerprint is None
-            or not _http_bridge_payload_looks_like_full_resend(payload)
+            not full_resend_shape
             or not isinstance(payload.input, list)
             or not _input_prefix_matches_stored_context(
                 payload.input,
@@ -441,10 +446,16 @@ def _pending_tool_calls_identity(
 def _verify_durable_full_resend(
     payload: ResponsesRequest,
     durable_lookup: DurableBridgeLookup | None,
+    *,
+    payload_looks_like_full_resend: bool | None = None,
 ) -> _VerifiedDurableFullResend | None:
     if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
         return None
-    return _VerifiedDurableFullResend._verify(payload, durable_lookup)
+    return _VerifiedDurableFullResend._verify(
+        payload,
+        durable_lookup,
+        payload_looks_like_full_resend=payload_looks_like_full_resend,
+    )
 
 
 _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL = "The previous bridge owner is no longer available."
@@ -1210,6 +1221,11 @@ class _HTTPBridgeStreamingMixin:
         scheduler = scheduler_for(self)
         clock = clock_for(self)
         del suppress_text_done_events
+        # This is a pure payload-shape signal. Capture it before the first
+        # await and before any legacy or durable continuity lookup so those
+        # paths cannot change which input shape the request presented at the
+        # bridge boundary.
+        payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
         dead_owner_anchor = False
         dead_owner_process_epoch_mismatch = False
         request_id = _denied_anchor_request_id or ensure_request_id()
@@ -1472,10 +1488,13 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_required_context_cache: bool | None = None
-        durable_full_resend_proof = _verify_durable_full_resend(payload, durable_lookup)
+        durable_full_resend_proof = _verify_durable_full_resend(
+            payload,
+            durable_lookup,
+            payload_looks_like_full_resend=payload_looks_like_full_resend,
+        )
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
-        payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
         # First-touch circuit load before any anchor planning: an expired
         # at-threshold poison row recorded by another replica arms this
         # worker's quarantine here, so the suppression checks below see it
@@ -2347,8 +2366,18 @@ class _HTTPBridgeStreamingMixin:
                 owner_forward_fresh_replay = owner_unavailable_allows_account_neutral_replay(exc)
                 if owner_forward_fresh_replay:
                     switch_to_account_neutral_replay()
+                recovery_previous_response_id = effective_payload.previous_response_id
+                if (
+                    proxy_injected_previous_response_id
+                    and incoming_turn_state_header is not None
+                    and exc.failure_phase == "owner_forward"
+                    and exc.failure_detail == "owner_input_shape_upgrade_required"
+                ):
+                    # An injected anchor does not grant explicit-continuation
+                    # recovery authority. Refresh the client's turn-state lease.
+                    recovery_previous_response_id = None
                 should_attempt_previous_response_recovery = not owner_forward_fresh_replay and (
-                    effective_payload.previous_response_id is not None
+                    recovery_previous_response_id is not None
                     and _http_bridge_should_attempt_local_previous_response_recovery(exc)
                 )
                 should_attempt_bootstrap_rebind = (
@@ -2357,7 +2386,7 @@ class _HTTPBridgeStreamingMixin:
                         exc,
                         key=bridge_session_key,
                         headers=headers,
-                        previous_response_id=effective_payload.previous_response_id,
+                        previous_response_id=recovery_previous_response_id,
                     )
                 )
                 should_attempt_turn_state_takeover = False
@@ -2369,7 +2398,7 @@ class _HTTPBridgeStreamingMixin:
                     takeover_turn_state = _http_bridge_turn_state_anchor_for_owner_failure(
                         exc,
                         headers=headers,
-                        previous_response_id=effective_payload.previous_response_id,
+                        previous_response_id=recovery_previous_response_id,
                     )
                     if takeover_turn_state is not None:
                         # Reuse the routing lookup semantics (alias resolution
@@ -2384,7 +2413,7 @@ class _HTTPBridgeStreamingMixin:
                                 api_key_id=bridge_session_key.api_key_id,
                                 turn_state=takeover_turn_state,
                                 session_header=durable_session_header_alias,
-                                previous_response_id=effective_payload.previous_response_id,
+                                previous_response_id=recovery_previous_response_id,
                             )
                         except Exception:
                             logger.warning(
@@ -2406,6 +2435,12 @@ class _HTTPBridgeStreamingMixin:
                                     ) = classify_durable_full_resend(fresh_turn_state_lookup)
                                     continuity_preferred_account_id = fresh_turn_state_lookup.account_id
                                     request_state.preferred_account_id = resolve_required_account_id(
+                                        (
+                                            "proxy-injected previous response",
+                                            request_state.preferred_account_id
+                                            if proxy_injected_previous_response_id
+                                            else None,
+                                        ),
                                         (
                                             "refreshed previous response or bridge",
                                             continuity_preferred_account_id,

@@ -35,6 +35,39 @@ fn large_websocket_object_retains_opaque_delivery() {
     assert!(interpret_websocket(&text).is_none());
 }
 
+#[test]
+fn python_integer_decode_limits_keep_the_entire_object_opaque() {
+    for sign in ["", "-"] {
+        let accepted = format!(r#"{{"sequence_number":{sign}{}}}"#, "9".repeat(640));
+        let event = interpret_websocket(&accepted).unwrap();
+        assert_eq!(event.payload.get(), accepted);
+        assert_eq!(
+            event.sequence_number.unwrap().get(),
+            format!("{sign}{}", "9".repeat(640))
+        );
+        for digits in [641, 5000] {
+            let token = format!("{sign}{}", "9".repeat(digits));
+            for text in [
+                format!(r#"{{"sequence_number":{token}}}"#),
+                format!(r#"{{"response":{{"extra":[{token}]}},"sequence_number":1}}"#),
+                format!(r#"{{"sequence_number":{token},"sequence_number":1}}"#),
+            ] {
+                assert!(interpret_websocket(&text).is_none());
+            }
+            for value in [
+                format!(r#""{token}""#),
+                format!("{token}.0"),
+                format!("{token}e-5000"),
+            ] {
+                let text = format!(r#"{{"sequence_number":{value}}}"#);
+                let event = interpret_websocket(&text).unwrap();
+                assert_eq!(event.payload.get(), text);
+                assert!(event.sequence_number.is_none());
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct RoutingCase {
     name: String,

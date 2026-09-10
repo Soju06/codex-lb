@@ -80,3 +80,22 @@ The command had already exited when a local stop was attempted; the exact source
 of the termination was not established. The host also lacks `kind`, which the
 final Helm smoke target requires. This was not a full CI pass. Complete GitHub
 Actions checks remain a PR gate.
+
+## PR review corrections
+
+CodeRabbit identified that a raw integer beyond Python's conversion limit could
+fail the shared IPC decoder before attribution to an exchange. Rust now keeps
+objects containing integer tokens over 640 digits opaque, including nested and
+overwritten tokens. This bound covers Python's minimum configurable limit;
+strings and floating-point tokens remain unaffected. The synchronized helper
+and adapter rollout is explicit in the proposal, context and architecture docs.
+
+- `make rust-check`: formatting, Clippy, **28 Rust tests**, and locked release build passed.
+- Actual release-helper native SSE/routed/WebSocket integration plus adapter and
+  routing fixtures: **447 passed** in 24.17 seconds. The new peer-isolation probe
+  uses Python's 640-digit limit and tests 641- and 5,000-digit values at the
+  top level, nested in arrays, and overwritten by duplicate keys. Both sockets
+  then receive exact 640-digit sequences from the same helper process.
+- Full `make lint`, `uv run ty check`, and **64** strict OpenSpec specs passed.
+- The initial cloud CI failed on a duplicate SQLite index in the unrelated
+  facet test. Main already contains the correction in PR #2296.

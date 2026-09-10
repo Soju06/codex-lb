@@ -19,4 +19,6 @@ operations to the reusable Responses crate as the next lifecycle migration slice
 ## Impact
 
 Internal helper/adapter contract, Responses crate, Python native adapter and
-WebSocket consumers. No new setting, dependency, schema or deployment action.
+WebSocket consumers. No new setting, dependency, schema or deployment mechanism.
+The Python adapter and bundled helper must be updated together to support
+`websocket_responses_routing_v1`; incompatible helpers fail closed before dispatch.

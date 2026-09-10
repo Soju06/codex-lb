@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,75 @@ from app.modules.proxy._service.http_bridge import upstream_events as bridge
 from app.modules.proxy._service.websocket import mixin
 
 FIXTURES = Path(__file__).resolve().parents[2] / "crates/codex-lb-responses/tests/fixtures/websocket-v1.json"
+
+
+@pytest.mark.asyncio
+async def test_native_websocket_oversized_integers_preserve_peer_exchanges() -> None:
+    binary = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY")
+    if not binary:
+        pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY to run the native wire probe")
+
+    async def echo(websocket: Any) -> None:
+        async for text in websocket:
+            await websocket.send(text)
+
+    client = SubprocessNativeEgressClient(Path(binary))
+    original_limit = sys.get_int_max_str_digits()
+    sockets: list[NativeUpstreamWebSocket] = []
+    try:
+        # The helper must also be safe with Python's smallest enabled limit.
+        sys.set_int_max_str_digits(sys.int_info.str_digits_check_threshold)
+        async with serve(echo, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            for _ in range(2):
+                sockets.append(
+                    NativeUpstreamWebSocket(
+                        await client.websocket(
+                            NativeWebSocketRequest(
+                                url=f"ws://127.0.0.1:{port}/responses",
+                                headers={},
+                                connect_timeout_seconds=5,
+                                max_message_bytes=1024 * 1024,
+                                interpret_responses=True,
+                            )
+                        )
+                    )
+                )
+            process = client._process
+            assert process is not None
+            for digits in (641, 5000):
+                token = "-" + "9" * digits
+                for fields in (
+                    f'"sequence_number":{token}',
+                    f'"response":{{"extra":[{token}]}},"sequence_number":1',
+                    f'"sequence_number":{token},"sequence_number":1',
+                ):
+                    text = '{"type":"response.output_text.delta",' + fields + "}"
+                    await sockets[0].send_text(text)
+                    message = await sockets[0].receive()
+                    assert message.kind == "text"
+                    assert message.text == text
+                    assert not message.responses_interpreted
+                    # The legacy parser may reject the affected frame, but it
+                    # must not take down the shared IPC reader or its peers.
+                    with pytest.raises(ValueError, match="integer string conversion"):
+                        mixin._parse_upstream_websocket_text_frame(text, message=message)
+                    for websocket in sockets:
+                        healthy = '{"type":"response.output_text.delta","sequence_number":' + "9" * 640 + "}"
+                        await websocket.send_text(healthy)
+                        reply = await websocket.receive()
+                        assert reply.kind == "text"
+                        assert reply.text == healthy
+                        assert reply.responses_interpreted
+                        assert reply.routing is not None
+                        assert reply.routing.sequence_number == int("9" * 640)
+                    assert client._process is process
+                    assert process.returncode is None
+            for websocket in sockets:
+                await websocket.close()
+    finally:
+        await client.aclose()
+        sys.set_int_max_str_digits(original_limit)
 
 
 @pytest.mark.asyncio

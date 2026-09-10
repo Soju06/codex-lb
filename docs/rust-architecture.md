@@ -69,9 +69,12 @@ embeds the raw payload in IPC for the Python decoder. With
 ID and recognizes integer sequence values without narrowing their precision.
 Python consumes these for direct WebSocket matching, archive attribution,
 bridge matching and replay checks. Validated lifecycle response IDs retain their
-existing unstripped precedence in Python. Unsupported ID strings use opaque
-delivery. Persistent socket lifetime, pending queues, retries and settlement
-remain in Python; sequence watermarks advance only after downstream delivery,
+existing unstripped precedence in Python. Unsupported ID strings and objects
+containing integer tokens over 640 digits use opaque delivery, keeping Python
+integer conversion failures out of the shared IPC reader. The adapter and
+bundled helper must be updated together for the routing capability; incompatible
+helpers fail closed before dispatch. Persistent socket lifetime, pending queues,
+retries and settlement remain in Python; sequence watermarks advance only after downstream delivery,
 and a terminal response does not close a shared WebSocket.
 
 Compact requests additionally require `http_compact_sse_v1`. Their

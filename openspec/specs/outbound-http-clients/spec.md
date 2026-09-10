@@ -1300,7 +1300,10 @@ and `sequence_number`, each explicitly null when absent. Rust MUST select the
 first nonempty stripped string from top-level `response_id` then nested
 `response.id`, using Python whitespace and last-duplicate-key semantics.
 Sequence metadata MUST accept only JSON integer tokens, excluding booleans,
-floats and exponent notation, and MUST preserve arbitrary precision and sign.
+floats and exponent notation, and MUST preserve precision and sign.
+Objects containing any integer token over 640 digits (excluding its sign),
+including nested and overwritten values, MUST retain opaque delivery so Python
+integer conversion limits cannot interrupt unrelated helper exchanges.
 Unsupported selected ID strings MUST retain opaque delivery without replay.
 
 Python MUST consume native payload metadata for direct WebSocket matching,
@@ -1321,7 +1324,7 @@ terminals as part of this metadata transfer.
 
 #### Scenario: Lossless sequence metadata reaches delivery policy
 
-- **WHEN** an interpreted frame includes a negative or arbitrarily large integer sequence
+- **WHEN** an interpreted frame includes a negative or large integer sequence within the interpretation bound
 - **THEN** Python receives that exact integer for replay checks
 - **AND** only successful downstream delivery advances the watermark
 
@@ -1335,3 +1338,9 @@ terminals as part of this metadata transfer.
 - **WHEN** an interpreted event omits routing metadata or carries invalid field types
 - **THEN** the adapter fails and releases that exchange without resending the request
 - **AND** other exchanges on the helper remain usable
+
+#### Scenario: Oversized integers cannot fail the shared IPC decoder
+
+- **WHEN** an upstream object contains an integer over 640 digits anywhere in its payload
+- **THEN** the helper delivers the original text through the opaque path without embedding raw numeric metadata
+- **AND** other exchanges remain usable on the same helper even if Python rejects that frame

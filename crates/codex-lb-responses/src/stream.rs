@@ -138,7 +138,7 @@ pub fn interpret_websocket(text: &str) -> Option<WebSocketEvent> {
             (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
                 .then(|| (*value).to_owned())
         }),
-        payload: RawValue::from_string(compact_json_whitespace(text)).ok()?,
+        payload: RawValue::from_string(compact_json_whitespace(text)?).ok()?,
         event_type,
     })
 }
@@ -171,11 +171,16 @@ fn payload_response_id(fields: &BTreeMap<String, &RawValue>) -> Result<Option<St
 // RawValue emits bytes verbatim. Strip only JSON whitespace outside strings so
 // a pretty-printed object cannot split the newline-delimited IPC record. Numeric
 // tokens, duplicate keys, string escapes and all string content stay untouched.
-fn compact_json_whitespace(text: &str) -> String {
+// Keep integers beyond Python's minimum configurable digit limit opaque: any
+// such token (including nested or overwritten values) could fail the shared IPC
+// decoder before Python can attribute the failure to an individual exchange.
+fn compact_json_whitespace(text: &str) -> Option<String> {
+    const MAX_PYTHON_INTEGER_DIGITS: usize = 640;
     let mut result = String::with_capacity(text.len());
     let mut in_string = false;
     let mut escaped = false;
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
         if in_string {
             result.push(ch);
             if escaped {
@@ -188,11 +193,25 @@ fn compact_json_whitespace(text: &str) -> String {
         } else if ch == '"' {
             in_string = true;
             result.push(ch);
+        } else if ch == '-' || ch.is_ascii_digit() {
+            let start = result.len();
+            result.push(ch);
+            while let Some(next) =
+                chars.next_if(|next| matches!(next, '0'..='9' | '.' | 'e' | 'E' | '+' | '-'))
+            {
+                result.push(next);
+            }
+            let token = &result[start..];
+            if !token.contains(['.', 'e', 'E'])
+                && token.strip_prefix('-').unwrap_or(token).len() > MAX_PYTHON_INTEGER_DIGITS
+            {
+                return None;
+            }
         } else if !matches!(ch, ' ' | '\t' | '\r' | '\n') {
             result.push(ch);
         }
     }
-    result
+    Some(result)
 }
 
 fn alias(kind: &str) -> Option<&'static str> {

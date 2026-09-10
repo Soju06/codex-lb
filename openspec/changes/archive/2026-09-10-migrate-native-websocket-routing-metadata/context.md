@@ -19,3 +19,17 @@ after successful downstream delivery. Suppressed replay-created events, send
 failures, retry and settlement retain their current policy. Bridge multiline
 SSE interpretation and non-Responses/oversized/unsupported opaque frames retain
 their existing Python path. No throughput improvement is claimed.
+
+The adapter and bundled helper must be updated together for
+`websocket_responses_routing_v1`; an incompatible helper fails closed before
+dispatch. No new deployment mechanism is introduced.
+
+Interpreted payloads admit integer tokens up to 640 digits, excluding the sign.
+This is Python's smallest configurable integer-string limit, so it protects even
+processes configured below the default 4,300 digits. Larger integers anywhere
+in an object (including nested or overwritten values) keep the entire frame
+opaque. The legacy Python parser may reject that exchange, but its integer
+conversion cannot fail the shared IPC reader or interrupt peer exchanges.
+For example, a 5,000-digit sequence is relayed as original text, while a
+640-digit negative sequence remains interpreted without precision loss.
+Strings and floating-point tokens do not use Python's integer conversion limit.

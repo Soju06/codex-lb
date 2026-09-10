@@ -105,10 +105,12 @@ def _state(engine: Engine) -> dict[str, Any]:
                 if has_pins
                 else None
             ),
-            "retry": tuple(
+            "retry": dict(
                 connection.execute(
                     text("SELECT * FROM http_bridge_retry_circuits WHERE session_key_hash = 'retained-retry'")
-                ).one()
+                )
+                .mappings()
+                .one()
             ),
             "schema": {
                 table: {
@@ -149,14 +151,12 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
         engine.dispose()
 
 
-def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tmp_path: Path) -> None:
+def test_overflow_transport_merge_precedes_the_only_head_with_both_original_parents(tmp_path: Path) -> None:
     config = _build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}")
     script = ScriptDirectory.from_config(config)
-    # Later revisions build on the merge; the graph must still have one head
-    # and the merge must be on its ancestry.
-    heads = script.get_heads()
-    assert len(heads) == 1
-    assert _MERGE in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
+    current_head = script.get_current_head()
+    assert current_head is not None
+    assert _MERGE in {revision.revision for revision in script.iterate_revisions(current_head, "base")}
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
     for revision in _PARENTS:
@@ -164,11 +164,7 @@ def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tm
         assert parent is not None and parent.down_revision == _COMMON_PARENT
 
 
-def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
-    branch_database: _MigrationDatabase,
-) -> None:
-    database = branch_database
-    before = _state(database.engine)
+def _assert_preserved_parent_data(database: _MigrationDatabase, before: dict[str, Any], after: dict[str, Any]) -> None:
     expected_settings = [dict(row) for row in before["settings"]]
     for row in expected_settings:
         if _TRANSPORT not in database.starting_revisions and row["upstream_stream_transport"] == "default":
@@ -177,26 +173,37 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
             row["subscription_overflow_source_id"] = None
             row["subscription_overflow_drain_until"] = None
 
-    result = run_upgrade(database.url, "head", bootstrap_legacy=False)
-    (head,) = ScriptDirectory.from_config(_build_alembic_config(database.url)).get_heads()
-    assert result.current_revision == head
-    assert _revisions(database.engine) == (head,)
+    # Descendants may add columns. Compare the preexisting fields while the
+    # historical round-trip separately compares the complete schema and rows.
+    projected_settings = [
+        {column: row[column] for column in expected}
+        for row, expected in zip(after["settings"], expected_settings, strict=True)
+    ]
+    assert projected_settings == expected_settings
+    for row, expected in zip(after["settings"], expected_settings, strict=True):
+        for column in row.keys() - expected.keys():
+            expected_default = 0 if column == "guest_session_generation" else None
+            assert row[column] == expected_default, column
+    assert [row["upstream_stream_transport"] for row in after["settings"]] == ["auto", "http", "websocket", "auto"]
+    expected_pins = before["pins"] if before["pins"] is not None else []
+    assert [
+        {column: row[column] for column in expected} for row, expected in zip(after["pins"], expected_pins, strict=True)
+    ] == expected_pins
+    assert {column: after["retry"][column] for column in before["retry"]} == before["retry"]
+
+
+def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
+    branch_database: _MigrationDatabase,
+) -> None:
+    database = branch_database
+    before = _state(database.engine)
+    result = run_upgrade(database.url, _MERGE, bootstrap_legacy=False)
+    assert result.current_revision == _MERGE
+    assert _revisions(database.engine) == (_MERGE,)
     merged = _state(database.engine)
-    # Revisions after the merge add dashboard_settings columns (the resilience
-    # toggles, the guest session counter, ...). Whether nullable or NOT NULL
-    # with a server default, each is backfilled uniformly, so it carries no
-    # per-row state: assert one value across rows and compare the rest
-    # separately, so this test keeps covering the two original branches.
-    merged_settings = [dict(row) for row in merged["settings"]]
-    added_columns = set(merged_settings[0]) - set(expected_settings[0])
-    for column in added_columns:
-        backfilled = {row.pop(column) for row in merged_settings}
-        assert len(backfilled) == 1, (column, backfilled)
-    assert merged_settings == expected_settings
-    assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
-    assert merged["pins"] == (before["pins"] if before["pins"] is not None else [])
-    assert merged["retry"] == before["retry"]
-    assert check_schema_drift(database.url) == ()
+    _assert_preserved_parent_data(database, before, merged)
+    if database.starting_revisions == _PARENTS:
+        assert merged == before
 
     # Populate the newly created overflow schema too, so every starting state
     # tests direct downgrade with retained settings and non-empty pins.
@@ -207,25 +214,29 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     assert len(populated["pins"]) == 2
     assert populated["settings"][0]["subscription_overflow_source_id"] == "retained-source"
 
-    # Step back to the merge first: revisions after it own their own schema
-    # (and their own drift against the ORM), while the merge itself must stay a
-    # no-op in both directions.
-    command.downgrade(_build_alembic_config(database.url), _MERGE)
-    assert _revisions(database.engine) == (_MERGE,)
-    at_merge = _state(database.engine)
-    merge_drift = check_schema_drift(database.url)
-
     for parent in _PARENTS:
         command.downgrade(_build_alembic_config(database.url), parent)
         # A direct downgrade to either immediate parent executes only the
         # no-op merge downgrade. Alembic records both unmerged parent heads;
         # it does not execute either parent's schema-removing downgrade.
         assert _revisions(database.engine) == tuple(sorted(_PARENTS))
-        assert _state(database.engine) == at_merge
-        assert check_schema_drift(database.url) == merge_drift
-
-        result = run_upgrade(database.url, "head", bootstrap_legacy=False)
-        assert result.current_revision == head
-        assert _revisions(database.engine) == (head,)
         assert _state(database.engine) == populated
-        assert check_schema_drift(database.url) == ()
+
+        result = run_upgrade(database.url, _MERGE, bootstrap_legacy=False)
+        assert result.current_revision == _MERGE
+        assert _revisions(database.engine) == (_MERGE,)
+        assert _state(database.engine) == populated
+
+
+def test_populated_parents_upgrade_directly_to_current_head(branch_database: _MigrationDatabase) -> None:
+    database = branch_database
+    before = _state(database.engine)
+    current_head = ScriptDirectory.from_config(_build_alembic_config(database.url)).get_current_head()
+    assert current_head is not None
+
+    result = run_upgrade(database.url, "head", bootstrap_legacy=False)
+
+    assert result.current_revision == current_head
+    assert _revisions(database.engine) == (current_head,)
+    _assert_preserved_parent_data(database, before, _state(database.engine))
+    assert check_schema_drift(database.url) == ()

@@ -324,4 +324,3 @@ When a T3 setting gains a database home, its environment field SHALL be removed 
 - **GIVEN** a `Settings` field that no module under `app/` reads
 - **WHEN** the field is discovered
 - **THEN** it is deleted in that change without a deprecation release
-

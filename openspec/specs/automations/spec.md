@@ -314,4 +314,3 @@ The dashboard setting `automations_scheduler_enabled` (a nullable `dashboard_set
 - **GIVEN** `CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED=false` and no dashboard value
 - **WHEN** an operator sets `automations_scheduler_enabled` to `true` in the dashboard
 - **THEN** ticks dispatch due work and `provenance.automations_scheduler_enabled.source` is `dashboard`
-

@@ -3,7 +3,9 @@
 ## Purpose
 
 Define migration, drift detection, and Alembic governance contracts so deployments fail closed on schema mismatch.
+
 ## Requirements
+
 ### Requirement: Alembic as migration source of truth
 
 The system SHALL use Alembic as the only runtime migration mechanism and SHALL NOT execute custom migration runners. Dashboard settings schema changes, including weekly pace working days, MUST be represented by Alembic revisions and ORM metadata so startup drift detection can verify them.
@@ -344,16 +346,16 @@ The migration graph MUST join `20260908_000000_add_subscription_overflow` and
 `20260908_000000_replace_upstream_stream_transport_default_sentinel` through a
 new merge revision. Both existing revisions MUST remain unchanged. The merge
 revision's upgrade and downgrade MUST NOT execute application schema or data
-operations.
+operations. Later revisions MAY descend from this merge.
 
-#### Scenario: An existing parent upgrades to the merged head
+#### Scenario: An existing parent upgrades to the current head
 
 - **GIVEN** a populated database at either parent, or at both parents
 - **WHEN** the normal migration runner upgrades to `head`
 - **THEN** it MUST apply any missing parent according to that parent's existing
-  behavior and finish at the single merge head
+  behavior, traverse the merge, and finish at the sole current graph head
 - **AND** it MUST preserve existing application rows except for data changes
-  already required by a missing parent's migration
+  already required by an applied migration
 - **AND** the resulting schema MUST match the current ORM metadata
 
 #### Scenario: Downgrading only the merge preserves both parents
@@ -363,8 +365,8 @@ operations.
 - **THEN** it MUST undo only the merge revision and retain both parent revision
   stamps and both parent schemas
 - **AND** application data MUST remain unchanged
-- **AND** upgrading to `head` again MUST restore the single merge stamp without
-  repeating either parent's schema or data operations
+- **AND** upgrading back to the merge revision MUST restore its single stamp
+  without repeating either parent's schema or data operations
 
 ### Requirement: Chunk transcript schema expands without rewriting history
 
@@ -511,3 +513,87 @@ remain for operator recovery.
 - **THEN** recovery MUST fail before deleting sidecars, writing output, or
   moving the source
 
+### Requirement: Receipt and spool-retention migration branches converge without history changes
+
+The migration graph MUST join `20260910_040000_merge_retry_claim_and_request_log_heads` and `20260910_010000_dashboard_spool_retention` through a new schema-neutral merge revision. Existing revision identifiers and parent edges MUST remain unchanged. The default head upgrade MUST succeed from an empty database or either populated parent and leave one current head matching ORM metadata.
+
+#### Scenario: Upgrade either populated parent
+
+- **GIVEN** a database at either parent with existing dashboard settings and retry-circuit failure evidence
+- **WHEN** the operator runs `codex-lb-db upgrade head`
+- **THEN** both parent schemas MUST be present and exactly one merge head MUST be current
+- **AND** existing rows and populated receipt or spool-retention values MUST remain unchanged
+- **AND** the migration policy and schema-drift checks MUST pass
+
+#### Scenario: Downgrade only the merge
+
+- **GIVEN** both parent schemas have been joined at the merge head
+- **WHEN** only the merge revision is downgraded
+- **THEN** both parent stamps MUST be restored without schema or row changes
+- **AND** upgrading to head again MUST restore one current merge stamp without changing those rows
+
+### Requirement: Guest-session and receipt migration branches converge without rewriting history
+
+The migration graph MUST join `20260910_160000_merge_retry_claim_spool_heads` and `20260908_000000_add_guest_session_generation` through a new schema-neutral merge revision. Existing revision identifiers, parent edges and bodies MUST remain unchanged. The public default head upgrade MUST succeed from an empty database or either populated parent and leave exactly one current head matching ORM metadata.
+
+#### Scenario: Upgrade either populated parent
+
+- **GIVEN** a database at either parent with existing retry-failure evidence and nondefault spool retention, plus a live receipt or nonzero guest-session generation where its schema exists
+- **WHEN** the operator runs `codex-lb-db upgrade head`
+- **THEN** all preexisting row fields MUST retain their values
+- **AND** newly introduced guest-session generations MUST default to zero and newly introduced receipt fields MUST be null
+- **AND** exactly one current merge head MUST remain and migration-policy and schema-drift checks MUST pass
+
+#### Scenario: Downgrade only the guest and receipt join
+
+- **GIVEN** both parent schemas are joined with live receipt, spool-retention and nonzero guest-session values
+- **WHEN** only the join revision is downgraded to either named immediate parent
+- **THEN** both parent stamps MUST be restored with exact schema and row preservation
+- **AND** upgrading to head again MUST restore one merge stamp with the same schema and rows
+
+### Requirement: Dashboard-user and retry-claim migration branches converge without history changes
+
+The graph MUST join `20260910_170000_merge_guest_retry_claim_heads` and `20260909_030000_add_audit_actor_columns` through a new schema-neutral merge revision. All published migration identifiers, parent edges and bodies MUST remain unchanged. The public default upgrade MUST converge from an empty database or either populated parent to exactly one head matching ORM metadata.
+
+#### Scenario: Upgrade either populated parent
+
+- **GIVEN** a populated parent with retry-failure evidence, guest-session generation and nondefault spool retention, plus live receipts or custom roles, scoped grants and user/session rows where those schemas exist
+- **WHEN** `codex-lb-db upgrade head` is run
+- **THEN** all preexisting row fields MUST retain their values except transformations explicitly required by the incoming parent migrations
+- **AND** incoming role seeding and credential projection MUST retain their documented semantics
+- **AND** the graph MUST have one current head with passing policy and drift checks
+
+#### Scenario: Downgrade only the join
+
+- **GIVEN** both parent schemas with populated receipt, role/grant and user/session data
+- **WHEN** only the join is downgraded to either named immediate parent
+- **THEN** both parent stamps MUST remain and the full schema and all rows MUST be unchanged
+- **AND** re-upgrade MUST restore one current head with the same schema and rows
+
+#### Scenario: Preserve audit history across the composed upgrade
+
+- **GIVEN** legacy audit rows on the retry parent or populated actor/target/severity snapshots on the audit parent
+- **WHEN** the operator upgrades to the merged head
+- **THEN** actor snapshots and existing values MUST be preserved, except the incoming migration's documented SQLite timestamp representation normalization
+- **AND** legacy actor/target fields MUST remain null and severity MUST default to info
+- **AND** join-only downgrade and re-upgrade MUST preserve the complete audit rows and schema
+
+### Requirement: Invite and retry-claim histories converge without rewriting published migrations
+
+The graph MUST join `20260910_200000_merge_users_retry_claim_heads` and `20260909_040000_add_dashboard_user_invites` through a new schema-neutral merge revision. All published identifiers, parent edges and bodies MUST remain unchanged. Public head upgrade MUST converge from empty or either populated parent to one head matching ORM metadata.
+
+#### Scenario: Upgrade either populated parent
+
+- **GIVEN** populated account/retry or invite history with role grants, user/session and guest generations, audit rows and nondefault spool retention, plus live receipt or invite rows where their schemas exist
+- **WHEN** the operator runs `codex-lb-db upgrade head`
+- **THEN** all existing row fields MUST retain their values
+- **AND** invite token hashes, expiry, flags, issuer snapshots and user links MUST remain intact
+- **AND** newly introduced invite storage MUST be empty or newly introduced receipt columns MUST be null
+- **AND** one current head and passing policy/drift checks MUST remain
+
+#### Scenario: Downgrade only the invite join
+
+- **GIVEN** both schemas populated with invites and a live receipt
+- **WHEN** only the join is downgraded to either named immediate parent
+- **THEN** both parent stamps MUST be restored with exact full schema and row preservation
+- **AND** re-upgrade MUST restore one head with the same schema and rows

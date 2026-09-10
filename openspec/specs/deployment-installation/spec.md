@@ -932,4 +932,3 @@ The Helm chart MUST keep rendering the pre-1.13 controller-migration shim (the `
 - **WHEN** an operator reads the chart README's `Upgrading` section
 - **THEN** it states that the shim is planned for removal in the first minor release after 1.26
 - **AND** it states that a release still on a pre-1.13 chart must first upgrade to a 1.13.0 - 1.26.x chart
-

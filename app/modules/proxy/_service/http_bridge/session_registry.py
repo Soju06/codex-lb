@@ -7,7 +7,7 @@ from datetime import timedelta
 from typing import Any
 
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clock import scheduler_for
+from app.core.clock import clock_for, scheduler_for
 from app.core.config.dashboard_overrides import effective_settings
 from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
@@ -20,9 +20,11 @@ from app.core.utils.time import utcnow
 from app.db.models import StickySessionKind
 from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
     _await_task_deferring_cancellation,
     _forget_http_bridge_denied_anchor_fence_owner,
     _http_bridge_allow_durable_takeover,
+    _http_bridge_background_cleanup_tasks,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_live_previous_response_alias_owner,
     _http_bridge_live_turn_state_alias_owner,
@@ -181,6 +183,39 @@ class _HTTPBridgeSessionRegistryMixin:
         # common resource finalization removes the latter entry.
         self._http_bridge_sessions = {}
         self._http_bridge_detached_sessions = {}
+
+    async def _drain_http_bridge_background_cleanup_tasks(self: _HTTPBridgeServiceProtocol, *, reason: str) -> bool:
+        clock = clock_for(self)
+        deadline = clock.monotonic() + _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS
+        no_tasks_turn = False
+        while True:
+            tasks = _http_bridge_background_cleanup_tasks(self)
+            if not tasks:
+                if no_tasks_turn:
+                    return not self._http_bridge_background_cleanup_failed
+                no_tasks_turn = True
+                await asyncio.sleep(0)
+                continue
+            no_tasks_turn = False
+            remaining = deadline - clock.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                results = await scheduler_for(self).wait_for(
+                    asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                break
+            self._http_bridge_background_cleanup_failed |= any(isinstance(result, BaseException) for result in results)
+            await asyncio.sleep(0)
+        logger.warning(
+            "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
+            reason,
+            len(tasks),
+            _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+        )
+        return False
 
     async def close_all_http_bridge_sessions(self: _HTTPBridgeServiceProtocol) -> bool:
         async with self._http_bridge_lock:

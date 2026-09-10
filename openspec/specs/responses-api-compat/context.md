@@ -6,6 +6,9 @@ This capability implements OpenAI-compatible behavior for `POST /v1/responses`, 
 
 See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
+See [retry-circuit generation context](retry-circuit-generations.md) for claim
+ownership, virtual-time budgets, and the unresolved stranded-receipt policy.
+
 ## Rationale and Decisions
 
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.

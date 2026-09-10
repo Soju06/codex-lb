@@ -65,7 +65,6 @@ _wait_for_websocket_continuity_gap = ["scheduler", "clock"]
 [allowances.timing]  # per-rule counts of raw-sleep + raw-timeout + raw-task-spawn + missing-scheduler-kwarg; unlisted modules and rules = 0
 "app/core/utils/shared_future.py" = { raw-task-spawn = 1 }
 "app/modules/proxy/_service/compact.py" = { raw-sleep = 1, raw-timeout = 1, raw-task-spawn = 1 }
-"app/modules/proxy/_service/http_bridge/mixin.py" = { raw-timeout = 1 }
 "app/modules/proxy/_service/realtime_live.py" = { raw-timeout = 2, raw-task-spawn = 3 }
 "app/modules/proxy/_service/request_log.py" = { raw-timeout = 1 }
 "app/modules/proxy/api.py" = { missing-scheduler-kwarg = 19 }
@@ -87,7 +86,6 @@ _wait_for_websocket_continuity_gap = ["scheduler", "clock"]
 "app/modules/proxy/account_cache.py" = 2
 "app/modules/proxy/account_eligibility.py" = 1
 "app/modules/proxy/api.py" = 8
-"app/modules/proxy/durable_bridge_repository.py" = 2
 "app/modules/proxy/images_observability.py" = 1
 "app/modules/proxy/images_service.py" = 2
 "app/modules/proxy/load_balancer.py" = 3

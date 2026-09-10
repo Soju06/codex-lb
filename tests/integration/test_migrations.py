@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import importlib
+import threading
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 import pytest
 from anyio import to_thread
@@ -2062,6 +2067,416 @@ async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
             assert await conn.run_sync(_schema_state) is not None
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_admission_claim_marker_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
+    from alembic import command
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.exc import OperationalError
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}"
+    parent_revision = "20260909_110000_model_context_window_overrides"
+    marker_revision = "20260829_000000_add_retry_circuit_admission_claim_marker"
+    script = ScriptDirectory.from_config(_build_alembic_config(db_url))
+    assert script.get_heads() == ["20260910_210000_merge_invite_retry_claim_heads"]
+    marker_script = script.get_revision(marker_revision)
+    assert marker_script is not None and marker_script.down_revision == parent_revision
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        columns = inspector.get_columns("http_bridge_retry_circuits")
+        marker = next(column for column in columns if column["name"] == "admission_claimed_at_epoch")
+        return {
+            "columns": {column["name"] for column in columns},
+            "marker_nullable": marker["nullable"],
+        }
+
+    def _preexisting_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        return {
+            "upstream_schema": {
+                table: {
+                    "columns": [
+                        (column["name"], str(column["type"]), column["nullable"], column["default"])
+                        for column in inspector.get_columns(table)
+                    ],
+                    "primary_key": inspector.get_pk_constraint(table),
+                    "foreign_keys": inspector.get_foreign_keys(table),
+                    "indexes": inspector.get_indexes(table),
+                }
+                for table in (
+                    "dashboard_settings",
+                    "model_context_window_overrides",
+                    "model_source_pins",
+                    "account_usage_rollup_state",
+                    "request_report_hourly_rollups",
+                    "automation_jobs",
+                    "automation_runs",
+                )
+            },
+            "settings": [tuple(row) for row in sync_conn.execute(text("SELECT * FROM dashboard_settings ORDER BY id"))],
+            "context_overrides": [
+                tuple(row)
+                for row in sync_conn.execute(text("SELECT * FROM model_context_window_overrides ORDER BY slug"))
+            ],
+            "pins": [tuple(row) for row in sync_conn.execute(text("SELECT * FROM model_source_pins ORDER BY pin_key"))],
+            "fold_state": [
+                tuple(row) for row in sync_conn.execute(text("SELECT * FROM account_usage_rollup_state ORDER BY id"))
+            ],
+            "reports": [
+                tuple(row)
+                for row in sync_conn.execute(text("SELECT * FROM request_report_hourly_rollups ORDER BY bucket_epoch"))
+            ],
+            "automation_jobs": [
+                tuple(row) for row in sync_conn.execute(text("SELECT * FROM automation_jobs ORDER BY id"))
+            ],
+            "automation_runs": [
+                tuple(row) for row in sync_conn.execute(text("SELECT * FROM automation_runs ORDER BY id"))
+            ],
+            "legacy_retry": tuple(
+                sync_conn.execute(
+                    text(
+                        """
+                        SELECT session_key_kind, session_key_hash, api_key_scope,
+                               consecutive_failures, cooldown_until_epoch, last_detail,
+                               updated_at_epoch, admission_generation
+                        FROM http_bridge_retry_circuits WHERE session_key_hash = 'legacy-hash'
+                        """
+                    )
+                ).one()
+            ),
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    claim_until_epoch = time.time() + 3600.0
+    try:
+        async with engine.connect() as conn:
+            before_has_table = await conn.run_sync(
+                lambda sync_conn: sa_inspect(sync_conn).has_table("http_bridge_retry_circuits")
+            )
+            before_columns = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_retry_circuits")
+                }
+            )
+        assert before_has_table is True
+        assert "admission_claimed_at_epoch" not in before_columns
+        assert "admission_claimed_generation" not in before_columns
+        assert "admission_claimed_until_epoch" not in before_columns
+
+        # Seed at the new parent, before the receipt columns exist. Marker
+        # migration must preserve upstream state and generation 4, including
+        # report history whose raw source is no longer retained.
+        async with engine.begin() as conn:
+            assert (
+                await conn.execute(text("SELECT reports_folded_through FROM account_usage_rollup_state WHERE id = 1"))
+            ).scalar_one() == "1970-01-01 00:00:00"
+            await conn.execute(
+                text(
+                    "INSERT INTO automation_jobs (id, name, schedule_time, schedule_timezone, model) "
+                    "VALUES ('retained-job', 'Retained job', '06:00', 'UTC', 'retained-model')"
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO automation_runs (
+                        id, job_id, trigger, slot_key, cycle_key,
+                        scheduled_for, started_at, attempt_count
+                    ) VALUES (
+                        :id, 'retained-job', 'scheduled', :slot, :slot,
+                        '2026-09-09 06:00:00', '2026-09-09 06:00:01', 2
+                    )
+                    """
+                ),
+                [
+                    {"id": "captured-budget-run", "slot": "captured-slot"},
+                    {"id": "legacy-budget-run", "slot": "legacy-slot"},
+                ],
+            )
+            assert (
+                await conn.execute(text("SELECT claim_budget_seconds FROM automation_runs ORDER BY id"))
+            ).scalars().all() == [None, None]
+            await conn.execute(
+                text("UPDATE automation_runs SET claim_budget_seconds = 600.0 WHERE id = 'captured-budget-run'")
+            )
+            await conn.execute(
+                text(
+                    "UPDATE account_usage_rollup_state SET reports_folded_through = '2026-09-09 06:00:00' WHERE id = 1"
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO request_report_hourly_rollups (
+                        bucket_epoch, account_id, api_key_id, model, useragent_group,
+                        conversation_id, first_requested_at, request_count, error_count,
+                        cancelled_count, input_tokens, output_tokens, reasoning_tokens,
+                        reasoning_usage_known_requests, cached_input_tokens, cost_usd
+                    ) VALUES (
+                        1772323200, 'retained-account', 'retained-key', 'retained-model',
+                        'retained-client', 'retained-conversation', '2026-03-01 00:15:00',
+                        9, 2, 1, 100, 50, 7, 4, 20, 0.125
+                    )
+                    """
+                )
+            )
+            assert (
+                await conn.execute(
+                    text(
+                        "SELECT http_responses_session_bridge_codex_prewarm_enabled, "
+                        "http_responses_stream_request_budget_seconds, "
+                        "http_responses_session_bridge_request_budget_seconds FROM dashboard_settings"
+                    )
+                )
+            ).one() == (None, None, None)
+            assert (await conn.execute(text("SELECT COUNT(*) FROM model_context_window_overrides"))).scalar_one() == 0
+            await conn.execute(
+                text(
+                    "INSERT INTO model_context_window_overrides (slug, context_window) "
+                    "VALUES ('retained-model', 128000)"
+                )
+            )
+            updated_settings = await conn.execute(
+                text(
+                    "UPDATE dashboard_settings SET subscription_overflow_source_id = 'retained-overflow-source', "
+                    "subscription_overflow_drain_until = '2026-09-09 12:00:00', "
+                    "upstream_stream_transport = 'websocket', "
+                    "soft_drain_enabled = 0, deterministic_failover_enabled = 1, circuit_breaker_enabled = 0, "
+                    "upstream_connect_timeout_seconds = 9.0, proxy_request_budget_seconds = 300.0, "
+                    "compact_request_budget_seconds = 120.0, transcription_request_budget_seconds = 60.0, "
+                    "stream_idle_timeout_seconds = 30.0, proxy_downstream_websocket_idle_timeout_seconds = 90.0, "
+                    "sse_keepalive_interval_seconds = 5.0, proxy_overload_isolation_seconds = 240, "
+                    "proxy_account_error_rate_weighting_enabled = 0, proxy_account_inflight_penalty_pct = 10.0, "
+                    "proxy_account_lease_token_weight = 2.0, proxy_account_lease_ttl_seconds = 900.0, "
+                    "http_responses_session_bridge_codex_prewarm_enabled = 1, "
+                    "http_responses_stream_request_budget_seconds = 240.0, "
+                    "http_responses_session_bridge_request_budget_seconds = 480.0"
+                )
+            )
+            assert updated_settings.rowcount > 0
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO model_source_pins (
+                        pin_key, kind, source_id, api_key_id,
+                        created_at, last_seen_at, expires_at, purge_at
+                    ) VALUES (
+                        'retained-thread-pin', 'thread', 'retained-overflow-source', NULL,
+                        '2026-09-08 10:00:00', '2026-09-08 10:30:00',
+                        '2026-09-09 10:00:00', '2026-09-10 10:00:00'
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_retry_circuits (
+                        session_key_kind, session_key_hash, api_key_scope,
+                        consecutive_failures, cooldown_until_epoch, last_detail,
+                        updated_at_epoch, admission_generation
+                    ) VALUES (
+                        'session_header', 'legacy-hash', '__anonymous__',
+                        2, 1300.0, 'stream_incomplete', 1200.0, 4
+                    )
+                    """
+                )
+            )
+            preexisting_state = await conn.run_sync(_preexisting_state)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+            assert await conn.run_sync(_preexisting_state) == preexisting_state
+            initial_receipt = (
+                await conn.execute(
+                    text(
+                        "SELECT admission_claimed_at_epoch, admission_claimed_generation, "
+                        "admission_claimed_until_epoch FROM http_bridge_retry_circuits "
+                        "WHERE session_key_hash = 'legacy-hash'"
+                    )
+                )
+            ).one()
+        assert tuple(initial_receipt) == (None, None, None)
+        assert {
+            "admission_claimed_at_epoch",
+            "admission_claimed_generation",
+            "admission_claimed_until_epoch",
+        }.issubset(state["columns"])
+        assert state["marker_nullable"] is True
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE http_bridge_retry_circuits
+                    SET admission_claimed_at_epoch = 1100.0,
+                        admission_claimed_generation = 4,
+                        admission_claimed_until_epoch = :claim_until_epoch
+                    WHERE session_key_hash = 'legacy-hash'
+                    """
+                ),
+                {"claim_until_epoch": claim_until_epoch},
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade retry-circuit admission claim marker migration",
+        ):
+            await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            after_downgrade = await conn.run_sync(_schema_state)
+            assert await conn.run_sync(_preexisting_state) == preexisting_state
+            row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT admission_generation, admission_claimed_at_epoch,
+                               admission_claimed_generation, admission_claimed_until_epoch
+                        FROM http_bridge_retry_circuits
+                        WHERE session_key_hash = 'legacy-hash'
+                        """
+                    )
+                )
+            ).one()
+            revision_after_refused_downgrade = (
+                await conn.execute(text("SELECT version_num FROM alembic_version"))
+            ).scalar_one()
+        assert {
+            "admission_claimed_at_epoch",
+            "admission_claimed_generation",
+            "admission_claimed_until_epoch",
+        }.issubset(after_downgrade["columns"])
+        assert tuple(row) == (4, 1100.0, 4, claim_until_epoch)
+        assert revision_after_refused_downgrade == marker_revision
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE http_bridge_retry_circuits
+                    SET admission_claimed_at_epoch = NULL,
+                        admission_claimed_generation = NULL,
+                        admission_claimed_until_epoch = NULL
+                    WHERE session_key_hash = 'legacy-hash'
+                    """
+                )
+            )
+
+        migration_module = importlib.import_module(
+            "app.db.alembic.versions.20260829_000000_add_retry_circuit_admission_claim_marker"
+        )
+        batch_entered = threading.Event()
+        release_batch = threading.Event()
+        original_batch_alter_table = migration_module.op.batch_alter_table
+
+        @contextmanager
+        def _hold_batch_alter_table(*args, **kwargs):
+            batch_entered.set()
+            if not release_batch.wait(timeout=5):
+                raise AssertionError("timed out waiting to release migration DDL")
+            with original_batch_alter_table(*args, **kwargs) as batch_op:
+                yield batch_op
+
+        monkeypatch.setattr(migration_module.op, "batch_alter_table", _hold_batch_alter_table)
+
+        def _attempt_claim_during_downgrade() -> None:
+            from sqlalchemy import create_engine
+
+            claim_engine = create_engine(
+                f"sqlite:///{tmp_path / 'retry-circuit-admission-claim-marker.sqlite'}",
+                future=True,
+                connect_args={"timeout": 0},
+            )
+            try:
+                with claim_engine.begin() as claim_conn:
+                    claim_conn.execute(
+                        text(
+                            """
+                            UPDATE http_bridge_retry_circuits
+                            SET admission_claimed_at_epoch = :claimed_at_epoch,
+                                admission_claimed_generation = 5,
+                                admission_claimed_until_epoch = :claimed_until_epoch
+                            WHERE session_key_hash = 'legacy-hash'
+                            """
+                        ),
+                        {
+                            "claimed_at_epoch": time.time(),
+                            "claimed_until_epoch": time.time() + 3600.0,
+                        },
+                    )
+            finally:
+                claim_engine.dispose()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            downgrade_future = pool.submit(command.downgrade, _build_alembic_config(db_url), parent_revision)
+            try:
+                assert batch_entered.wait(timeout=5), "downgrade did not reach the guarded DDL"
+                claim_future = pool.submit(_attempt_claim_during_downgrade)
+                with pytest.raises(OperationalError, match="database is locked"):
+                    claim_future.result(timeout=5)
+            finally:
+                release_batch.set()
+            downgrade_future.result(timeout=5)
+
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_preexisting_state) == preexisting_state
+            after_release_downgrade = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_retry_circuits")
+                }
+            )
+            revision_after_release_downgrade = (
+                await conn.execute(text("SELECT version_num FROM alembic_version"))
+            ).scalar_one()
+        assert "admission_claimed_at_epoch" not in after_release_downgrade
+        assert "admission_claimed_generation" not in after_release_downgrade
+        assert "admission_claimed_until_epoch" not in after_release_downgrade
+        assert revision_after_release_downgrade == parent_revision
+
+        reupgrade = await to_thread.run_sync(lambda: run_upgrade(db_url, marker_revision, bootstrap_legacy=False))
+        assert reupgrade.current_revision == marker_revision
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+            assert await conn.run_sync(_preexisting_state) == preexisting_state
+            row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT admission_generation, admission_claimed_at_epoch,
+                               admission_claimed_generation, admission_claimed_until_epoch
+                        FROM http_bridge_retry_circuits
+                        WHERE session_key_hash = 'legacy-hash'
+                        """
+                    )
+                )
+            ).one()
+        assert state["marker_nullable"] is True
+        # A released receipt permits a complete downgrade; re-upgrade restores
+        # nullable marker columns without inventing a claim.
+        assert tuple(row) == (4, None, None, None)
+    finally:
+        await engine.dispose()
+
+
+def test_retry_circuit_admission_claim_marker_migration_uses_database_clock() -> None:
+    migration_module = importlib.import_module(
+        "app.db.alembic.versions.20260829_000000_add_retry_circuit_admission_claim_marker"
+    )
+
+    postgres_sql = str(migration_module._active_claim_statement("postgresql"))
+    sqlite_sql = str(migration_module._active_claim_statement("sqlite"))
+
+    assert "admission_claimed_until_epoch > EXTRACT(EPOCH FROM clock_timestamp())" in postgres_sql
+    assert "admission_claimed_until_epoch > ((julianday('now') - 2440587.5) * 86400.0)" in sqlite_sql
+    assert ":now_epoch" not in postgres_sql
+    assert ":now_epoch" not in sqlite_sql
 
 
 @pytest.mark.asyncio

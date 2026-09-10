@@ -270,4 +270,3 @@ The Codex-base and `/v1` image generation and edit routes MUST require a valid p
 
 - **WHEN** an Images request omits the required-capability carrier
 - **THEN** the route retains its existing authentication, validation, account-routing, observability, and response behavior
-

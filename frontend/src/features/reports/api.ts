@@ -1,5 +1,5 @@
 import { get } from "@/lib/api-client";
-import { ReportsResponseSchema } from "./schemas";
+import { ReportsResponseSchema, ReportsOptionsResponseSchema } from "./schemas";
 
 export type ReportsParams = {
   startDate?: string;
@@ -11,7 +11,7 @@ export type ReportsParams = {
   timezone?: string;
 };
 
-export function getReports(params: ReportsParams = {}) {
+function reportQuery(params: ReportsParams): string {
   const query = new URLSearchParams();
   if (params.startDate) query.set("start_date", params.startDate);
   if (params.endDate) query.set("end_date", params.endDate);
@@ -29,5 +29,13 @@ export function getReports(params: ReportsParams = {}) {
     }
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return get(`/api/reports${suffix}`, ReportsResponseSchema);
+  return suffix;
+}
+
+export function getReports(params: ReportsParams = {}) {
+  return get(`/api/reports${reportQuery(params)}`, ReportsResponseSchema);
+}
+
+export function getReportsOptions(params: Omit<ReportsParams, "model" | "useragent"> = {}) {
+  return get(`/api/reports/options${reportQuery(params)}`, ReportsOptionsResponseSchema);
 }

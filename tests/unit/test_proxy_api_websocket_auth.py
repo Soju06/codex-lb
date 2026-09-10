@@ -17,6 +17,7 @@ import app.core.request_locality as request_locality
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.request_policy as proxy_request_policy
 from app.core.clients.proxy import ProxyResponseError
+from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
 from app.core.middleware.trusted_proxy_headers import TrustedProxyHeadersMiddleware
@@ -294,6 +295,7 @@ async def test_websocket_auth_uses_raw_peer_and_identity_consensus(
     denied: bool,
 ) -> None:
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", forwarded_allow_ips)
+    get_settings.cache_clear()
     _configure_disabled_proxy_auth(
         monkeypatch,
         trusted_proxy_cidr=trusted_proxy_cidr,

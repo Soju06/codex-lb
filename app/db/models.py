@@ -77,6 +77,32 @@ class FileAccountPin(Base):
     __table_args__ = (Index("ix_file_account_pins_expires_at", "expires_at"),)
 
 
+class ModelSourcePin(Base):
+    """Stickiness of a conversation, anchor, or bounce to a subscription-overflow model source.
+
+    ``pin_key`` is namespaced by ``kind`` (``thread`` | ``anchor`` | ``bounce``; a
+    plain string because the routing stage owns the values). ``source_id``
+    carries no foreign key so rows outlive a deleted source for the drain
+    window instead of cascading away. A row answers lookups while
+    ``purge_at > now``; ``expires_at <= now`` marks it a tombstone. Timestamps
+    are timezone-aware like ``file_account_pins`` because the database clock is
+    authoritative for expiry. No runtime code reads this table yet (#2123 WP-A).
+    """
+
+    __tablename__ = "model_source_pins"
+
+    pin_key: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    source_id: Mapped[str] = mapped_column(String, nullable=False)
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    purge_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_model_source_pins_purge_at", "purge_at"),)
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -278,6 +304,39 @@ class AccountUsageRollupState(Base):
         nullable=True,
         server_default=text("'1970-01-01 00:00:00'"),
     )
+
+    reports_folded_through: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
+
+
+class RequestReportHourlyRollup(Base):
+    """Permanent report measures; conversation remains a dimension for exact distinct counts.
+
+    Hours are assembled into timezone days at read time. Normal traffic only,
+    including detached/deleted accounts, matching the reports contract.
+    """
+
+    __tablename__ = "request_report_hourly_rollups"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    useragent_group: Mapped[str] = mapped_column(String, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    first_requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    error_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cancelled_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    reasoning_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    reasoning_usage_known_requests: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
 
 
 class RequestUsageHourlyRollup(Base):
@@ -499,12 +558,6 @@ class RequestLog(Base):
     latency_bridge_queue_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     prewarm_status: Mapped[str | None] = mapped_column(String, nullable=True)
     prewarm_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # Deprecated: no longer written since the prewarm canary retirement
-    # (reduce-settings-surface-phase-4). Kept one release so old replicas can
-    # keep inserting during rolling upgrades; the column drop ships in the
-    # next release.
-    prewarm_canary_bucket: Mapped[str | None] = mapped_column(String, nullable=True)
-    prewarm_eligible_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     session_previous_gap_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -837,8 +890,8 @@ class DashboardSettings(Base):
     sticky_threads_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     upstream_stream_transport: Mapped[str] = mapped_column(
         String,
-        default="default",
-        server_default=text("'default'"),
+        default="auto",
+        server_default=text("'auto'"),
         nullable=False,
     )
     prohibit_fast_mode: Mapped[bool] = mapped_column(
@@ -869,6 +922,30 @@ class DashboardSettings(Base):
         Integer,
         nullable=True,
     )
+    # C2-1 timeouts: dashboard-managed upstream timeouts and request budgets.
+    # NULL = inherit the ``Settings`` field (environment value or code default).
+    upstream_connect_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    compact_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    transcription_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stream_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_downstream_websocket_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sse_keepalive_interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end C2-1 timeouts
+    # M1 stream/bridge budgets: dashboard-managed Responses stream and HTTP
+    # session bridge request budgets. NULL = inherit the ``Settings`` field.
+    http_responses_stream_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    http_responses_session_bridge_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end M1 stream/bridge budgets
+    # C2-2 routing/overload: dashboard-managed routing weights and overload
+    # isolation. NULL inherits the process environment value (or the code
+    # default) at read time; a non-NULL value wins over the environment.
+    proxy_overload_isolation_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proxy_account_error_rate_weighting_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    proxy_account_inflight_penalty_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_account_lease_token_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_account_lease_ttl_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end C2-2 routing/overload
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )
@@ -915,6 +992,12 @@ class DashboardSettings(Base):
         nullable=False,
     )
     single_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Subscription-exhaustion overflow designation (#2123). No foreign key on
+    # purpose: a dangling id means "off", mirroring single_account_id. The drain
+    # deadline is armed when the designation is cleared and compared against
+    # utcnow() (naive UTC) like every other dashboard_settings timestamp.
+    subscription_overflow_source_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    subscription_overflow_drain_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
         Integer,
         default=1800,
@@ -981,6 +1064,11 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
+    # M3 codex prewarm: dashboard-managed Codex HTTP-bridge session prewarm.
+    # NULL inherits the deprecated ``CODEX_LB_*`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    http_responses_session_bridge_codex_prewarm_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M3 codex prewarm
     upstream_proxy_routing_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1094,7 +1182,7 @@ class DashboardSettings(Base):
         nullable=False,
     )
     # Data retention windows in days; NULL = never set from the dashboard
-    # (the deprecated env alias then applies), 0 = explicitly disabled.
+    # (treated as disabled), 0 = explicitly disabled.
     request_log_retention_days: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
@@ -1103,6 +1191,22 @@ class DashboardSettings(Base):
         Integer,
         nullable=True,
     )
+    # C2-3 resilience toggles: NULL inherits the deprecated ``CODEX_LB_*`` env
+    # alias (then the code default); a non-NULL value is dashboard-owned.
+    soft_drain_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    deterministic_failover_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    circuit_breaker_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # M2 background jobs: NULL inherits the deprecated ``CODEX_LB_*`` env alias
+    # (then the code default); schedulers read the value at every cycle entry.
+    auth_guardian_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    automations_scheduler_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    rate_limit_reset_credits_refresh_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M2 background jobs
+    # M5 conversation archive: NULL inherits the deprecated
+    # ``CODEX_LB_CONVERSATION_ARCHIVE_ENABLED`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    conversation_archive_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M5 conversation archive
     version: Mapped[int] = mapped_column(
         Integer,
         default=1,
@@ -1118,6 +1222,31 @@ class DashboardSettings(Base):
     )
 
     __mapper_args__ = {"version_id_col": version}
+
+
+# M4 model catalogue: dashboard-managed per-model context window overrides.
+class ModelContextWindowOverride(Base):
+    """One dashboard-stored context window override for a model slug.
+
+    A row wins over the ``CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES`` entry for
+    the same slug; slugs without a row inherit the environment entry (or have
+    no override). The migration never copies the environment into rows.
+    """
+
+    __tablename__ = "model_context_window_overrides"
+
+    slug: Mapped[str] = mapped_column(String, primary_key=True)
+    context_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+# end M4 model catalogue
 
 
 class RuntimeSentinel(Base):
@@ -1586,6 +1715,12 @@ class AutomationRun(Base):
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    # Compact request budget (seconds) in effect when this row was last
+    # claimed; the stale-claim reclaim window covers the larger of this value
+    # and the current budget so a later dashboard change cannot reclaim an
+    # in-flight run early. NULL on rows claimed before the column existed
+    # (they use the current budget).
+    claim_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="runs")
@@ -2229,6 +2364,21 @@ Index(
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
+    "idx_logs_missing_cost",
+    RequestLog.model_source_id,
+    RequestLog.id,
+    postgresql_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+    sqlite_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+)
+Index(
     "idx_logs_deleted_at_requested_at_id",
     RequestLog.deleted_at,
     RequestLog.requested_at.desc(),
@@ -2278,6 +2428,32 @@ Index(
     RequestLog.error_code,
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
+)
+# Live-row partial indexes for the unfiltered request-log facet skip scan
+# (recursive ``facet_skip`` probes: ``min(column) WHERE deleted_at IS NULL AND
+# column > previous``). The predicate matches the probe so a probe never walks
+# the soft-deleted cohort sharing a value. Account ids need none: soft deletion
+# detaches account_id (NULL), which ``account_id > previous`` never walks.
+# Enforced via the manual drift index requirements like the covering index.
+Index(
+    "idx_logs_live_api_key",
+    RequestLog.api_key_id,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
+)
+Index(
+    "idx_logs_live_model_effort",
+    RequestLog.model,
+    RequestLog.reasoning_effort,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
+)
+Index(
+    "idx_logs_live_status_error",
+    RequestLog.status,
+    RequestLog.error_code,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
 )
 Index(
     "idx_logs_request_status_api_key_time",

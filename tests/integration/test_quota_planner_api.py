@@ -5,12 +5,14 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
+from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -23,6 +25,8 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeyNotFoundError, ApiKeyRateLimitExceededError
+from app.modules.quota_planner import api as quota_planner_api
+from app.modules.quota_planner import scheduler as quota_planner_scheduler
 from app.modules.quota_planner.logic import PlannerAction, PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.quota_planner.scheduler import QuotaPlannerScheduler
@@ -233,6 +237,77 @@ async def test_quota_planner_forecast_api_returns_simulation(async_client, db_se
     assert payload["slotSeconds"] == 900
     assert "simulation" in payload
     assert payload["simulation"]["forecastUnits"] == payload["totalDemandUnits"]
+
+
+def _record_build_states(monkeypatch, module) -> list[dict[str, Any]]:
+    captured: list[dict[str, Any]] = []
+    original_build_states = module._build_states
+
+    def recording_build_states(**kwargs):
+        captured.append(kwargs)
+        return original_build_states(**kwargs)
+
+    monkeypatch.setattr(module, "_build_states", recording_build_states)
+    return captured
+
+
+async def _store_dashboard_values_differing_from_environment(async_client) -> tuple[bool, float]:
+    soft_drain_enabled = not resolve_resilience_toggles(None).soft_drain_enabled
+    inflight_penalty_pct = 37.5
+    response = await async_client.put(
+        "/api/settings",
+        json={"softDrainEnabled": soft_drain_enabled, "proxyAccountInflightPenaltyPct": inflight_penalty_pct},
+    )
+    assert response.status_code == 200
+    return soft_drain_enabled, inflight_penalty_pct
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_forecast_builds_states_from_the_dashboard_snapshot(monkeypatch, async_client, db_setup):
+    del db_setup
+    captured = _record_build_states(monkeypatch, quota_planner_api)
+    soft_drain_enabled, inflight_penalty_pct = await _store_dashboard_values_differing_from_environment(async_client)
+    # The snapshot read may refresh the cache through its own session, so it
+    # must complete before the request session issues its first query and
+    # pins a pooled connection.
+    order: list[str] = []
+    settings_cache = quota_planner_api.get_settings_cache()
+    original_cache_get = settings_cache.get
+    original_planner_get_settings = QuotaPlannerRepository.get_settings
+
+    async def recording_cache_get(*args, **kwargs):
+        order.append("dashboard_snapshot")
+        return await original_cache_get(*args, **kwargs)
+
+    async def recording_planner_get_settings(self, *args, **kwargs):
+        order.append("first_repository_query")
+        return await original_planner_get_settings(self, *args, **kwargs)
+
+    monkeypatch.setattr(settings_cache, "get", recording_cache_get)
+    monkeypatch.setattr(QuotaPlannerRepository, "get_settings", recording_planner_get_settings)
+
+    response = await async_client.get("/api/quota-planner/forecast?horizonHours=6")
+
+    assert response.status_code == 200
+    assert len(captured) == 1
+    assert captured[0]["soft_drain_enabled"] is soft_drain_enabled
+    assert captured[0]["routing_tunables"].inflight_penalty_pct == inflight_penalty_pct
+    assert order.index("dashboard_snapshot") < order.index("first_repository_query")
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_scheduler_tick_builds_states_from_the_dashboard_snapshot(
+    monkeypatch, async_client, db_setup
+):
+    del db_setup
+    captured = _record_build_states(monkeypatch, quota_planner_scheduler)
+    soft_drain_enabled, inflight_penalty_pct = await _store_dashboard_values_differing_from_environment(async_client)
+
+    assert await QuotaPlannerScheduler()._run_once_as_leader() is True
+
+    assert len(captured) == 1
+    assert captured[0]["soft_drain_enabled"] is soft_drain_enabled
+    assert captured[0]["routing_tunables"].inflight_penalty_pct == inflight_penalty_pct
 
 
 @pytest.mark.asyncio

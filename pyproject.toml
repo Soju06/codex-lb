@@ -1,6 +1,6 @@
 [project]
 name = "codex-lb"
-version = "1.25.0-beta.1"
+version = "1.25.0-beta.6"
 description = "Codex load balancer and proxy for ChatGPT accounts with usage dashboard"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -35,6 +35,7 @@ classifiers = [
 requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.13.4",
+    "anyio>=4.14.0",
     "aiohttp-retry>=2.9.1",
     "alembic>=1.16.5",
     "aiosqlite>=0.22.1",
@@ -83,7 +84,7 @@ dev = [
     "pytest-timeout>=2.4.0",
     "httpx>=0.28.1",
     "ruff>=0.14.13",
-    "ty==0.0.75",
+    "ty==0.0.78",
     "openai>=2.16.0",
     "pytest-xdist>=3.8.0",
     "pytest-cov>=7.1.0",
@@ -102,6 +103,7 @@ markers = [
     "e2e: end-to-end flow tests",
     "integration: tests that exercise multiple layers together",
     "unit: fast isolated tests",
+    "usage_refresh_request_path: keep UsageUpdater request-path refreshes live (see tests/conftest.py)",
 ]
 testpaths = ["tests"]
 filterwarnings = [

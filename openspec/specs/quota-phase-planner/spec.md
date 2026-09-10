@@ -326,3 +326,66 @@ integrity error that aborts the remainder of a planning tick.
 - **WHEN** one decision's idempotency key was concurrently inserted by another
   writer
 - **THEN** the tick continues logging the remaining accounts' decisions
+
+### Requirement: Warmup cancellation preserves measured API-key usage
+
+When a warmup probe has returned exact token usage for an owned API-key reservation, warmup execution SHALL finish reservation finalization with those measured counts before propagating caller cancellation. It MUST NOT replace a completed probe's known usage with a zero-usage failure settlement.
+
+Cancellation before the warmup probe returns measured usage SHALL continue to
+fail the owned reservation with zero usage. Deferred cancellation during
+finalization of already measured usage MUST propagate before request logging,
+warmup-effect recording, or decision completion.
+
+#### Scenario: Cancellation during finalization preserves measured usage
+
+- **GIVEN** a warmup probe returns 7 input, 3 output, and 2 cached input tokens
+- **AND** reservation finalization has started with those counts
+- **WHEN** caller cancellation arrives before finalization returns
+- **THEN** finalization completes exactly once with 7/3/2
+- **AND** no failed zero-usage settlement is applied
+- **AND** cancellation propagates after finalization
+- **AND** no success log or executed decision status is written
+
+#### Scenario: Cancellation before usage remains a zero-usage failure
+
+- **GIVEN** an API-key reservation exists for a warmup
+- **WHEN** cancellation arrives before the probe returns usage
+- **THEN** the reservation is failed with zero token counts
+- **AND** caller cancellation propagates
+
+### Requirement: Planner demand history is reduced per slot inside the database
+
+The quota planner SHALL obtain its demand-forecast history as demand units
+already summed per `(slot_epoch, request_kind)` by the database, not as one
+row per legacy demand grain (`slot`, `account`, `api_key`, `model`,
+`reasoning_effort`, `request_kind`, `status`). The per-row demand-unit formula
+(the maximum of token, cost, and request units with non-negative clamps) MUST
+be applied per legacy-grain row before the per-slot sum, so the reduced result
+equals the Python reduction of the exact-grain rows for any watermark
+position. The folded rollup segment and the un-folded raw tail MUST keep the
+existing watermark-consistent partition. A planner tick MUST log its duration
+so a slow tick is attributable from logs alone.
+
+#### Scenario: A tick over a long history returns a bounded row set
+
+- **GIVEN** 28 days of demand history at the legacy grain across many
+  accounts, keys, models, and efforts
+- **WHEN** the planner tick loads demand history
+- **THEN** the number of rows materialized in the process is bounded by slots
+  times request kinds, independent of how many accounts, keys, models, or
+  efforts produced traffic
+
+#### Scenario: Reduced history equals the exact-grain reduction
+
+- **GIVEN** the same window read as exact-grain bins and as per-slot units
+- **WHEN** both are reduced to demand units per slot
+- **THEN** the per-slot totals agree within floating-point tolerance for the
+  epoch watermark, a mid-history watermark, the full target watermark, and the
+  raw-degraded state after the operator escape hatch
+
+#### Scenario: Tick duration is observable
+
+- **GIVEN** a replica that ran a planner tick as leader
+- **WHEN** the tick completes
+- **THEN** the replica logs the tick duration in milliseconds
+

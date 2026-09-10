@@ -55,6 +55,7 @@ certs/
 .agents/.personality_migration
 .agents/version.json
 .agents/log/
+.agents/scheduled_tasks.lock
 .venv
 
 # Local Responses traffic captures and generated parity reports

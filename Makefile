@@ -2,6 +2,10 @@ PYTEST_ARGS := -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeou
 POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
 INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
+	tests/integration/test_cost_backfill.py \
+	tests/integration/test_atomic_quota_warmup_claims.py \
+	tests/integration/test_report_rollup.py \
+	tests/integration/test_reports_performance_api.py \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
@@ -23,6 +27,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_account_deletion_background.py \
 	tests/integration/test_request_usage_time_rollup.py \
 	tests/integration/test_request_usage_rollup_parity.py \
+	tests/integration/test_conversation_presence_union.py \
 	tests/integration/test_migrations.py::test_request_usage_time_rollups_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_conversation_presence_rollup_migration_upgrade_and_downgrade \
 	tests/integration/test_data_retention.py \
@@ -46,8 +51,10 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_capped_floor_query_plan_is_index_only_postgresql \
 	tests/integration/test_migrations.py::test_usage_history_bulk_covering_indexes_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql \
-	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql
-SHELL := /bin/bash
+	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql \
+	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql \
+	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql
+SHELL := bash
 
 .PHONY: help
 help:
@@ -101,6 +108,8 @@ lint: architecture-check
 architecture-check:
 	uv run python scripts/check_proxy_architecture.py
 	uv run python scripts/check_cancellation_safety.py
+	uv run python scripts/check_proxy_timing_seams.py
+	uv run python scripts/check_settings_tiers.py
 
 typecheck:
 	uv sync --dev --frozen
@@ -128,7 +137,7 @@ rust-audit:
 	test-integration-bridge test-e2e test-postgres
 test-unit: frontend-build
 	uv sync --dev --frozen
-	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/test_request_logs_options_api.py
+	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/simulation tests/test_request_logs_options_api.py
 
 test-integration-core: frontend-build
 	uv sync --dev --frozen

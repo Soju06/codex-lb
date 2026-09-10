@@ -128,11 +128,19 @@ async def test_account_binding_uses_bound_pool_and_same_pool_fallbacks(
 
 
 @pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])
-def test_resolver_rejects_credentials_on_plaintext_proxy(scheme: str) -> None:
+def test_resolver_allows_plaintext_proxy_credentials_and_warns_once(
+    scheme: str, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Credentials on http/socks5 proxies are allowed (the dashboard warns);
+    the resolver logs one credential-free warning per endpoint, not per request."""
+
+    from app.core.upstream_proxy import resolver as resolver_module
+
+    monkeypatch.setattr(resolver_module, "_PLAINTEXT_CREDENTIAL_WARNINGS_EMITTED", set())
     encryptor = _encryptor()
     endpoint = ProxyEndpoint(
-        id="unsafe",
-        name="unsafe",
+        id=f"plaintext-{scheme}",
+        name="plaintext",
         scheme=scheme,
         host="proxy.test",
         port=8080,
@@ -140,10 +148,32 @@ def test_resolver_rejects_credentials_on_plaintext_proxy(scheme: str) -> None:
         password_encrypted=encryptor.encrypt("secret"),
     )
 
-    with pytest.raises(UpstreamProxyRouteError) as exc_info:
+    with caplog.at_level("WARNING", logger="app.core.upstream_proxy.resolver"):
+        resolved = resolve_proxy_endpoint(endpoint, encryptor=encryptor)
         resolve_proxy_endpoint(endpoint, encryptor=encryptor)
 
-    assert exc_info.value.reason == "plaintext_proxy_credentials_forbidden"
+    assert resolved.username == "user"
+    assert resolved.password == "secret"
+    assert resolved.plaintext_credentials is True
+    warnings = [record for record in caplog.records if "plaintext" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "secret" not in warnings[0].getMessage()
+    assert "user" not in warnings[0].getMessage().split("proxy in plaintext")[0].replace("plaintext-", "")
+
+
+def test_resolver_https_credentials_are_not_flagged_as_plaintext() -> None:
+    encryptor = _encryptor()
+    endpoint = ProxyEndpoint(
+        id="tls",
+        name="tls",
+        scheme="https",
+        host="proxy.test",
+        port=8443,
+        username="user",
+        password_encrypted=encryptor.encrypt("secret"),
+    )
+
+    assert resolve_proxy_endpoint(endpoint, encryptor=encryptor).plaintext_credentials is False
 
 
 def test_resolver_rejects_colon_in_proxy_username() -> None:

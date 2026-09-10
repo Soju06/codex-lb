@@ -100,6 +100,9 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
 pub struct WebSocketEvent {
     pub payload: Box<RawValue>,
     pub event_type: Option<String>,
+    /// Payload-only precedence; validated lifecycle IDs remain caller policy.
+    pub payload_response_id: Option<String>,
+    pub sequence_number: Option<Box<RawValue>>,
 }
 
 /// Match Python's WebSocket classification: a string type wins, otherwise an
@@ -128,19 +131,56 @@ pub fn interpret_websocket(text: &str) -> Option<WebSocketEvent> {
         _ => None,
     };
     Some(WebSocketEvent {
-        payload: RawValue::from_string(compact_json_whitespace(text)).ok()?,
+        payload_response_id: payload_response_id(&fields).ok()?,
+        sequence_number: fields.get("sequence_number").and_then(|value| {
+            let token = value.get();
+            let digits = token.strip_prefix('-').unwrap_or(token);
+            (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| (*value).to_owned())
+        }),
+        payload: RawValue::from_string(compact_json_whitespace(text)?).ok()?,
         event_type,
     })
+}
+
+fn payload_response_id(fields: &BTreeMap<String, &RawValue>) -> Result<Option<String>, ()> {
+    fn stripped_id(value: Option<&&RawValue>) -> Result<Option<String>, ()> {
+        let Some(value) = value.filter(|value| value.get().starts_with('"')) else {
+            return Ok(None);
+        };
+        let value: String = serde_json::from_str(value.get()).map_err(|_| ())?;
+        // Python str.strip also treats these four information separators as whitespace.
+        let value = value
+            .trim_matches(|ch: char| ch.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&ch));
+        Ok((!value.is_empty()).then(|| value.to_owned()))
+    }
+    if let Some(id) = stripped_id(fields.get("response_id"))? {
+        return Ok(Some(id));
+    }
+    let Some(response) = fields
+        .get("response")
+        .filter(|value| value.get().starts_with('{'))
+    else {
+        return Ok(None);
+    };
+    let response: BTreeMap<String, &RawValue> =
+        serde_json::from_str(response.get()).map_err(|_| ())?;
+    stripped_id(response.get("id"))
 }
 
 // RawValue emits bytes verbatim. Strip only JSON whitespace outside strings so
 // a pretty-printed object cannot split the newline-delimited IPC record. Numeric
 // tokens, duplicate keys, string escapes and all string content stay untouched.
-fn compact_json_whitespace(text: &str) -> String {
+// Keep integers beyond Python's minimum configurable digit limit opaque: any
+// such token (including nested or overwritten values) could fail the shared IPC
+// decoder before Python can attribute the failure to an individual exchange.
+fn compact_json_whitespace(text: &str) -> Option<String> {
+    const MAX_PYTHON_INTEGER_DIGITS: usize = 640;
     let mut result = String::with_capacity(text.len());
     let mut in_string = false;
     let mut escaped = false;
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
         if in_string {
             result.push(ch);
             if escaped {
@@ -153,11 +193,25 @@ fn compact_json_whitespace(text: &str) -> String {
         } else if ch == '"' {
             in_string = true;
             result.push(ch);
+        } else if ch == '-' || ch.is_ascii_digit() {
+            let start = result.len();
+            result.push(ch);
+            while let Some(next) =
+                chars.next_if(|next| matches!(next, '0'..='9' | '.' | 'e' | 'E' | '+' | '-'))
+            {
+                result.push(next);
+            }
+            let token = &result[start..];
+            if !token.contains(['.', 'e', 'E'])
+                && token.strip_prefix('-').unwrap_or(token).len() > MAX_PYTHON_INTEGER_DIGITS
+            {
+                return None;
+            }
         } else if !matches!(ch, ' ' | '\t' | '\r' | '\n') {
             result.push(ch);
         }
     }
-    result
+    Some(result)
 }
 
 fn alias(kind: &str) -> Option<&'static str> {

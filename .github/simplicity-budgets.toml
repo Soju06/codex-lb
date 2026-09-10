@@ -99,6 +99,7 @@ allowed = [
   "renovate.json",
   "rust-toolchain.toml",
   "scripts",
+  "spec",
   "tests",
   "uv.lock",
 ]

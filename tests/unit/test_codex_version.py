@@ -8,6 +8,7 @@ import aiohttp
 import pytest
 
 from app.core.clients.codex_version import CodexVersionCache
+from app.core.clients.codex_version_snapshot import CODEX_VERSION
 
 
 def _mock_response(*, status: int = 200, json_data: object = None) -> MagicMock:
@@ -101,7 +102,7 @@ async def test_rejects_invalid_version_name():
         version = await cache.get_version()
 
     # Invalid name falls back to settings default
-    assert version == "0.153.4"
+    assert version == CODEX_VERSION
 
 
 @pytest.mark.asyncio
@@ -113,7 +114,7 @@ async def test_rejects_alpha_version_name():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == CODEX_VERSION
 
 
 @pytest.mark.asyncio
@@ -149,7 +150,7 @@ async def test_fallback_to_settings_default_when_no_cache():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session_fail):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == CODEX_VERSION
 
 
 @pytest.mark.asyncio
@@ -162,7 +163,7 @@ async def test_fallback_on_network_exception():
     ):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == CODEX_VERSION
 
 
 @pytest.mark.asyncio
@@ -185,7 +186,7 @@ async def test_invalidate_clears_cache():
 
 
 @pytest.mark.asyncio
-async def test_missing_name_field_falls_back():
+async def test_missing_name_uses_stable_tag():
     cache = CodexVersionCache(ttl_seconds=60)
     resp = _mock_response(json_data={"tag_name": "rust-v1.2.3"})
     session = _mock_session(resp)
@@ -193,7 +194,7 @@ async def test_missing_name_field_falls_back():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == "1.2.3"
 
 
 def test_ttl_must_be_positive():
@@ -239,7 +240,7 @@ async def test_npm_invalid_version_falls_back_to_settings_default():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == CODEX_VERSION
 
 
 @pytest.mark.asyncio
@@ -252,7 +253,7 @@ async def test_npm_missing_version_field_falls_back_to_settings_default():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == CODEX_VERSION
 
 
 @pytest.mark.asyncio
@@ -318,3 +319,59 @@ def test_cached_version_or_default_falls_back_to_settings_default_when_empty():
         result = cache.cached_version_or_default()
 
     assert result == "0.101.0"
+
+
+async def test_persisted_version_survives_offline_restart(tmp_path):
+    path = tmp_path / "version.json"
+    first = CodexVersionCache()
+    await first.restore(path)
+    with patch.object(first, "_fetch_latest_version", AsyncMock(return_value="1.2.3")):
+        assert await first.get_version() == "1.2.3"
+    second = CodexVersionCache()
+    await second.restore(path)
+    assert second.cached_version_or_default() == "1.2.3"
+    with patch.object(second, "_fetch_latest_version", AsyncMock(return_value=None)) as fetch:
+        assert await second.get_version() == "1.2.3"
+        assert await second.get_version() == "1.2.3"
+    fetch.assert_awaited_once()
+
+
+async def test_failure_backoff_without_cached_value():
+    cache = CodexVersionCache()
+    with patch.object(cache, "_fetch_latest_version", AsyncMock(return_value=None)) as fetch:
+        assert await cache.get_version() == CODEX_VERSION
+        assert await cache.get_version() == CODEX_VERSION
+    fetch.assert_awaited_once()
+
+
+async def test_prerelease_flag_is_rejected_even_with_stable_name():
+    cache = CodexVersionCache()
+    session = _mock_session_per_url(
+        {
+            "api.github.com": _mock_response(json_data={"name": "9.0.0", "prerelease": True}),
+            "registry.npmjs.org": _mock_response(json_data={"version": "1.0.0"}),
+        }
+    )
+    with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
+        assert await cache.get_version() == "1.0.0"
+
+
+async def test_old_disk_version_cannot_override_new_bundled_default(tmp_path):
+    path = tmp_path / "version.json"
+    path.write_text('{"version": "0.1.0"}')
+    cache = CodexVersionCache()
+    await cache.restore(path)
+    assert cache.cached_version_or_default() == CODEX_VERSION
+
+
+async def test_restored_version_is_refreshed_even_just_after_host_boot(tmp_path):
+    path = tmp_path / "version.json"
+    path.write_text('{"version": "1.0.0"}')
+    cache = CodexVersionCache()
+    await cache.restore(path)
+    with (
+        patch("app.core.clients.codex_version.time.monotonic", return_value=10),
+        patch.object(cache, "_fetch_latest_version", AsyncMock(return_value="1.1.0")) as fetch,
+    ):
+        assert await cache.get_version() == "1.1.0"
+    fetch.assert_awaited_once()

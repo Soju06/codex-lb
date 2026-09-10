@@ -17,6 +17,7 @@ pub const CAPABILITIES: &[&str] = &[
     "http_responses_completion_v1",
     "websocket",
     "websocket_responses_events_v1",
+    "websocket_responses_routing_v1",
     "websocket_send_ack",
 ];
 
@@ -152,6 +153,8 @@ pub enum NativeEvent {
         text: String,
         event_type: Option<String>,
         payload: Box<serde_json::value::RawValue>,
+        payload_response_id: Option<String>,
+        sequence_number: Option<Box<serde_json::value::RawValue>>,
     },
     WebsocketBinary {
         request_id: String,

@@ -22842,7 +22842,7 @@ def test_turn_state_bootstrap_rebind_requires_explicit_draining_owner_rejection(
     assert (
         proxy_service._http_bridge_should_attempt_local_bootstrap_rebind(
             exc,
-            key=proxy_service._HTTPBridgeSessionKey("thread_header", "thread-123", None),
+            key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_123", None),
             headers={"thread-id": "thread-123", "x-codex-turn-state": "http_turn_123"},
             previous_response_id=None,
             owner_pre_dispatch=http_bridge_owner_forwarding_module._owner_forward_failure_was_pre_dispatch(exc),
@@ -22957,7 +22957,7 @@ async def test_stream_via_http_bridge_recovers_turn_state_locally_after_draining
         chunk
         async for chunk in service._stream_via_http_bridge(
             payload,
-            headers={"x-codex-turn-state": turn_state},
+            headers={"x-codex-turn-state": turn_state, "x-codex-session-id": "sid-drain-rebind"},
             codex_session_affinity=True,
             propagate_http_errors=False,
             openai_cache_affinity=False,
@@ -23012,6 +23012,46 @@ def test_owner_forward_proxy_error_classifies_explicit_drain_as_receiver_rejecte
     )
 
 
+
+def test_turn_state_only_generated_drain_rejection_preserves_retryable_owner_error() -> None:
+    source = ProxyResponseError(
+        503,
+        {"error": {"code": "bridge_drain_active", "message": "owner draining", "type": "server_error"}},
+    )
+    exc = http_bridge_owner_forwarding_module._OwnerForwardRequestError(
+        source,
+        outcome=http_bridge_owner_forwarding_module._OwnerForwardOutcome.RECEIVER_REJECTED,
+    )
+
+    assert (
+        proxy_service._http_bridge_should_attempt_local_bootstrap_rebind(
+            exc,
+            key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_123", None),
+            headers={"x-codex-turn-state": "http_turn_123"},
+            previous_response_id=None,
+            owner_pre_dispatch=True,
+        )
+        is False
+    )
+
+
+def test_ambiguous_drain_rejection_does_not_bootstrap_rebind_session_key() -> None:
+    exc = ProxyResponseError(
+        503,
+        {"error": {"code": "bridge_drain_active", "message": "owner draining", "type": "server_error"}},
+    )
+
+    assert (
+        proxy_service._http_bridge_should_attempt_local_bootstrap_rebind(
+            exc,
+            key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
+            headers={"x-codex-session-id": "sid-123"},
+            previous_response_id=None,
+            owner_pre_dispatch=False,
+        )
+        is False
+    )
+
 def test_turn_state_draining_owner_rejection_does_not_rebind_previous_response() -> None:
     source = ProxyResponseError(
         503,
@@ -23025,7 +23065,7 @@ def test_turn_state_draining_owner_rejection_does_not_rebind_previous_response()
     assert (
         proxy_service._http_bridge_should_attempt_local_bootstrap_rebind(
             exc,
-            key=proxy_service._HTTPBridgeSessionKey("thread_header", "thread-123", None),
+            key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_123", None),
             headers={"thread-id": "thread-123", "x-codex-turn-state": "http_turn_123"},
             previous_response_id="resp-123",
             owner_pre_dispatch=True,

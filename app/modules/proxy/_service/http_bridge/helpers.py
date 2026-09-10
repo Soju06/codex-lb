@@ -3923,12 +3923,20 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
         return False
     if previous_response_id is not None:
         return False
+    turn_state_key = _sticky_key_from_turn_state_header(headers)
     if owner_pre_dispatch and _http_bridge_error_code(exc) == "bridge_drain_active":
         # Explicit draining-owner rejection before dispatch: the old owner never
-        # accepted this request upstream, so a bootstrap rebind is safe even
-        # under a hard turn-state anchor.
+        # accepted this request upstream. A generated turn-state-only key still
+        # has no safe local creator fallback, so preserve the owner's retryable
+        # rejection instead of turning it into a misleading local 409.
+        has_identity_fallback = (
+            _codex_backend_identity(headers).thread_selection_key is not None
+            or _sticky_key_from_session_header(headers) is not None
+        )
+        if key.affinity_kind == "turn_state_header" and str(turn_state_key or "").startswith("http_turn_"):
+            return has_identity_fallback
         return True
-    if _sticky_key_from_turn_state_header(headers) is not None:
+    if turn_state_key is not None:
         return False
     payload = exc.payload
     if not isinstance(payload, dict):
@@ -3938,7 +3946,6 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
         return False
     code = error.get("code")
     return code in {
-        "bridge_drain_active",
         "bridge_owner_unreachable",
         "bridge_instance_mismatch",
     }

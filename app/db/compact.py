@@ -439,6 +439,9 @@ def execute_sqlite_compaction(
         original_source_stat = source.stat()
         original_source_identity = (original_source_stat.st_dev, original_source_stat.st_ino)
         source_sync_descriptor = _open_sync_descriptor(source)
+        opened_source_stat = os.fstat(source_sync_descriptor)
+        if (opened_source_stat.st_dev, opened_source_stat.st_ino) != original_source_identity:
+            raise RuntimeError("source path changed before compaction")
         source_integrity = check_sqlite_integrity(
             source,
             mode=SqliteIntegrityCheckMode.QUICK,

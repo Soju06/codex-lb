@@ -1063,3 +1063,25 @@ def test_compact_cli_execute_does_not_call_dry_run_planner(monkeypatch, capsys) 
     assert "source_bytes_after=123" in output
     assert "reclaimed_bytes=456" in output
     assert execute_calls == [("sqlite+aiosqlite:////tmp/store.db", True)]
+
+
+def test_compaction_rejects_a_descriptor_for_another_inode(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "store.db"
+    unrelated = tmp_path / "unrelated.db"
+    _create_fragmented_database(source)
+    _create_fragmented_database(unrelated)
+    original_source = source.read_bytes()
+    original_unrelated = unrelated.read_bytes()
+    real_open = compact._open_sync_descriptor
+
+    def open_other_inode(path: Path) -> int:
+        return real_open(unrelated if path == source else path)
+
+    monkeypatch.setattr(compact, "_open_sync_descriptor", open_other_inode)
+    with pytest.raises(RuntimeError, match="source path changed before compaction"):
+        compact.execute_sqlite_compaction(_database_url(source), confirm_stopped=True)
+
+    assert source.read_bytes() == original_source
+    assert unrelated.read_bytes() == original_unrelated
+    assert list(tmp_path.glob("*.pre-compact-*")) == []
+    assert not Path(f"{source}.compact.lock").exists()

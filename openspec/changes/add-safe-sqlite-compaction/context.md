@@ -20,3 +20,5 @@ the fixes. Afterward, 106 compaction, recovery, and settings-reference tests
 passed, along with full Ruff/typing, architecture/cancellation/timing/tier
 checks and strict validation of this change. All 65 canonical specs validated.
 Tests use disposable databases and do not compact a running deployment.
+
+Descriptor acquisition now compares `fstat` device/inode with the initial source stat before any integrity or compaction work. The regression supplies a descriptor to a different inode while retaining the source path; it failed before the fix and passes afterward without modifying either database.

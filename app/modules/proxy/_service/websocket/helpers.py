@@ -1154,6 +1154,19 @@ def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestS
     ) and not _websocket_fresh_request_blocks_account_switch(request_state)
 
 
+def _websocket_request_requires_preferred_account(request_state: _WebSocketRequestState) -> bool:
+    """Whether continuity or file ownership makes the preferred account mandatory."""
+    return (
+        (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
+        or request_state.replay_required_account_id is not None
+        or request_state.file_required_preferred_account
+        or (
+            request_state.affinity_policy.codex_session_source == "turn_state"
+            and request_state.preferred_account_id is not None
+        )
+    )
+
+
 def _prepare_websocket_request_state_for_auth_replay(
     request_state: _WebSocketRequestState,
     *,

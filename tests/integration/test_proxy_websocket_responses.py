@@ -10399,6 +10399,164 @@ def test_backend_responses_websocket_retries_precreated_model_not_found_on_anoth
     assert excluded_snapshots == [set(), {account_ids[0]}]
 
 
+def test_backend_responses_websocket_retries_model_not_found_after_temporary_preference(
+    app_instance,
+    monkeypatch,
+):
+    """A completed forced refresh leaves a preference, not an owner pin."""
+    model_rejection = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 404,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "model_not_found",
+                            "message": "The model `gpt-5.5` does not exist or you do not have access to it.",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        ]
+    )
+    recovered = _FakeUpstreamWebSocket(_websocket_response_batch("resp_ws_model_not_found_after_refresh"))
+    upstreams = [model_rejection, recovered]
+    account_ids = ["acct_ws_refresh_a", "acct_ws_refresh_b"]
+    selected_accounts: list[str] = []
+    excluded_snapshots: list[set[str]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self, headers, *, request_state, model, api_key, client_send_lock, websocket, **kwargs
+    ):
+        del self, headers, model, api_key, client_send_lock, websocket, kwargs
+        index = len(selected_accounts)
+        selected_accounts.append(account_ids[index])
+        excluded_snapshots.append(set(request_state.excluded_account_ids))
+        if index == 0:
+            request_state.preferred_account_id = account_ids[index]
+        else:
+            assert request_state.force_refresh_account_id is None
+            assert request_state.preferred_account_id == account_ids[0]
+        return SimpleNamespace(id=account_ids[index]), upstreams[index]
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(_websocket_response_create("retry after refresh")))
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    assert selected_accounts == account_ids
+    assert excluded_snapshots == [set(), {account_ids[0]}]
+
+
+def test_backend_responses_websocket_exhausted_model_not_found_preserves_original_envelope(
+    app_instance,
+    monkeypatch,
+):
+    """A movable pre-created retry must not replace its 404 with no_accounts."""
+    rejected_account = "acct_ws_model_not_found_only"
+    message = "The model `gpt-5.5` does not exist or you do not have access to it."
+    rejected = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 404,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "model_not_found",
+                            "message": message,
+                            "param": "model",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        ]
+    )
+    connect_attempts = 0
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self, headers, *, request_state, model, api_key, client_send_lock, websocket, **kwargs
+    ):
+        nonlocal connect_attempts
+        del headers, model, kwargs
+        connect_attempts += 1
+        if connect_attempts == 1:
+            return SimpleNamespace(id=rejected_account), rejected
+        await self._emit_websocket_connect_failure(
+            websocket,
+            client_send_lock=client_send_lock,
+            account_id=None,
+            api_key=api_key,
+            request_state=request_state,
+            status_code=503,
+            payload=proxy_module.openai_error("no_accounts", "No active accounts available", error_type="server_error"),
+            error_code="no_accounts",
+            error_message="No active accounts available",
+        )
+        return None, None
+
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(_websocket_response_create("retry only account")))
+            event = json.loads(websocket.receive_text())
+
+    assert connect_attempts == 2
+    assert event == {
+        "type": "error",
+        "status": 404,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "model_not_found",
+            "message": message,
+            "param": "model",
+        },
+    }
+
+
 def test_backend_responses_websocket_previous_response_usage_limit_returns_upstream_unavailable(
     app_instance,
     monkeypatch,

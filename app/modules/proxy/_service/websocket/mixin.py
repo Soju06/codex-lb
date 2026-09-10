@@ -454,6 +454,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_precreated_replay_fallback_error,
     _websocket_precreated_retry_error_code,
     _websocket_receive_timeout_for_pending_requests,
+    _websocket_request_requires_preferred_account,
     _websocket_response_id,
     _wrapped_websocket_error_event,
 )
@@ -3701,16 +3702,7 @@ class _WebSocketMixin:
                 or forced_refresh_account_id
                 or request_state.preferred_account_id
             )
-            turn_state_owner_required = (
-                request_state.affinity_policy.codex_session_source == "turn_state"
-                and request_state.preferred_account_id is not None
-            )
-            require_preferred_account = (
-                (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
-                or request_state.replay_required_account_id is not None
-                or request_state.file_required_preferred_account
-                or turn_state_owner_required
-            )
+            require_preferred_account = _websocket_request_requires_preferred_account(request_state)
             try:
                 account = await proxy._select_websocket_connect_account(
                     deadline,
@@ -3766,7 +3758,7 @@ class _WebSocketMixin:
                 and account.id != request_state.precreated_replay_account_id
             )
             if selected_account_model_replacement:
-                # Preserve the rejected account's 400 only when selection
+                # Preserve the rejected account's original envelope only when selection
                 # cannot find a replacement. Once this replacement attempt
                 # starts, a connection/open failure belongs to the replacement.
                 _clear_websocket_precreated_replay_fallback(request_state)
@@ -5931,7 +5923,11 @@ class _WebSocketMixin:
             _websocket_event_error_message(event_type, payload),
             error_code=retry_error_code,
         )
-        if not accepted_lifecycle_replay and model_scoped_rejection and request_state.preferred_account_id is not None:
+        if (
+            not accepted_lifecycle_replay
+            and model_scoped_rejection
+            and _websocket_request_requires_preferred_account(request_state)
+        ):
             # A pre-created model rejection can move only an unowned request.
             # Keep the original event for a hard owner rather than reconnecting
             # it and eventually replacing the upstream 404 with an owner miss.
@@ -6003,9 +5999,11 @@ class _WebSocketMixin:
                 # it, so the fresh body is re-sent to the same account on a
                 # fresh socket instead of excluding the account it must use.
                 request_state.request_text = safe_request_text
-        if retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+        if retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE or (
+            retry_error_code == "model_not_found" and model_scoped_rejection
+        ):
             retry_text = None
-            if not request_state.file_required_preferred_account:
+            if not _websocket_request_requires_preferred_account(request_state):
                 retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
             if retry_text is not None:
                 request_state.precreated_replay_reason = _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE

@@ -1042,6 +1042,14 @@ async def test_stream_model_not_found_keeps_account_health_and_valid_neighbour_w
         rejected_lines = [line async for line in response.aiter_lines() if line]
 
     assert set(seen_account_ids) == {"acc_model_not_found_a", "acc_model_not_found_b"}
+    assert response.status_code == 404
+    assert json.loads("\n".join(rejected_lines)) == {
+        "error": {
+            "code": "model_not_found",
+            "message": "The model `gpt-5.5` does not exist or you do not have access to it.",
+            "type": "invalid_request_error",
+        }
+    }
     assert not any(event.get("type") == "response.completed" for event in _extract_events(rejected_lines))
 
     from app.dependencies import get_proxy_service_for_app

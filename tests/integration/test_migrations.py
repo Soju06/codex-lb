@@ -1878,6 +1878,12 @@ async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path, empty_reg
         lambda: run_upgrade(db_url, "20260910_000000_request_logs_missing_cost_index", bootstrap_legacy=False)
     )
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent, bootstrap_legacy=False))
+    # The dashboard spool-retention migration is an independent sibling of the
+    # HTTP bridge recovery branch. Apply it as well so schema-drift validation
+    # compares the complete ORM schema while round-tripping the rebind claim.
+    await to_thread.run_sync(
+        lambda: run_upgrade(db_url, "20260910_010000_dashboard_spool_retention", bootstrap_legacy=False)
+    )
     engine = create_async_engine(db_url)
     if empty_registry:
         async with engine.begin() as conn:

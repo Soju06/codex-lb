@@ -1465,6 +1465,17 @@
       "contributions": [
         "doc"
       ]
+    },
+    {
+      "login": "elmakus",
+      "name": "elmakus",
+      "avatar_url": "https://avatars.githubusercontent.com/u/76910687?v=4",
+      "profile": "https://github.com/elmakus",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
     }
   ],
   "contributorsPerLine": 7,

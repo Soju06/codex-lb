@@ -64,6 +64,7 @@ class _NoopScheduler:
 # themselves (e.g. test_otel, test_telemetry_consent,
 # test_model_registry_replication) and keep working.
 BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
+    "build_metadata_refresh_scheduler",
     "build_usage_refresh_scheduler",
     "build_model_refresh_scheduler",
     "build_sticky_session_cleanup_scheduler",
@@ -440,9 +441,13 @@ def _reset_codex_version_cache():
     cache = get_codex_version_cache()
     cache._cached_version = None
     cache._cached_at = 0.0
+    cache._retry_at = 0.0
+    cache._cache_path = None
     yield
     cache._cached_version = None
     cache._cached_at = 0.0
+    cache._retry_at = 0.0
+    cache._cache_path = None
 
 
 def _reset_global_state() -> None:

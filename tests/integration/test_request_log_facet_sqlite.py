@@ -85,17 +85,20 @@ async def test_options_avoid_repeated_live_cohort_scans(
             ],
         )
         await session.commit()
-        if live_facet_indexes:
-            # The independently proposed partial indexes must remain compatible.
-            for name, columns in (
-                ("api_key", "api_key_id"),
-                ("model_effort", "model, reasoning_effort"),
-                ("status_error", "status, error_code"),
-            ):
+        # Model metadata now creates these indexes by default (#2246).
+        # Build both parameterized layouts explicitly so the pre-index case
+        # stays covered and the indexed case cannot duplicate a schema index.
+        for name, columns in (
+            ("api_key", "api_key_id"),
+            ("model_effort", "model, reasoning_effort"),
+            ("status_error", "status, error_code"),
+        ):
+            await session.execute(text(f"DROP INDEX IF EXISTS idx_logs_live_{name}"))
+            if live_facet_indexes:
                 await session.execute(
                     text(f"CREATE INDEX idx_logs_live_{name} ON request_logs ({columns}) WHERE deleted_at IS NULL")
                 )
-            await session.commit()
+        await session.commit()
         assert not (await session.execute(text("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'"))).all()
 
     # Count SQLite VM work for the real HTTP endpoint, including its actual

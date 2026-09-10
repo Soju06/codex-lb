@@ -2280,8 +2280,14 @@ class _StreamingRetryMixin:
                                 request_started_at=start,
                                 affinity_observation=affinity_observation,
                                 allow_transient_retry=(
-                                    transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1
-                                    or allow_retry_flag
+                                    resilience.deterministic_failover_enabled
+                                    and allow_retry_flag
+                                    and payload.previous_response_id is None
+                                    and affinity.kind != StickySessionKind.CODEX_SESSION
+                                    and not _stream_owner_bound_to(account)
+                                    and responses_payload_is_account_neutral_fresh_replay(
+                                        payload.to_replay_safety_payload()
+                                    )
                                 ),
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,

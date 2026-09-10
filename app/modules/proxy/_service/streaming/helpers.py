@@ -91,6 +91,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.accepted_replay import _terminal_payload_reports_output
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -306,6 +307,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _event_type_from_payload,
     _RequestLogFailureMetadata,
+    _RetryableStreamError,
     _signal_propagated_capacity_startup_ready,
     _StreamSettlement,
     _WebSocketRequestState,
@@ -529,6 +531,50 @@ def _stream_iterator_after_capacity_admission(
 
 
 _REQUEST_TRANSPORT_HTTP = "http"
+
+
+class _OutputFreeOverloadReplayBuffer:
+    """Keep a fresh direct-HTTP lifecycle prelude replayable until model output."""
+
+    _PRELUDE_EVENT_TYPES = frozenset({"response.created", "response.in_progress"})
+
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self._lines: list[str] = []
+
+    def raise_if_retryable(
+        self,
+        event_type: str | None,
+        error_code: str | None,
+        event_payload: dict[str, JsonValue] | None,
+        settlement: _StreamSettlement,
+        error_message: str | None,
+    ) -> None:
+        if not self.enabled or settlement.downstream_visible or event_type not in {"response.failed", "error"}:
+            return
+        if error_code not in UPSTREAM_OVERLOAD_CODES or _terminal_payload_reports_output(event_payload):
+            return
+        raise _RetryableStreamError(
+            error_code,
+            settlement.error or cast(UpstreamError, {"message": error_message or "Upstream overloaded"}),
+            exclude_account=True,
+        )
+
+    def relay(self, event_type: str | None, line: str, settlement: _StreamSettlement) -> list[str]:
+        if self.enabled and event_type in self._PRELUDE_EVENT_TYPES:
+            self._lines.append(line)
+            return []
+        lines, self._lines = [*self._lines, line], []
+        settlement.downstream_visible = True
+        if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+            settlement.downstream_text_visible = True
+        return lines
+
+    def flush(self, settlement: _StreamSettlement) -> list[str]:
+        lines, self._lines = self._lines, []
+        if lines:
+            settlement.downstream_visible = True
+        return lines
 
 
 def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:

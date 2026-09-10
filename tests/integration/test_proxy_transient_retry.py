@@ -1038,6 +1038,7 @@ async def test_stream_safety_policy_rejection_keeps_account_health_and_original_
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
         if status_code is None:
+            yield _sse_event({"type": "response.created", "response": {"id": "resp_safety_policy"}})
             yield _sse_event(
                 {
                     "type": "response.failed",

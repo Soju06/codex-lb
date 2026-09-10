@@ -45,6 +45,7 @@ from app.modules.api_keys.service import (
     LimitRuleInput,
 )
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
+from app.modules.proxy.account_cache import RoutingAvailabilityCache
 from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.capability_routing import (
     REQUIRED_CAPABILITY_HEADER,
@@ -148,6 +149,15 @@ def _stub_request_logging(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+
+@pytest.fixture(autouse=True)
+def _stub_socket_account_availability(monkeypatch: pytest.MonkeyPatch) -> None:
+    # This module's fake connect methods return accounts absent from the DB.
+    # Keep their availability explicit; the pause/reuse route tests use real
+    # committed snapshots in test_proxy_websocket_account_availability.py.
+    availability = RoutingAvailabilityCache()
+    monkeypatch.setattr(websocket_mixin_module, "is_account_routing_unavailable", availability.is_unavailable)
 
 
 class _FakeUpstreamMessage:

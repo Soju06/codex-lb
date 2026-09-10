@@ -345,3 +345,28 @@ for the hard-owner and cross-account turn-state requirements.
 When JSON is decoded and rebuilt for upstream HTTP, inbound hop-by-hop fields and every Connection-nominated header are dropped before native client identity is classified. Mandatory selected credentials/account and JSON negotiation headers are then regenerated. For example, `Connection: authorization, x-client-hop` cannot forward `x-client-hop` or suppress the selected upstream Authorization. A Connection-nominated originator or User-Agent cannot manufacture native identity. Non-nominated native identity and continuity retain their existing behavior.
 
 The shared HTTP builder covers canonical backend and v1 compaction egress while preserving synthesized subscription hints. The existing compact trailing-slash URLs remain HTTP 405 with the OpenAI-compatible error envelope and no upstream dispatch; this backport does not add aliases. Responses streaming canonical/trailing-slash routes retain their existing routing behavior and final 429 propagation. Source: upstream 5be82ef4; no transport dependency or database migration is imported. See [spec.md](spec.md).
+
+## Pausing accounts with open WebSockets
+
+An ordinary direct WebSocket can outlive its selected account's availability.
+The account object captured at connection time does not observe later database
+updates. Dispatch therefore checks the existing routing availability snapshot
+before reuse and again after admission waits, immediately before sending a new
+turn. Peer updates arrive through the existing account-routing invalidation bus;
+the check adds no database query or selection pass to available socket reuse.
+
+For example, A completes a response and an operator pauses A from another
+replica. Once the shared snapshot observes that pause, a fresh movable request
+retires A's idle socket and selects an available account. A request carrying an
+A-owned response or file retains that ownership and fails closed if A cannot
+serve it. Turn-state learned from A is cleared when retiring its socket.
+
+If A still has an accepted response, it may finish. A new unsent turn is rejected
+locally without penalizing A's upstream health. A pause observed during admission
+also releases that turn's reservation, admission, create lease, and gate.
+Rejection retains scope ownership until cleanup finishes, including cancellation
+during logging or terminal delivery. Pause
+is not cancellation of accepted work; request-log completion times can occur
+after pause for work already in progress. These checks take effect when the
+availability snapshot receives the update, rather than synchronously with a
+remote replica's database commit. See [spec.md](spec.md).

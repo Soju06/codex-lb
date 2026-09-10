@@ -23,6 +23,7 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.clock import Clock
+from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
@@ -95,6 +96,76 @@ class SelectionInputsProtocol(Protocol):
 SelectionInputsT = TypeVar("SelectionInputsT", bound=SelectionInputsProtocol)
 
 
+class SelectionStatesOwner(Protocol):
+    """What ``prepare_selection_states`` needs from the balancer: runtime, clock, encryptor, lock-held maintenance."""
+
+    _clock: Clock
+    _runtime: dict[str, RuntimeState]
+    _encryptor: TokenEncryptor
+
+    def _reclaim_stale_account_leases_locked(
+        self,
+        *,
+        routing_tunables: RoutingTunables,
+        redact_sensitive_details: bool = False,
+    ) -> None: ...
+
+    def _prune_runtime(self, accounts: Iterable[Account]) -> None: ...
+
+
+def prepare_selection_states(
+    owner: SelectionStatesOwner,
+    selection_inputs: SelectionInputsProtocol,
+    *,
+    build_states: Callable[..., tuple[list[AccountState], dict[str, Account]]],
+    required_account_id: str | None,
+    redact_sensitive_details: bool,
+    routing_tunables: RoutingTunables,
+    soft_drain_enabled: bool | None = None,
+    model: str | None = None,
+) -> tuple[list[AccountState], dict[str, Account]]:
+    """Build the live selection states for one attempt of a selection path.
+
+    Runs under the owner's runtime lock: reclaims stale leases, prunes runtime
+    entries for accounts that left the pool, builds the states over the live
+    runtime with ``build_states`` (``load_balancer._build_states``; passed in
+    so the balancer module stays the seam tests patch) and, when the path is
+    pinned to ``required_account_id``, narrows the result to that account.
+    ``model`` is the requested model the latency cohort weight is scoped to.
+    """
+    owner._reclaim_stale_account_leases_locked(
+        routing_tunables=routing_tunables,
+        redact_sensitive_details=redact_sensitive_details,
+    )
+    owner._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
+    states, account_map = build_states(
+        accounts=selection_inputs.accounts,
+        latest_primary=selection_inputs.latest_primary,
+        latest_secondary=selection_inputs.latest_secondary,
+        latest_monthly=selection_inputs.latest_monthly,
+        runtime=owner._runtime,
+        now=owner._clock.time(),
+        routing_policy_override=selection_inputs.routing_policy_override,
+        ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+        encryptor=owner._encryptor,
+        routing_tunables=routing_tunables,
+        # C2-3 resilience toggles: an explicit value (opportunistic admission)
+        # wins; selection carries it on its inputs.
+        soft_drain_enabled=(
+            soft_drain_enabled
+            if soft_drain_enabled is not None
+            else getattr(selection_inputs, "soft_drain_enabled", None)
+        ),
+        model=model,
+    )
+    if required_account_id is None:
+        return states, account_map
+    return (
+        [state for state in states if state.account_id == required_account_id],
+        {account_id: account for account_id, account in account_map.items() if account_id == required_account_id},
+    )
+
+
 class StickySelectionOwner(Protocol):
     _clock: Clock
     _runtime: dict[str, RuntimeState]
@@ -108,6 +179,7 @@ class StickySelectionOwner(Protocol):
         required_account_id: str | None,
         redact_sensitive_details: bool,
         routing_tunables: RoutingTunables,
+        model: str | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
     def _sync_runtime_state(
@@ -258,6 +330,8 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     # from the pre-exclusion continuity pool, which also differs from the
     # routable pool by catalog-evidence model filtering.
     exclude_account_ids: frozenset[str] = frozenset()
+    # Requested model; scopes the per-model latency cohort weight of fresh draws.
+    model: str | None = None
     # First-iteration owner read performed by the caller inside its shared
     # owner-lookup session (see load_balancer.select_account). Consumed exactly
     # once; retries re-read fresh ownership evidence through a repo bundle.
@@ -445,6 +519,7 @@ async def run_sticky_selection_path(
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
                 routing_tunables=routing_tunables,
+                model=request.model,
             )
             if retired_legacy_owner_account_ids:
                 # Retirement is authoritative even when this selector loaded a

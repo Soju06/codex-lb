@@ -25,12 +25,17 @@ never inside a runtime lock and never per operation — so a dashboard change
 takes effect on the next tick on every replica without a restart.
 
 Because the spool is the replay source for durable bridge recovery, the
-effective window MUST cover every window in which a spooled operation can still
-be read: the bridge session reuse window, the stale-operation abandonment
-window, and the retry-circuit state TTL. That floor MUST be derived from those
-terms rather than fixed, because two of them are themselves operator-tunable,
-and the settings API MUST refuse an update that would leave the effective
-window below it, naming the binding term.
+effective window MUST cover every *configured* window in which a spooled
+operation can still be read: the bridge session reuse window, the
+stale-operation abandonment window, and the retry-circuit state TTL. That floor
+MUST be derived from those terms rather than fixed, because two of them are
+themselves operator-tunable, and the settings API MUST refuse an update that
+would leave the effective window below it, naming the binding term. The floor
+is a steady-state bound on the configuration, not a retroactive one: a bridge
+session already open keeps the longer idle TTL it captured, so shortening a
+reuse window can still outlive the transcripts of sessions opened under the
+previous window — the same non-retroactive behaviour the abandoned-row
+retention derived from those windows already has.
 
 #### Scenario: Retention drains a small backlog
 

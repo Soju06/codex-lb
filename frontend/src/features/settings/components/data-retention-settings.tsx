@@ -17,8 +17,10 @@ export type DataRetentionSettingsProps = {
 const MAX_RETENTION_DAYS = 3650;
 const REQUEST_LOG_FLOOR_DAYS = 30;
 const USAGE_HISTORY_FLOOR_DAYS = 45;
-// Whole numbers only, for both the day windows and the spool window in seconds.
+// Whole numbers only, for the two day windows.
 const INTEGER_PATTERN = /^\d+$/;
+// The spool window is seconds and float-typed on the wire.
+const DECIMAL_SECONDS_PATTERN = /^\d+(\.\d+)?$/;
 const REQUEST_LOG_PRESET_DAYS = [30, 90] as const;
 // R2 spool retention: seconds, matching the backend field. 3650 days, the same
 // ceiling as the two day-based windows above.
@@ -61,16 +63,19 @@ type ParsedSpoolRetention =
  * R2 spool retention: mirrors the backend floor check before the PUT. The spool
  * is replayed for as long as a bridge session stays reusable, so a shorter
  * window would delete transcripts a recovery still needs.
+ *
+ * Seconds are a float on the wire, so a value an API client stored (`7200.5`)
+ * must round-trip through this field rather than read as invalid.
  */
 function parseSpoolRetention(raw: string, floorSeconds: number): ParsedSpoolRetention {
   const trimmed = raw.trim();
   if (trimmed === "") {
     return { valid: true, value: null };
   }
-  if (!INTEGER_PATTERN.test(trimmed)) {
+  if (!DECIMAL_SECONDS_PATTERN.test(trimmed)) {
     return { valid: false };
   }
-  const parsed = Number.parseInt(trimmed, 10);
+  const parsed = Number.parseFloat(trimmed);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > MAX_SPOOL_RETENTION_SECONDS) {
     return { valid: false };
   }
@@ -103,12 +108,16 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
   const usageHistoryChanged =
     parsedUsageHistory.valid && parsedUsageHistory.value !== settings.usageHistoryRetentionOverrideDays;
   const parsedSpoolRetention = parseSpoolRetention(spoolRetentionSeconds, spoolFloorSeconds);
-  const spoolRetentionChanged =
-    parsedSpoolRetention.valid && spoolRetentionSeconds.trim() !== spoolRetentionToInput(settings);
+  const spoolRetentionEdited = spoolRetentionSeconds.trim() !== spoolRetentionToInput(settings);
+  const spoolRetentionChanged = parsedSpoolRetention.valid && spoolRetentionEdited;
+  // An untouched spool field never blocks the other two windows: a stored value
+  // the API accepts but this card cannot represent must not make the card
+  // read-only. Only an edit the backend would reject blocks saving.
+  const spoolRetentionRejected = spoolRetentionEdited && !parsedSpoolRetention.valid;
   const canSave =
     parsedRequestLog.valid &&
     parsedUsageHistory.valid &&
-    parsedSpoolRetention.valid &&
+    !spoolRetentionRejected &&
     (requestLogChanged || usageHistoryChanged || spoolRetentionChanged);
 
   const save = () => {
@@ -260,8 +269,8 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
                 type="number"
                 min={spoolFloorSeconds}
                 max={MAX_SPOOL_RETENTION_SECONDS}
-                step={1}
-                inputMode="numeric"
+                step="any"
+                inputMode="decimal"
                 value={spoolRetentionSeconds}
                 disabled={busy}
                 placeholder={t("settings.retention.inheritPlaceholder")}
@@ -284,7 +293,7 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
             {t("settings.retention.usageHistory.invalid")}
           </div>
         ) : null}
-        {!parsedSpoolRetention.valid ? (
+        {spoolRetentionRejected ? (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
             {t("settings.retention.spool.invalid", { seconds: spoolFloorSeconds })}
           </div>

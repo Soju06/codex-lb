@@ -1417,7 +1417,7 @@
   "settings.retention.spool.description": "保存原始请求负载及其响应事件，以便重放被中断的回合；缩短保留时间会更早删除它们。留空则继承环境变量值或 7 天的默认值。",
   "settings.retention.spool.ariaLabel": "HTTP 桥接操作队列保留秒数",
   "settings.retention.spool.floorHint": "至少 {{seconds}} 秒 —— 队列中的操作仍可被重放的最长时间窗口。",
-  "settings.retention.spool.invalid": "队列保留时间必须是介于 {{seconds}} 和 315360000 之间的整数秒。更短的窗口会删除恢复仍然需要的记录。留空以继承。",
+  "settings.retention.spool.invalid": "队列保留时间必须介于 {{seconds}} 和 315360000 秒之间。更短的窗口会删除恢复仍然需要的记录。留空以继承。",
   "settings.session.title": "会话",
   "settings.session.description": "控制新签发的密码会话在仪表盘中保持登录的时长。",
   "settings.session.lifetime.label": "仪表盘会话有效期",

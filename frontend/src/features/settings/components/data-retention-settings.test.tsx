@@ -350,16 +350,50 @@ describe("DataRetentionSettings", () => {
     await user.type(input, "7199");
 
     expect(
-      screen.getByText(/Spool retention must be a whole number of seconds between 7200 and 315360000/i),
+      screen.getByText(/Spool retention must be a number of seconds between 7200 and 315360000/i),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save retention" })).toBeDisabled();
 
     await user.clear(input);
     await user.type(input, "7200");
-    expect(screen.queryByText(/Spool retention must be a whole number of seconds/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Spool retention must be a number of seconds/i)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Save retention" }));
     expect(onSave).toHaveBeenCalledWith(
       expect.objectContaining({ httpResponsesSessionBridgeOperationSpoolRetentionSeconds: 7200 }),
+    );
+  });
+
+  it("round-trips a fractional stored spool window without blocking the other windows", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    // The wire type is a float, so a value stored through the API can be
+    // fractional; the card must render and re-save it, and must never make the
+    // request-log / usage-history windows read-only.
+    const settings = {
+      ...baseSettings,
+      httpResponsesSessionBridgeOperationSpoolRetentionSeconds: 7200.5,
+      provenance: {
+        http_responses_session_bridge_operation_spool_retention_seconds: {
+          source: "dashboard" as const,
+          envValue: 604800,
+          default: 604800,
+        },
+      },
+    };
+
+    render(<DataRetentionSettings settings={settings} busy={false} onSave={onSave} />);
+
+    expect(screen.getByLabelText("HTTP bridge operation spool retention seconds")).toHaveDisplayValue("7200.5");
+    expect(screen.queryByText(/Spool retention must be a number of seconds/i)).not.toBeInTheDocument();
+
+    const requestLogInput = screen.getByLabelText("Request log retention days");
+    await user.clear(requestLogInput);
+    await user.type(requestLogInput, "90");
+    await user.click(screen.getByRole("button", { name: "Save retention" }));
+
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ requestLogRetentionOverrideDays: 90 }));
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty(
+      "httpResponsesSessionBridgeOperationSpoolRetentionSeconds",
     );
   });
 

@@ -1129,7 +1129,7 @@
   "settings.retention.spool.description": "중단된 턴을 재생할 수 있도록 요청 본문 원문과 응답 이벤트를 보관합니다. 보존 기간을 줄이면 그만큼 빨리 삭제됩니다. 비워 두면 환경 변수 값 또는 기본값(7일)을 상속합니다.",
   "settings.retention.spool.ariaLabel": "HTTP 브리지 작업 스풀 보존 기간(초)",
   "settings.retention.spool.floorHint": "최소 {{seconds}}초 — 스풀에 저장된 작업이 아직 재생될 수 있는 가장 긴 구간입니다.",
-  "settings.retention.spool.invalid": "스풀 보존 기간은 {{seconds}}초 이상 315360000초 이하의 정수여야 합니다. 더 짧으면 복구가 아직 필요한 기록이 삭제됩니다. 상속하려면 비워 두세요.",
+  "settings.retention.spool.invalid": "스풀 보존 기간은 {{seconds}}초 이상 315360000초 이하여야 합니다. 더 짧으면 복구가 아직 필요한 기록이 삭제됩니다. 상속하려면 비워 두세요.",
   "settings.import.allowDuplicates.description": "email 기준으로 덮어쓰지 않고 workspace 또는 unknown credential slot을 따로 유지합니다.",
   "settings.import.allowDuplicates.label": "덮어쓰기 없이 import 허용",
   "settings.import.description": "Account import 시 credential slot 처리 방식을 제어합니다.",

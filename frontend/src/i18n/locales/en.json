@@ -1417,7 +1417,7 @@
   "settings.retention.spool.description": "Holds raw request payloads and their response events so an interrupted turn can be replayed; shorter retention deletes them sooner. Leave empty to inherit the environment value or the 7-day default.",
   "settings.retention.spool.ariaLabel": "HTTP bridge operation spool retention seconds",
   "settings.retention.spool.floorHint": "At least {{seconds}} seconds — the longest window in which a spooled operation can still be replayed.",
-  "settings.retention.spool.invalid": "Spool retention must be a whole number of seconds between {{seconds}} and 315360000. A shorter window would delete transcripts a recovery still needs. Leave the field empty to inherit.",
+  "settings.retention.spool.invalid": "Spool retention must be a number of seconds between {{seconds}} and 315360000. A shorter window would delete transcripts a recovery still needs. Leave the field empty to inherit.",
   "settings.session.title": "Session",
   "settings.session.description": "Control how long newly issued password-backed dashboard sessions stay signed in.",
   "settings.session.lifetime.label": "Dashboard session lifetime",

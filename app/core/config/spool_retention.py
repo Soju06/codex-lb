@@ -98,6 +98,13 @@ def spool_retention_floor_terms_seconds(
       reading and appending its own spool.
     - ``retry_circuit_state_ttl``: a surviving retry circuit can admit a replay
       of an operation whose spool must therefore still exist.
+
+    The terms are read from the configuration in force, so this is a
+    steady-state bound. A live bridge session keeps the idle TTL it captured
+    (``session_registry`` only ever max-promotes it), so lowering a reuse
+    window does not shorten sessions that are already open; the abandoned-row
+    retention derived from the same windows is non-retroactive in exactly the
+    same way.
     """
     from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
 

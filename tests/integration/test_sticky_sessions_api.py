@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from urllib.parse import quote
 
 import pytest
 from sqlalchemy import text
@@ -356,10 +355,16 @@ async def test_sticky_sessions_api_hides_and_protects_reserved_live_bindings(asy
     assert affinity_delete.json()["deletedCount"] == 1
     assert affinity_delete.json()["failed"] == []
 
-    single_delete = await async_client.delete(
-        f"/api/sticky-sessions/codex_session/{quote(reserved_keys['single-delete'], safe='')}"
+    single_delete = await async_client.post(
+        "/api/sticky-sessions/delete",
+        json={"sessions": [{"key": reserved_keys["single-delete"], "kind": "codex_session"}]},
     )
-    assert single_delete.status_code == 404
+    assert single_delete.status_code == 200
+    assert single_delete.json() == {
+        "deletedCount": 0,
+        "deleted": [],
+        "failed": [{"key": reserved_keys["single-delete"], "kind": "codex_session", "reason": "not_found"}],
+    }
 
     bulk_delete = await async_client.post(
         "/api/sticky-sessions/delete",
@@ -589,8 +594,12 @@ async def test_sticky_sessions_api_counts_hidden_stale_rows_and_deletes_by_kind(
     assert stale_payload["hasMore"] is False
     assert [(entry["key"], entry["kind"]) for entry in stale_payload["entries"]] == [("shared-key", "prompt_cache")]
 
-    response = await async_client.delete("/api/sticky-sessions/prompt_cache/shared-key")
+    response = await async_client.post(
+        "/api/sticky-sessions/delete",
+        json={"sessions": [{"key": "shared-key", "kind": "prompt_cache"}]},
+    )
     assert response.status_code == 200
+    assert response.json()["deletedCount"] == 1
 
     response = await async_client.get("/api/sticky-sessions")
     assert response.status_code == 200
@@ -740,8 +749,12 @@ async def test_sticky_sessions_api_deletes_slash_containing_keys(async_client):
     assert response.status_code == 200
     assert any(entry["key"] == sticky_key for entry in response.json()["entries"])
 
-    response = await async_client.delete(f"/api/sticky-sessions/prompt_cache/{quote(sticky_key, safe='')}")
+    response = await async_client.post(
+        "/api/sticky-sessions/delete",
+        json={"sessions": [{"key": sticky_key, "kind": "prompt_cache"}]},
+    )
     assert response.status_code == 200
+    assert response.json()["deletedCount"] == 1
 
     response = await async_client.get("/api/sticky-sessions")
     assert response.status_code == 200

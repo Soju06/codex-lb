@@ -69,5 +69,67 @@ context and stays in Python. An alias payload containing a float, oversized
 integer, or escaped surrogate uses Python serialization to preserve its exact
 legacy representation. Neither handoff starts a second HTTP request. Unchanged
 mixed-line-ending events preserve their text; JSON arrays never become objects.
-The Python transport remains the missing-helper implementation, and WebSocket
-event interpretation is deferred to the next transport slice.
+The Python transport remains the missing-helper implementation.
+
+## Native Responses WebSocket ownership
+
+`websocket_responses_events_v1` classifies Responses WebSocket JSON objects in
+Rust and embeds their JSON payload in IPC. The Python WebSocket relay and HTTP
+bridge reuse that decoded object for request matching, sequence tracking,
+tool-call handling and lifecycle validation. Original text, numeric tokens,
+duplicate-key precedence and WebSocket aliases stay unchanged. A string `type`
+wins; otherwise an object `error` classifies as `error`. Public errors and
+HTTP-specific normalization retain their Python policy owners.
+
+For example, an integer larger than 64 bits crosses IPC without Rust numeric
+conversion and remains a Python integer. Whitespace outside strings is removed
+only in the embedded IPC object to preserve JSON-line framing; original frame
+text is untouched. Invalid/non-object/unsupported JSON and frames over 1 MiB
+remain opaque. Live calls do not opt in. The HTTP bridge preserves its legacy
+SSE-field parsing for multiline or whitespace-prefixed frames.
+
+The Python fallback is still supported, so its parser is active code. Retired
+native-path branches must be removed in the migration that replaces them. Before
+removal, audit intervening Python commits and extend shared Rust/Python fixtures
+for applicable fixes. The ownership table and audit through `d3f63331d` are in
+[the archived change](../../changes/archive/2026-09-08-native-websocket-event-interpretation/context.md).
+That change includes a tracked benchmark script/result; the final synthetic
+measurement shows no speedup (640 ms raw versus 674 ms interpreted).
+
+## Native SSE output writes
+
+The helper coalesces already framed SSE records into writes of at most 32 records
+and 64 KiB of encoded JSON lines, flushing each existing 16 KiB body-read slice
+before processing more input. A single protocol record that expands beyond the
+byte budget through JSON escaping is emitted alone. There is no batching timer:
+one ready event reaches the consumer even if upstream waits indefinitely for the
+consumer's next action. Valid records also precede a framing failure from the
+same read.
+
+Accepted output bytes and their write offset live in the shared writer. If a
+producer is cancelled during a partial write or buffered flush, the next writer
+finishes those bytes before emitting its own record. For example, cancellation
+of a large SSE event cannot splice a sibling request's JSON line into that event.
+Compact, raw HTTP and WebSocket messages keep immediate writes through this same
+cancellation-safe owner. Python queue fairness, bounds and replay policy are
+unchanged. Benchmark methodology and limitations are recorded in the archived
+`batch-ready-native-sse-output` change.
+
+## Direct usage GET transport
+
+Direct usage queries without an injected Python client prefer the existing
+native helper after the direct-egress admission check. Python owns routes,
+retry policy and UsagePayload validation; Rust owns each HTTP attempt and body.
+Only a missing/unstartable helper on the initial request permits Python fallback.
+
+For example, a 503 response whose body never ends closes before the next attempt
+and uses the existing ExponentialRetry delay (1, 2, then 2 seconds). A truncated
+200 body remains a transport error instead of becoming an invalid-payload 502.
+Cancellation retires one exchange without closing the shared helper.
+
+The adapter explicitly forwards aiohttp's default Accept-Encoding value because
+the helper enables decompression only for requests that negotiate it. Charset,
+empty-body and JSON-syntax handling follow the default Python session. Usage
+credit consumption remains a separate call, and resolved routes retain
+CodexClient ownership. Loopback probes validate these semantics; they do not
+measure production performance.

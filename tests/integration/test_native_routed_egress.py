@@ -89,7 +89,8 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper(
 
     async def websocket_handler(websocket: Any) -> None:
         message = await websocket.recv()
-        await websocket.send(f"echo:{message}")
+        assert message == "probe"
+        await websocket.send('{"type":"response.completed","response":{"id":"resp_ws"}}')
 
     async with websocket_serve(websocket_handler, "127.0.0.1", 0) as websocket_server:
         websocket_port = websocket_server.sockets[0].getsockname()[1]
@@ -197,7 +198,10 @@ async def test_direct_sse_and_routed_http_websocket_share_native_helper(
             await websocket.send_text("probe")
             message = await websocket.receive()
             assert message.kind == "text"
-            assert message.text == "echo:probe"
+            assert message.text == '{"type":"response.completed","response":{"id":"resp_ws"}}'
+            assert message.responses_interpreted is True
+            assert message.event_type == "response.completed"
+            assert message.payload == {"type": "response.completed", "response": {"id": "resp_ws"}}
             await websocket.close()
 
             assert native._process is helper_process

@@ -1386,18 +1386,23 @@ async def test_dashboard_models_exposes_extended_reasoning_efforts(async_client)
     assert model["defaultReasoningEffort"] == "low"
 
 
+async def _put_context_window_override(async_client, slug: str, context_window: int) -> None:
+    # M4 model catalogue: the override is a dashboard row, not a settings
+    # monkeypatch, so the catalog is exercised through the same cached snapshot
+    # production reads.
+    response = await async_client.put(
+        f"/api/settings/model-context-window-overrides/{slug}", json={"contextWindow": context_window}
+    )
+    assert response.status_code == 200, response.text
+
+
 @pytest.mark.asyncio
-async def test_model_context_window_override(async_client, monkeypatch):
+async def test_model_context_window_override(async_client):
     registry = get_model_registry()
     models = [_make_upstream_model("gpt-5.4")]
     await registry.update({"pro": models})
 
-    from app.core.config.settings import get_settings
-    from app.modules.proxy import api as proxy_api_module
-
-    original_settings = get_settings()
-    patched = original_settings.model_copy(update={"model_context_window_overrides": {"gpt-5.4": 515000}})
-    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+    await _put_context_window_override(async_client, "gpt-5.4", 515000)
 
     # /backend-api/codex/models
     resp = await async_client.get("/backend-api/codex/models")
@@ -1421,16 +1426,12 @@ async def test_model_context_window_override(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_model_context_window_override_clamped_to_max_context_window(async_client, monkeypatch):
+async def test_model_context_window_override_clamped_to_max_context_window(async_client):
     registry = get_model_registry()
     models = [_make_upstream_model("gpt-5.4", raw=_raw_with_max_context_window(872_000))]
     await registry.update({"pro": models})
 
-    from app.core.config.settings import get_settings
-    from app.modules.proxy import api as proxy_api_module
-
-    patched = get_settings().model_copy(update={"model_context_window_overrides": {"gpt-5.4": 1_000_000}})
-    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+    await _put_context_window_override(async_client, "gpt-5.4", 1_000_000)
 
     resp_v1 = await async_client.get("/v1/models")
     assert resp_v1.status_code == 200
@@ -1454,16 +1455,12 @@ async def test_model_context_window_override_clamped_to_max_context_window(async
 
 
 @pytest.mark.asyncio
-async def test_model_context_window_override_applies_to_codex_models_data_alias(async_client, monkeypatch):
+async def test_model_context_window_override_applies_to_codex_models_data_alias(async_client):
     registry = get_model_registry()
     models = [_make_upstream_model("gpt-5.4")]
     await registry.update({"pro": models})
 
-    from app.core.config.settings import get_settings
-    from app.modules.proxy import api as proxy_api_module
-
-    patched = get_settings().model_copy(update={"model_context_window_overrides": {"gpt-5.4": 515_000}})
-    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+    await _put_context_window_override(async_client, "gpt-5.4", 515_000)
 
     # The OpenAI-compatible `data` alias on /backend-api/codex/models is built
     # from the same list-item shape as /v1/models, so the override reaches its
@@ -1479,6 +1476,72 @@ async def test_model_context_window_override_applies_to_codex_models_data_alias(
     assert alias_item["capabilities"]["context_length"] == 515_000
     assert alias_item["contextLength"] == 515_000
     assert alias_item["context_length"] == 515_000
+
+
+@pytest.mark.asyncio
+async def test_dashboard_context_window_override_wins_over_environment_without_restart(async_client, monkeypatch):
+    """A dashboard row beats the CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES entry for
+    its slug on the next catalog request, and deleting the row falls back to the
+    environment entry — no restart, no settings reload."""
+    registry = get_model_registry()
+    await registry.update({"pro": [_make_upstream_model("gpt-5.4"), _make_upstream_model("gpt-5.5")]})
+
+    from app.core.config.settings import get_settings
+    from app.modules.proxy import api as proxy_api_module
+
+    environment = get_settings().model_copy(update={"model_context_window_overrides": {"gpt-5.4": 300_000}})
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: environment)
+
+    async def _native_windows() -> dict[str, int]:
+        resp = await async_client.get("/backend-api/codex/models")
+        assert resp.status_code == 200
+        return {m["slug"]: m["context_window"] for m in resp.json()["models"] if m["slug"] in {"gpt-5.4", "gpt-5.5"}}
+
+    # No dashboard row: the environment entry is the per-slug fallback.
+    assert await _native_windows() == {"gpt-5.4": 300_000, "gpt-5.5": 272_000}
+
+    await _put_context_window_override(async_client, "gpt-5.4", 515_000)
+    assert await _native_windows() == {"gpt-5.4": 515_000, "gpt-5.5": 272_000}
+
+    # Another slug's row does not disturb the environment-inherited one.
+    await _put_context_window_override(async_client, "gpt-5.5", 400_000)
+    deleted = await async_client.delete("/api/settings/model-context-window-overrides/gpt-5.4")
+    assert deleted.status_code == 200
+    assert await _native_windows() == {"gpt-5.4": 300_000, "gpt-5.5": 400_000}
+
+
+@pytest.mark.asyncio
+async def test_catalog_serves_the_last_known_overrides_when_the_row_read_fails(async_client, monkeypatch):
+    """An invalidation expires the snapshot's freshness but keeps the rows, so a
+    catalog request during a database blip serves the last known window instead
+    of failing the request."""
+    registry = get_model_registry()
+    await registry.update({"pro": [_make_upstream_model("gpt-5.4")]})
+    await _put_context_window_override(async_client, "gpt-5.4", 515_000)
+
+    async def _native_window() -> int:
+        resp = await async_client.get("/backend-api/codex/models")
+        assert resp.status_code == 200
+        return next(model["context_window"] for model in resp.json()["models"] if model["slug"] == "gpt-5.4")
+
+    assert await _native_window() == 515_000
+
+    from app.core.config.context_window_overrides import get_model_context_window_overrides_cache
+    from app.modules.settings import repository as settings_repository_module
+
+    # Warm snapshot, then an unrelated settings bump plus an unreachable
+    # database: the catalog must still answer with the stored override.
+    await get_model_context_window_overrides_cache().invalidate(propagate=False)
+
+    class _UnreachableRepository:
+        def __init__(self, session) -> None:
+            self._session = session
+
+        async def by_slug(self) -> dict[str, int]:
+            raise RuntimeError("database unreachable")
+
+    monkeypatch.setattr(settings_repository_module, "ModelContextWindowOverridesRepository", _UnreachableRepository)
+    assert await _native_window() == 515_000
 
 
 @pytest.mark.asyncio

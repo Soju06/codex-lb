@@ -1,0 +1,119 @@
+{
+  "model": "gpt-5.5",
+  "instructions": "You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer.",
+  "input": [
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "# AGENTS.md instructions for /workspace/repo\n\nRun the unit tests before declaring a change done."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "<environment_context>\n  <cwd>/workspace/repo</cwd>\n  <approval_policy>on-request</approval_policy>\n  <sandbox_mode>workspace-write</sandbox_mode>\n  <network_access>restricted</network_access>\n  <shell>bash</shell>\n</environment_context>"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Fix the failing test in tests/unit/test_parser.py."
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "shell",
+      "description": "Runs a shell command and returns its output.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {"type": "array", "items": {"type": "string"}, "description": "The command to execute"},
+          "workdir": {"type": "string", "description": "The working directory to execute the command in"},
+          "timeout_ms": {"type": "number", "description": "The timeout for the command in milliseconds"}
+        },
+        "required": ["command"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "update_plan",
+      "description": "Updates the task plan.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "explanation": {"type": "string"},
+          "plan": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "step": {"type": "string"},
+                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+              },
+              "required": ["step", "status"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["plan"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "custom",
+      "name": "apply_patch",
+      "description": "Use the `apply_patch` tool to edit files.",
+      "format": {
+        "type": "grammar",
+        "syntax": "lark",
+        "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n%import common.LF"
+      }
+    },
+    {
+      "type": "function",
+      "name": "view_image",
+      "description": "Attach a local image (by filesystem path) to the conversation context for this turn.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Local filesystem path to an image file"}},
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": false,
+  "reasoning": {"effort": "medium", "summary": "auto"},
+  "store": false,
+  "stream": true,
+  "include": ["reasoning.encrypted_content"],
+  "prompt_cache_key": "019a6a1c-4c2e-7d3a-9b1f-3f6e8c2d1a55",
+  "text": {"verbosity": "medium"},
+  "client_metadata": {
+    "x-codex-installation-id": "5d0e4c1a-8b6f-4d2e-9a3c-1f2e3d4c5b6a",
+    "session_id": "019a6a1c-4c2e-7d3a-9b1f-3f6e8c2d1a55",
+    "thread_id": "019a6a1c-4c2e-7d3a-9b1f-3f6e8c2d1a55",
+    "x-codex-window-id": "019a6a1c-5a10-7e2b-8c4d-2e3f4a5b6c7d",
+    "turn_id": "019a6a1c-6b21-7f3c-9d5e-3f4a5b6c7d8e",
+    "x-codex-turn-metadata": "{\"turn_id\":\"019a6a1c-6b21-7f3c-9d5e-3f4a5b6c7d8e\"}"
+  },
+  "stream_options": {"reasoning_summary_delivery": "interleaved"}
+}

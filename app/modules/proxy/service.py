@@ -27,6 +27,12 @@ from app.core.balancer import (
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
+from app.core.clients.proxy import (
+    _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE as _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE,
+)
+from app.core.clients.proxy import (
+    _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE as _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE,
+)
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy as CodexControlRequestPrivacyPolicy
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
@@ -45,6 +51,30 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
+from app.core.clients.proxy import (
+    _is_inline_image_reference as _is_inline_image_reference,
+)
+from app.core.clients.proxy import (
+    _response_create_inline_image_notice_item as _response_create_inline_image_notice_item,
+)
+from app.core.clients.proxy import (
+    _response_create_inline_image_notice_part as _response_create_inline_image_notice_part,
+)
+from app.core.clients.proxy import (
+    _response_create_recent_suffix_start as _response_create_recent_suffix_start,
+)
+from app.core.clients.proxy import (
+    _response_create_too_large_error_envelope as _response_create_too_large_error_envelope,
+)
+from app.core.clients.proxy import (
+    _should_slim_historical_tool_output as _should_slim_historical_tool_output,
+)
+from app.core.clients.proxy import (
+    _slim_historical_response_content as _slim_historical_response_content,
+)
+from app.core.clients.proxy import (
+    _slim_historical_response_content_part as _slim_historical_response_content_part,
+)
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import stream_responses as core_stream_responses  # noqa: F401
@@ -58,7 +88,9 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket as connect_responses_websocket,
 )
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
-from app.core.config.settings import get_settings
+from app.core.config.dashboard_overrides import with_dashboard_overrides
+from app.core.config.settings import Settings as _Settings
+from app.core.config.settings import get_settings as get_environment_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE
@@ -71,7 +103,6 @@ from app.core.errors import (
     ResponseFailedEvent,
     coerce_error_param,
     is_previous_response_not_found_error,
-    is_previous_response_not_found_message,
     openai_error,
     previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
@@ -93,6 +124,7 @@ from app.core.openai.requests import (
 from app.core.resilience.network_recovery import (
     ProcessNetworkRecovery as ProcessNetworkRecovery,
 )
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.upstream_proxy.resolver import (
@@ -367,6 +399,9 @@ from app.modules.proxy._service.refresh import (
     ensure_fresh_with_budget as _recover_fresh_account,
 )
 from app.modules.proxy._service.request_log import (
+    _normalize_session_id as _normalize_session_id,
+)
+from app.modules.proxy._service.request_log import (
     _RequestLogMixin,
 )
 from app.modules.proxy._service.response_create import (
@@ -383,12 +418,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE as _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE,
-)
-from app.modules.proxy._service.response_create import (
-    _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE as _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE,
-)
-from app.modules.proxy._service.response_create import (
-    _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE as _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE,
 )
 from app.modules.proxy._service.response_create import (
     _UPSTREAM_RESPONSE_CREATE_MAX_BYTES as _UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
@@ -418,9 +447,6 @@ from app.modules.proxy._service.response_create import (
     _input_part_is_image as _input_part_is_image,
 )
 from app.modules.proxy._service.response_create import (
-    _is_inline_image_reference as _is_inline_image_reference,
-)
-from app.modules.proxy._service.response_create import (
     _json_size_bytes as _json_size_bytes,
 )
 from app.modules.proxy._service.response_create import (
@@ -442,15 +468,6 @@ from app.modules.proxy._service.response_create import (
     _response_create_history_omission_notice_item as _response_create_history_omission_notice_item,
 )
 from app.modules.proxy._service.response_create import (
-    _response_create_inline_image_notice_item as _response_create_inline_image_notice_item,
-)
-from app.modules.proxy._service.response_create import (
-    _response_create_inline_image_notice_part as _response_create_inline_image_notice_part,
-)
-from app.modules.proxy._service.response_create import (
-    _response_create_recent_suffix_start as _response_create_recent_suffix_start,
-)
-from app.modules.proxy._service.response_create import (
     _response_create_text as _response_create_text,
 )
 from app.modules.proxy._service.response_create import (
@@ -458,9 +475,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _response_create_text_with_size_guard as _response_create_text_with_size_guard,
-)
-from app.modules.proxy._service.response_create import (
-    _response_create_too_large_error_envelope as _response_create_too_large_error_envelope,
 )
 from app.modules.proxy._service.response_create import (
     _response_output_item_done_tool_call as _response_output_item_done_tool_call,
@@ -476,15 +490,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _should_dump_oversized_response_create as _should_dump_oversized_response_create,
-)
-from app.modules.proxy._service.response_create import (
-    _should_slim_historical_tool_output as _should_slim_historical_tool_output,
-)
-from app.modules.proxy._service.response_create import (
-    _slim_historical_response_content as _slim_historical_response_content,
-)
-from app.modules.proxy._service.response_create import (
-    _slim_historical_response_content_part as _slim_historical_response_content_part,
 )
 from app.modules.proxy._service.response_create import (
     _slim_historical_response_input_item as _slim_historical_response_input_item,
@@ -521,9 +526,6 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import _is_background_json_ack as _is_background_json_ack
 from app.modules.proxy._service.streaming.helpers import (
     _push_stream_attempt_timeout_overrides as _push_stream_attempt_timeout_overrides,
-)
-from app.modules.proxy._service.streaming.helpers import (
-    _resolve_upstream_stream_transport as _resolve_upstream_stream_transport,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _rewrite_previous_response_stream_error as _rewrite_previous_response_stream_error,
@@ -600,9 +602,13 @@ from app.modules.proxy._service.support import (
     _WebSocketReceiveTimeout,  # noqa: F401
     _WebSocketRequestState,
     _WebSocketUpstreamControl,  # noqa: F401
+    opportunistic_admission_account_scope,
 )
 from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
+)
+from app.modules.proxy._service.support import (
+    _raise_proxy_unavailable_for_account as _raise_proxy_unavailable_for_account,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -757,14 +763,34 @@ from app.modules.proxy.load_balancer import (
     AccountLeaseKind,
     AccountSelection,
     LoadBalancer,
+    RoutingTunables,
     effective_account_concurrency_caps,
+    effective_routing_tunables,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
 from app.modules.proxy.selection_errors import selection_failure_response
-from app.modules.proxy.work_admission import WorkAdmissionController
+from app.modules.proxy.work_admission import (
+    ADMISSION_WAIT_TIMEOUT_SECONDS,
+    COMPACT_RESPONSE_CREATE_LIMIT,
+    TOKEN_REFRESH_LIMIT,
+    UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+    WorkAdmissionController,
+)
+
+
+def get_settings() -> _Settings:
+    """Startup ``Settings`` with the request-bound dashboard overrides applied.
+
+    Every proxy consumer reads settings through this facade (directly or via
+    ``_service_get_settings()``), so the dashboard-managed timeouts (C2-1) take
+    effect here without touching each call site; outside a bound request context
+    the environment values apply unchanged.
+    """
+    return with_dashboard_overrides(get_environment_settings())
+
 
 logger = logging.getLogger(__name__)
 
@@ -775,21 +801,12 @@ _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 # error probe window. If a keepalive becomes the first yielded chunk, the HTTP
 # status is committed as 200 and startup ProxyResponseError handling is masked.
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
-_DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    settings = settings or get_settings()
-    raw_timeout = getattr(
-        settings,
-        "proxy_admission_wait_timeout_seconds",
-        _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS,
-    )
-    try:
-        timeout = float(raw_timeout)
-    except (TypeError, ValueError):
-        timeout = _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS
-    return max(0.001, timeout)
+def _proxy_admission_wait_timeout_seconds() -> float:
+    # Module-level indirection so the HTTP bridge helpers and tests share one
+    # patch point for the fixed admission wait.
+    return ADMISSION_WAIT_TIMEOUT_SECONDS
 
 
 # Maximum time (seconds) to wait for a prewarm upstream response before
@@ -952,13 +969,12 @@ class ProxyService(
 
     def _get_work_admission(self) -> WorkAdmissionController:
         if self._work_admission is None:
-            settings = get_settings()
             self._work_admission = WorkAdmissionController(
-                token_refresh_limit=settings.proxy_token_refresh_limit,
-                websocket_connect_limit=settings.proxy_upstream_websocket_connect_limit,
-                response_create_limit=settings.proxy_response_create_limit,
-                compact_response_create_limit=settings.proxy_compact_response_create_limit,
-                admission_wait_timeout_seconds=getattr(settings, "proxy_admission_wait_timeout_seconds", 10.0),
+                token_refresh_limit=TOKEN_REFRESH_LIMIT,
+                websocket_connect_limit=UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+                response_create_limit=get_settings().proxy_response_create_limit,
+                compact_response_create_limit=COMPACT_RESPONSE_CREATE_LIMIT,
+                admission_wait_timeout_seconds=_proxy_admission_wait_timeout_seconds(),
                 scheduler=self._scheduler,
             )
         return self._work_admission
@@ -980,6 +996,7 @@ class ProxyService(
         base_settings = get_settings()
         deadline = start + base_settings.proxy_request_budget_seconds
         settings = await get_settings_cache().get()
+        bind_resilience_toggles(settings, startup_settings=base_settings)  # C2-3 resilience toggles
         affinity = _sticky_key_for_thread_goal_request(
             payload, headers, codex_session_affinity, settings.openai_cache_affinity_max_age_seconds
         )
@@ -1268,6 +1285,7 @@ class ProxyService(
         compact: bool = False,
         account_id: str | None = None,
         surface: str = "websocket",
+        routing_tunables: RoutingTunables | None = None,
     ) -> None:
         scheduler = self._scheduler
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
@@ -1278,12 +1296,15 @@ class ProxyService(
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = self._clock.monotonic()
         if account_id is not None:
+            # One cached snapshot for this lease operation; a caller that already
+            # resolved the tunables for the same turn (bridge submit) passes them.
             settings = await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=account_id,
                 request_id=request_state.request_id,
                 surface=surface,
                 concurrency_caps=effective_account_concurrency_caps(settings),
+                routing_tunables=routing_tunables or effective_routing_tunables(settings),
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
@@ -1395,6 +1416,14 @@ class ProxyService(
             await self._release_request_state_account_response_create_lease(request_state)
             await _release_websocket_response_create_gate(request_state, response_create_gate, scheduler=scheduler)
             raise
+        # The global response-create admission is a queue wait too, and a direct
+        # WebSocket has no bridge-queue measurement: fold it into the gate wait
+        # so the row carries the whole pre-send wait (the TTFT cohort sampler
+        # skips any row with a non-zero wait).
+        if request_state.response_create_gate_wait_started_at is not None:
+            request_state.latency_response_create_gate_wait_ms = int(
+                max(0.0, self._clock.monotonic() - request_state.response_create_gate_wait_started_at) * 1000
+            )
 
     async def _release_request_state_account_response_create_lease(
         self,
@@ -1766,6 +1795,7 @@ class ProxyService(
             with self._scheduler.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
                 concurrency_caps = effective_account_concurrency_caps(settings)
+                routing_tunables = effective_routing_tunables(settings)  # C2-2 routing/overload
                 stream_reserve_slots = (
                     (
                         get_settings().proxy_account_stream_recovery_reserve
@@ -1850,6 +1880,7 @@ class ProxyService(
                         legacy_sticky_key,
                     )
                     preferred_selection = await self._load_balancer.select_account(
+                        dashboard_settings=settings,  # C2-3 resilience toggles
                         sticky_key=preferred_sticky_inputs[0],
                         sticky_kind=preferred_sticky_inputs[1],
                         reallocate_sticky=preferred_sticky_inputs[2],
@@ -1867,6 +1898,7 @@ class ProxyService(
                         routing_strategy=routing_strategy,
                         relative_availability_power=_relative_availability_power(settings),
                         relative_availability_top_k=_relative_availability_top_k(settings),
+                        routing_tunables=routing_tunables,
                         model=model,
                         service_tier=service_tier,
                         additional_limit_name=additional_limit_name,
@@ -1914,6 +1946,7 @@ class ProxyService(
                         )
                         return preferred_selection
                 selection = await self._load_balancer.select_account(
+                    dashboard_settings=settings,  # C2-3 resilience toggles
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
@@ -1952,6 +1985,7 @@ class ProxyService(
                     redact_sensitive_details=redact_sensitive_details,
                     api_key_id=api_key_id,
                     api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
+                    routing_tunables=routing_tunables,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(
@@ -1993,11 +2027,13 @@ class ProxyService(
         request_id: str,
         surface: str,
         concurrency_caps: AccountConcurrencyCaps,
+        routing_tunables: RoutingTunables | None = None,
     ) -> AccountLease:
         lease = await self._load_balancer.acquire_account_lease(
             account_id,
             kind="response_create",
             concurrency_caps=concurrency_caps,
+            routing_tunables=routing_tunables,
         )
         if lease is not None:
             return lease
@@ -2029,26 +2065,16 @@ class ProxyService(
         api_key: ApiKeyData | None,
         model: str | None,
         lease_kind: AccountLeaseKind | None = None,
+        service_tier: str | None = None,
+        observe_only: bool = False,
     ) -> AccountSelection:
         settings = await get_settings_cache().get()
-        scoped_account_ids = (
-            set(api_key.assigned_account_ids)
-            if api_key is not None and api_key.account_assignment_scope_enabled
-            else None
-        )
-        if _routing_strategy(settings) == "single_account":
-            selected_account_id = (settings.single_account_id or "").strip()
-            if selected_account_id:
-                scoped_account_ids = (
-                    {selected_account_id}
-                    if scoped_account_ids is None or selected_account_id in scoped_account_ids
-                    else set()
-                )
-            else:
-                scoped_account_ids = set()
         return await self._load_balancer.check_opportunistic_admission(
+            dashboard_settings=settings,  # C2-3 resilience toggles
             model=model,
-            account_ids=scoped_account_ids,
+            service_tier=service_tier,
+            observe_only=observe_only,
+            account_ids=opportunistic_admission_account_scope(settings, api_key),
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
             routing_strategy=_routing_strategy(settings),
@@ -2056,6 +2082,7 @@ class ProxyService(
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,
             concurrency_caps=effective_account_concurrency_caps(settings),
+            routing_tunables=effective_routing_tunables(settings),
             stream_reserve_slots=(
                 (
                     get_settings().proxy_account_stream_recovery_reserve
@@ -2092,6 +2119,7 @@ class ProxyService(
                 code,
                 http_status=exc.status_code,
                 privacy_policy=privacy_policy,
+                retry_after_seconds=exc.retry_after_seconds,
             )
             return
         await self._handle_stream_error(
@@ -2099,11 +2127,8 @@ class ProxyService(
             _upstream_error_from_openai(error),
             code,
             http_status=exc.status_code,
+            retry_after_seconds=exc.retry_after_seconds,
         )
-
-
-def _is_previous_response_not_found_message(message: str | None) -> bool:
-    return is_previous_response_not_found_message(message)
 
 
 def _previous_response_id_from_not_found_message(message: str | None) -> str | None:
@@ -2125,13 +2150,6 @@ def _message_mentions_previous_response_id(message: str | None, previous_respons
         )
         is not None
     )
-
-
-def _normalize_session_id(session_id: str | None) -> str | None:
-    if not isinstance(session_id, str):
-        return None
-    stripped = session_id.strip()
-    return stripped or None
 
 
 _MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES = (
@@ -2405,15 +2423,6 @@ def _raise_proxy_unavailable(message: str) -> NoReturn:
 _FAILED_ACCOUNT_ATTR = "_codex_lb_failed_account"
 
 
-def _raise_proxy_unavailable_for_account(message: str, account: Account) -> NoReturn:
-    exc = ProxyResponseError(
-        502,
-        openai_error("upstream_unavailable", message),
-    )
-    setattr(exc, _FAILED_ACCOUNT_ATTR, account)
-    raise exc
-
-
 def _proxy_response_failed_account(exc: ProxyResponseError, fallback: Account) -> Account:
     account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
     return account if isinstance(account, Account) else fallback
@@ -2524,21 +2533,6 @@ def _previous_response_owner_lookup_failed_error_envelope() -> OpenAIErrorEnvelo
         "Previous response owner lookup failed; retry later.",
         error_type="server_error",
     )
-
-
-def _mark_request_state_previous_response_not_found(
-    request_state: _WebSocketRequestState,
-    detail: str,
-) -> None:
-    previous_response_id = request_state.previous_response_id
-    if previous_response_id is None:
-        return
-    payload = _http_bridge_previous_response_error_envelope(previous_response_id, detail)
-    error = payload["error"]
-    request_state.error_code_override = error.get("code")
-    request_state.error_message_override = error.get("message")
-    request_state.error_type_override = error.get("type")
-    request_state.error_param_override = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
 
 
 def _header_value_case_insensitive(headers: Mapping[str, str], name: str) -> str | None:

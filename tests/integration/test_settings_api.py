@@ -2184,7 +2184,8 @@ async def test_settings_api_lease_ttl_and_request_budgets_are_checked_on_effecti
     assert response.status_code == 200
     assert response.json()["provenance"]["proxy_request_budget_seconds"]["source"] == "dashboard"
 
-    # A TTL of 700 satisfies the environment budget (600) but not the compact/default dashboard budget (7200) → rejected.
+    # A TTL of 700 satisfies the environment budget (600) but not the
+    # compact/default dashboard budget (7200) → rejected.
     response = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": 700})
     assert response.status_code == 400
     body = response.json()

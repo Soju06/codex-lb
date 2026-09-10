@@ -53,7 +53,10 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
     ("rule_id", "overrides"),
     [
         ("upstream-connect-within-proxy-budget", {"upstream_connect_timeout_seconds": 601.0}),
-        ("upstream-connect-within-compact-budget", {"upstream_connect_timeout_seconds": 181.0, "compact_request_budget_seconds": 180.0}),
+        (
+            "upstream-connect-within-compact-budget",
+            {"upstream_connect_timeout_seconds": 181.0, "compact_request_budget_seconds": 180.0},
+        ),
         ("upstream-connect-within-transcription-budget", {"upstream_connect_timeout_seconds": 121.0}),
         # M1 stream/bridge budgets: connect 61 s fits every other budget but not a 60 s stream budget.
         (

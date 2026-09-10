@@ -12702,7 +12702,11 @@ async def test_compact_responses_without_trigger_canonicalization_hits_upstream_
         upstream_connect_timeout_seconds = 1.0
         trace_channels = frozenset()
 
-    monkeypatch.setattr(proxy_module, "_effective_compact_total_timeout", lambda: 12.0)
+    monkeypatch.setattr(
+        proxy_module,
+        "_effective_compact_total_timeout",
+        lambda configured_timeout_seconds=None: 12.0,
+    )
 
     class _DuplicateTriggerResponse:
         status = 400
@@ -12885,7 +12889,11 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
         trace_channels = frozenset()
 
     # Override-only compact cap (the compact service pushes the remaining budget).
-    monkeypatch.setattr(proxy_module, "_effective_compact_total_timeout", lambda: 123.0)
+    monkeypatch.setattr(
+        proxy_module,
+        "_effective_compact_total_timeout",
+        lambda configured_timeout_seconds=None: 123.0,
+    )
 
     class _TimeoutCompactResponse:
         status = 200

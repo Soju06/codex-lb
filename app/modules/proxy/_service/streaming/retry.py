@@ -12,6 +12,11 @@ import aiohttp
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import failover_decision
+from app.core.balancer.logic import (
+    BURST_SAME_ACCOUNT_MAX_RETRIES,
+    BURST_SURFACE_RETRY_AFTER_SECONDS,
+    burst_same_account_backoff_seconds,
+)
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -34,6 +39,7 @@ from app.core.resilience.network_recovery import (
     NetworkRecoveryDecision,
     ProcessNetworkRecovery,
 )
+from app.core.resilience.toggles import bind_resilience_toggles, set_resilience_toggles
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.retry import backoff_seconds
@@ -41,10 +47,15 @@ from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import format_sse_event
 from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
+from app.modules.proxy._load_balancer.overload_backoff import (
+    UPSTREAM_OVERLOAD_CODES,
+    record_upstream_burst_rejection,
+)
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
     _record_continuity_fail_closed,
     _record_upstream_transport_decision,
+    record_http_bridge_routing,
 )
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
@@ -62,6 +73,8 @@ from app.modules.proxy._service.support import (
     _TerminalStreamError,
     _TransientStreamError,
     _WebSocketUpstreamControl,
+    configured_upstream_stream_transport,
+    upstream_websocket_transport_recently_failed,
 )
 from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
@@ -71,7 +84,6 @@ from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _sticky_key_for_responses_request,
-    _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
     _websocket_continuity_key_from_headers,
 )
@@ -84,8 +96,10 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
     _upstream_error_from_openai,
     classify_upstream_failure,
+    is_upstream_burst_rejection,
     is_upstream_model_capacity_error,
 )
+from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
@@ -102,15 +116,17 @@ def _facade() -> Any:
 
 
 def _http_downstream_request_is_sticky(payload: ResponsesRequest, headers: Mapping[str, str]) -> bool:
-    return (
-        payload.previous_response_id is not None
-        or _prompt_cache_key_from_request_model(payload) is not None
-        or _sticky_key_from_session_header(headers) is not None
-        or _sticky_key_from_turn_state_header(headers) is not None
-    )
+    return http_continuation_signal(payload, headers) is not None
 
 
 _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR = "_codex_lb_post_refresh_transient_exhausted"
+# Set on a surfaced pre-visible ``ProxyResponseError`` whose account health was
+# already written where the failover decision was made, so the outer terminal
+# handler does not write it a second time. Exactly-once matters most for an
+# exhausted owner-bound burst 429 (its same-account retries engage only the
+# replica-local burst cooldown, never ``record_error``), but every surfaced
+# pre-visible failure is penalized once by construction.
+_STREAM_HEALTH_RECORDED_ATTR = "_codex_lb_stream_health_recorded"
 
 
 def _resolve_http_downstream_transport(policy: str, *, payload: ResponsesRequest, headers: Mapping[str, str]) -> str:
@@ -173,7 +189,6 @@ def _verified_cross_transport_fresh_replay(
 def _effective_http_downstream_transport_policy(
     api_key: ApiKeyData | None,
     dashboard_settings: Any,
-    base_settings: Any,
 ) -> tuple[str, bool]:
     override = getattr(api_key, "transport_policy_override", None) if api_key is not None else None
     if override is not None:
@@ -181,14 +196,11 @@ def _effective_http_downstream_transport_policy(
     dashboard_policy = getattr(dashboard_settings, "http_downstream_transport_policy", None)
     if isinstance(dashboard_policy, str) and dashboard_policy:
         return dashboard_policy, False
-    base_policy = getattr(base_settings, "http_downstream_transport_policy", _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT)
-    return base_policy, False
+    return _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT, False
 
 
-def _resolved_configured_stream_transport(dashboard_settings: Any, base_settings: Any) -> tuple[str, bool]:
-    configured = getattr(dashboard_settings, "upstream_stream_transport", "default")
-    if configured == "default":
-        configured = getattr(base_settings, "upstream_stream_transport", "auto")
+def _resolved_configured_stream_transport(dashboard_settings: Any) -> tuple[str, bool]:
+    configured = configured_upstream_stream_transport(dashboard_settings)
     return configured, configured in ("http", "websocket")
 
 
@@ -202,22 +214,18 @@ def _http_bridge_allowed_by_transport_policy(
 ) -> bool:
     """Apply ordinary HTTP transport precedence before entering the WS bridge."""
 
-    configured_transport, explicit_transport = _resolved_configured_stream_transport(
-        dashboard_settings,
-        base_settings,
-    )
-    if explicit_transport:
-        return configured_transport == "websocket"
-    if _is_native_codex_request(headers):
-        # A first-party Codex client owns its WebSocket -> HTTP fallback. Once
-        # it submits HTTP, sticky metadata must not promote it back to WS.
-        return False
-    policy, _override_applied = _effective_http_downstream_transport_policy(
-        api_key,
-        dashboard_settings,
-        base_settings,
-    )
-    return _resolve_http_downstream_transport(policy, payload=payload, headers=headers) == "websocket"
+    configured_transport, explicit_transport = _resolved_configured_stream_transport(dashboard_settings)
+    if upstream_websocket_transport_recently_failed():
+        reason, allowed = "recent_ws_failure", False
+    elif explicit_transport:
+        reason, allowed = f"explicit_{configured_transport}", configured_transport == "websocket"
+    else:
+        policy, _override_applied = _effective_http_downstream_transport_policy(api_key, dashboard_settings)
+        allowed = _resolve_http_downstream_transport(policy, payload=payload, headers=headers) == "websocket"
+        signal = http_continuation_signal(payload, headers)
+        reason = f"smart_{signal or 'single_turn'}" if policy == "smart" else policy
+    record_http_bridge_routing(stage="admission", reason=reason)
+    return allowed
 
 
 async def _iter_account_capacity_recovery_wait(
@@ -277,8 +285,37 @@ async def _iter_account_capacity_recovery_wait(
         remaining_sleep_seconds -= chunk_seconds
 
 
+def _retry_after_kwargs(retry_after_seconds: float | None) -> dict[str, float]:
+    """Forward upstream ``Retry-After`` to ``_handle_stream_error`` only when one was sent.
+
+    The kw-only ``retry_after_seconds`` is additive; omitting it when there is
+    nothing to convey keeps partial doubles with the historical positional
+    signature (``account, error, code, http_status``) working.
+    """
+    return {} if retry_after_seconds is None else {"retry_after_seconds": retry_after_seconds}
+
+
 def _payload_size_estimate_bytes(payload: ResponsesRequest) -> int:
     return len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+
+
+def _transient_retry_error_code(tex: BaseException) -> str:
+    """Error code the same-account transient retry loop aggregates under.
+
+    Stream-framed failures keep their own code. HTTP-status failures used to
+    collapse to ``server_error``; an upstream 5xx whose body says the account
+    is overloaded keeps that code so the health write after retry exhaustion
+    still counts as an admission rejection (the overload backoff feeds on the
+    code, and ``server_is_overloaded`` classifies as the same transient class).
+    """
+    if isinstance(tex, _TransientStreamError):
+        return tex.code
+    payload = getattr(tex, "payload", None)
+    if isinstance(payload, Mapping):
+        parsed = _parse_openai_error(payload)
+        if parsed is not None and isinstance(parsed.code, str) and parsed.code in UPSTREAM_OVERLOAD_CODES:
+            return parsed.code
+    return "server_error"
 
 
 class _StreamingRetryMixin:
@@ -308,6 +345,11 @@ class _StreamingRetryMixin:
         start = clock.monotonic()
         base_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
+        # C2-3 resilience toggles: resolved from this request's snapshot and
+        # bound to the task so the upstream client gates its breaker the same
+        # way; rebound before every upstream attempt because a keepalive yield
+        # can move this generator to another task (ContextVars follow tasks).
+        resilience = bind_resilience_toggles(settings, startup_settings=base_settings)
         concurrency_caps = _facade().effective_account_concurrency_caps(settings)
         deadline = start + _facade()._stream_request_budget_seconds(
             base_settings,
@@ -334,12 +376,11 @@ class _StreamingRetryMixin:
 
         upstream_stream_transport = upstream_stream_transport_override
         if upstream_stream_transport is None:
-            configured_transport, explicit_transport = _resolved_configured_stream_transport(settings, base_settings)
+            configured_transport, explicit_transport = _resolved_configured_stream_transport(settings)
             image_bypass = _facade()._responses_request_uses_image_generation(
                 payload
             ) or _facade()._responses_request_contains_input_image(payload)
             resolved_base_transport = _resolve_stream_transport(
-                settings=base_settings,
                 transport=configured_transport,
                 transport_override=None,
                 model=payload.model,
@@ -356,15 +397,13 @@ class _StreamingRetryMixin:
                 and upstream_stream_transport == "websocket"
             ):
                 sticky = upstream_transport_sticky
-                if _is_native_codex_request(headers):
-                    policy = "native_codex_http"
+                if upstream_websocket_transport_recently_failed():
+                    policy = "recent_ws_failure"
                     override_applied = False
                     upstream_transport_policy_label = policy
                     upstream_stream_transport = "http"
                 else:
-                    policy, override_applied = _effective_http_downstream_transport_policy(
-                        api_key, settings, base_settings
-                    )
+                    policy, override_applied = _effective_http_downstream_transport_policy(api_key, settings)
                     upstream_transport_policy_label = policy
                     policy_transport = _resolve_http_downstream_transport(policy, payload=payload, headers=headers)
                     upstream_stream_transport = "http" if policy_transport == "http" else configured_transport
@@ -386,6 +425,9 @@ class _StreamingRetryMixin:
                 upstream_stream_transport,
                 request_id,
             )
+        if request_transport == _REQUEST_TRANSPORT_HTTP and upstream_websocket_transport_recently_failed():
+            upstream_stream_transport = "http"
+            upstream_transport_policy_label = "recent_ws_failure"
         if rewritten_file_account_id is None and not file_account_resolution_complete:
             proxy._raise_for_unsupported_input_image_references(payload)
             rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
@@ -444,6 +486,10 @@ class _StreamingRetryMixin:
         excluded_account_ids: set[str] = set()
         transient_failed_account_id: str | None = None
         hard_affinity_same_owner_retry_attempted = False
+        # Owner-bound burst 429 same-account retries; reset when the counter's
+        # account differs from the one being retried (see the closures below).
+        burst_same_account_retries = 0
+        burst_same_account_retry_account_id: str | None = None
         deferred_capacity_account: Account | None = None
         deferred_capacity_lease: AccountLease | None = None
         preferred_account_id: str | None = None
@@ -451,7 +497,14 @@ class _StreamingRetryMixin:
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
-        pending_post_refresh_transient_penalties: list[tuple[Account, UpstreamError, str, int | None, int]] = []
+        # (account, error, code, http_status, retry_count, retry_after_seconds,
+        #  burst_cooldown_recorded): a queued keyed health write. The burst
+        # cooldown is replica-local runtime state with no reservation-ordering
+        # dependency, so it is engaged at rejection time and the flag stops the
+        # deferred write from re-engaging it after the stream settled.
+        pending_post_refresh_transient_penalties: list[
+            tuple[Account, UpstreamError, str, int | None, int, float | None, bool]
+        ] = []
         deferred_account_error_backoffs: dict[str, Account] = {}
         post_refresh_transient_replacement_selected = False
         require_security_work_authorized = False
@@ -513,6 +566,8 @@ class _StreamingRetryMixin:
                     transient_error_code,
                     transient_http_status,
                     transient_retry_count,
+                    transient_retry_after_seconds,
+                    transient_burst_cooldown_recorded,
                 ) = pending_post_refresh_transient_penalties[0]
 
                 async def _apply_deferred_penalty(
@@ -521,6 +576,8 @@ class _StreamingRetryMixin:
                     error_code: str = transient_error_code,
                     http_status: int | None = transient_http_status,
                     retry_count: int = transient_retry_count,
+                    retry_after_seconds: float | None = transient_retry_after_seconds,
+                    burst_cooldown_recorded: bool = transient_burst_cooldown_recorded,
                 ) -> None:
                     try:
                         await proxy._handle_stream_error(
@@ -528,6 +585,8 @@ class _StreamingRetryMixin:
                             error_payload,
                             error_code,
                             http_status=http_status,
+                            **_retry_after_kwargs(retry_after_seconds),
+                            **({"burst_cooldown_recorded": True} if burst_cooldown_recorded else {}),
                         )
                         if retry_count > 1:
                             await proxy._load_balancer.record_errors(account, retry_count - 1)
@@ -615,6 +674,7 @@ class _StreamingRetryMixin:
             *,
             http_status: int | None = None,
             transient_retry_count: int = 1,
+            retry_after_seconds: float | None = None,
         ) -> ClassifiedFailure:
             """Classify and either write health now or defer until after settle.
 
@@ -627,6 +687,25 @@ class _StreamingRetryMixin:
             after settlement (same ordering as compact keyed mid-loop health).
             """
             if api_key is not None and api_key_reservation is not None:
+                classified = classify_upstream_failure(
+                    error_code=failed_code,
+                    error=failed_error,
+                    http_status=http_status,
+                    phase="first_event",
+                )
+                burst_cooldown_recorded = is_upstream_burst_rejection(
+                    failure_class=classified["failure_class"],
+                    http_status=http_status,
+                )
+                if burst_cooldown_recorded:
+                    # Replica-local runtime state only (no DB write, no
+                    # reservation ordering): engage it now so other requests
+                    # are steered away during the burst, not after settlement.
+                    await record_upstream_burst_rejection(
+                        proxy._load_balancer,
+                        failed_account,
+                        retry_after_seconds=retry_after_seconds,
+                    )
                 pending_post_refresh_transient_penalties.append(
                     (
                         failed_account,
@@ -634,23 +713,66 @@ class _StreamingRetryMixin:
                         failed_code,
                         http_status,
                         transient_retry_count,
+                        retry_after_seconds,
+                        burst_cooldown_recorded,
                     )
                 )
-                return classify_upstream_failure(
-                    error_code=failed_code,
-                    error=failed_error,
-                    http_status=http_status,
-                    phase="first_event",
-                )
+                return classified
             classified = await proxy._handle_stream_error(
                 failed_account,
                 failed_error,
                 failed_code,
                 http_status=http_status,
+                **_retry_after_kwargs(retry_after_seconds),
             )
             if transient_retry_count > 1:
                 await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
             return classified
+
+        def _stream_owner_bound_to(account: Account) -> bool:
+            """True when this request cannot move off ``account``.
+
+            Mirrors the loop's ``can_try_other_account`` predicates: single-account
+            routing, a payload already dispatched to the account (account-bound
+            items such as ``reasoning``), a required previous-response /
+            turn-state owner, or an input-file owner. A required owner whose
+            locally verified full-input replay may still move
+            (``_move_verified_fresh_replay_from_owner``) is *not* bound.
+            """
+            if routing_strategy == "single_account":
+                return True
+            if (
+                require_preferred_account
+                and preferred_account_id == account.id
+                and verified_fresh_replay_payload is not None
+            ):
+                return False
+            return (
+                payload_replay_required_account_id == account.id
+                or (require_preferred_account and preferred_account_id == account.id)
+                or account.id == file_preferred_account_id
+                or turn_state_owner_account_id is not None
+            )
+
+        def _burst_same_account_retry_available(account: Account, *, burst: bool) -> bool:
+            if not burst:
+                return False
+            retries = burst_same_account_retries if burst_same_account_retry_account_id == account.id else 0
+            return retries < BURST_SAME_ACCOUNT_MAX_RETRIES and proxy._remaining_budget_seconds(deadline) > 0
+
+        def _next_burst_same_account_retry(account: Account) -> int:
+            nonlocal burst_same_account_retries, burst_same_account_retry_account_id
+            if burst_same_account_retry_account_id != account.id:
+                burst_same_account_retry_account_id = account.id
+                burst_same_account_retries = 0
+            burst_same_account_retries += 1
+            return burst_same_account_retries
+
+        def _stamp_surfaced_burst_retry_after(exc: ProxyResponseError) -> None:
+            # A surfaced burst 429 that carried no upstream Retry-After still
+            # tells the client when to come back (api.py emits the header).
+            if exc.retry_after_seconds is None:
+                exc.retry_after_seconds = BURST_SURFACE_RETRY_AFTER_SECONDS
 
         async def _drain_pending_post_refresh_penalty_on_terminal(
             current_settlement: _StreamSettlement,
@@ -865,6 +987,9 @@ class _StreamingRetryMixin:
 
             while True:
                 settlement.reset()
+                # Rebind per attempt: a capacity keepalive may have handed this
+                # generator to another task since the request-entry binding.
+                set_resilience_toggles(resilience)
                 stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
                     proxy._remaining_budget_seconds(deadline)
                 )
@@ -953,6 +1078,8 @@ class _StreamingRetryMixin:
                                 settlement.error_code or "upstream_error",
                                 502,
                                 transient_retries,
+                                None,
+                                False,
                             )
                         )
                     if can_try_other_account:
@@ -2078,6 +2205,7 @@ class _StreamingRetryMixin:
                     transient_retries = 0
                     allow_retry_flag = attempt < max_attempts - 1
                     while True:
+                        set_resilience_toggles(resilience)  # rebind per attempt (task handoff)
                         stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
                             proxy._remaining_budget_seconds(deadline),
                         )
@@ -2421,11 +2549,19 @@ class _StreamingRetryMixin:
                                     http_status=tex.status_code,
                                     phase="first_event",
                                 )
-                                if getattr(base_settings, "deterministic_failover_enabled", True):
+                                burst = is_upstream_burst_rejection(
+                                    failure_class=classified["failure_class"],
+                                    http_status=tex.status_code,
+                                )
+                                if resilience.deterministic_failover_enabled:
                                     action = failover_decision(
                                         failure_class=classified["failure_class"],
                                         downstream_visible=settlement.downstream_visible,
                                         candidates_remaining=max_attempts - attempt - 1,
+                                        owner_bound=_stream_owner_bound_to(account),
+                                        same_account_retry_available=_burst_same_account_retry_available(
+                                            account, burst=burst
+                                        ),
                                     )
                                 else:
                                     action = "surface"
@@ -2438,12 +2574,70 @@ class _StreamingRetryMixin:
                                     classified["failure_class"],
                                     action,
                                 )
+                                if action == "retry_same_account":
+                                    # Owner-bound burst 429: the request cannot
+                                    # move, so back off briefly on the owner and
+                                    # redispatch. Only the replica-local burst
+                                    # cooldown is engaged per retry (steering
+                                    # *other* unbound requests away at rejection
+                                    # time, keyed or not); the transient error
+                                    # penalty is written once, when the failure
+                                    # is finally surfaced, so a bursting owner
+                                    # is not pushed into selection error backoff
+                                    # and a success is never followed by a
+                                    # deferred penalty. The account is neither
+                                    # excluded nor released from its dispatch
+                                    # anchor, and the stream lease is kept so the
+                                    # redispatch stays inside the admitted slot.
+                                    await record_upstream_burst_rejection(
+                                        proxy._load_balancer,
+                                        account,
+                                        retry_after_seconds=tex.retry_after_seconds,
+                                    )
+                                    retry_index = _next_burst_same_account_retry(account)
+                                    delay = burst_same_account_backoff_seconds(
+                                        retry_index,
+                                        retry_after_seconds=tex.retry_after_seconds,
+                                    )
+                                    _facade().logger.info(
+                                        "Burst 429 on owner-bound stream, retrying same account "
+                                        "request_id=%s account_id=%s retry=%s/%s delay=%.2fs retry_after_seconds=%s",
+                                        request_id,
+                                        account.id,
+                                        retry_index,
+                                        BURST_SAME_ACCOUNT_MAX_RETRIES,
+                                        delay,
+                                        tex.retry_after_seconds,
+                                    )
+                                    async for wait_event in _iter_account_capacity_recovery_wait(
+                                        request_id=request_id,
+                                        model=payload.model,
+                                        account_id=account.id,
+                                        error_message=error_message,
+                                        recovery_sleep_seconds=delay,
+                                        remaining_budget_seconds=proxy._remaining_budget_seconds(deadline),
+                                        # The wait is bounded (<= 10 s) so no
+                                        # keepalive is needed; on the propagating
+                                        # route a keepalive frame would commit
+                                        # 200/SSE and make the surfaced 429
+                                        # unreachable as an HTTP status.
+                                        emit_keepalives=not propagate_http_errors,
+                                        stage="burst_backoff",
+                                        scheduler=scheduler,
+                                        clock=clock,
+                                    ):
+                                        yield wait_event
+                                    if proxy._remaining_budget_seconds(deadline) > 0:
+                                        continue
+                                    # Budget spent during the wait: surface the
+                                    # original rejection below (one health write).
                                 if action == "failover_next":
                                     await _handle_or_defer_keyed_stream_health(
                                         account,
                                         _upstream_error_from_openai(error),
                                         code,
                                         http_status=tex.status_code,
+                                        retry_after_seconds=tex.retry_after_seconds,
                                     )
                                     last_transient_exc = tex
                                     transient_failed_account_id = account.id
@@ -2460,14 +2654,18 @@ class _StreamingRetryMixin:
                                     _upstream_error_from_openai(error),
                                     code,
                                     http_status=tex.status_code,
+                                    **_retry_after_kwargs(tex.retry_after_seconds),
                                 )
+                                setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
+                                if burst:
+                                    _stamp_surfaced_burst_retry_after(tex)
                                 raise
-                            error_code = tex.code if isinstance(tex, _TransientStreamError) else "server_error"
                             error_payload: UpstreamError = (
                                 tex.error
                                 if isinstance(tex, _TransientStreamError)
                                 else _upstream_error_from_openai(_parse_openai_error(tex.payload))
                             )
+                            error_code = _transient_retry_error_code(tex)
                             error_message = str(error_payload.get("message") or "")
                             recovery_decision = await _wait_for_process_network_recovery(
                                 account,
@@ -3067,13 +3265,24 @@ class _StreamingRetryMixin:
                                 phase="first_event",
                             )
                             candidates_remaining = max_attempts - attempt - 1
+                            burst = is_upstream_burst_rejection(
+                                failure_class=classified["failure_class"],
+                                http_status=retry_exc.status_code,
+                            )
                             if retry_exc.status_code == 401 and candidates_remaining > 0:
                                 action = "failover_next"
-                            elif getattr(base_settings, "deterministic_failover_enabled", True):
+                            elif resilience.deterministic_failover_enabled:
                                 action = failover_decision(
                                     failure_class=classified["failure_class"],
                                     downstream_visible=False,
                                     candidates_remaining=candidates_remaining,
+                                    owner_bound=_stream_owner_bound_to(account),
+                                    # The post-refresh redispatch re-enters the
+                                    # attempt loop, so it also needs an attempt.
+                                    same_account_retry_available=(
+                                        candidates_remaining > 0
+                                        and _burst_same_account_retry_available(account, burst=burst)
+                                    ),
                                 )
                             else:
                                 action = "surface"
@@ -3086,12 +3295,66 @@ class _StreamingRetryMixin:
                                 classified["failure_class"],
                                 action,
                             )
+                            if action == "retry_same_account":
+                                # Owner-bound burst 429 after the forced refresh:
+                                # keep the dispatch anchor and let the next
+                                # attempt re-select the same owner (it is not
+                                # excluded) after a short backoff. As on the
+                                # pre-visible path only the burst cooldown is
+                                # engaged here; the transient penalty is written
+                                # once if the failure is finally surfaced.
+                                await record_upstream_burst_rejection(
+                                    proxy._load_balancer,
+                                    account,
+                                    retry_after_seconds=retry_exc.retry_after_seconds,
+                                )
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
+                                retry_index = _next_burst_same_account_retry(account)
+                                delay = burst_same_account_backoff_seconds(
+                                    retry_index,
+                                    retry_after_seconds=retry_exc.retry_after_seconds,
+                                )
+                                # A failed re-selection re-raises this exception:
+                                # stamp Retry-After now (after the delay was
+                                # derived from the upstream value).
+                                _stamp_surfaced_burst_retry_after(retry_exc)
+                                last_transient_exc = retry_exc
+                                _facade().logger.info(
+                                    "Burst 429 on owner-bound stream, retrying same account "
+                                    "request_id=%s account_id=%s phase=post_refresh retry=%s/%s delay=%.2fs "
+                                    "retry_after_seconds=%s",
+                                    request_id,
+                                    account.id,
+                                    retry_index,
+                                    BURST_SAME_ACCOUNT_MAX_RETRIES,
+                                    delay,
+                                    retry_exc.retry_after_seconds,
+                                )
+                                async for wait_event in _iter_account_capacity_recovery_wait(
+                                    request_id=request_id,
+                                    model=payload.model,
+                                    account_id=account.id,
+                                    error_message=error.message if error else None,
+                                    recovery_sleep_seconds=delay,
+                                    remaining_budget_seconds=proxy._remaining_budget_seconds(deadline),
+                                    emit_keepalives=not propagate_http_errors,
+                                    stage="burst_backoff",
+                                    scheduler=scheduler,
+                                    clock=clock,
+                                ):
+                                    yield wait_event
+                                if proxy._remaining_budget_seconds(deadline) > 0:
+                                    continue
+                                # Budget spent during the wait: surface the
+                                # original rejection below (one health write).
                             if action == "failover_next":
                                 await _handle_or_defer_keyed_stream_health(
                                     account,
                                     current_error_payload,
                                     current_error_code,
                                     http_status=retry_exc.status_code,
+                                    retry_after_seconds=retry_exc.retry_after_seconds,
                                 )
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
@@ -3109,7 +3372,11 @@ class _StreamingRetryMixin:
                                     current_error_payload,
                                     current_error_code,
                                     http_status=retry_exc.status_code,
+                                    **_retry_after_kwargs(retry_exc.retry_after_seconds),
                                 )
+                                setattr(retry_exc, _STREAM_HEALTH_RECORDED_ATTR, True)
+                            if burst:
+                                _stamp_surfaced_burst_retry_after(retry_exc)
                             if propagate_http_errors:
                                 raise
                             error_message = error.message if error else None
@@ -3185,7 +3452,11 @@ class _StreamingRetryMixin:
                             require_security_work_authorized = True
                             continue
                     health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
-                    if health_write_allowed and _facade()._should_penalize_stream_error(error_code):
+                    if (
+                        health_write_allowed
+                        and not getattr(exc, _STREAM_HEALTH_RECORDED_ATTR, False)
+                        and _facade()._should_penalize_stream_error(error_code)
+                    ):
                         await proxy._handle_stream_error(
                             account,
                             _upstream_error_from_openai(error),

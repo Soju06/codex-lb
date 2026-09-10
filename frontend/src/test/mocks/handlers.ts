@@ -23,6 +23,7 @@ import {
   createDashboardOverview,
   createDashboardProjections,
   createDashboardSettings,
+  createSubscriptionOverflowPreflight,
   createDefaultAccounts,
   createDefaultApiKeys,
   createDefaultConversations,
@@ -39,10 +40,12 @@ import {
   createRequestLogFilterOptions,
   createTelemetryConsent,
   createTelemetrySnapshotEnvelope,
+  createModelContextWindowOverrides,
   createUpstreamProxyAdmin,
   createRequestLogsResponse,
   type DashboardAuthSession,
   type DashboardSettings,
+  type ModelContextWindowOverrides,
   type ModelSource,
   type QuotaPlannerDecision,
   type QuotaPlannerForecast,
@@ -108,8 +111,9 @@ const AccountRoutingPolicyPayloadSchema = z.object({
 
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
+  subscriptionOverflowSourceId: z.string().nullable().optional(),
   upstreamStreamTransport: z
-    .enum(["default", "auto", "http", "websocket"])
+    .enum(["auto", "http", "websocket"])
     .optional(),
   httpDownstreamTransportPolicy: z
     .enum(["smart", "always_http", "always_websocket", "pinned"])
@@ -261,6 +265,7 @@ type MockState = {
   quotaPlannerSettings: QuotaPlannerSettings;
   quotaPlannerDecisions: QuotaPlannerDecision[];
   upstreamProxyAdmin: UpstreamProxyAdmin;
+  modelContextWindowOverrides: ModelContextWindowOverrides;
   quotaPlannerForecast: QuotaPlannerForecast;
   apiKeys: ApiKey[];
   automations: Array<{
@@ -354,6 +359,7 @@ function createInitialState(): MockState {
     quotaPlannerSettings: createQuotaPlannerSettings(),
     quotaPlannerDecisions: [createQuotaPlannerDecision()],
     upstreamProxyAdmin: createUpstreamProxyAdmin(),
+    modelContextWindowOverrides: createModelContextWindowOverrides(),
     quotaPlannerForecast: createQuotaPlannerForecast(),
     apiKeys: createDefaultApiKeys(),
     automations: [],
@@ -1129,38 +1135,6 @@ export const handlers = [
 		return HttpResponse.json({ status: "deleted" });
 	}),
 
-  http.post("/api/accounts/:accountId/export", ({ params }) => {
-    const accountId = String(params.accountId);
-    const account = findAccount(accountId);
-    if (!account) {
-      return HttpResponse.json(
-        { error: { code: "account_not_found", message: "Account not found" } },
-        { status: 404 },
-      );
-    }
-    return HttpResponse.json({
-      accountId: account.accountId,
-      email: account.email,
-      planType: account.planType,
-      status: account.status,
-      authJson: JSON.stringify(
-        {
-          auth_mode: "chatgpt",
-          OPENAI_API_KEY: null,
-          tokens: {
-            id_token: "id-token",
-            access_token: "access-token",
-            refresh_token: "refresh-token",
-            account_id: accountId,
-          },
-          last_refresh: "2026-01-01T12:00:00.000000Z",
-        },
-        null,
-        2,
-      ),
-    });
-  }),
-
   http.delete("/api/accounts/:accountId", ({ params }) => {
     const accountId = String(params.accountId);
     const exists = state.accounts.some(
@@ -1207,6 +1181,28 @@ export const handlers = [
 
   http.get("/api/settings", () => {
     return HttpResponse.json(state.settings);
+  }),
+
+  http.get("/api/settings/subscription-overflow/preflight", ({ request }) => {
+    const sourceId = new URL(request.url).searchParams.get("source_id") ?? "";
+    const source = state.modelSources.find((candidate) => candidate.id === sourceId);
+    if (!source) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Model source not found" } },
+        { status: 404 },
+      );
+    }
+    const eligible = source.kind === "openai_compatible" && source.supportsResponses;
+    return HttpResponse.json(
+      createSubscriptionOverflowPreflight({
+        sourceId: source.id,
+        sourceName: source.name,
+        sourceEnabled: source.isEnabled,
+        eligible,
+        blockers: eligible ? [] : ["source_responses_unsupported"],
+        drainUntil: state.settings.subscriptionOverflowDrainUntil,
+      }),
+    );
   }),
 
   http.get("/api/settings/telemetry", ({ request }) => {
@@ -1270,6 +1266,9 @@ export const handlers = [
       port: payload.port,
       username: payload.username ?? null,
       isActive: payload.isActive ?? true,
+      // Mirrors the server: credentials on http/socks5 cross the proxy hop unencrypted.
+      plaintextCredentials:
+        payload.scheme !== "https" && (payload.username != null || payload.password != null),
     };
     state.upstreamProxyAdmin = {
       ...state.upstreamProxyAdmin,
@@ -1578,6 +1577,59 @@ export const handlers = [
         reason: "admin_canceled",
       }),
     );
+  }),
+
+  http.get("/api/settings/model-context-window-overrides", () => {
+    return HttpResponse.json(state.modelContextWindowOverrides);
+  }),
+
+  http.put("/api/settings/model-context-window-overrides/:slug*", async ({ params, request }) => {
+    // `:slug*` and no trim: the backend routes the slug as a path segment
+    // (vendor/model) and rejects — never trims — a slug with whitespace.
+    const slug = decodeURIComponent(String(params.slug));
+    const payload = await parseJsonBody(request, z.object({ contextWindow: z.number().int().positive() }));
+    if (!payload) {
+      return HttpResponse.json(
+        { error: { code: "validation_error", message: "contextWindow must be a positive integer" } },
+        { status: 422 },
+      );
+    }
+    if (!slug || /\s/.test(slug)) {
+      return HttpResponse.json(
+        { error: { code: "invalid_model_slug", message: "Invalid model slug" } },
+        { status: 400 },
+      );
+    }
+    const existing = state.modelContextWindowOverrides.overrides.find((entry) => entry.slug === slug);
+    const others = state.modelContextWindowOverrides.overrides.filter((entry) => entry.slug !== slug);
+    state.modelContextWindowOverrides = {
+      overrides: [
+        ...others,
+        { slug, contextWindow: payload.contextWindow, source: "dashboard" as const, envValue: existing?.envValue ?? null },
+      ].sort((a, b) => a.slug.localeCompare(b.slug)),
+    };
+    return HttpResponse.json(state.modelContextWindowOverrides);
+  }),
+
+  http.delete("/api/settings/model-context-window-overrides/:slug*", ({ params }) => {
+    const slug = decodeURIComponent(String(params.slug));
+    const existing = state.modelContextWindowOverrides.overrides.find((entry) => entry.slug === slug);
+    if (!existing || existing.source !== "dashboard") {
+      return HttpResponse.json(
+        { error: { code: "model_context_window_override_not_found", message: "Override not found" } },
+        { status: 404 },
+      );
+    }
+    const others = state.modelContextWindowOverrides.overrides.filter((entry) => entry.slug !== slug);
+    state.modelContextWindowOverrides = {
+      overrides:
+        existing.envValue !== null
+          ? [...others, { slug, contextWindow: existing.envValue, source: "env" as const, envValue: existing.envValue }].sort(
+              (a, b) => a.slug.localeCompare(b.slug),
+            )
+          : others,
+    };
+    return HttpResponse.json(state.modelContextWindowOverrides);
   }),
 
   http.put("/api/settings", async ({ request }) => {

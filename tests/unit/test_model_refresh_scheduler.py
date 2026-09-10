@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import logging
@@ -112,14 +113,6 @@ async def test_refresh_access_token_marks_transport_errors(monkeypatch: pytest.M
     session = MagicMock()
     session.post.side_effect = aiohttp.ClientError("dns failed")
 
-    monkeypatch.setattr(
-        refresh_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            token_refresh_timeout_seconds=15.0,
-        ),
-    )
-
     with pytest.raises(refresh_module.RefreshError) as excinfo:
         await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
 
@@ -141,7 +134,6 @@ async def test_refresh_access_token_preserves_transient_dns_classification(monke
             auth_base_url="https://auth.example.test",
             oauth_client_id="client-id",
             oauth_scope="openid profile",
-            token_refresh_timeout_seconds=15.0,
         ),
     )
 
@@ -171,7 +163,6 @@ async def test_refresh_access_token_marks_typed_connector_dns_failure_replay_saf
             auth_base_url="https://auth.example.test",
             oauth_client_id="client-id",
             oauth_scope="openid profile",
-            token_refresh_timeout_seconds=15.0,
         ),
     )
 
@@ -212,7 +203,6 @@ async def test_refresh_access_token_network_body_read_failure_is_not_replay_safe
             auth_base_url="https://auth.example.test",
             oauth_client_id="client-id",
             oauth_scope="openid profile",
-            token_refresh_timeout_seconds=15.0,
         ),
     )
 
@@ -582,3 +572,82 @@ async def test_refresh_once_clears_registry_when_no_active_accounts(
 
     clear.assert_awaited_once_with()
     invalidate.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_run_loop_warms_the_codex_version_cache_on_every_replica(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-leader replica never runs the leader refresh (the only place the
+    Codex client version used to be fetched), so it presented the configured
+    fallback version indefinitely. The loop tick warms the cache before the
+    leader-gated refresh, on every replica, and a warm-up failure never stops
+    the tick."""
+    get_version = AsyncMock(return_value="0.153.4")
+    monkeypatch.setattr(scheduler_module, "get_codex_version_cache", lambda: SimpleNamespace(get_version=get_version))
+
+    class _Follower:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object | None:
+            return None
+
+    reconcile = AsyncMock()
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Follower())
+    monkeypatch.setattr(scheduler_module, "reconcile_model_registry_from_store", reconcile)
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=3600, enabled=True)
+    await scheduler.start()
+    for _ in range(50):
+        if get_version.await_count and reconcile.await_count:
+            break
+        await asyncio.sleep(0.01)
+    await scheduler.stop()
+    get_version.assert_awaited_once_with()
+    reconcile.assert_awaited_once_with()
+
+    # A failing warm-up is logged and the leader-gated refresh still runs.
+    failing = AsyncMock(side_effect=RuntimeError("github down"))
+    monkeypatch.setattr(scheduler_module, "get_codex_version_cache", lambda: SimpleNamespace(get_version=failing))
+    reconcile.reset_mock()
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=3600, enabled=True)
+    await scheduler.start()
+    for _ in range(50):
+        if reconcile.await_count:
+            break
+        await asyncio.sleep(0.01)
+    await scheduler.stop()
+    failing.assert_awaited_once_with()
+    reconcile.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_warmed_version_reaches_the_non_native_upstream_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Product path of #2170: after the per-replica warm-up, a non-native SDK
+    request is forwarded with the fetched Codex version in ``User-Agent`` and
+    ``version`` instead of the configured fallback, using the real shared cache."""
+    from app.core.clients import proxy as proxy_module
+    from app.core.clients.codex_version import CodexVersionCache, get_codex_version_cache
+    from app.core.config.settings import get_settings
+
+    cache = get_codex_version_cache()
+    await cache.invalidate()
+    fallback = get_settings().model_registry_client_version
+    fetched = "9.9.9"
+    assert fetched != fallback
+
+    async def _stub_fetch(self: CodexVersionCache) -> str | None:
+        return fetched
+
+    monkeypatch.setattr(CodexVersionCache, "_fetch_latest_version", _stub_fetch)
+    try:
+        cold = {"user-agent": "OpenAI/Python 2.24.0", "version": "sdk"}
+        proxy_module._normalize_non_native_upstream_fingerprint(cold)
+        assert cold["User-Agent"].startswith(f"codex_cli_rs/{fallback} ")
+        assert cold["version"] == fallback
+
+        await scheduler_module._warm_codex_version_cache()
+
+        warm = {"user-agent": "OpenAI/Python 2.24.0", "version": "sdk"}
+        proxy_module._normalize_non_native_upstream_fingerprint(warm)
+        assert warm["User-Agent"].startswith(f"codex_cli_rs/{fetched} ")
+        assert warm["version"] == fetched
+        assert warm["originator"] == "codex_cli_rs"
+    finally:
+        await cache.invalidate()

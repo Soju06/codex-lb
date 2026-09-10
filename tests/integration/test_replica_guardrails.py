@@ -18,6 +18,7 @@ from app.core.config.key_fingerprint import (
 )
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.utils.time import utcnow
+from app.db import sqlite_lock_retry
 from app.db.models import BridgeRingMember, RuntimeSentinel
 from app.db.session import SessionLocal
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
@@ -99,11 +100,10 @@ async def test_fingerprint_retries_transient_sqlite_lock(db_setup, monkeypatch):
             raise OperationalError("INSERT runtime_sentinels", {}, Exception("database is locked"))
         await real_stamp_if_absent(session, fingerprint)
 
-    async def no_sleep(_delay_seconds: float) -> None:
-        return None
-
     monkeypatch.setattr(key_fingerprint_module, "_stamp_if_absent", fail_once_then_stamp)
-    monkeypatch.setattr(key_fingerprint_module.asyncio, "sleep", no_sleep)
+    # The retry budget now lives in the shared helper; zero the delays so the
+    # test exercises the retry without waiting it out.
+    monkeypatch.setattr(sqlite_lock_retry, "SQLITE_LOCK_RETRY_DELAYS_SECONDS", (0.0, 0.0, 0.0))
 
     await verify_encryption_key_fingerprint()
 

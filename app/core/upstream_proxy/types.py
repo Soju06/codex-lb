@@ -8,6 +8,19 @@ from urllib.parse import quote
 _PLAINTEXT_SCHEMES = frozenset({"http", "socks5", "socks5h"})
 
 
+def sends_plaintext_credentials(scheme: str, *, has_credentials: bool) -> bool:
+    """Whether proxy credentials cross the LB-to-proxy hop unencrypted.
+
+    ``http`` (CONNECT ``Proxy-Authorization``) and ``socks5``/``socks5h``
+    (username/password sub-negotiation) both send the credential in the clear
+    to the proxy server; only an ``https`` proxy encrypts that hop. Such
+    endpoints are allowed, but the dashboard surfaces a warning and the
+    resolver logs one so operators can move to ``https`` or an IP allowlist.
+    """
+
+    return has_credentials and scheme.lower().strip() in _PLAINTEXT_SCHEMES
+
+
 def _encode_basic_proxy_auth(username: str, password: str) -> str:
     # RFC 7617 Basic token encoded with latin1, byte-identical to the header
     # value aiohttp derives from URL userinfo (``BasicAuth`` default encoding);
@@ -28,13 +41,14 @@ class ResolvedProxyEndpoint:
     username: str | None = None
     password: str | None = None
 
-    def _reject_plaintext_credentials(self) -> None:
-        if self.scheme.lower() in _PLAINTEXT_SCHEMES and (self.username is not None or self.password is not None):
-            raise ValueError("credential-bearing plaintext proxy URLs are forbidden")
+    @property
+    def plaintext_credentials(self) -> bool:
+        return sends_plaintext_credentials(
+            self.scheme, has_credentials=self.username is not None or self.password is not None
+        )
 
     @property
     def proxy_url(self) -> str:
-        self._reject_plaintext_credentials()
         scheme = "socks5h" if self.scheme == "socks5" else self.scheme
         auth = ""
         if self.username:
@@ -59,7 +73,6 @@ class ResolvedProxyEndpoint:
         only on the CONNECT tunnel request, i.e. for TLS (``https``/``wss``)
         targets; callers must not use these kwargs for plaintext targets.
         """
-        self._reject_plaintext_credentials()
         kwargs: dict[str, Any] = {"proxy": self.proxy_url_without_credentials}
         if self.username:
             kwargs["proxy_headers"] = {

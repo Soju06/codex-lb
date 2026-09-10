@@ -24,7 +24,7 @@ When the Helm chart deploys with `postgresql.enabled=false`, it MUST provide a n
 
 When `database_url` resolves to a PostgreSQL backend, the application MUST configure each async engine — both the request-path `engine` and the optional background-task `_background_engine` — with `pool_pre_ping=True` and a finite `pool_recycle` window. This is required so the application detects connections that the PostgreSQL server has silently closed (idle timeout, restart, network reset) before the first real query is dispatched on them, and so connections are cycled before they reach any reasonable upstream keep-alive boundary. The recycle window is the fixed 1800-second application constant in `app/db/session.py`.
 
-Each PostgreSQL statement MUST additionally be bounded by the fixed asyncpg `command_timeout` application constant in `app/db/session.py`, so a query stalled on a half-dead connection surfaces as an error within the bound instead of awaiting indefinitely — pre-ping only protects the first statement after checkout, not a connection that dies mid-statement. A statement that dies mid-flight while its caller holds an application lock MUST therefore release that caller within the bound. Alembic migrations run on their own synchronous engine and are not subject to this bound.
+Each PostgreSQL statement MUST additionally be bounded by the fixed asyncpg `command_timeout` application constant in `app/db/session.py`, so a query stalled on a half-dead connection surfaces as an error within the bound instead of awaiting indefinitely — pre-ping only protects the first statement after checkout, not a connection that dies mid-statement. This bound covers the dominant stall (a dispatched statement whose response never arrives); asyncpg's timeout handling then cancels the statement and raises to the caller, releasing whatever application lock the caller held. The bound is best-effort against a fully blackholed peer: asyncpg's post-timeout cancellation handshake itself talks to the server, so lock-discipline requirements (resolving settings/DB inputs before acquiring application locks) remain the primary defense and MUST NOT be relaxed on the strength of this bound. Alembic migrations run on their own synchronous engine and are not subject to this bound.
 
 #### Scenario: Stale connections are rejected before checkout
 
@@ -41,9 +41,15 @@ Each PostgreSQL statement MUST additionally be bounded by the fixed asyncpg `com
 
 #### Scenario: Mid-statement connection death cannot wedge its caller
 
-- **WHEN** a statement's connection dies after dispatch (network partition, half-dead peer) and no response arrives
+- **WHEN** a statement's connection dies after dispatch (network partition, half-dead peer) and no response arrives, while the server remains reachable for the cancellation handshake
 - **THEN** asyncpg cancels the statement and raises within the fixed `command_timeout` bound
-- **AND** any application lock held by the caller is released within that bound instead of being held indefinitely
+- **AND** any application lock held by the caller is released when the error propagates
+
+#### Scenario: The statement bound does not license DB awaits under application locks
+
+- **GIVEN** a code path that would await a settings or database read while holding an application lock
+- **WHEN** the path is reviewed against the lock-discipline requirements
+- **THEN** the `command_timeout` bound is not accepted as a substitute for resolving the read before acquiring the lock
 
 #### Scenario: SQLite backends are not affected
 
@@ -382,4 +388,510 @@ Paths that do NOT match those rendered Windows forms MUST be preserved literally
 - **GIVEN** a `:memory:` SQLite URL
 - **WHEN** the path is extracted
 - **THEN** no filesystem path is returned and no file is created
+
+### Requirement: A completed SQLite teardown is never reclaimed
+
+When the initial bounded wait for file-backed SQLite rollback or close expires, the service MUST observe the existing teardown task for a bounded completion grace before reclamation. Only successful task completion observed within that opportunity MUST exempt the session from fencing, driver interruption, connection invalidation and deferred cleanup registration. Normal remaining teardown MUST still run. Failed, cancelled or still-pending tasks MUST retain the existing fencing and tracked reclamation/late-cleanup ownership, using connections captured before teardown; already-closed handles MUST not be interrupted or invalidated again.
+
+A successful-completion warning MUST name the phase, configured initial bound and elapsed time measured at that bound before grace. Diagnostics MUST describe observed task/cleanup outcomes; elapsed time alone MUST NOT be reported as measured event-loop lag, and failed invalidation alone MUST NOT be asserted to prove a permanent writer hold. An observed teardown failure and an exception raised by `connection.invalidate()` MUST be reported at warning level. A teardown-finalization diagnostic MUST report completion without asserting that it occurred after reclamation.
+
+#### Scenario: Real rollback worker completes while the event loop is delayed
+- **GIVEN** a file-backed SQLite write transaction whose native rollback finishes while the event loop is blocked across the initial bound
+- **WHEN** grace observes successful task completion after the loop resumes
+- **THEN** the session is not fenced and no connection is interrupted or invalidated
+- **AND** no deferred cleanup is registered, normal close runs, and another writer can commit
+- **AND** the warning reports the phase, initial bound and pre-grace elapsed time without claiming measured lag
+
+#### Scenario: Real close worker completes while the event loop is delayed
+- **GIVEN** a file-backed SQLite session whose native close finishes while completion callbacks cannot run across the initial bound
+- **WHEN** grace observes successful close completion
+- **THEN** no reclaim or deferred cleanup is performed and another writer can commit
+
+#### Scenario: Failure or cancellation is not successful completion
+- **WHEN** a teardown that outlived the initial bound fails, is cancelled, or remains pending after grace
+- **THEN** existing fencing, captured-connection reclamation attempts and owned late cleanup remain in effect
+- **AND** already-closed handles are skipped without suppressing an observed teardown failure
+
+#### Scenario: Reclamation diagnostics do not invent a permanent lock
+- **WHEN** `connection.invalidate()` raises an exception for a captured open connection
+- **THEN** the failure is reported at warning level
+- **AND** diagnostics do not assert that a permanent writer hold has been proven
+
+#### Scenario: A task already terminal during grace is finalized
+- **GIVEN** teardown failed after releasing its connection and before reclamation began
+- **WHEN** the completion callback finalizes the abandoned task
+- **THEN** its diagnostic reports completion without describing it as a late finish after reclamation
+- **AND** the existing deferred close and cleanup-task ownership remain in effect
+
+### Requirement: SQLite write-lock stalls are attributable
+
+When a SQLite write transaction holds the writer slot longer than the configured busy timeout, the system MUST report it at WARNING once the transaction has actually ended — the end-of-transaction call itself can be the stall, so the report MUST be deferred to the first proof the DBAPI transaction is over (the connection's next transaction, or its return to the pool) and MUST include that call in the measured hold, including the held duration, whether it committed or rolled back, the owning task where available, and the first and last write statements it executed. The window MUST be measured from the completion of the transaction's first successful write statement — including a bare `BEGIN IMMEDIATE`/`BEGIN EXCLUSIVE`, which acquires the writer slot with no DML — a statement still waiting in the busy timeout has not acquired the slot, so a victim of the stall is never reported as its holder — and read-only transactions, which never take the writer slot in WAL, are never reported. The watchdog MUST NOT raise into the query path and MUST NOT require configuration.
+
+#### Scenario: The starving writer is identified when it finally ends
+
+- **GIVEN** a write transaction that held the writer slot past the busy timeout while other writers surfaced `database is locked`
+- **WHEN** it commits or rolls back
+- **THEN** a warning reports its duration, outcome, task, and first/last write statements
+
+#### Scenario: A BEGIN IMMEDIATE holder with no DML is attributed
+
+- **GIVEN** a transaction that acquired the writer slot via `BEGIN IMMEDIATE` and ran only reads
+- **WHEN** it holds past the busy timeout
+- **THEN** it is reported like any other write holder
+
+#### Scenario: A failed commit is not reported as a durable commit
+
+- **GIVEN** a write transaction whose DBAPI commit raises and is rolled back
+- **WHEN** the report fires
+- **THEN** its outcome states the commit failed and rolled back
+
+#### Scenario: A stalled commit or rollback is inside the measured hold
+
+- **GIVEN** a write transaction whose commit or rollback call itself stalls past the busy timeout
+- **WHEN** the connection next begins a transaction or returns to the pool
+- **THEN** the report fires with the stall included in the held duration
+
+#### Scenario: A victim waiting out the busy timeout is not reported as the holder
+
+- **GIVEN** a write statement that spends the busy timeout waiting for the slot and fails with `database is locked`
+- **WHEN** its transaction rolls back
+- **THEN** no long-write report attributes the wait to that transaction
+
+#### Scenario: Healthy traffic is silent
+
+- **WHEN** read-only transactions and writes completing under the threshold run
+- **THEN** no long-write report is produced
+
+### Requirement: Wedged SQLite session teardown is bounded and reclaimed
+
+File-backed SQLite session teardown (rollback and close) MUST use an initial bounded wait derived from the busy timeout, shielded from caller cancellation, followed by a bounded completion grace for observing successful teardown. Successful completion observed within grace MUST avoid reclamation. A task still pending, cancelled or failed after that observation MUST retain session fencing, interruption/invalidation attempts for captured open connections, and owned late-cleanup bookkeeping. Already-closed handles MUST not be reclaimed again. Cleanup diagnostics MUST preserve available watchdog identifiers, including deferred held duration, owning task and first/last writes. Failed cleanup MUST be reported without claiming guaranteed writer-slot release or a proven permanent hold. Late completion MUST not produce unretrieved errors; deferred bookkeeping close MUST remain tracked and drained at database shutdown. PostgreSQL teardown semantics MUST remain unchanged. In-memory SQLite MUST retain unbounded teardown without reclamation.
+
+#### Scenario: A wedged rollback no longer starves every other writer
+
+- **GIVEN** a session holding an open SQLite write transaction whose rollback wedges during teardown
+- **WHEN** the initial deadline and completion grace pass without successful completion
+- **THEN** the service interrupts and invalidates the captured open connection through the existing reclaim owner
+- **AND** when that cleanup releases the native connection, another writer can acquire the writer slot
+
+#### Scenario: The reclaim is attributed with the watchdog's identifiers
+
+- **GIVEN** a wedged teardown whose transaction ran write statements tracked by the long-write watchdog
+- **WHEN** the connection is reclaimed
+- **THEN** the report names the held duration, owning task, and first/last write statements, even though invalidation prevents the watchdog's own deferred report from firing
+
+#### Scenario: A wedged session cannot be driven concurrently
+
+- **GIVEN** a session whose teardown was abandoned as wedged
+- **WHEN** teardown is attempted again
+- **THEN** it returns immediately, and the session is closed for bookkeeping only after the abandoned teardown finishes late
+
+#### Scenario: PostgreSQL teardown is untouched
+
+- **GIVEN** a session bound to a non-SQLite dialect
+- **WHEN** its rollback or close outlives the SQLite deadline
+- **THEN** the teardown still awaits completion unboundedly and no connection is reclaimed
+
+#### Scenario: The shared in-memory SQLite connection is never reclaimed
+
+- **GIVEN** a session bound to an in-memory SQLite database, whose one shared connection is the entire database
+- **WHEN** its teardown outlives the deadline
+- **THEN** the teardown still awaits completion unboundedly and the connection is never invalidated, preserving schema and data for later sessions
+
+#### Scenario: The bound never abandons healthy teardown
+
+- **WHEN** rollback and close complete within the deadline
+- **THEN** teardown behaves exactly as before, including re-raising the completed call's exception to the existing swallow points
+
+### Requirement: Default pool sizing preserves raw-slot reserve on default max_connections
+
+The default values of `database_pool_size` and `database_max_overflow` MUST
+keep one replica's aggregate application connection capacity —
+`(database_pool_size + database_max_overflow) * 2 pooled engines * 1
+supported worker` — at or below 80, so a single replica on PostgreSQL's
+default `max_connections=100` retains at least 20 raw server slots for
+PostgreSQL-reserved connections, the migration path's two-connection peak,
+administration, and transient non-application clients.
+
+#### Scenario: Default single replica fits default max_connections
+
+- **WHEN** one replica runs with the default `database_pool_size` and
+  `database_max_overflow`
+- **THEN** both pooled engines together cap at no more than 80 PostgreSQL
+  connections
+- **AND** at least 20 raw server slots remain on a default
+  `max_connections=100` server
+
+#### Scenario: Operators can still tune the pool
+
+- **WHEN** `CODEX_LB_DATABASE_POOL_SIZE` or `CODEX_LB_DATABASE_MAX_OVERFLOW`
+  is set in the environment
+- **THEN** the configured values override the defaults for both pooled
+  engines
+
+### Requirement: Proxy usage refresh does not retain sessions across upstream I/O
+
+The public proxy usage payload path MUST detach rows loaded for its initial
+refresh decision before closing the request-adjacent repository scope. An owned
+usage refresh MUST use caller-independent short-lived repositories for freshness
+reads, upstream fetches, and required writes; it MUST NOT retain an
+`AsyncSession` while waiting for upstream usage I/O. The payload path MUST
+reopen a repository scope only after the refresh completes.
+
+#### Scenario: cancelled usage request closes its initial scope
+
+- **GIVEN** `/api/codex/usage` starts an owned usage refresh
+- **WHEN** the client request is cancelled while the refresh is in flight
+- **THEN** the initial repository scope is closed before the owned refresh runs
+- **AND** the owned refresh remains caller-independent and may finish safely
+- **AND** the payload-read repository scope is not reopened by the cancelled request
+
+#### Scenario: usage refresh releases its session during upstream fetch
+
+- **GIVEN** an owned usage refresh needs to fetch usage from an upstream service
+- **WHEN** the upstream request is in flight
+- **THEN** no database session remains checked out for that refresh's read/write work
+- **AND** the refresh reacquires short-lived sessions only for required database operations
+
+### Requirement: Account ChatGPT identity lookups are index-supported
+
+Deployments MUST maintain an index (`idx_accounts_chatgpt_account_id`) on
+`accounts (chatgpt_account_id)` so that per-snapshot ChatGPT account identity
+lookups performed during live usage snapshot settlement do not scan the
+accounts heap. On PostgreSQL the migration MUST build the index concurrently
+and MUST complete without failing when a valid index of the same name already
+exists.
+
+#### Scenario: Identity lookup is index-supported after migration
+
+- **WHEN** database migrations are applied
+- **THEN** the `accounts` table includes an index on `chatgpt_account_id` named `idx_accounts_chatgpt_account_id`
+- **AND** live usage settlement's unique ChatGPT identity lookup is satisfiable by that index for its filter phase
+
+#### Scenario: Interrupted concurrent build is repaired, not accepted
+
+- **GIVEN** the database backend is PostgreSQL
+- **AND** a previous `CREATE INDEX CONCURRENTLY` for `idx_accounts_chatgpt_account_id` was interrupted, leaving an invalid index (`pg_index.indisvalid = false`) under the same name
+- **WHEN** the schema migration is applied
+- **THEN** the migration MUST drop the invalid index and rebuild it rather than accepting it via `IF NOT EXISTS`
+
+### Requirement: The SQLite startup integrity check is skipped after a recorded clean shutdown
+
+The startup integrity check reads every page of the SQLite file and the
+listener MUST NOT bind until it returns, so its cost grows with the store.
+Because SQLite is already consistent after a clean close, the system MUST
+record how each process left the store and MUST run the startup check only
+when the previous process did not record a clean shutdown.
+
+The run state MUST be persisted in a sidecar next to the database file. The
+system MUST record `running` during startup and MUST record `clean` only
+after the database engines are disposed during an orderly shutdown. The
+`clean` record MUST NOT be reachable from a crash, a signal-killed process,
+or a failed startup.
+
+Startup MUST read the prior run-state record before mutating it, then MUST
+persist `running` before deciding whether a prior `clean` record permits
+skipping the integrity check. If the `running` transition cannot be recorded,
+startup MUST run the configured check when enabled and MUST NOT trust the
+prior `clean` record. When the failed transition has durably removed the
+untrusted sidecar, startup MAY continue after the configured check; when
+removal or its directory-sync durability cannot be confirmed, the write MUST
+report a distinct durability failure and startup MUST run the configured check
+when enabled, then abort before migrations or serving. A failed startup MUST
+leave a durable `running` marker where the sidecar can be written.
+
+Before reading the run-state sidecar, startup MUST acquire an exclusive
+transaction on a persistent `<db>.runstate.lock` SQLite sentinel. Startup MUST
+fail closed when that lifetime lock cannot be acquired, rather than trusting a
+`clean` marker while another process may be using the database. The process
+MUST hold the lock through its database lifetime and MUST release it only after
+the `clean` transition has been attempted. SQLite's transaction semantics MUST
+release the lock when the process exits unexpectedly. A `clean` transition MUST
+be attempted only while the corresponding lifetime lock is held.
+
+Every state other than a recorded `clean` MUST run the check. A missing
+sidecar MUST read as unknown rather than clean, so a first run and an upgrade
+from a build that never wrote one both still scan. Sidecar content that cannot be read, cannot be
+decoded, or is not recognized MUST also read as unknown, and MUST NOT
+propagate an error that aborts startup. A sidecar write that fails MUST
+remove the temporary and target entries rather than leave a stale `clean`
+behind, and MUST directory-sync that removal. If either removal or its
+directory sync cannot be confirmed, the write MUST fail closed to its caller.
+
+The run state MUST be recorded even when the check mode is `off`, so
+re-enabling the check cannot trust a state the disabled build never
+maintained.
+
+A `clean` record MUST be fenced to the database file it describes. The
+recorded state MUST capture enough of the file's identity to detect that it
+was replaced, including its device and inode, not only its size and
+modification time: a restore that preserves timestamps (`tar -x`, `cp -p`,
+`rsync -a`) can reproduce both. A `clean` record MUST read as unknown once
+any captured attribute no longer matches. The fence applies only to `clean`;
+a `running` record stays readable while the process writes to the store. A
+clean identity, the newly persisted running identity, and the current database
+identity MUST all be non-null and equal before a clean skip. Startup MUST
+revalidate the running identity at the final decision seam, so replacement in
+any window forces the integrity check.
+
+Run-state transitions MUST be durable. The system MUST sync both the record's
+contents and the directory entry that names it, so a power loss cannot retain
+an earlier `clean` record while losing the `running` transition that replaced
+it. Every directory-sync failure MUST be treated as a failed write, including
+a directory that cannot be opened, so storage that cannot confirm durability
+leaves no trusted record. The one exception is a platform that offers no
+directory handle at all, where the sync MUST be skipped and reported as
+success, because rename durability there is the platform's guarantee and
+failing closed would prevent those deployments from ever recording a clean
+shutdown. That exception MUST be decided by platform rather than by the error
+the open reports, because Windows refuses a directory handle with the same
+`EACCES` an ordinary permission denial uses. The file fence cannot substitute for this: in WAL mode the main database
+file can keep its size and modification time across a long run, so a lost
+transition would leave a `clean` record that still matches.
+
+If the directory sync fails after a sidecar replacement, cleanup MUST remove
+the temporary and target entries and MUST sync the parent directory again so
+the removal itself is durable. A failure of that second sync MUST remain
+fail-closed.
+
+Each run-state write MUST create its temporary file with an exclusive,
+unpredictable name in the target directory before writing, syncing, and
+atomically replacing the sidecar. A predictable temporary pathname MUST NOT be
+opened for writing.
+
+Recording `clean` MUST NOT be reachable unless the database engines actually
+finished disposing, all reclaimed SQLite teardown work finished within the
+bounded shutdown drain, and every database-owning shutdown drain completed.
+The database-owning drains include HTTP bridge durable-session marking and
+closure, scheduler leader-release, final proxy persistence, and detached
+audit/fleet control-plane work. A cancelled or failed disposal, or a drain
+that abandons pending work at its deadline, MUST leave the run state unclean.
+
+The configured check mode (`quick`, `full`, `off`) keeps its meaning: this
+requirement governs only whether the selected mode runs on a given startup.
+
+#### Scenario: A clean shutdown skips the next scan
+
+- **GIVEN** a SQLite store whose sidecar records a clean shutdown
+- **WHEN** the application starts with the check mode enabled
+- **THEN** no integrity check runs
+- **AND** the sidecar is updated to record that a process is running
+
+#### Scenario: An unrecordable running transition cannot skip the check
+
+- **GIVEN** a SQLite sidecar records `clean`
+- **AND** writing the current `running` transition fails
+- **WHEN** startup reaches the integrity-check decision
+- **THEN** the configured check runs
+- **AND** startup does not trust the prior `clean` record
+
+#### Scenario: An unconfirmed running invalidation aborts startup
+
+- **GIVEN** a SQLite sidecar records `clean`
+- **AND** replacing the sidecar fails and removal or its directory sync cannot
+  be confirmed
+- **WHEN** startup reaches the integrity-check decision
+- **THEN** the configured check runs when enabled
+- **AND** startup aborts before migrations or serving
+- **AND** the prior `clean` record is never trusted
+
+#### Scenario: A replacement around startup fencing still scans
+
+- **GIVEN** a SQLite sidecar records `clean` for database identity A
+- **WHEN** the database is replaced with identity B before or after the
+  `running` transition, or before the final skip decision
+- **THEN** the configured integrity check runs against identity B
+
+#### Scenario: A second process cannot trust or replace a live process's clean marker
+
+- **GIVEN** one process holds the `<db>.runstate.lock` lifetime lock
+- **WHEN** another process starts against the same SQLite file
+- **THEN** startup fails closed before it reads the clean marker
+- **AND** the second process does not run migrations or serve traffic
+
+#### Scenario: Process death releases the lifetime lock
+
+- **GIVEN** one process holds the `<db>.runstate.lock` lifetime lock
+- **WHEN** that process exits unexpectedly
+- **THEN** SQLite releases the transaction while the persistent sentinel file
+  remains
+- **AND** a subsequent process can acquire the lock before reading the sidecar
+
+#### Scenario: Clean shutdown releases ownership after the marker transition
+
+- **GIVEN** a process holds the `<db>.runstate.lock` lifetime lock
+- **WHEN** database disposal completes and shutdown records `clean`
+- **THEN** the sidecar records `clean` only while that lock is held
+- **AND** the lock is released after the write attempt
+
+#### Scenario: An unfinished previous process still scans
+
+- **GIVEN** a SQLite store whose sidecar records that a process was running
+- **WHEN** the application starts with the check mode enabled
+- **THEN** the configured integrity check runs
+
+#### Scenario: A missing sidecar still scans
+
+- **GIVEN** an existing SQLite store with no sidecar, as after an upgrade from
+  a build that never wrote one
+- **WHEN** the application starts with the check mode enabled
+- **THEN** the configured integrity check runs
+
+#### Scenario: A disabled check still records the run state
+
+- **GIVEN** a check mode of `off`
+- **WHEN** the application starts
+- **THEN** no integrity check runs
+- **AND** the sidecar records that a process is running, so a later startup
+  with the check enabled does not trust the earlier clean record
+
+#### Scenario: A restored database still scans
+
+- **GIVEN** a SQLite store whose sidecar records a clean shutdown
+- **WHEN** the database file is replaced from a backup, leaving the sidecar
+  in place, and the restore reproduces the recorded size and modification
+  time
+- **THEN** the clean record reads as unknown
+- **AND** the configured integrity check runs against the restored file
+
+#### Scenario: Unverifiable durability leaves no trusted record
+
+- **GIVEN** storage whose directory sync fails
+- **WHEN** the system records a run-state transition
+- **THEN** the write reports failure and no sidecar remains
+- **AND** the next startup runs the integrity check
+
+#### Scenario: A directory that cannot be opened fails the write closed
+
+- **GIVEN** a platform that supports directory handles
+- **AND** a run-state directory the process cannot open
+- **WHEN** the system records a run-state transition
+- **THEN** the write reports failure and no sidecar remains
+
+#### Scenario: Corrupt sidecar content does not abort startup
+
+- **GIVEN** a sidecar whose bytes are not valid UTF-8
+- **WHEN** the application starts
+- **THEN** the run state reads as unknown
+- **AND** the configured integrity check runs instead of startup failing
+
+#### Scenario: A failed disposal is not recorded as clean
+
+- **GIVEN** a shutdown in which disposing the database engines raises or is
+  cancelled
+- **WHEN** the lifespan teardown completes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: An abandoned SQLite teardown is not recorded as clean
+
+- **GIVEN** reclaimed SQLite teardown work remains pending when the bounded
+  shutdown drain reaches its deadline
+- **WHEN** database disposal finishes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: An abandoned database-owning drain is not recorded as clean
+
+- **GIVEN** the final proxy persistence drain, detached audit/fleet
+  control-plane drain, or scheduler leader-release drain leaves database-using
+  work pending at its deadline
+- **WHEN** database disposal finishes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: An incomplete HTTP bridge shutdown is not recorded as clean
+
+- **GIVEN** HTTP bridge durable-session marking or closure fails, or its
+  background cleanup drain fails, is cancelled, or times out, during shutdown
+- **WHEN** database disposal finishes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: A failed check leaves the state unclean
+
+- **GIVEN** a SQLite store that fails its startup integrity check
+- **WHEN** startup aborts with the corruption error
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the check again
+
+### Requirement: The SQLite startup integrity check is observable
+
+When the startup integrity check runs, the system MUST log that it is
+starting, including the database path, the check mode, and the file size, and
+MUST log the elapsed duration when the check passes. A multi-minute scan MUST
+NOT present as an unexplained stall with the listener unbound.
+
+#### Scenario: A long scan is attributable
+
+- **GIVEN** a SQLite store large enough for the check to take minutes
+- **WHEN** the application starts with the check mode enabled
+- **THEN** a log record precedes the scan naming the path, mode, and size
+- **AND** a log record on success reports how long the scan took
+
+#### Scenario: A skipped scan says so
+
+- **GIVEN** a SQLite store whose sidecar records a clean shutdown
+- **WHEN** the application starts with the check mode enabled
+- **THEN** a log record states that the check was skipped after a clean shutdown
+
+### Requirement: Dashboard usage aggregation reads are index-only on PostgreSQL
+
+PostgreSQL deployments MUST maintain a covering partial index (`idx_logs_dash_usage_covering`) on `request_logs (requested_at)` that includes every column referenced by the quota-planner slot aggregation (`account_id`, `api_key_id`, `model`, `reasoning_effort`, `request_kind`, `status`, `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_tokens`, `cost_usd`, `id`) and is filtered to `deleted_at IS NULL`, so the aggregation can be satisfied without heap access. SQLite deployments MUST maintain the same index as a partial index on `requested_at`.
+
+#### Scenario: Slot aggregation avoids heap churn
+
+- **GIVEN** the database backend is PostgreSQL
+- **AND** `request_logs` contains live (non-deleted) rows in the requested timeframe
+- **WHEN** the dashboard requests the usage slot aggregation for any timeframe
+- **THEN** PostgreSQL MUST be able to satisfy the time-range filter and every aggregated column from `idx_logs_dash_usage_covering` alone
+- **AND** the aggregation result MUST remain semantically identical to the previous heap-backed plan
+
+#### Scenario: Migration is safe after a live hotfix
+
+- **GIVEN** `idx_logs_dash_usage_covering` or `ix_additional_usage_distinct_labels` was already created manually as a live hotfix
+- **WHEN** the schema migration is applied
+- **THEN** the migration MUST complete without failing on duplicate index creation
+
+#### Scenario: Interrupted concurrent build is repaired, not accepted
+
+- **GIVEN** the database backend is PostgreSQL
+- **AND** a previous `CREATE INDEX CONCURRENTLY` for `idx_logs_dash_usage_covering` or `ix_additional_usage_distinct_labels` was interrupted, leaving an invalid index (`pg_index.indisvalid = false`) under the same name
+- **WHEN** the schema migration is applied
+- **THEN** the migration MUST drop the invalid index and rebuild it rather than accepting it via `IF NOT EXISTS`
+
+### Requirement: Distinct quota-label lookups are index-only
+
+Deployments MUST maintain a composite index (`ix_additional_usage_distinct_labels`) on `additional_usage_history (account_id, quota_key, limit_name, metered_feature)` so the recurring distinct quota-label lookup does not scan the table heap.
+
+#### Scenario: Quota-label poll uses the composite index
+
+- **GIVEN** `additional_usage_history` contains usage rows for one or more accounts
+- **WHEN** the dashboard polls for the distinct `(quota_key, limit_name, metered_feature)` labels of a set of accounts
+- **THEN** the lookup MUST be satisfiable from `ix_additional_usage_distinct_labels` without reading table rows
+
+### Requirement: Insert-heavy dashboard tables keep autovacuum effective on PostgreSQL
+
+PostgreSQL deployments MUST set per-table autovacuum storage parameters on `request_logs` and `additional_usage_history` (`autovacuum_vacuum_insert_scale_factor = 0.02`, `autovacuum_vacuum_insert_threshold = 50000`, `autovacuum_analyze_scale_factor = 0.02`) so that visibility-map freshness and planner statistics recover promptly even after crash recovery resets the cumulative statistics counters.
+
+#### Scenario: Autovacuum triggers after bounded insert volume
+
+- **GIVEN** the database backend is PostgreSQL
+- **AND** the cumulative statistics counters were recently reset (for example by crash recovery)
+- **WHEN** inserts accumulate on `request_logs` or `additional_usage_history`
+- **THEN** autovacuum MUST become eligible for the table after the configured insert threshold instead of the global default scale factor
+
+### Requirement: Redundant request-log indexes are not maintained
+
+The schema MUST NOT maintain indexes on `request_logs` or `additional_usage_history` whose read paths are fully served by another maintained index on the same table. Specifically, `idx_logs_requested_at`, `idx_logs_api_key_time_account`, and `ix_additional_usage_history_account_id` are dropped; their read paths are served by `idx_logs_requested_at_id`, `idx_logs_api_key_time`, and `ix_additional_usage_distinct_labels` respectively. `idx_logs_request_status_api_key_time` MUST be kept: the sessionless response-owner fallback lookup orders by `requested_at DESC, id DESC` after an equality prefix, and the session-scoped index (`idx_logs_request_status_api_key_session_time`) cannot return that order because `session_id` precedes the ordering columns. On PostgreSQL the redundant indexes MUST be dropped with `DROP INDEX CONCURRENTLY` so writers are not queued behind an `ACCESS EXCLUSIVE` lock during startup migration.
+
+#### Scenario: Reads previously served by a dropped index use its wider twin
+
+- **WHEN** a query filters or orders by the leading columns of a dropped redundant index
+- **THEN** the query MUST be satisfiable by the wider index that shares the same leading key columns
+- **AND** query results MUST remain semantically identical
+
+#### Scenario: Sessionless response-owner fallback keeps ordered retrieval
+
+- **WHEN** the response-owner lookup falls back to a sessionless search by `request_id` and `status`
+- **THEN** the newest matching row by `requested_at DESC, id DESC` MUST be retrievable from `idx_logs_request_status_api_key_time` in index order
 

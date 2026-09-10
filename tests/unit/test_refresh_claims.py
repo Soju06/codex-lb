@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Dialect
 
-from app.core.config.settings import Settings
+from app.core.auth.refresh import TOKEN_REFRESH_TIMEOUT_SECONDS
+from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.refresh_claims import (
     build_refresh_claim_upsert,
     default_refresh_claimant_id,
 )
+from app.modules.proxy.work_admission import ADMISSION_WAIT_TIMEOUT_SECONDS
 
 pytestmark = pytest.mark.unit
 
@@ -263,38 +264,14 @@ def test_process_default_coordinator_yields_distinct_claimants_across_fork() -> 
         reset_refresh_claim_coordinator()
 
 
-def test_claim_ttl_must_cover_admission_wait_plus_twice_the_refresh_timeout() -> None:
+def test_claim_ttl_covers_admission_wait_plus_twice_the_refresh_timeout(monkeypatch) -> None:
     # The claim is held across the refresh-admission wait AND the OAuth
-    # exchange, so a TTL sized only around the HTTP timeout is rejected.
-    with pytest.raises(ValidationError, match="token_refresh_claim_ttl_seconds"):
-        Settings(
-            token_refresh_timeout_seconds=8.0,
-            proxy_admission_wait_timeout_seconds=10.0,
-            token_refresh_claim_ttl_seconds=16.0,
-        )
-    settings = Settings(
-        token_refresh_timeout_seconds=8.0,
-        proxy_admission_wait_timeout_seconds=10.0,
-        token_refresh_claim_ttl_seconds=26.0,
-    )
-    assert settings.token_refresh_claim_ttl_seconds == 26.0
+    # exchange, so the fixed TTL must never drop below that floor.
+    ttl = auth_manager_module._token_refresh_claim_ttl_seconds()
+    assert ttl == 30.0
+    assert ttl >= ADMISSION_WAIT_TIMEOUT_SECONDS + 2.0 * TOKEN_REFRESH_TIMEOUT_SECONDS
 
-
-def test_claim_ttl_default_derives_from_raised_timeouts_without_explicit_ttl() -> None:
-    # A deployment that predates the claim-TTL setting may have raised the
-    # refresh/admission timeouts without knowing to set the new field. That
-    # config must still boot: the TTL default is derived from the related
-    # timeouts (never below the invariant floor) instead of crashing against
-    # the fixed 30s default.
-    settings = Settings(
-        token_refresh_timeout_seconds=11.0,
-        proxy_admission_wait_timeout_seconds=14.0,
-    )
-    minimum_ttl = settings.proxy_admission_wait_timeout_seconds + 2.0 * settings.token_refresh_timeout_seconds
-    assert settings.token_refresh_claim_ttl_seconds >= minimum_ttl
-    assert settings.token_refresh_claim_ttl_seconds == minimum_ttl
-
-    # A default deployment keeps the fixed 30s default (which already covers
-    # the default timeout floor of 26s).
-    default_settings = Settings()
-    assert default_settings.token_refresh_claim_ttl_seconds == 30.0
+    # A raised admission wait lifts the TTL with it instead of leaving a
+    # healthy claimant exposed to a peer re-exchange mid-work.
+    monkeypatch.setattr(auth_manager_module, "ADMISSION_WAIT_TIMEOUT_SECONDS", 40.0)
+    assert auth_manager_module._token_refresh_claim_ttl_seconds() == 40.0 + 2.0 * TOKEN_REFRESH_TIMEOUT_SECONDS

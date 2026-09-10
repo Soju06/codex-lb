@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from cryptography.fernet import InvalidToken
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
@@ -7,12 +9,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.crypto import TokenEncryptor
-from app.core.upstream_proxy.types import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+from app.core.upstream_proxy.types import ResolvedProxyEndpoint, ResolvedUpstreamRoute, sends_plaintext_credentials
 from app.db.models import AccountProxyBinding, DashboardSettings, ProxyEndpoint, ProxyPool, ProxyPoolMember
 
 _ACCOUNT_BOUND_MODE = "account_bound"
 _DEFAULT_POOL_MODE = "default_pool"
 _SUPPORTED_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+
+logger = logging.getLogger(__name__)
+
+# Endpoint ids already warned about in this process; the resolver runs on every
+# routed request, so the plaintext-credential warning is emitted once per
+# endpoint rather than per request.
+_PLAINTEXT_CREDENTIAL_WARNINGS_EMITTED: set[str] = set()
 
 
 class UpstreamProxyRouteError(RuntimeError):
@@ -133,14 +142,28 @@ async def _resolve_pool(
     return ResolvedUpstreamRoute(mode=mode, pool_id=pool_id, endpoint=endpoints[0], fallbacks=tuple(endpoints[1:]))
 
 
+def _warn_plaintext_credentials_once(endpoint: ProxyEndpoint, scheme: str) -> None:
+    if endpoint.id in _PLAINTEXT_CREDENTIAL_WARNINGS_EMITTED:
+        return
+    _PLAINTEXT_CREDENTIAL_WARNINGS_EMITTED.add(endpoint.id)
+    logger.warning(
+        "Upstream proxy endpoint %s (%s://%s:%s) sends its credentials to the proxy in plaintext; "
+        "prefer an https:// proxy or an IP allowlist without credentials",
+        endpoint.id,
+        scheme,
+        endpoint.host,
+        endpoint.port,
+    )
+
+
 def _resolve_endpoint(endpoint: ProxyEndpoint, *, encryptor: TokenEncryptor | None) -> ResolvedProxyEndpoint:
     scheme = endpoint.scheme.lower().strip()
     if scheme not in _SUPPORTED_SCHEMES:
         raise UpstreamProxyRouteError("unsupported_proxy_scheme")
-    if scheme in {"http", "socks5", "socks5h"} and (
-        endpoint.username is not None or endpoint.password_encrypted is not None
+    if sends_plaintext_credentials(
+        scheme, has_credentials=endpoint.username is not None or endpoint.password_encrypted is not None
     ):
-        raise UpstreamProxyRouteError("plaintext_proxy_credentials_forbidden")
+        _warn_plaintext_credentials_once(endpoint, scheme)
     if endpoint.username is not None and ":" in endpoint.username:
         # RFC 7617 Basic credentials cannot encode a colon in the user-id.
         raise UpstreamProxyRouteError("invalid_proxy_username")

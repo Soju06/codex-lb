@@ -1,26 +1,26 @@
 # account-auth-export Specification
 
 ## Purpose
-TBD - created by manual sync from archived OpenSpec changes. Update Purpose after archive.
+Governs the OpenCode-format account credential export. Operators who onboard accounts through codex-lb should not have to repeat the OpenAI OAuth flow inside OpenCode, so a selected account can be exported as an OpenCode-compatible `auth.json` holding only that account's OAuth entry. The payload is delivered through the unified export endpoint, must exclude codex-lb-only metadata, and must never leak token material into audit records.
 ## Requirements
 ### Requirement: Per-account OpenCode auth export
-The system SHALL let an authenticated dashboard user export one selected account as an OpenCode-compatible `auth.json` payload.
+The system SHALL let an authenticated dashboard user export one selected account as an OpenCode-compatible `auth.json` payload. The payload SHALL be delivered as the `opencodeAuthJson` member of the unified `POST /api/accounts/{id}/export/auth` response; the system SHALL NOT expose a dedicated OpenCode export route.
 
 The exported payload SHALL be provider-keyed with exactly one `openai` OAuth entry containing `type`, `refresh`, `access`, `expires`, and `accountId` fields.
 
 The exported payload SHALL NOT include codex-lb-only account metadata, dashboard settings, API keys, request logs, usage history, or multi-account custom fields.
 
 #### Scenario: Export selected account for stock OpenCode
-- **WHEN** an authenticated dashboard user exports account `acc_123`
-- **THEN** the response includes an `authJson` object with an `openai` OAuth entry
-- **AND** `authJson.openai.access` is the decrypted access token for `acc_123`
-- **AND** `authJson.openai.refresh` is the decrypted refresh token for `acc_123`
-- **AND** `authJson.openai.accountId` is the account's ChatGPT account id when available
-- **AND** `authJson.openai.expires` is a non-negative integer in epoch milliseconds
+- **WHEN** an authenticated dashboard user exports account `acc_123` through `POST /api/accounts/acc_123/export/auth`
+- **THEN** the response includes an `opencodeAuthJson` object with an `openai` OAuth entry
+- **AND** `opencodeAuthJson.openai.access` is the decrypted access token for `acc_123`
+- **AND** `opencodeAuthJson.openai.refresh` is the decrypted refresh token for `acc_123`
+- **AND** `opencodeAuthJson.openai.accountId` is the account's ChatGPT account id when available
+- **AND** `opencodeAuthJson.openai.expires` is a non-negative integer in epoch milliseconds
 
 #### Scenario: Export account with unknown ChatGPT account id
 - **WHEN** an authenticated dashboard user exports an account whose real ChatGPT account id is unknown
-- **THEN** `authJson.openai.accountId` is `null`
+- **THEN** `opencodeAuthJson.openai.accountId` is `null`
 - **AND** the system does not substitute the local codex-lb account id
 
 #### Scenario: Export missing account
@@ -31,3 +31,4 @@ The exported payload SHALL NOT include codex-lb-only account metadata, dashboard
 - **WHEN** an account export succeeds
 - **THEN** the system records an audit event identifying the exported account
 - **AND** the audit event does not include access or refresh token values
+

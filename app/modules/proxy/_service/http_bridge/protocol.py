@@ -73,7 +73,12 @@ class _HTTPBridgeServiceProtocol(Protocol):
         inflight_future: asyncio.Future[_HTTPBridgeSession] | None,
         exc: BaseException,
     ) -> bool: ...
-    async def _retire_http_bridge_after_drain_if_ready(self, session: _HTTPBridgeSession) -> bool: ...
+    async def _retire_http_bridge_after_drain_if_ready(
+        self,
+        session: _HTTPBridgeSession,
+        *,
+        lock_wait_timeout_seconds: float | None = None,
+    ) -> bool: ...
     async def _release_http_bridge_admission_preregistration(
         self,
         session: _HTTPBridgeSession,

@@ -15,7 +15,7 @@ contact_links:
       Advisories — do NOT open a public issue. See SECURITY.md.
 
   - name: 📚 Documentation & FAQ
-    url: https://github.com/Soju06/codex-lb#readme
+    url: https://soju06.github.io/codex-lb/
     about: |
-      Common setup, deployment, account quota and dashboard topics are
-      documented in the README — check there first.
+      Setup, client configuration, deployment, account quota and dashboard
+      topics are covered on the docs site — check there first.

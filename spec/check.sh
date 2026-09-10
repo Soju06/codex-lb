@@ -32,6 +32,8 @@ declare -A EXPECTED_VIOLATION=(
   ["weak-stale-route-acquire.cfg"]="Inv4FreshSnapshots"
   ["weak-non-atomic-claim.cfg"]="Inv5SingleOwnerCAS"
   ["weak-misroute-producer.cfg"]="Inv6TerminalIsolation"
+  ["weak-misroute-cancelled-producer.cfg"]="Inv6TerminalIsolation"
+  ["weak-misroute-failed-producer.cfg"]="Inv6TerminalIsolation"
   ["weak-lost-waiter.cfg"]="Inv7GateAccounting"
   ["weak-shutdown-admit.cfg"]="Inv8ShutdownDrain"
   ["weak-leak-owner-on-terminal.cfg"]="Inv9TerminalOwnerReleased"
@@ -80,6 +82,7 @@ run_tlc() {
   local cfg="$1"
   local out="$2"
   local budget="${3:-0}"
+  local module="${4:-$SPEC_DIR/CoreOwnership.tla}"
   local status=0
   local -a launcher=()
   if [[ "$budget" != "0" ]]; then
@@ -97,7 +100,7 @@ run_tlc() {
     -workers auto \
     -metadir "$ACTIVE_TLC_METADIR" \
     -config "$cfg" \
-    "$SPEC_DIR/CoreOwnership.tla" >"$out" 2>&1 || status=$?
+    "$module" >"$out" 2>&1 || status=$?
   cleanup_tlc_metadir
   return "$status"
 }
@@ -251,8 +254,24 @@ expect_weakening_fails() {
   echo "COUNTEREXAMPLE ${label}: ${violation}; distinct states=${distinct}."
 }
 
+expect_stream_idle_regression() {
+  local out="$SPEC_DIR/.tlc-stream-idle-regression.out"
+  if ! run_tlc "$SPEC_DIR/stream-idle-regression.cfg" "$out" 60 "$SPEC_DIR/StreamIdleRegression.tla"; then
+    cat "$out"
+    echo "Stream-idle regression failed." >&2
+    exit 1
+  fi
+  if ! grep -q 'Model checking completed. No error has been found.' "$out"; then
+    cat "$out"
+    echo "Stream-idle regression did not complete." >&2
+    exit 1
+  fi
+  echo "PASS stream-idle regression: healthy progress survives; silence expires."
+}
+
 main() {
   download_tlc
+  expect_stream_idle_regression
   expect_full_pass
 
   local failures=0 cfg

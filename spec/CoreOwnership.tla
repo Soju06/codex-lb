@@ -38,6 +38,8 @@ MaxKeepaliveCount == 2
 KeepaliveCadenceFloor == KeepaliveInterval * MaxKeepaliveCount
 GateRetireBudget == 2
 StreamIdleBudget == 3
+ConnectBudget == 1
+FirstByteBudget == 2
 ClientSafePreResponseCap == KeepaliveCadenceFloor
 PreResponseBudget == Min2(Min2(GateRetireBudget, ClientSafePreResponseCap), StreamIdleBudget)
 
@@ -68,6 +70,8 @@ WeakStaleCache == Weakening = "stale_cache"
 WeakStaleRouteAcquire == Weakening = "stale_route_acquire"
 WeakLostWaiter == Weakening = "lost_waiter"
 WeakMisrouteProducer == Weakening = "misroute_producer"
+WeakMisrouteCancelledProducer == Weakening = "misroute_cancelled_producer"
+WeakMisrouteFailedProducer == Weakening = "misroute_failed_producer"
 WeakShutdownAdmit == Weakening = "shutdown_admit"
 WeakDoubleSettle == Weakening = "double_settle"
 WeakLeakOwnerOnTerminal == Weakening = "leak_owner_on_terminal"
@@ -265,7 +269,7 @@ ExpireBoundFor(t) ==
          CASE attemptPhase[t] = "connect" -> connectDeadline[t]
            [] attemptPhase[t] = "awaiting_first_byte" -> firstByteDeadline[t]
            [] OTHER -> preResponseDeadline[t]
-    [] OTHER -> requestDeadline[t]
+    [] OTHER -> IF WeakSingleTimeout THEN SingleSharedTimeoutBudget ELSE StreamIdleBudget
 
 LivePhase(t) ==
   turnState[t] \in {"queued", "active", "streaming"}
@@ -355,12 +359,12 @@ AcquireTurn(t, r, a, inj) ==
   /\ acquisitionCount' = [acquisitionCount EXCEPT ![t] = @ + 1]
   /\ reservation' = [reservation EXCEPT ![t] = "held"]
   /\ gate' = [gate EXCEPT ![t] = "holding"]
-  /\ gateDeadline' = [gateDeadline EXCEPT ![t] = GateRetireBudget]
-  /\ requestDeadline' = [requestDeadline EXCEPT ![t] = StreamIdleBudget]
-  /\ connectDeadline' = [connectDeadline EXCEPT ![t] = IF WeakSingleTimeout THEN 3 ELSE 1]
-  /\ firstByteDeadline' = [firstByteDeadline EXCEPT ![t] = 2]
-  /\ preResponseDeadline' = [preResponseDeadline EXCEPT ![t] = PreResponseBudget]
-  /\ gateRetireDeadline' = [gateRetireDeadline EXCEPT ![t] = GateRetireBudget]
+  /\ gateDeadline' = [gateDeadline EXCEPT ![t] = IF WeakSingleTimeout THEN SingleSharedTimeoutBudget ELSE GateRetireBudget]
+  /\ requestDeadline' = [requestDeadline EXCEPT ![t] = IF WeakSingleTimeout THEN SingleSharedTimeoutBudget ELSE StreamIdleBudget]
+  /\ connectDeadline' = [connectDeadline EXCEPT ![t] = IF WeakSingleTimeout THEN SingleSharedTimeoutBudget ELSE ConnectBudget]
+  /\ firstByteDeadline' = [firstByteDeadline EXCEPT ![t] = IF WeakSingleTimeout THEN SingleSharedTimeoutBudget ELSE FirstByteBudget]
+  /\ preResponseDeadline' = [preResponseDeadline EXCEPT ![t] = IF WeakSingleTimeout THEN SingleSharedTimeoutBudget ELSE PreResponseBudget]
+  /\ gateRetireDeadline' = [gateRetireDeadline EXCEPT ![t] = IF WeakSingleTimeout THEN SingleSharedTimeoutBudget ELSE GateRetireBudget]
   /\ attemptPhase' = [attemptPhase EXCEPT ![t] = "connect"]
   /\ phaseElapsed' = [phaseElapsed EXCEPT ![t] = 0]
   /\ clientRetry' = IF clientRetry = "torn" THEN "torn" ELSE "attached"
@@ -442,18 +446,12 @@ StreamProgress(t) ==
   /\ turnState[t] = "streaming"
   /\ attemptPhase[t] = "streaming"
   /\ phaseElapsed[t] > 0
-  \* Upstream activity resets only the idle clock.  Elapsed streaming time
-  \* still consumes the carried total request budget, so periodic events
-  \* cannot keep the request alive past that budget.
-  /\ LET remainingRequest == SubtractFloor(requestDeadline[t], phaseElapsed[t])
-     IN /\ requestDeadline' = [requestDeadline EXCEPT ![t] = remainingRequest]
-        /\ gateDeadline' = [gateDeadline EXCEPT ![t] = Min2(gateDeadline[t], remainingRequest)]
-        /\ connectDeadline' = [connectDeadline EXCEPT ![t] = Min2(connectDeadline[t], remainingRequest)]
-        /\ firstByteDeadline' = [firstByteDeadline EXCEPT ![t] = Min2(firstByteDeadline[t], remainingRequest)]
-        /\ preResponseDeadline' = [preResponseDeadline EXCEPT ![t] = Min2(preResponseDeadline[t], remainingRequest)]
-        /\ phaseElapsed' = [phaseElapsed EXCEPT ![t] = 0]
+  \* A started stream is bounded by silence, not total elapsed request time.
+  \* Earlier request-budget accounting remains relevant only before start.
+  /\ phaseElapsed' = [phaseElapsed EXCEPT ![t] = 0]
   /\ UNCHANGED << clock, owner, ownerEpoch, turnState, turnReplica, turnAccount, turnEpoch,
-    acquisitionCount, settlementCount, reservation, gate, gateRetireDeadline,
+    acquisitionCount, settlementCount, reservation, gate, gateDeadline, requestDeadline, connectDeadline,
+    firstByteDeadline, preResponseDeadline, gateRetireDeadline,
     mislabeledKill, anchor, anchorUsed, badAnchorUse, crossAccountDispatch, durableVersion,
     snapshotVersion, routedWithStaleSnapshot, snapshotRoute, producerTarget,
     terminalReason, shutdownPhase, registered, ownerReleased, attemptPhase, poppedFromPending,
@@ -777,10 +775,16 @@ DeliverProducer(t, u) ==
   /\ t \in Turns
   /\ u \in Turns
   /\ turnState[t] \in TerminalStates
-  /\ terminalReason[t] = "completed"
+  \* An acquired producer can outlive success, cancellation, or failure.
+  \* Self-targeting after cancellation/failure denotes dropping the late event
+  \* with its original turn; it must never be reassigned to another queue.
+  /\ acquisitionCount[t] = 1
   /\ producerDelivered[t] = FALSE
-  /\ IF WeakMisrouteProducer
-     THEN /\ t # u
+  /\ IF WeakMisrouteProducer \/ WeakMisrouteCancelledProducer \/ WeakMisrouteFailedProducer
+     THEN /\ IF WeakMisrouteCancelledProducer THEN terminalReason[t] = "cancelled"
+               ELSE IF WeakMisrouteFailedProducer THEN turnState[t] = "failed"
+               ELSE terminalReason[t] = "completed"
+          /\ t # u
           /\ turnState[u] \in {"queued", "active", "streaming"}
      ELSE u = t
   /\ producerTarget' = [producerTarget EXCEPT ![t] = u]
@@ -927,6 +931,13 @@ Inv2DeadlineOrdering ==
       /\ connectDeadline[t] <= firstByteDeadline[t]
       /\ firstByteDeadline[t] <= requestDeadline[t]
       /\ gateDeadline[t] <= requestDeadline[t]
+      \* Equality alone cannot detect one oversized shared timer. Check each
+      \* live waiting phase against the independent resource budget it guards.
+      /\ (turnState[t] = "queued" => ExpireBoundFor(t) <= GateRetireBudget)
+      /\ (turnState[t] = "active" /\ attemptPhase[t] = "connect" =>
+           ExpireBoundFor(t) <= ConnectBudget)
+      /\ (turnState[t] = "active" /\ attemptPhase[t] = "awaiting_first_byte" =>
+           ExpireBoundFor(t) <= FirstByteBudget)
 
 Settled(s) == s \in {"released", "finalized", "transferred"}
 

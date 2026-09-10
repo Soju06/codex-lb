@@ -27,8 +27,8 @@ kills them under three different budgets:
   This is the **pre-response eventless phase** (`preResponseDeadline`), and its
   phase resets still consume the same request budget.
 - `streaming` - response started, incremental events flowing
-  (`phaseElapsed` is the resettable idle clock; `requestDeadline` carries the
-  remaining total request budget across every reset).
+  (`phaseElapsed` is the resettable idle clock, bounded by `StreamIdleBudget`;
+  healthy progress is not killed by the pre-start total request budget).
 
 ## Files
 
@@ -39,6 +39,9 @@ kills them under three different budgets:
   pre-response eventless timer, and bounded client retry backoff.
 - `CoreOwnership.cfg` - full model configuration. `check.sh` runs TLC without
   the `-deadlock` opt-out, so TLC deadlock checking stays enabled.
+- `StreamIdleRegression.tla` / `stream-idle-regression.cfg` - exhaustive scripted
+  regression: four one-tick progress events survive past the three-tick total
+  budget, then three silent ticks terminate the stream.
 - `weak-*.cfg` - negative controls that set one weakening flag at a time.
 - `check.sh` - verifies the pinned `tla2tools.jar` sha256, downloads through a
   temporary file before replacing the cache, runs the full model under a
@@ -53,11 +56,11 @@ kills them under three different budgets:
 | Invariant | Requirement | Demonstrating action / weakening |
 | --- | --- | --- |
 | `Inv1AnchorCurrent` | Anchor dispatch/use requires current owner epoch, compatible lineage, and safe provenance. | `AcquireTurn` rejects mismatched lineage before dispatch; `UseAnchor` records unsafe reuse and fires at most once per anchor value. `weak-ignore-owner-epoch.cfg` demonstrates stale anchor reuse, while `weak-ignore-anchor-lineage.cfg` admits an otherwise current same-account anchor with incompatible lineage and records the rejected dispatch. |
-| `Inv2DeadlineOrdering` | Connect, first-byte, gate, and request deadlines remain ordered under the original request deadline, with later active-phase deadlines clamped to the remaining request budget before each phase reset. | `QueueTurn` assigns phase deadlines; active-phase transitions and `StreamProgress` subtract elapsed time before resetting the idle clock, so activity cannot extend the total budget. `weak-single-shared-timeout.cfg` demonstrates a shared timeout can violate ordering. |
+| `Inv2DeadlineOrdering` | Pre-start deadlines stay ordered and every gate/connect/first-byte wait respects its independent resource budget. | Active-phase transitions carry the remaining request budget; started streams use a separate resettable idle budget. The shared-timeout control keeps all deadlines equal but violates a phase bound, rather than artificially reversing deadline order. |
 | `Inv3ReservationSettledExactlyOnce` | Every acquired terminal turn has exactly one settlement event and a settled reservation state. | `CompleteTurn`, `CancelTurn`, `ExpireDeadline`, and `FinalizeCompletedDelivery` increment `settlementCount`; `weak-skip-release-on-cancel.cfg`, `weak-double-settle.cfg`, and `weak-popped-not-finalized.cfg` demonstrate zero, double, and lost-finalizer failures. |
 | `Inv4FreshSnapshots` | Routing cannot use a local snapshot behind durable freshness evidence. | Normal `RouteFromSnapshot` records the routed replica, account, and durable version; `AcquireTurn` rechecks that version before dispatch. `weak-stale-cache.cfg` removes the route-time guard, while `weak-stale-route-acquire.cfg` invalidates an initially fresh route before acquisition and removes the consumption-time guard. |
 | `Inv5SingleOwnerCAS` | Singleton/account work mutates under a single durable owner epoch, and the live turn is the replica/epoch that durable row names. | `AcquireTurn` enforces empty durable ownership and no live turn on the same account; the invariant also pins each live turn's replica and epoch to `owner`/`ownerEpoch`, so reassigning the durable owner under a live turn is a violation rather than an unchecked state. `weak-non-atomic-claim.cfg` demonstrates duplicate live owners. |
-| `Inv6TerminalIsolation` | Terminal or cancelled producers cannot enqueue into later turns, and terminal reason is present. | Producer misrouting is disabled in the full model; `weak-misroute-producer.cfg` demonstrates terminal producer contamination independently of gate accounting. |
+| `Inv6TerminalIsolation` | Late producer events after completion, cancellation, or failure stay with their originating turn; terminal reason is present. | `DeliverProducer` handles acquired terminal producers, including discard after cancel/failure. Three independent misroute controls cover completed, cancelled, and failed origins. |
 | `Inv7GateAccounting` | Every gate waiter is exactly queued, holding, or terminal and keeps the inherited deadline. | `QueueTurn`, `AcquireTurn`, and terminal actions preserve the gate lattice; `weak-lost-waiter.cfg` demonstrates a dropped queued waiter. |
 | `Inv8ShutdownDrain` | Draining forbids admission of new externally visible work; shutdown completion requires no registered work and no successful response awaiting downstream producer delivery. | `QueueTurn` is gated by `CanAdmit`; `CompleteShutdown` blocks on both registered work and `producerDelivered`; `weak-shutdown-admit.cfg` demonstrates post-drain admission. |
 | `Inv9TerminalOwnerReleased` | Every acquired terminal turn releases the durable owner slot and finalizer owner. | Terminal actions call epoch-fenced release; `weak-leak-owner-on-terminal.cfg` demonstrates a leaked owner lease. |
@@ -67,8 +70,9 @@ kills them under three different budgets:
 The full configuration also checks natural liveness properties:
 
 - `TurnTermination`: every admitted turn eventually reaches a terminal state.
-  This is derived from bounded `Tick`, `ExpireDeadline`, and
-  `FinalizeCompletedDelivery` fairness, not from fairness on cancellation.
+  This assumes weak fairness of successful completion as well as `Tick`,
+  `ExpireDeadline`, and `FinalizeCompletedDelivery`. A progressing stream
+  need not exhaust an idle budget; completion fairness is necessary for it.
 - `ShutdownEventuallyComplete`: committed shutdown drain eventually completes
   once registered work has left and successful responses have reached terminal
   downstream delivery.
@@ -90,13 +94,15 @@ or if its config does not declare exactly the mapped temporal property.
 | --- | --- | --- | --- | --- |
 | `weak-ignore-owner-epoch.cfg` | Allows continuity anchor reuse without current owner epoch/provenance fencing, and lets `OwnerLoss` clear the durable owner while leaving the turn live. | `Inv1AnchorCurrent\|Inv5SingleOwnerCAS` | Stale continuity anchor and owner mapping | `85802e64`, `48f083ef`, `4c04e538`, `b1d27bc6` |
 | `weak-ignore-anchor-lineage.cfg` | Accepts a continuity anchor whose conversation lineage does not match the turn, while every other fence still holds. | `Inv1AnchorCurrent` | Stale continuity anchor and owner mapping | `85802e64`, `48f083ef` |
-| `weak-single-shared-timeout.cfg` | Collapses phase-specific deadlines into a single mismatched timeout. | `Inv2DeadlineOrdering` | Timeout budget mismatch and stuck streams | `aa65e97d`, `de2c5fc0`, `af5051f8` |
+| `weak-single-shared-timeout.cfg` | Assigns the same oversized deadline to every phase; ordering still holds but the gate/connect/first-byte resource bounds fail. | `Inv2DeadlineOrdering` | Timeout budget mismatch and stuck streams | `aa65e97d`, `de2c5fc0`, `af5051f8` |
 | `weak-skip-release-on-cancel.cfg` | Lets cancellation bypass reservation release/finalization. | `Inv3ReservationSettledExactlyOnce` | Lease and reservation leaks | `592d47b3`, `015f669e`, `783665b9` |
 | `weak-double-settle.cfg` | Allows a terminal acquired turn to settle twice. | `Inv3ReservationSettledExactlyOnce` | Duplicate finalization and replayed settlement | `592d47b3`, `015f669e`, `783665b9` |
 | `weak-stale-cache.cfg` | Lets a replica route from a local snapshot already behind durable invalidation. | `Inv4FreshSnapshots` | Cache and quota freshness races | `04d8fab8`, `7347745b`, `b7bf87cf` |
 | `weak-stale-route-acquire.cfg` | Lets durable invalidation race between a fresh route decision and acquisition, bypassing the version recheck. | `Inv4FreshSnapshots` | Cache and quota freshness TOCTOU | `04d8fab8`, `7347745b`, `b7bf87cf` |
 | `weak-non-atomic-claim.cfg` | Lets a second turn claim an account without durable compare-and-set exclusion. | `Inv5SingleOwnerCAS` | Cross-replica single-owner coordination | `0a7f354d`, `b5f0541a`, `53f7b463`, `a8e12f8` |
 | `weak-misroute-producer.cfg` | Lets a completed producer enqueue into a different live turn. | `Inv6TerminalIsolation` | Terminal producer contamination | `87fae430`, `03b77781`, `c9da4974` |
+| `weak-misroute-cancelled-producer.cfg` | Routes an acquired cancelled producer into another live turn. | `Inv6TerminalIsolation` | Terminal producer contamination after cancellation | Same producer-isolation contract |
+| `weak-misroute-failed-producer.cfg` | Routes an acquired failed producer into another live turn. | `Inv6TerminalIsolation` | Terminal producer contamination after failure | Same producer-isolation contract |
 | `weak-lost-waiter.cfg` | Lets cancellation drop a queued waiter slot. | `Inv7GateAccounting` | Admission gate and lock contention | `87fae430`, `03b77781`, `c9da4974` |
 | `weak-shutdown-admit.cfg` | Allows new externally visible turns after drain starts. | `Inv8ShutdownDrain` | Shutdown drain and background task lifecycle | `66b9196d`, `ec36ef60`, `3bdc9dea` |
 | `weak-leak-owner-on-terminal.cfg` | Lets terminal completion/cancel/timeout leave the durable owner slot assigned. | `Inv9TerminalOwnerReleased` | Lease and reservation leaks | `592d47b3`, `015f669e`, `783665b9` |
@@ -188,7 +194,9 @@ Expected result: the full model reports no violation with deadlock checking
 enabled; all weakening runs fail with their mapped invariant names, and the
 liveness control fails with its mapped temporal property while keeping every
 invariant. The script prints the distinct-state count for the full model and
-every weakening so the checked state-space size is visible.
+every weakening so the checked state-space size is visible. The scripted
+stream-idle regression must also finish exhaustively; its bounded trace is not
+a proof that the full two-turn model has been exhausted.
 
 ### The full model is budgeted, not exhausted
 

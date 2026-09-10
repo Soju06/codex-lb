@@ -78,15 +78,6 @@ def test_core_ownership_only_completes_after_response_phase() -> None:
     assert "ClaimCompletedDelivery(t) ==" in spec
 
 
-def test_core_ownership_clamps_request_budget_before_each_phase_reset() -> None:
-    spec = CORE_OWNERSHIP.read_text()
-
-    assert spec.count("LET remainingRequest == SubtractFloor(requestDeadline[t], phaseElapsed[t])") == 4
-    assert spec.count("/\\ requestDeadline' = [requestDeadline EXCEPT ![t] = remainingRequest]") == 4
-    assert "StartStream(t, k) ==" in spec
-    assert "StreamProgress(t) ==" in spec
-
-
 def test_core_ownership_shutdown_waits_for_terminal_delivery() -> None:
     spec = CORE_OWNERSHIP.read_text()
 

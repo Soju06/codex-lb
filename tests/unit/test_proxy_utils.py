@@ -49970,14 +49970,28 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     monkeypatch.setattr(proxy_service, "_PREWARM_RESPONSE_TIMEOUT_SECONDS", 0.05)
     # The one row the prewarm resolves before its lock. Both helpers under the
     # lock must receive this exact object rather than reading their own, so the
-    # assertions below compare by identity and pin the read's call site.
+    # assertions below compare by identity, pin the read's call site, and -- via
+    # one shared event log with the lock -- pin that it happened first.
     expected_snapshot = settings
-    settings_reads: list[str] = []
+    events: list[str] = []
 
     async def snapshot_get() -> Any:
-        settings_reads.append(sys._getframe(1).f_code.co_name)
+        events.append(f"read:{sys._getframe(1).f_code.co_name}")
         return expected_snapshot
 
+    class _RecordingPrewarmLock:
+        def __init__(self) -> None:
+            self._lock = anyio.Lock()
+
+        async def __aenter__(self) -> None:
+            await self._lock.acquire()
+            events.append("lock_acquired")
+
+        async def __aexit__(self, *exc: object) -> None:
+            events.append("lock_released")
+            self._lock.release()
+
+    session.prewarm_lock = cast(Any, _RecordingPrewarmLock())
     monkeypatch.setattr(
         proxy_service,
         "get_settings_cache",
@@ -50072,9 +50086,10 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     # the prewarm resolved before taking it ...
     assert observation["dashboard_settings"] is expected_snapshot
     assert admission_observations[0]["dashboard_settings"] is expected_snapshot
-    # ... which is the only settings read on the path, and it happened before
-    # the lock, in the prewarm helper itself.
-    assert settings_reads == ["_maybe_prewarm_http_bridge_session"]
+    # ... which is the only settings read on the path, taken by the prewarm
+    # helper itself and -- ordering asserted directly, not inferred from the
+    # caller -- strictly before the lock was acquired.
+    assert events == ["read:_maybe_prewarm_http_bridge_session", "lock_acquired", "lock_released"]
     pending_request_ids = cast(list[str], observation["pending_request_ids"])
     assert len(pending_request_ids) == 1
     assert pending_request_ids[0].startswith("http_prewarm_")

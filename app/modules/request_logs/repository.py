@@ -1560,17 +1560,27 @@ class RequestLogsRepository:
     async def _distinct_skip_scan(
         self,
         column: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
-        conditions: list,
+        conditions: list[ColumnElement[bool]],
+        *,
+        prefix_conditions: tuple[ColumnElement[bool], ...] = (),
     ) -> list[str]:
         """Loose-index-scan emulation: seed min(column), then min(column) >
         previous, one btree probe per distinct value. NULLs never seed or
         chain (min() skips them); empty strings are preserved — the legacy
         DISTINCT path only drops falsy values per facet, in the callers."""
-        seed = select(func.min(column).label("val")).where(*conditions)
+        sqlite = self._session.get_bind().dialect.name == "sqlite"
+        # SQLite can choose the deleted_at index for MIN(facet), rescanning
+        # every live row per successor. Traverse the facet index first, then
+        # check visibility with an equality probe for each candidate value.
+        scan_conditions = prefix_conditions if sqlite else conditions
+        seed = select(func.min(column).label("val")).where(*scan_conditions)
         skip = seed.cte("facet_skip", recursive=True)
-        successor = select(func.min(column)).where(*conditions, column > skip.c.val).scalar_subquery()
+        successor = select(func.min(column)).where(*scan_conditions, column > skip.c.val).scalar_subquery()
         skip = skip.union_all(select(successor).where(skip.c.val.is_not(None)))
         stmt = select(skip.c.val).where(skip.c.val.is_not(None)).order_by(skip.c.val.asc())
+        if sqlite:
+            visible = select(RequestLog.id).where(*conditions, column == skip.c.val).correlate(skip).exists()
+            stmt = stmt.where(visible)
         rows = await self._session.execute(stmt)
         return [value for (value,) in rows.all() if value is not None]
 
@@ -1591,10 +1601,11 @@ class RequestLogsRepository:
             if not value:
                 # Legacy DISTINCT drops falsy leading values in Python.
                 continue
-            value_conditions = [*conditions, leading == value]
+            prefix = leading == value
+            value_conditions = [*conditions, prefix]
             null_probe = select(RequestLog.id).where(*value_conditions, second.is_(None)).limit(1)
             has_null = (await self._session.execute(null_probe)).scalar_one_or_none() is not None
-            second_values = await self._distinct_skip_scan(second, value_conditions)
+            second_values = await self._distinct_skip_scan(second, value_conditions, prefix_conditions=(prefix,))
             if has_null and nulls_first:
                 pairs.append((value, None))
             pairs.extend((value, second_value) for second_value in second_values)

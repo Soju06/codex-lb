@@ -102,7 +102,7 @@ when the requested slug matches a bootstrap entry.
 
 ### Requirement: OpenAI-compatible model metadata uses backend context windows
 
-When serving `GET /v1/models`, the system SHALL expose `metadata.context_window` as the upstream backend `context_window` budget by default. The system MUST NOT promote raw `max_context_window` values or hard-coded full-context guesses into `metadata.context_window`. Explicit operator context-window overrides remain the highest-priority reported-context value, clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`.
+When serving `GET /v1/models`, the system SHALL expose `metadata.context_window` as the upstream backend `context_window` budget by default. The system MUST NOT promote raw `max_context_window` values or hard-coded full-context guesses into `metadata.context_window`. Explicit operator context-window overrides — a `model_context_window_overrides` dashboard row for the slug, else the `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry for the slug (see "Per-model context window overrides are dashboard settings") — remain the highest-priority reported-context value, clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`.
 
 #### Scenario: GPT-5 Codex models are reported with the backend context window on /v1/models
 
@@ -116,7 +116,7 @@ When serving `GET /v1/models`, the system SHALL expose `metadata.context_window`
 
 ### Requirement: OpenAI-compatible model metadata preserves the backend input budget explicitly
 
-When serving `GET /v1/models`, the system SHALL expose the upstream backend input/context budget in `metadata.input_context_window`. When an explicit operator context-window override applies to a model, that override SHALL be the reported input budget as well, clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`, so `metadata.input_context_window` and the OpenAI-compatible `context_length`, `contextLength`, and `capabilities.context_length` fields never contradict `metadata.context_window` and never advertise more input than the backend sanctions. A `max_context_window` equal to the backend `context_window` — the parseability default synthesized for bootstrap and source-catalog models — MUST NOT clamp an override, so raise overrides for those models keep working. For models whose reported `metadata.context_window` is not operator-overridden, `metadata.context_window` and `metadata.input_context_window` SHOULD be equal. The system SHOULD expose `metadata.max_output_tokens` for known GPT-5 Codex models when that output-budget value is known; that value MUST NOT be used to inflate `metadata.context_window`.
+When serving `GET /v1/models`, the system SHALL expose the upstream backend input/context budget in `metadata.input_context_window`. When an explicit operator context-window override (dashboard row, else environment entry) applies to a model, that override SHALL be the reported input budget as well, clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`, so `metadata.input_context_window` and the OpenAI-compatible `context_length`, `contextLength`, and `capabilities.context_length` fields never contradict `metadata.context_window` and never advertise more input than the backend sanctions. A `max_context_window` equal to the backend `context_window` — the parseability default synthesized for bootstrap and source-catalog models — MUST NOT clamp an override, so raise overrides for those models keep working. For models whose reported `metadata.context_window` is not operator-overridden, `metadata.context_window` and `metadata.input_context_window` SHOULD be equal. The system SHOULD expose `metadata.max_output_tokens` for known GPT-5 Codex models when that output-budget value is known; that value MUST NOT be used to inflate `metadata.context_window`.
 
 #### Scenario: /v1/models exposes the 272k backend input budget explicitly
 
@@ -157,7 +157,7 @@ When serving `GET /v1/models`, the system SHALL expose the upstream backend inpu
 
 When serving `GET /backend-api/codex/models`, the system MUST keep Codex-native model catalog semantics unchanged: the top-level `context_window` field remains the backend compact/input budget unless an explicit operator override applies, and upstream raw fields such as `max_context_window` remain available when upstream provides them. The `/v1/models` compatibility metadata MUST NOT mutate the native Codex endpoint.
 
-When an explicit operator context-window override applies to a model, the native entry SHALL report the single resolved value — the override clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`; a `max_context_window` equal to the backend `context_window` (the synthesized parseability default) MUST NOT clamp — on `context_window`, and SHALL rewrite `max_context_window` to that same resolved value when upstream provides the field. The endpoint's OpenAI-compatible `data` alias SHALL report the same resolved value on its `context_length`, `contextLength`, `capabilities.context_length`, `metadata.context_window`, and `metadata.input_context_window` fields, so the native and alias views of one model never advertise different budgets.
+When an explicit operator context-window override (dashboard row, else environment entry) applies to a model, the native entry SHALL report the single resolved value — the override clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`; a `max_context_window` equal to the backend `context_window` (the synthesized parseability default) MUST NOT clamp — on `context_window`, and SHALL rewrite `max_context_window` to that same resolved value when upstream provides the field. The endpoint's OpenAI-compatible `data` alias SHALL report the same resolved value on its `context_length`, `contextLength`, `capabilities.context_length`, `metadata.context_window`, and `metadata.input_context_window` fields, so the native and alias views of one model never advertise different budgets.
 
 #### Scenario: Native Codex route preserves compact budget
 
@@ -243,7 +243,7 @@ sanctioned divergence from the upstream GPT-5.6 entries beyond the
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **AND** no persisted snapshot is loaded
-- **AND** no `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry applies to these slugs
+- **AND** no context-window override (dashboard row or `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry) applies to these slugs
 - **WHEN** a client calls `GET /backend-api/codex/models`
 - **THEN** `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` report
   `context_window=272000`
@@ -252,7 +252,7 @@ sanctioned divergence from the upstream GPT-5.6 entries beyond the
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **AND** no persisted snapshot is loaded
-- **AND** no `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry applies to these slugs
+- **AND** no context-window override (dashboard row or `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry) applies to these slugs
 - **WHEN** a client calls `GET /backend-api/codex/models`
 - **THEN** `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` report
   `context_window=272000`
@@ -262,7 +262,7 @@ sanctioned divergence from the upstream GPT-5.6 entries beyond the
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **AND** no persisted snapshot is loaded
-- **AND** no `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry applies to these slugs
+- **AND** no context-window override (dashboard row or `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry) applies to these slugs
 - **WHEN** a client calls `GET /v1/models`
 - **THEN** each GPT-5.6 entry reports `context_window=272000` and
   `input_context_window=272000`
@@ -1356,4 +1356,48 @@ present in the snapshot yet source-routed.
 
 - **WHEN** a model-catalog request omits the required-capability carrier
 - **THEN** the existing deployment-level authentication and catalog behavior remains in effect
+
+### Requirement: Per-model context window overrides are dashboard settings
+
+The per-model reported context window override (`model_context_window_overrides`, `slug -> window`) MUST be managed from the dashboard as one row per slug in the `model_context_window_overrides` table (`slug`, `context_window`), resolved per slug as environment entry < dashboard row: a slug with a row reports the row's window, a slug without a row inherits the `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry for that slug, and a slug with neither has no override (the catalog reports the upstream window). The migration and the first boot MUST NOT copy the environment dict into rows. The settings API MUST expose the overrides under `GET /api/settings/model-context-window-overrides` as the merged per-slug list, each entry carrying `slug`, the effective `context_window`, a `source` of `"dashboard"` or `"env"`, and `env_value` (the environment entry for the slug, `null` when none); `PUT /api/settings/model-context-window-overrides/{slug}` with `{"context_window": n}` MUST create or replace the row for `slug` in a single upsert, so concurrent creates of the same absent slug both succeed, and `DELETE /api/settings/model-context-window-overrides/{slug}` MUST remove it (404 when no row exists, including for a slug that only the environment knows). A write MUST reject a `context_window` that is not an integer between 1 and 2147483647 (the width of the stored column) — a float, a numeric string and a boolean are rejected, not coerced — and a slug that is empty, longer than 256 characters, or contains whitespace or non-printable characters; a slug MUST NOT be trimmed into validity, and the slug segment MUST accept `/`. The catalog endpoints (`GET /v1/models`, `GET /backend-api/codex/models`) MUST resolve the merged overrides once per catalog build from a cached snapshot of the rows that the settings API invalidates durably through the cross-replica `settings` cache namespace on every write — an invalidation MUST NOT be overwritten by a load that was already in flight when it happened —, MUST NOT read the database per model entry, and MUST apply the existing `max_context_window` clamp to a dashboard value exactly as to an environment value. Each store and delete MUST be recorded as a `settings_changed` audit event naming `model_context_window_overrides` and the slug. A stored or deleted row takes effect on the next catalog request on every replica without a restart; when the database is unreachable past the snapshot's TTL the catalog MUST keep serving the last known rows rather than failing the request. The environment variable remains as a deprecated per-slug fallback for one release and is removed in the next minor.
+
+#### Scenario: Dashboard row overrides the environment entry for its slug
+
+- **GIVEN** the process environment sets `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES={"gpt-5.4": 300000}` and the upstream catalog reports `gpt-5.4` with `context_window=272000`
+- **WHEN** `PUT /api/settings/model-context-window-overrides/gpt-5.4` stores `{"context_window": 515000}`
+- **THEN** the next `GET /backend-api/codex/models` reports `gpt-5.4` with `context_window=515000` without a restart
+- **AND** `GET /api/settings/model-context-window-overrides` lists `gpt-5.4` with `context_window=515000`, `source="dashboard"` and `env_value=300000`
+
+#### Scenario: Deleted row returns the slug to the environment entry
+
+- **GIVEN** a dashboard row `gpt-5.4 -> 515000` while the environment entry for `gpt-5.4` is `300000`
+- **WHEN** `DELETE /api/settings/model-context-window-overrides/gpt-5.4` succeeds
+- **THEN** the next catalog request reports `gpt-5.4` with `context_window=300000`
+- **AND** the settings API lists `gpt-5.4` with `source="env"` and `env_value=300000`
+
+#### Scenario: Slug known only to the environment has no row to delete
+
+- **GIVEN** the environment entry `gpt-5.4 -> 300000` and no dashboard row for `gpt-5.4`
+- **WHEN** `DELETE /api/settings/model-context-window-overrides/gpt-5.4` is called
+- **THEN** the response is 404 with code `model_context_window_override_not_found`
+- **AND** the environment entry keeps applying
+
+#### Scenario: Dashboard value is clamped like an environment value
+
+- **GIVEN** the upstream catalog reports a model with `context_window=272000` and `max_context_window=872000`
+- **WHEN** a dashboard row stores `1000000` for that slug
+- **THEN** `GET /v1/models` and `GET /backend-api/codex/models` report `872000` for every context budget field of that model
+
+#### Scenario: Invalid window or slug is rejected
+
+- **WHEN** `PUT /api/settings/model-context-window-overrides/gpt-5.4` sends `{"context_window": 0}`, `-1`, `1.5`, `515000.0`, `"515000"`, `true` or `2147483648`
+- **THEN** the response is 422 and no row is written
+- **WHEN** the slug segment is empty, longer than 256 characters, or contains whitespace (including leading or trailing whitespace) or a control character
+- **THEN** the response is 400 with code `invalid_model_slug` and no row is written
+
+#### Scenario: Catalog build reads one cached snapshot
+
+- **WHEN** `GET /v1/models` or `GET /backend-api/codex/models` builds its entries
+- **THEN** the merged overrides are resolved once before the per-model loop from the cached row snapshot and the process settings
+- **AND** no database read happens per model entry
 

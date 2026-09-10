@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.audit.service import AuditService
+from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
     set_dashboard_error_format,
@@ -22,9 +23,16 @@ from app.core.auth.dependencies import (
 )
 from app.core.clients.http import _shared_ssl_context
 from app.core.config import settings as settings_module
+from app.core.config.background_jobs import BACKGROUND_JOB_SETTINGS
+from app.core.config.context_window_overrides import (
+    get_model_context_window_overrides_cache,
+    resolve_context_window_overrides,
+)
 from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
+from app.core.config.inheritable import resolve_inheritable
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING, CONVERSATION_ARCHIVE_TOGGLED_ACTION
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError, DashboardSettingsConflictError
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
@@ -40,12 +48,16 @@ from app.modules.proxy.account_cache import (
     get_account_selection_cache,
     propagate_account_routing_change,
 )
+from app.modules.settings.repository import ModelContextWindowOverridesRepository
 from app.modules.settings.schemas import (
     AccountProxyBindingRequest,
     AccountProxyBindingResponse,
     AdditionalQuotaPolicy,
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
+    ModelContextWindowOverrideResponse,
+    ModelContextWindowOverridesResponse,
+    ModelContextWindowOverrideUpsertRequest,
     RuntimeConnectAddressResponse,
     SettingProvenance,
     SubscriptionOverflowPreflightResponse,
@@ -150,8 +162,15 @@ def _clears_dashboard_value(payload: DashboardSettingsUpdateRequest, name: str) 
 # end C2-2 routing/overload
 
 
-def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
+def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> DashboardSettingsResponse:
     environment_settings = get_app_settings()
+    # M5 conversation archive: the T1 directory is this replica's local shard;
+    # a filesystem path is admin-only information. ``getattr``: startup-settings
+    # fakes in tests may carry only the fields they exercise.
+    archive_dir = getattr(environment_settings, "conversation_archive_dir", None)
+    conversation_archive_dir = (
+        str(archive_dir) if archive_dir is not None and principal.role == DashboardRole.ADMIN else None
+    )
     additional_quota_policies = [
         AdditionalQuotaPolicy(
             quota_key=definition.quota_key,
@@ -230,6 +249,11 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
         http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
+        # M3 codex prewarm
+        http_responses_session_bridge_codex_prewarm_enabled=(
+            settings.http_responses_session_bridge_codex_prewarm_enabled
+        ),
+        # end M3 codex prewarm
         sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
         sticky_reallocation_primary_budget_threshold_pct=settings.sticky_reallocation_primary_budget_threshold_pct,
         sticky_reallocation_secondary_budget_threshold_pct=settings.sticky_reallocation_secondary_budget_threshold_pct,
@@ -262,6 +286,16 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         soft_drain_enabled=settings.soft_drain_enabled,
         deterministic_failover_enabled=settings.deterministic_failover_enabled,
         circuit_breaker_enabled=settings.circuit_breaker_enabled,
+        # M2 background jobs
+        auth_guardian_enabled=settings.auth_guardian_enabled,
+        auth_guardian_blocked_by_topology=settings.auth_guardian_blocked_by_topology,
+        automations_scheduler_enabled=settings.automations_scheduler_enabled,
+        rate_limit_reset_credits_refresh_enabled=settings.rate_limit_reset_credits_refresh_enabled,
+        # end M2 background jobs
+        # M5 conversation archive
+        conversation_archive_enabled=settings.conversation_archive_enabled,
+        conversation_archive_dir=conversation_archive_dir,
+        # end M5 conversation archive
         version=settings.version,
         # C2-1 timeouts
         upstream_connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
@@ -272,6 +306,12 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         proxy_downstream_websocket_idle_timeout_seconds=settings.proxy_downstream_websocket_idle_timeout_seconds,
         sse_keepalive_interval_seconds=settings.sse_keepalive_interval_seconds,
         # end C2-1 timeouts
+        # M1 stream/bridge budgets
+        http_responses_stream_request_budget_seconds=settings.http_responses_stream_request_budget_seconds,
+        http_responses_session_bridge_request_budget_seconds=(
+            settings.http_responses_session_bridge_request_budget_seconds
+        ),
+        # end M1 stream/bridge budgets
         provenance={
             name: SettingProvenance(source=resolved.source, env_value=resolved.env_value, default=resolved.default)
             for name, resolved in settings.provenance.items()
@@ -281,10 +321,11 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
 
 @router.get("", response_model=DashboardSettingsResponse)
 async def get_settings(
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     settings = await context.service.get_settings()
-    return _dashboard_settings_response(settings)
+    return _dashboard_settings_response(settings, principal=principal)
 
 
 @router.get("/subscription-overflow/preflight", response_model=SubscriptionOverflowPreflightResponse)
@@ -689,6 +730,99 @@ _TIMEOUT_INVARIANT_DASHBOARD_SETTINGS: tuple[str, ...] = (
 )
 
 
+# M4 model catalogue: per-model context window overrides. One dashboard row per
+# slug (``model_context_window_overrides``); the
+# ``CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES`` entry is the per-slug fallback.
+MODEL_CONTEXT_WINDOW_OVERRIDES_PATH = "/model-context-window-overrides"
+_MODEL_SLUG_MAX_LENGTH = 256
+
+
+def _validate_model_slug(slug: str) -> str:
+    # The raw segment is validated, never trimmed: silently storing " gpt-5.4 "
+    # as "gpt-5.4" would make the row the operator sees disagree with the slug
+    # they wrote, and the requirement rejects any slug containing whitespace.
+    if (
+        not slug
+        or len(slug) > _MODEL_SLUG_MAX_LENGTH
+        or any(character.isspace() or not character.isprintable() for character in slug)
+    ):
+        raise DashboardBadRequestError(
+            f"Model slug must be 1-{_MODEL_SLUG_MAX_LENGTH} printable characters without whitespace",
+            code="invalid_model_slug",
+        )
+    return slug
+
+
+async def _model_context_window_overrides_response(context: SettingsContext) -> ModelContextWindowOverridesResponse:
+    dashboard = await ModelContextWindowOverridesRepository(context.session).by_slug()
+    resolved = resolve_context_window_overrides(dashboard, get_app_settings().model_context_window_overrides)
+    return ModelContextWindowOverridesResponse(
+        overrides=[
+            ModelContextWindowOverrideResponse(
+                slug=override.slug,
+                context_window=override.context_window,
+                source=override.source,
+                env_value=override.env_value,
+            )
+            for override in resolved.values()
+        ]
+    )
+
+
+@router.get(MODEL_CONTEXT_WINDOW_OVERRIDES_PATH, response_model=ModelContextWindowOverridesResponse)
+async def get_model_context_window_overrides(
+    context: SettingsContext = Depends(get_settings_context),
+) -> ModelContextWindowOverridesResponse:
+    return await _model_context_window_overrides_response(context)
+
+
+@router.put(MODEL_CONTEXT_WINDOW_OVERRIDES_PATH + "/{slug:path}", response_model=ModelContextWindowOverridesResponse)
+async def put_model_context_window_override(
+    request: Request,
+    slug: str,
+    payload: ModelContextWindowOverrideUpsertRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> ModelContextWindowOverridesResponse:
+    normalized = _validate_model_slug(slug)
+    await ModelContextWindowOverridesRepository(context.session).upsert(normalized, payload.context_window)
+    # The catalog reads a cached snapshot of the rows: clear + durably bump
+    # before responding so every replica reports the new window.
+    await get_model_context_window_overrides_cache().invalidate()
+    # Audited like every other dashboard settings write: this one changes what
+    # the model catalog advertises to every client.
+    AuditService.log_async(
+        "settings_changed",
+        actor_ip=request.client.host if request.client else None,
+        details={"changed_fields": ["model_context_window_overrides"], "slug": normalized},
+    )
+    return await _model_context_window_overrides_response(context)
+
+
+@router.delete(MODEL_CONTEXT_WINDOW_OVERRIDES_PATH + "/{slug:path}", response_model=ModelContextWindowOverridesResponse)
+async def delete_model_context_window_override(
+    request: Request,
+    slug: str,
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> ModelContextWindowOverridesResponse:
+    normalized = _validate_model_slug(slug)
+    if not await ModelContextWindowOverridesRepository(context.session).delete(normalized):
+        raise DashboardNotFoundError(
+            "Model context window override not found", code="model_context_window_override_not_found"
+        )
+    await get_model_context_window_overrides_cache().invalidate()
+    AuditService.log_async(
+        "settings_changed",
+        actor_ip=request.client.host if request.client else None,
+        details={"changed_fields": ["model_context_window_overrides"], "slug": normalized},
+    )
+    return await _model_context_window_overrides_response(context)
+
+
+# end M4 model catalogue
+
+
 def _proposed_timeout_settings(payload: DashboardSettingsUpdateRequest, current, startup_settings) -> dict[str, float]:
     """Effective timeout values after ``payload`` is applied: value = store, null = inherit, absent = current."""
     proposed: dict[str, float] = {}
@@ -754,6 +888,30 @@ def _validate_timeout_invariants(payload: DashboardSettingsUpdateRequest, curren
         )
 
 
+def _proposed_reset_credit_polling_enabled(payload: DashboardSettingsUpdateRequest, current) -> bool:
+    """M2 background jobs: the reset-credit polling toggle as it will be after this update.
+
+    A value in the payload wins; an explicit null returns to the inherited
+    environment / default value; an omitted field keeps the current effective
+    value (dashboard column, else the deprecated env alias, else the default).
+    """
+    name = "rate_limit_reset_credits_refresh_enabled"
+    if name not in payload.model_fields_set:
+        return bool(getattr(current, name))
+    proposed = getattr(payload, name)
+    if proposed is not None:
+        return bool(proposed)
+    inherited = current.provenance[name]
+    return bool(resolve_inheritable(None, inherited.env_value, inherited.default).value)
+
+
+def _proposed_auto_redeem_enabled(payload: DashboardSettingsUpdateRequest, current) -> bool:
+    """M2 background jobs: the auto-redeem opt-in as it will be after this update."""
+    if payload.auto_redeem_reset_credits_before_expiry is None:
+        return bool(current.auto_redeem_reset_credits_before_expiry)
+    return bool(payload.auto_redeem_reset_credits_before_expiry)
+
+
 def _timeout_field(payload: DashboardSettingsUpdateRequest, name: str) -> tuple[float | None, bool]:
     """(value to store, clear flag) for one tri-state timeout field of ``payload``."""
     if name not in payload.model_fields_set:
@@ -769,7 +927,7 @@ def _timeout_field(payload: DashboardSettingsUpdateRequest, name: str) -> tuple[
 async def update_settings(
     request: Request,
     payload: DashboardSettingsUpdateRequest = Body(...),
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
@@ -798,19 +956,28 @@ async def update_settings(
         current.subscription_overflow_drain_until,
         utcnow(),
     )
-    if (
-        payload.auto_redeem_reset_credits_before_expiry
-        and not current.auto_redeem_reset_credits_before_expiry
-        and not get_app_settings().rate_limit_reset_credits_refresh_enabled
-    ):
-        # The reset-credit refresh loop is the sole driver of automatic
-        # redemption; accepting the opt-in while polling is disabled would
-        # persist a setting that can never run.
-        raise DashboardBadRequestError(
-            "autoRedeemResetCreditsBeforeExpiry requires reset-credit polling; "
-            "set CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED=true first",
-            code="reset_credit_polling_disabled",
+    # The reset-credit refresh loop is the sole driver of automatic redemption,
+    # so "auto-redeem on, polling off" is a setting that can never run. The gate
+    # gets the effective (dashboard-aware) values this request would leave
+    # behind and is symmetric: it refuses both the request that turns the
+    # opt-in on and the one that turns polling off. A payload that only
+    # re-saves an already inconsistent pair is still accepted, so unrelated
+    # settings edits are never blocked by pre-existing state.
+    proposed_polling_enabled = _proposed_reset_credit_polling_enabled(payload, current)
+    proposed_auto_redeem_enabled = _proposed_auto_redeem_enabled(payload, current)
+    if proposed_auto_redeem_enabled and not proposed_polling_enabled:
+        enables_auto_redeem = not current.auto_redeem_reset_credits_before_expiry
+        disables_polling = (
+            "rate_limit_reset_credits_refresh_enabled" in payload.model_fields_set
+            and current.rate_limit_reset_credits_refresh_enabled
         )
+        if enables_auto_redeem or disables_polling:
+            raise DashboardBadRequestError(
+                "autoRedeemResetCreditsBeforeExpiry requires reset-credit polling; "
+                "keep rateLimitResetCreditsRefreshEnabled on (Settings -> Advanced -> Background jobs), "
+                "or turn the opt-in off in the same request",
+                code="reset_credit_polling_disabled",
+            )
     try:
         legacy_threshold_provided = payload.sticky_reallocation_budget_threshold_pct is not None
         primary_threshold_provided = payload.sticky_reallocation_primary_budget_threshold_pct is not None
@@ -1021,6 +1188,14 @@ async def update_settings(
                     if payload.http_responses_session_bridge_gateway_safe_mode is not None
                     else current.http_responses_session_bridge_gateway_safe_mode
                 ),
+                # M3 codex prewarm: tri-state via model_fields_set.
+                http_responses_session_bridge_codex_prewarm_enabled=_dashboard_value(
+                    payload, "http_responses_session_bridge_codex_prewarm_enabled"
+                ),
+                clear_http_responses_session_bridge_codex_prewarm_enabled=_clears_dashboard_value(
+                    payload, "http_responses_session_bridge_codex_prewarm_enabled"
+                ),
+                # end M3 codex prewarm
                 sticky_reallocation_budget_threshold_pct=resolved_legacy_threshold,
                 sticky_reallocation_primary_budget_threshold_pct=resolved_primary_threshold,
                 sticky_reallocation_secondary_budget_threshold_pct=(
@@ -1142,6 +1317,29 @@ async def update_settings(
                 clear_circuit_breaker_enabled=(
                     "circuit_breaker_enabled" in payload.model_fields_set and payload.circuit_breaker_enabled is None
                 ),
+                # M2 background jobs: tri-state via model_fields_set.
+                auth_guardian_enabled=_dashboard_value(payload, "auth_guardian_enabled"),
+                clear_auth_guardian_enabled=_clears_dashboard_value(payload, "auth_guardian_enabled"),
+                automations_scheduler_enabled=_dashboard_value(payload, "automations_scheduler_enabled"),
+                clear_automations_scheduler_enabled=_clears_dashboard_value(payload, "automations_scheduler_enabled"),
+                rate_limit_reset_credits_refresh_enabled=_dashboard_value(
+                    payload, "rate_limit_reset_credits_refresh_enabled"
+                ),
+                clear_rate_limit_reset_credits_refresh_enabled=_clears_dashboard_value(
+                    payload, "rate_limit_reset_credits_refresh_enabled"
+                ),
+                # end M2 background jobs
+                # M5 conversation archive: tri-state via model_fields_set.
+                conversation_archive_enabled=(
+                    payload.conversation_archive_enabled
+                    if CONVERSATION_ARCHIVE_SETTING in payload.model_fields_set
+                    else None
+                ),
+                clear_conversation_archive_enabled=(
+                    CONVERSATION_ARCHIVE_SETTING in payload.model_fields_set
+                    and payload.conversation_archive_enabled is None
+                ),
+                # end M5 conversation archive
                 # C2-1 timeouts
                 upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][0],
                 clear_upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][1],
@@ -1162,6 +1360,21 @@ async def update_settings(
                 sse_keepalive_interval_seconds=timeout_fields["sse_keepalive_interval_seconds"][0],
                 clear_sse_keepalive_interval_seconds=timeout_fields["sse_keepalive_interval_seconds"][1],
                 # end C2-1 timeouts
+                # M1 stream/bridge budgets (registered in DASHBOARD_TIMEOUT_SETTINGS,
+                # so the PUT-time invariant check and the audit loop cover them).
+                http_responses_stream_request_budget_seconds=timeout_fields[
+                    "http_responses_stream_request_budget_seconds"
+                ][0],
+                clear_http_responses_stream_request_budget_seconds=timeout_fields[
+                    "http_responses_stream_request_budget_seconds"
+                ][1],
+                http_responses_session_bridge_request_budget_seconds=timeout_fields[
+                    "http_responses_session_bridge_request_budget_seconds"
+                ][0],
+                clear_http_responses_session_bridge_request_budget_seconds=timeout_fields[
+                    "http_responses_session_bridge_request_budget_seconds"
+                ][1],
+                # end M1 stream/bridge budgets
             ),
             # CAS anchor: omitted fields above were merged from `current`
             # (version checked against expectedVersion when supplied), so the
@@ -1211,6 +1424,7 @@ async def update_settings(
             "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
             "http_responses_session_bridge_gateway_safe_mode",
+            "http_responses_session_bridge_codex_prewarm_enabled",  # M3 codex prewarm
             "sticky_reallocation_budget_threshold_pct",
             "sticky_reallocation_primary_budget_threshold_pct",
             "sticky_reallocation_secondary_budget_threshold_pct",
@@ -1238,13 +1452,17 @@ async def update_settings(
             "soft_drain_enabled",
             "deterministic_failover_enabled",
             "circuit_breaker_enabled",
+            *BACKGROUND_JOB_SETTINGS,  # M2 background jobs
+            CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive
             *DASHBOARD_TIMEOUT_SETTINGS,  # C2-1 timeouts
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
-    # C2-3 resilience toggles: storing the inherited value (or clearing it)
-    # changes ownership without changing the effective value; audit that too.
-    for field_name in RESILIENCE_TOGGLE_SETTINGS:
+    # C2-3 resilience toggles / M2 background jobs / M5 conversation archive:
+    # storing the inherited value (or clearing it) changes ownership without
+    # changing the effective value; audit that too. An effective archive flip
+    # additionally gets its own audit line naming the actor (further below).
+    for field_name in (*RESILIENCE_TOGGLE_SETTINGS, *BACKGROUND_JOB_SETTINGS, CONVERSATION_ARCHIVE_SETTING):
         if current.provenance[field_name] != updated.provenance[field_name] and field_name not in changed_fields:
             changed_fields.append(field_name)
     # C2-1 timeouts: a dashboard value equal to the inherited one still changes
@@ -1278,6 +1496,13 @@ async def update_settings(
         ):
             changed_fields.append(field_name)
     # end C2-2 routing/overload
+    # M3 codex prewarm: storing the inherited value (or clearing it) changes
+    # ownership without changing the effective value; audit that too.
+    if "http_responses_session_bridge_codex_prewarm_enabled" not in changed_fields and current.provenance.get(
+        "http_responses_session_bridge_codex_prewarm_enabled"
+    ) != updated.provenance.get("http_responses_session_bridge_codex_prewarm_enabled"):
+        changed_fields.append("http_responses_session_bridge_codex_prewarm_enabled")
+    # end M3 codex prewarm
     if upstream_route_inputs_changed:
         # Durably bump ``upstream_route`` (with the coalesced retry fallback)
         # rather than relying solely on the ``settings`` bump issued above:
@@ -1286,9 +1511,26 @@ async def update_settings(
         # instead of the first recovered poll cycle. The re-clear inside
         # ``invalidate`` is harmless; the guarding clear already ran pre-await.
         await get_upstream_route_cache().invalidate()
+    actor_ip = request.client.host if request.client else None
     AuditService.log_async(
         "settings_changed",
-        actor_ip=request.client.host if request.client else None,
+        actor_ip=actor_ip,
         details={"changed_fields": changed_fields},
     )
-    return _dashboard_settings_response(updated)
+    # M5 conversation archive: enabling turns the proxy into a full
+    # prompt/response recorder readable by the same dashboard admin, so every
+    # effective on/off change is a dedicated audit event with the actor, not
+    # just an entry in ``changed_fields``.
+    if current.conversation_archive_enabled != updated.conversation_archive_enabled:
+        AuditService.log_async(
+            CONVERSATION_ARCHIVE_TOGGLED_ACTION,
+            actor_ip=actor_ip,
+            details={
+                "enabled": updated.conversation_archive_enabled,
+                "source": updated.provenance[CONVERSATION_ARCHIVE_SETTING].source,
+                "actor": principal.actor,
+                "actor_role": principal.role.value,
+            },
+        )
+    # end M5 conversation archive
+    return _dashboard_settings_response(updated, principal=principal)

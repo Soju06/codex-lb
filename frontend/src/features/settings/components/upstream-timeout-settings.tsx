@@ -25,6 +25,18 @@ const TIMEOUT_FIELDS = [
     name: "transcription_request_budget_seconds",
     key: "transcriptionBudget",
   },
+  // M1 stream/bridge budgets
+  {
+    field: "httpResponsesStreamRequestBudgetSeconds",
+    name: "http_responses_stream_request_budget_seconds",
+    key: "streamBudget",
+  },
+  {
+    field: "httpResponsesSessionBridgeRequestBudgetSeconds",
+    name: "http_responses_session_bridge_request_budget_seconds",
+    key: "bridgeBudget",
+  },
+  // end M1 stream/bridge budgets
   { field: "streamIdleTimeoutSeconds", name: "stream_idle_timeout_seconds", key: "streamIdle" },
   {
     field: "proxyDownstreamWebsocketIdleTimeoutSeconds",
@@ -43,7 +55,16 @@ const CONNECT_BUDGET_FIELDS: readonly TimeoutField[] = [
   "proxyRequestBudgetSeconds",
   "compactRequestBudgetSeconds",
   "transcriptionRequestBudgetSeconds",
+  "httpResponsesStreamRequestBudgetSeconds",
+  "httpResponsesSessionBridgeRequestBudgetSeconds",
 ];
+// Mirrors bridge-stuck-gate-retire-within-bridge-budget: twice the fixed 300 s
+// stuck-gate threshold (HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS) must stay
+// strictly below the session bridge request budget.
+const BRIDGE_BUDGET_MIN_EXCLUSIVE_SECONDS = 600;
+// Mirrors admission-wait-within-stream-budget: the fixed admission wait
+// (ADMISSION_WAIT_TIMEOUT_SECONDS) must fit inside the stream request budget.
+const ADMISSION_WAIT_SECONDS = 10;
 const MAX_SECONDS = 86400;
 // Keepalive 0 disables the frames; every other value must be positive.
 const ZERO_ALLOWED: ReadonlySet<TimeoutField> = new Set(["sseKeepaliveIntervalSeconds"]);
@@ -128,8 +149,27 @@ export function UpstreamTimeoutSettings({ settings, busy, onSave }: UpstreamTime
       connect > effective(field, name) &&
       !(settings.upstreamConnectTimeoutSeconds > settings[field]),
   );
+  const bridgeBudget = effective(
+    "httpResponsesSessionBridgeRequestBudgetSeconds",
+    "http_responses_session_bridge_request_budget_seconds",
+  );
+  const bridgeBudgetTooLow =
+    bridgeBudget <= BRIDGE_BUDGET_MIN_EXCLUSIVE_SECONDS &&
+    !(settings.httpResponsesSessionBridgeRequestBudgetSeconds <= BRIDGE_BUDGET_MIN_EXCLUSIVE_SECONDS);
+  const streamBudget = effective(
+    "httpResponsesStreamRequestBudgetSeconds",
+    "http_responses_stream_request_budget_seconds",
+  );
+  const streamBudgetBelowAdmissionWait =
+    streamBudget < ADMISSION_WAIT_SECONDS &&
+    !(settings.httpResponsesStreamRequestBudgetSeconds < ADMISSION_WAIT_SECONDS);
   const changed = Object.keys(patch).length > 0;
-  const canSave = changed && invalidKeys.length === 0 && budgetViolations.length === 0;
+  const canSave =
+    changed &&
+    invalidKeys.length === 0 &&
+    budgetViolations.length === 0 &&
+    !bridgeBudgetTooLow &&
+    !streamBudgetBelowAdmissionWait;
 
   const save = () => void onSave(buildSettingsUpdateRequest(settings, patch));
 
@@ -199,6 +239,22 @@ export function UpstreamTimeoutSettings({ settings, busy, onSave }: UpstreamTime
             })}
           </div>
         ))}
+        {streamBudgetBelowAdmissionWait ? (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+            {t("settings.upstreamTimeouts.streamBudgetBelowAdmissionWait", {
+              budget: streamBudget,
+              minimum: ADMISSION_WAIT_SECONDS,
+            })}
+          </div>
+        ) : null}
+        {bridgeBudgetTooLow ? (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+            {t("settings.upstreamTimeouts.bridgeBudgetTooLow", {
+              budget: bridgeBudget,
+              minimum: BRIDGE_BUDGET_MIN_EXCLUSIVE_SECONDS,
+            })}
+          </div>
+        ) : null}
 
         <div className="flex justify-end">
           <Button

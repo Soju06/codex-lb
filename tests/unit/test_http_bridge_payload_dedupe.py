@@ -268,7 +268,7 @@ def test_prepare_http_bridge_request_matches_legacy_per_stage_dumps() -> None:
 @pytest.mark.asyncio
 async def test_stream_http_bridge_or_retry_shares_size_gate_dump_with_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service()
-    settings = SimpleNamespace(upstream_stream_transport="auto", max_sse_event_bytes=16 * 1024 * 1024)
+    settings = SimpleNamespace(upstream_stream_transport="auto")
 
     class _SettingsCache:
         async def get(self) -> object:

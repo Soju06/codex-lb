@@ -1,8 +1,10 @@
 """Subscription-overflow designation, preflight, and delete-clears behaviour (#2123 WP-B).
 
-Everything here is dashboard-side. The last test pins the stage's inertness
-end to end: with a source designated, an exhausted pool still answers today's
-``429 usage_limit_reached`` and the source is never contacted.
+Everything here is dashboard-side except the last test, the decline golden of
+WP-C2: with a source designated and the pool exhausted, every request the
+overflow decision declines still answers today's ``429 usage_limit_reached``
+byte for byte (only ``not_portable_history`` adds the hint) and the source is
+never contacted.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import json
 import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -30,6 +33,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AuditLog, ModelSourcePin
 from app.db.session import SessionLocal
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.overflow import HINT_HEADER, HINT_NATIVE_TEXT, HINT_SDK_SENTENCE
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.subscription_overflow import DRAIN_WINDOW, PIN_IDLE_TTL
 from app.modules.usage.repository import UsageRepository
@@ -562,18 +566,16 @@ async def source_upstream() -> AsyncIterator[Callable[[_UpstreamHandler], Awaita
         await runner.cleanup()
 
 
-@pytest.mark.asyncio
-async def test_designated_source_is_inert_when_the_pool_is_exhausted(async_client, source_upstream, monkeypatch):
-    """Golden guard for WP-C2: a designated source must not change today's exhaustion answer.
+@dataclass(slots=True)
+class _Exhausted:
+    reset_at: int
+    hits: list[str]
 
-    The pool is usage-proven exhausted (QUOTA_EXCEEDED at 100 % with a known
-    reset), the requested model is a registry slug the designated source
-    serves, and the request still gets the structured ``429 usage_limit_reached``
-    with ``resets_at`` while the source receives nothing. WP-C2 replaces this
-    test when overflow routing becomes reachable.
-    """
-    account_id = await _import_account(async_client, "acc_overflow_inert", "overflow-inert@example.com")
+
+async def _exhaust_the_pool(async_client, *, tag: str) -> int:
+    account_id = await _import_account(async_client, f"acc_{tag}", f"{tag}@example.com")
     now_epoch = int(time.time())
+    # Above ``SELECTOR_RETRY_HINT_MAX_SECONDS`` so the 429 message is the capped, byte-stable constant.
     reset_at = now_epoch + 1800
     now = utcnow()
     async with SessionLocal() as session:
@@ -602,40 +604,149 @@ async def test_designated_source_is_inert_when_the_pool_is_exhausted(async_clien
         )
         await session.commit()
     get_account_selection_cache().invalidate()
+    return reset_at
+
+
+def _forbid_subscription_attempts(monkeypatch) -> list[str]:
+    attempts: list[str] = []
+
+    async def fail_fast_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        # Exhaustion must be decided before any upstream call; fail loudly
+        # instead of letting a mis-seeded pool hang on the unreachable upstream.
+        attempts.append(account_id)
+        raise ProxyResponseError(500, {"error": {"message": "unexpected subscription attempt"}})
+        yield  # pragma: no cover - async generator marker
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_fast_stream)
+    return attempts
+
+
+_VOLATILE_HEADERS = frozenset({"date", "x-request-id", "x-codex-turn-state"})
+
+
+def _snapshot(response) -> tuple[int, dict[str, str], bytes]:
+    headers = {name.lower(): value for name, value in response.headers.items() if name.lower() not in _VOLATILE_HEADERS}
+    return response.status_code, headers, response.content
+
+
+_NATIVE = {"user-agent": "codex_cli_rs/0.153.4 (Linux 6.8.0; x86_64) decline-golden", "originator": "codex_cli_rs"}
+_SDK = {"user-agent": "openai-python/1.99"}
+_PLAIN_INPUT: list[dict[str, object]] = [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+# Prior reasoning (subscription ciphertext) makes the transcript non-portable: ``not_portable_history``.
+_HISTORY_INPUT: list[dict[str, object]] = [
+    {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    {"type": "reasoning", "id": "rs_prior", "summary": [], "encrypted_content": "c2VjcmV0"},
+]
+
+
+@pytest.mark.asyncio
+async def test_declined_overflow_is_byte_identical_to_todays_429(async_client, source_upstream, monkeypatch):
+    """Decline golden (I5, §8.7): with a source designated and the pool exhausted, every declining request
+    answers exactly what it answered before the designation, and the source is never contacted.
+
+    Declines exercised at the route level: a background job outside the allowlist
+    (``x-openai-subagent: memory_consolidation``), a binding ``x-codex-turn-state``,
+    and an opportunistic API key. Only ``not_portable_history`` differs -- by the
+    promo header for native Codex and by the appended sentence for SDK clients --
+    and even then the rest of the answer is unchanged.
+    """
+    reset_at = await _exhaust_the_pool(async_client, tag="decline_golden")
+    attempts = _forbid_subscription_attempts(monkeypatch)
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    foreground = await async_client.post("/api/api-keys/", json={"name": "decline-golden-foreground"})
+    assert foreground.status_code == 200, foreground.text
+    opportunistic = await async_client.post(
+        "/api/api-keys/", json={"name": "decline-golden-opportunistic", "trafficClass": "opportunistic"}
+    )
+    assert opportunistic.status_code == 200, opportunistic.text
+    fg = {"authorization": f"Bearer {foreground.json()['key']}"}
+    op = {"authorization": f"Bearer {opportunistic.json()['key']}"}
+
+    def body(input_items: list[dict[str, object]]) -> dict[str, object]:
+        return {"model": _REGISTRY_SLUG, "instructions": "hi", "input": input_items, "stream": True}
+
+    cases: dict[str, tuple[str, dict[str, str], dict[str, object]]] = {
+        "background_job": (
+            "/backend-api/codex/responses",
+            {**_NATIVE, **fg, "thread-id": "thr_decline_bg", "x-openai-subagent": "memory_consolidation"},
+            body(_PLAIN_INPUT),
+        ),
+        "turn_state_bound": (
+            "/backend-api/codex/responses",
+            {**_NATIVE, **fg, "thread-id": "thr_decline_turn", "x-codex-turn-state": "upstream-bound-turn-state"},
+            body(_PLAIN_INPUT),
+        ),
+        "opportunistic": (
+            "/backend-api/codex/responses",
+            {**_NATIVE, **op, "thread-id": "thr_decline_opportunistic"},
+            body(_PLAIN_INPUT),
+        ),
+        "not_portable_history_native": (
+            "/backend-api/codex/responses",
+            {**_NATIVE, **fg, "thread-id": "thr_decline_history"},
+            body(_HISTORY_INPUT),
+        ),
+        "not_portable_history_sdk": ("/v1/responses", {**_SDK, **fg}, body(_HISTORY_INPUT)),
+    }
+
+    async def snapshot(case: str) -> tuple[int, dict[str, str], bytes]:
+        path, headers, payload = cases[case]
+        return _snapshot(await async_client.post(path, json=payload, headers=headers))
+
+    before = {case: await snapshot(case) for case in cases}
+    assert before["background_job"][0] == 429
+    assert json.loads(before["background_job"][2])["error"]["resets_at"] == reset_at
+    assert before["not_portable_history_native"][0] == 429
+    assert before["not_portable_history_sdk"][0] == 429
 
     hits: list[str] = []
 
     async def record(request: web.Request) -> web.StreamResponse:
         hits.append(request.path)
-        return web.json_response({"error": {"message": "source must never be contacted"}}, status=500)
+        return web.json_response({"error": {"message": "a declined request never reaches the source"}}, status=500)
 
     base_url = await source_upstream(record)
-    source_id = await _create_model_source(async_client, name="overflow-stub", base_url=base_url)
+    source_id = await _create_model_source(async_client, name="overflow-decline-golden", base_url=base_url)
     designated = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": source_id})
-    assert designated.status_code == 200
+    assert designated.status_code == 200, designated.text
 
-    subscription_attempts: list[str] = []
+    after = {case: await snapshot(case) for case in cases}
 
-    async def fail_fast_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        # Exhaustion must be decided before any upstream call; fail loudly
-        # instead of letting a mis-seeded pool hang on the unreachable upstream.
-        subscription_attempts.append(account_id)
-        raise ProxyResponseError(500, {"error": {"message": "unexpected subscription attempt"}})
-        yield  # pragma: no cover - async generator marker
+    for case in ("background_job", "turn_state_bound", "opportunistic"):
+        assert after[case] == before[case], case
 
-    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_fast_stream)
+    status, headers, content = after["not_portable_history_native"]
+    baseline_status, baseline_headers, baseline_content = before["not_portable_history_native"]
+    assert status == baseline_status == 429
+    assert content == baseline_content, "the native hint travels in a header; the body is today's byte for byte"
+    assert headers.pop(HINT_HEADER) == HINT_NATIVE_TEXT
+    assert headers == baseline_headers
 
-    payload = {"model": _REGISTRY_SLUG, "instructions": "hi", "input": [], "stream": True}
-    response = await async_client.post("/backend-api/codex/responses", json=payload)
-    assert subscription_attempts == [], "an exhausted pool must not attempt a subscription stream"
-    assert response.status_code == 429
-    error = response.json()["error"]
-    assert error["code"] == "usage_limit_reached"
-    assert error["type"] == "usage_limit_reached"
-    assert error["resets_at"] == reset_at
-    assert hits == [], "the designated source must not be contacted before WP-C2"
+    status, headers, content = after["not_portable_history_sdk"]
+    baseline_status, baseline_headers, baseline_content = before["not_portable_history_sdk"]
+    assert status == baseline_status == 429
+    assert HINT_HEADER not in headers
+    hinted, baseline = json.loads(content), json.loads(baseline_content)
+    baseline_message = baseline["error"].pop("message")
+    hinted_message = hinted["error"].pop("message")
+    assert hinted == baseline
+    assert hinted_message.startswith(baseline_message)
+    assert hinted_message.endswith(HINT_SDK_SENTENCE)
+    assert {name: value for name, value in headers.items() if name != "content-length"} == {
+        name: value for name, value in baseline_headers.items() if name != "content-length"
+    }
 
-    # The designation itself is untouched by request traffic.
+    assert hits == [], "a declined request must never reach the designated source"
+    assert attempts == [], "an exhausted pool must not attempt a subscription stream"
     settings = await _get_settings(async_client)
     assert settings["subscriptionOverflowSourceId"] == source_id
     assert settings["subscriptionOverflowDrainUntil"] is None

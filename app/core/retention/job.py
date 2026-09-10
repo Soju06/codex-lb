@@ -7,11 +7,18 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, func, select
 
 from app.core.config.settings_cache import get_settings_cache
+from app.core.metrics.prometheus import model_source_live_pins
 from app.core.utils.time import utcnow
 from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.usage_rollup import FOLD_LAG
-from app.modules.proxy.model_source_pins import ModelSourcePinRepository, drain_deadline_from_settings
+from app.modules.proxy.model_source_pins import (
+    PIN_KIND_ANCHOR,
+    PIN_KIND_BOUNCE,
+    PIN_KIND_THREAD,
+    ModelSourcePinRepository,
+    drain_deadline_from_settings,
+)
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 logger = logging.getLogger(__name__)
@@ -19,6 +26,10 @@ logger = logging.getLogger(__name__)
 # Rows deleted per transaction; a large backlog drains across many short
 # transactions instead of holding one long one.
 BATCH_SIZE = 10_000
+
+# Every ``kind`` label of ``codex_lb_model_source_live_pins`` is published on each
+# sample (``0`` when absent) so a kind that emptied never lingers at its last value.
+LIVE_PIN_KINDS: tuple[str, ...] = (PIN_KIND_THREAD, PIN_KIND_ANCHOR, PIN_KIND_BOUNCE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +61,8 @@ async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
 
     The request-log and usage-history windows are opt-in; the model-source pin
     purge is not (every pin row carries its own ``purge_at``, design §8.8), so
-    it runs on every pass whatever the windows say.
+    it runs on every pass whatever the windows say. The live-pin gauge is
+    sampled right after the purge on the same (leader-gated, hourly) tick.
     """
     retention = await get_effective_retention()
     now = now or utcnow()
@@ -63,6 +75,7 @@ async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
         deleted["usage_history"] = await _prune_usage_history(cutoff)
         deleted["additional_usage_history"] = await _prune_additional_usage_history(cutoff)
     deleted["model_source_pins"] = await prune_model_source_pins()
+    await sample_model_source_live_pins(now=now)
     total = sum(deleted.values())
     if total:
         logger.info(
@@ -97,6 +110,28 @@ async def prune_model_source_pins(*, batch_size: int = BATCH_SIZE) -> int:
             break
     await _warn_on_model_source_pin_drain_invariant()
     return total
+
+
+async def sample_model_source_live_pins(*, now: datetime) -> dict[str, int]:
+    """Publish ``codex_lb_model_source_live_pins{kind}`` from one ``COUNT ... GROUP BY kind``.
+
+    Rides the hourly retention tick instead of a dedicated task (owner decision
+    2026-09-09): the pass already runs leader-gated once an hour, so the gauge
+    is an hourly sample scraped from whichever replica holds the lease. Every
+    kind in ``LIVE_PIN_KINDS`` is published; a failure is logged and never
+    fails the pass. Returns the sample (empty on failure).
+    """
+    try:
+        async with get_background_session() as session:
+            counts = await ModelSourcePinRepository(session).count_live_by_kind(now=now)
+    except Exception:
+        logger.exception("Retention: model-source live-pin sample failed")
+        return {}
+    sample = {kind: counts.get(kind, 0) for kind in LIVE_PIN_KINDS}
+    if model_source_live_pins is not None:
+        for kind, count in sample.items():
+            model_source_live_pins.labels(kind=kind).set(count)
+    return sample
 
 
 async def _warn_on_model_source_pin_drain_invariant() -> None:

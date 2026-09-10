@@ -1087,7 +1087,7 @@ The balancer SHALL keep a replica-local window (600 s) of upstream outcomes per 
 
 ### Requirement: Resilience toggles follow the dashboard value
 
-Soft drain (the draining/probing health tiers), the deterministic failover decision and the circuit-breaker selection gate MUST be controlled by the `dashboard_settings` columns `soft_drain_enabled`, `deterministic_failover_enabled` and `circuit_breaker_enabled`. A NULL column MUST inherit the process environment value (the deprecated `CODEX_LB_*` alias) and then the code default, and a non-NULL column MUST win over both; the effective value MUST come from the single `configuration-tiers` resolver, and the settings API MUST report each toggle's effective value and provenance. Account selection MUST resolve the three toggles once from the dashboard-settings snapshot its caller obtained before entering runtime locks — the same snapshot that produced the concurrency caps — MUST apply that resolution to every reload of its selection inputs (sticky and non-sticky retries, exclusion- and security-filtered pools) and to opportunistic admission, and MUST NOT read the database, await the settings cache or read `get_settings().<toggle>` for them while holding a runtime lock or inside the retry loop. Force Probe settlement MUST take one snapshot before acquiring the account lock. A caller that supplies no snapshot (a code path outside a proxy request) MUST resolve the environment layer, which is the pre-dashboard behaviour. Changing a toggle in the dashboard MUST take effect on the next selection on every replica without a restart.
+Soft drain (the draining/probing health tiers), the deterministic failover decision and the circuit-breaker selection gate MUST be controlled by the `dashboard_settings` columns `soft_drain_enabled`, `deterministic_failover_enabled` and `circuit_breaker_enabled`. A NULL column MUST inherit the process environment value (the deprecated `CODEX_LB_*` alias) and then the code default, and a non-NULL column MUST win over both; the effective value MUST come from the single `configuration-tiers` resolver, and the settings API MUST report each toggle's effective value and provenance. Account selection MUST resolve the three toggles once from the dashboard-settings snapshot its caller obtained before entering runtime locks — the same snapshot that produced the concurrency caps — MUST apply that resolution to every reload of its selection inputs (sticky and non-sticky retries, exclusion- and security-filtered pools) and to opportunistic admission, and MUST NOT read the database, await the settings cache or read `get_settings().<toggle>` for them while holding a runtime lock or inside the retry loop. Force Probe settlement MUST take one snapshot before acquiring the account lock. The background state builds — the quota planner tick, the quota planner forecast endpoint and the usage-refresh recovery reconciliation — MUST resolve soft drain from one dashboard-settings snapshot taken per tick or per request outside any runtime lock (the settings cache, or the dashboard-settings row the usage-refresh cycle already read) and pass it into the state build, so the health tier they compute follows the dashboard toggle; they MUST NOT resolve the environment layer while a snapshot is available. Only a caller with no snapshot at all (tests, tools) resolves the environment layer, which is the pre-dashboard behaviour. Changing a toggle in the dashboard MUST take effect on the next selection on every replica without a restart.
 
 #### Scenario: Dashboard turns soft drain off
 
@@ -1095,6 +1095,13 @@ Soft drain (the draining/probing health tiers), the deterministic failover decis
 - **WHEN** the next selection evaluates an account whose primary usage is above the fixed drain threshold
 - **THEN** the account stays in the healthy tier instead of entering the draining tier
 - **AND** no database read or settings-cache await happened under the runtime lock
+
+#### Scenario: Background state builds follow the dashboard soft-drain value
+
+- **GIVEN** `CODEX_LB_SOFT_DRAIN_ENABLED` is unset (default on) and the dashboard stores `soft_drain_enabled = false`
+- **WHEN** the quota planner tick or forecast endpoint builds its account states, or the usage-refresh recovery evaluates a recoverable account
+- **THEN** the states are built with soft drain off, so an account above the fixed drain threshold stays in the healthy tier
+- **AND** the snapshot was taken once for that tick or request, outside any runtime lock
 
 #### Scenario: Dashboard turns deterministic failover off
 
@@ -1117,13 +1124,20 @@ Soft drain (the draining/probing health tiers), the deterministic failover decis
 
 ### Requirement: Routing weights and overload isolation are dashboard settings
 
-The in-flight pressure penalty (`proxy_account_inflight_penalty_pct`), the leased-token weight (`proxy_account_lease_token_weight`), the account lease TTL (`proxy_account_lease_ttl_seconds`), the overload isolation window (`proxy_overload_isolation_seconds`) and the error-rate weighting switch (`proxy_account_error_rate_weighting_enabled`) MUST be `dashboard_settings` columns of the same name, resolved as code default < environment < dashboard: a NULL column inherits the process environment value (or the code default), and a non-NULL column wins over the environment. The first-boot seed and the migration MUST leave the columns NULL. The settings API MUST expose each effective value with a `provenance` entry and accept the tri-state update (omitted = unchanged, `null` = inherit, value = store) with the bounds of the corresponding `Settings` field; the in-flight penalty MUST additionally be bounded at 100 on write (an inherited environment value above 100 MUST still be readable), and a dashboard lease TTL MUST satisfy the same `account-lease-ttl-covers-*` timeout invariants that startup validation applies to the environment value, evaluated against the effective request budgets. The load balancer MUST NOT read the process settings for these values on the request path: the proxy service MUST resolve them once per selection or lease operation from the cached dashboard snapshot it already holds for that operation (the snapshot the concurrency caps are derived from) and pass them into account selection, opportunistic admission and lease acquisition, and the balancer MUST thread that snapshot through every runtime-lock section of the operation without reading settings. A path that carries no request snapshot (the stream error funnel recording an overload rejection, an unkeyed bridge session reacquiring its lease) MUST reuse the balancer's most recent request snapshot rather than read settings; the environment applies only before the first request has been served. A changed value takes effect within the settings cache TTL without a restart, with these runtime semantics: a new isolation window applies to trips recorded after the change only — an account already isolated keeps its existing deadline, and storing `0` does not lift an active isolation; a new lease TTL applies at the next stale-lease reclaim pass to every existing lease (judged by its acquisition time). The environment variables remain as deprecated fallbacks for one release and are removed in the next minor.
+The in-flight pressure penalty (`proxy_account_inflight_penalty_pct`), the leased-token weight (`proxy_account_lease_token_weight`), the account lease TTL (`proxy_account_lease_ttl_seconds`), the overload isolation window (`proxy_overload_isolation_seconds`) and the error-rate weighting switch (`proxy_account_error_rate_weighting_enabled`) MUST be `dashboard_settings` columns of the same name, resolved as code default < environment < dashboard: a NULL column inherits the process environment value (or the code default), and a non-NULL column wins over the environment. The first-boot seed and the migration MUST leave the columns NULL. The settings API MUST expose each effective value with a `provenance` entry and accept the tri-state update (omitted = unchanged, `null` = inherit, value = store) with the bounds of the corresponding `Settings` field; the in-flight penalty MUST additionally be bounded at 100 on write (an inherited environment value above 100 MUST still be readable), and a dashboard lease TTL MUST satisfy the same `account-lease-ttl-covers-*` timeout invariants that startup validation applies to the environment value, evaluated against the effective request budgets. The load balancer MUST NOT read the process settings for these values on the request path: the proxy service MUST resolve them once per selection or lease operation from the cached dashboard snapshot it already holds for that operation (the snapshot the concurrency caps are derived from) and pass them into account selection, opportunistic admission and lease acquisition, and the balancer MUST thread that snapshot through every runtime-lock section of the operation without reading settings. A path that carries no request snapshot (the stream error funnel recording an overload rejection, an unkeyed bridge session reacquiring its lease) MUST reuse the balancer's most recent request snapshot rather than read settings; the environment applies only before the first request has been served. The background state builds (the quota planner tick and forecast endpoint, the usage-refresh recovery reconciliation) MUST resolve the knobs from the dashboard-settings snapshot they take once per tick or per request and pass them into the state build; only a caller with no snapshot at all (tests, tools) resolves the environment alone. A changed value takes effect within the settings cache TTL without a restart, with these runtime semantics: a new isolation window applies to trips recorded after the change only — an account already isolated keeps its existing deadline, and storing `0` does not lift an active isolation; a new lease TTL applies at the next stale-lease reclaim pass to every existing lease (judged by its acquisition time). The environment variables remain as deprecated fallbacks for one release and are removed in the next minor.
 
 #### Scenario: Dashboard value overrides startup environment
 
 - **GIVEN** the process environment sets `CODEX_LB_PROXY_ACCOUNT_INFLIGHT_PENALTY_PCT=2.5` and the dashboard stores `proxy_account_inflight_penalty_pct = 10`
 - **WHEN** account states are built for a selection
 - **THEN** each in-flight request adds 10 percentage points of pressure, not 2.5
+
+#### Scenario: Background state builds resolve the knobs from the dashboard snapshot
+
+- **GIVEN** the process environment leaves `proxy_account_inflight_penalty_pct` at 2.5 and the dashboard stores `proxy_account_inflight_penalty_pct = 37.5`
+- **WHEN** the quota planner tick or forecast endpoint builds its account states, or the usage-refresh recovery evaluates a recoverable account
+- **THEN** the state build receives the routing tunables resolved from the dashboard snapshot (in-flight penalty 37.5), not the environment value
+- **AND** no settings read happens under a runtime lock
 
 #### Scenario: Cleared dashboard value returns to the environment
 
@@ -1155,4 +1169,65 @@ The in-flight pressure penalty (`proxy_account_inflight_penalty_pct`), the lease
 
 - **WHEN** `PUT /api/settings` sends `proxyAccountInflightPenaltyPct: 150`, `proxyAccountLeaseTtlSeconds: 0`, or a lease TTL below the proxy or compact request budget (for example 120 with the default 600 s budget)
 - **THEN** the request is rejected with a validation error naming the violated invariant and the stored values are unchanged
+
+### Requirement: Code-less upstream HTTP 429 rejections enter a short replica-local burst cooldown
+
+When upstream answers a stream dispatch for a selected account with HTTP 429 whose error body carries no error code or type (normalized to `upstream_error`, classified `retryable_transient`), the proxy MUST, at the point where account health is written for that failure, record a replica-local per-account **burst cooldown** on the account's runtime state in addition to the existing transient error penalty. The cooldown deadline MUST be `now + clamp(retry_after, 5 s, 30 s)`, where `retry_after` is the upstream `Retry-After` value and a missing value applies 5 s; a rejection that arrives while a cooldown is already active MUST extend the deadline and MUST NOT shorten it. While the cooldown is active the account MUST be treated exactly as an account in overload soft backoff wherever a NEW account is chosen for a request — fresh (unbound) selection and the sticky path's fresh binding, reallocation, or fallback pick: it MUST be dropped from a candidate pool only while at least one other candidate remains, and when the configured strategy and budget gates select none of the remaining candidates, selection MUST run again over the full pool exactly as before. The cooldown MUST NOT engage the overload isolation stage, MUST NOT feed the overload rejection window, MUST NOT move an established sticky owner, a continuity owner, or a hard-affinity owner, MUST NOT write `RuntimeState.cooldown_until`, the persisted account status, `reset_at`, or `blocked_at`, MUST NOT change the failure classification or the status and body returned to the client, and MUST NOT be exposed as a new setting. A 429 that carries a rate-limit or quota code (`rate_limit_exceeded`, `usage_limit_reached`) MUST keep the existing rate-limit handling and MUST NOT engage the burst cooldown. The proxy MUST log a warning when the cooldown engages, naming the account under the configured redaction policy, the applied cooldown seconds, and the upstream `Retry-After` value.
+
+#### Scenario: Cooldown steers unbound selection while a sibling exists
+
+- **GIVEN** account A just returned a code-less HTTP 429 to a stream dispatch and account B is selectable
+- **WHEN** a fresh unbound request selects an account within 5 seconds of the rejection
+- **THEN** account B is selected
+- **AND** a request arriving after the cooldown deadline may select account A again without any success having been recorded
+
+#### Scenario: Single-candidate pool still serves
+
+- **GIVEN** account A is the only selectable account and is in burst cooldown
+- **WHEN** a fresh request selects an account
+- **THEN** account A is selected rather than failing with `No available accounts` or an account-cap error
+
+#### Scenario: Established sticky owner and hard continuity owners are kept
+
+- **GIVEN** account A is in burst cooldown and account B is selectable
+- **WHEN** a request whose `prompt_cache_key` already maps to account A, or a request hard-bound to account A by `previous_response_id`, a file pin, or turn-state ownership, selects an account
+- **THEN** account A serves the request
+- **AND** the mapping is not rebound to account B
+
+#### Scenario: Persisted status is untouched
+
+- **GIVEN** account A is `ACTIVE`
+- **WHEN** a code-less HTTP 429 engages the burst cooldown for account A
+- **THEN** the persisted status stays `ACTIVE` and `reset_at` and `blocked_at` are unchanged
+- **AND** `RuntimeState.cooldown_until` and the overload rejection window for account A are unchanged
+- **AND** a peer replica that has not observed the rejection may still select account A
+
+#### Scenario: Retry-After sets the floor, clamped to 30 seconds
+
+- **GIVEN** upstream answers with a code-less HTTP 429 carrying `Retry-After: 12`
+- **WHEN** the burst cooldown is recorded
+- **THEN** the cooldown lasts 12 seconds
+- **AND** a `Retry-After: 120` on a later rejection yields a 30-second cooldown, and a `Retry-After: 1` yields a 5-second cooldown
+
+#### Scenario: Coded 429 keeps the existing rate-limit handling
+
+- **GIVEN** upstream answers a stream dispatch with HTTP 429 whose body carries `rate_limit_exceeded` or `usage_limit_reached`
+- **WHEN** the proxy records account health
+- **THEN** the account is marked rate-limited or cooling down as before, with its persisted status and `reset_at` written by the existing rate-limit path
+- **AND** the burst cooldown is not engaged
+
+#### Scenario: Transient penalty is still recorded
+
+- **GIVEN** account A returns a code-less HTTP 429 and the request fails over or surfaces the failure
+- **WHEN** the proxy records account health
+- **THEN** the existing transient error penalty is recorded for account A exactly as before
+- **AND** the burst cooldown engages alongside it
+- **AND** a warning `Account burst backoff engaged` is logged with the applied seconds and the upstream `Retry-After` value
+
+#### Scenario: Keyed stream engages the cooldown at rejection time
+
+- **GIVEN** account A returns a code-less HTTP 429 to a stream on an API key whose usage reservation defers the health write until after settlement
+- **WHEN** the rejection is observed
+- **THEN** the burst cooldown for account A is engaged immediately, before the replacement dispatch or backoff wait
+- **AND** the deferred transient penalty, written after settlement, does not extend the cooldown deadline
 

@@ -707,6 +707,25 @@ The following values MUST be fixed at their previously documented defaults:
   drain threshold 90%, error window 60 seconds, error count 2, probe quiet
   window 60 seconds, probe success streak 3), fixed in
   `app/core/balancer/logic.py`.
+- The never-tuned core tunables constantized by `constantize-core-tunables`:
+  the upstream SSE event / websocket frame budget (16 MiB) and the derived
+  serialized `response.create` budget (15 MiB); the OAuth exchange timeout
+  (30 s), token-refresh exchange timeout (8 s), refresh-failure negative
+  cache (5 s) and the token-refresh claim TTL (`max(30 s, admission wait +
+  2 x refresh timeout)`, all in code); the admission wait (10 s) and the
+  token-refresh (64), upstream websocket connect (128) and compact
+  response-create (64) gates; the usage / reset-credits fetch timeout (10 s)
+  and retry budget (2), the usage refresh interval (60 s) with its derived
+  freshness horizon, the usage auth-failure cooldown (300 s) and the
+  reset-credits polling interval (60 s); the always-on switches for usage
+  refresh, live usage ingestion, sticky-session cleanup, the model registry
+  and the quota planner scheduler (the dashboard `quota_planner_settings.mode
+  = "off"` remains the only planner switch); the HTTP ingress body budgets
+  (32 MiB general, 128 MiB Responses); inline image fetching (always on, no
+  host allowlist); the public default image model (`gpt-image-2`); and
+  proxy-generated prompt-cache-key derivation (always on). There is no
+  separate upstream compact timeout: the dashboard compact request budget is
+  the only cap.
 
 The following values MUST be derived rather than configured:
 
@@ -728,9 +747,18 @@ environment alias (see `data-retention`).
 Incident-debugging trace logging SHALL be controlled by the single
 `CODEX_LB_TRACE` comma-separated channel list, whose empty default disables
 all trace channels. The Codex HTTP-bridge prewarm rollout scoping SHALL NOT
-be operator-configurable: prewarm eligibility MUST be the
-`CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` flag alone,
-with no canary sampling percent and no API-key allow/deny cohort lists.
+be operator-configurable: prewarm eligibility MUST be the single
+`http_responses_session_bridge_codex_prewarm_enabled` switch alone, with no
+canary sampling percent and no API-key allow/deny cohort lists. That switch
+MUST be a dashboard runtime setting (a nullable `dashboard_settings` column of
+the same name, NULL on the first-created row and never seeded from the
+environment) whose
+`CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` variable is a
+deprecated alias that applies only while the column is NULL and that joins the
+removed-settings warning list in the next minor release. The bridge MUST
+resolve the switch before it takes a session's prewarm lock, from the dashboard
+overrides the request entry point already bound, and MUST NOT add a settings
+read under that lock.
 `database_pool_size` and `database_max_overflow` MUST remain
 operator-configurable settings, and `soft_drain_enabled` and
 `deterministic_failover_enabled` MUST remain the failover subsystem's only
@@ -744,7 +772,8 @@ warning list in the next minor release.
 #### Scenario: Removed env vars are ignored with one startup warning
 
 - **GIVEN** a deployment whose environment still sets removed settings such
-  as `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and `CODEX_LB_WARMUP_MODEL`
+  as `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and
+  `CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS`
 - **WHEN** the application starts
 - **THEN** startup succeeds and the dashboard runtime values are used
 - **AND** exactly one warning log lists both removed names without their
@@ -849,18 +878,33 @@ warning list in the next minor release.
 
 #### Scenario: Prewarm stays off by default
 
-- **GIVEN** a default install with no prewarm variables set
+- **GIVEN** a default install with no prewarm variables set and the dashboard
+  prewarm switch unset (NULL)
 - **WHEN** Codex bridge requests are served
 - **THEN** no session prewarm is attempted and visible requests record
   `prewarm_status=not_applicable`
 
 #### Scenario: Prewarm eligibility is the enabled flag alone
 
-- **GIVEN** `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED=true`
+- **GIVEN** the Codex session prewarm switch is on, either in the dashboard or
+  through `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED=true`
+  while the dashboard value is unset
 - **WHEN** a first-turn Codex bridge request arrives on a session that has
   not been prewarmed
 - **THEN** the session prewarm is attempted for that request
 - **AND** no request is excluded by canary sampling or an allow/deny cohort
+
+#### Scenario: Prewarm env alias applies only until the dashboard sets a value
+
+- **GIVEN** `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED=true`
+  and a `dashboard_settings` row whose
+  `http_responses_session_bridge_codex_prewarm_enabled` column is NULL
+- **WHEN** an operator turns the Codex session prewarm off in the dashboard
+- **THEN** the next new Codex bridge session on every replica is served
+  without a prewarm and without a restart, and the settings API reports
+  `source: "dashboard"`
+- **AND** clearing the dashboard value returns to the environment alias
+  (`source: "env"`) until that alias is removed in the next minor release
 
 #### Scenario: Resilience toggle env aliases apply only until the dashboard sets a value
 
@@ -871,4 +915,21 @@ warning list in the next minor release.
   a restart, and the settings API reports `source: "dashboard"`
 - **AND** clearing the dashboard value returns to the environment alias
   (`source: "env"`) until that alias is removed in the next minor release
+
+### Requirement: Helm pre-1.13 controller-migration shim is retained through 1.26 and its removal is announced
+
+The Helm chart MUST keep rendering the pre-1.13 controller-migration shim (the `pre-upgrade` legacy-prepare hook, the `post-upgrade` legacy-cleanup hook, the lookup-based `auto` Service selector mode and the `migration.serviceSelectorMode` value) on every chart release up to and including the 1.26 minor. The chart README MUST document the upgrade path from chart versions older than 1.13.0: what each hook does, what `migration.serviceSelectorMode` controls (the rendered selector only; the cleanup hook cuts the live Service over regardless), how to verify the cutover using the chart fullname, and that the first upgrade from a pre-1.13 release is not zero-downtime because Helm removes the legacy Deployment during the resource sync before the post-upgrade hook runs. The README MUST state the planned removal (the first minor release after 1.26) and the intermediate-upgrade path for releases still on a pre-1.13 chart before the removal ships. Removing the shim MUST be its own OpenSpec change that supersedes this requirement.
+
+#### Scenario: Operator upgrades a release installed before chart 1.13.0
+
+- **GIVEN** a release installed from a chart older than 1.13.0 and any chart up to the 1.26 minor
+- **WHEN** the operator runs `helm upgrade`
+- **THEN** the chart renders the legacy-prepare and legacy-cleanup hooks and the `auto` selector mode
+- **AND** the chart README tells the operator to plan a maintenance window, how to verify the cutover, and what `migration.serviceSelectorMode` does and does not control
+
+#### Scenario: Operator reads the deprecation notice
+
+- **WHEN** an operator reads the chart README's `Upgrading` section
+- **THEN** it states that the shim is planned for removal in the first minor release after 1.26
+- **AND** it states that a release still on a pre-1.13 chart must first upgrade to a 1.13.0 - 1.26.x chart
 

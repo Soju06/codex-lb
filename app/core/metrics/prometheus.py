@@ -370,6 +370,12 @@ if PROMETHEUS_AVAILABLE:
         ["surface"],
         registry=REGISTRY,
     )
+    stream_terminal_delivery_total = Counter(
+        "codex_lb_stream_terminal_delivery_total",
+        "Downstream SSE terminal-frame delivery outcomes by surface",
+        ["surface", "outcome"],
+        registry=REGISTRY,
+    )
     cache_invalidation_bump_failures_total = Counter(
         "codex_lb_cache_invalidation_bump_failures_total",
         "Total cache invalidation version bumps that failed after retries",
@@ -425,6 +431,23 @@ if PROMETHEUS_AVAILABLE:
         "codex_lb_model_source_live_pins",
         "Live model-source pins by kind (sampled)",
         ["kind"],
+        registry=REGISTRY,
+        **({"multiprocess_mode": "liveall"} if MULTIPROCESS_MODE else {}),
+    )
+    # Subscription-exhaustion overflow (#2123 WP-C2, design §11). ``route`` and
+    # ``outcome`` are closed enums (``app.modules.proxy.overflow.OVERFLOW_OUTCOMES``);
+    # the breaker gauge is per replica worker (0 closed, 1 open, 2 half-open) and
+    # bounded by the number of configured sources.
+    subscription_overflow_total = Counter(
+        "codex_lb_subscription_overflow_total",
+        "Total subscription-exhaustion overflow decisions by route and outcome",
+        ["route", "outcome"],
+        registry=REGISTRY,
+    )
+    model_source_breaker_state = Gauge(
+        "codex_lb_model_source_breaker_state",
+        "Per-source overflow breaker state (0 closed, 1 open, 2 half-open)",
+        ["source_id"],
         registry=REGISTRY,
         **({"multiprocess_mode": "liveall"} if MULTIPROCESS_MODE else {}),
     )
@@ -508,6 +531,7 @@ else:
     event_loop_lag_warnings_total: CounterLike | None = None
     stream_keepalive_sent_total: CounterLike | None = None
     stream_idle_timeout_total: CounterLike | None = None
+    stream_terminal_delivery_total: CounterLike | None = None
     cache_invalidation_bump_failures_total: CounterLike | None = None
     cache_invalidation_poll_failures_total: CounterLike | None = None
     model_source_dispatch_total: CounterLike | None = None
@@ -517,6 +541,8 @@ else:
     model_source_bulkhead_in_flight: GaugeLike | None = None
     model_source_usage_estimated_total: CounterLike | None = None
     model_source_live_pins: GaugeLike | None = None
+    subscription_overflow_total: CounterLike | None = None
+    model_source_breaker_state: GaugeLike | None = None
     pool_exhaustion_probe_declined_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
@@ -571,10 +597,12 @@ __all__ = [
     "http_bridge_stuck_retire_total",
     "stream_keepalive_sent_total",
     "stream_idle_timeout_total",
+    "stream_terminal_delivery_total",
     "image_request_duration_seconds",
     "image_requests_total",
     "make_scrape_registry",
     "mark_process_dead",
+    "model_source_breaker_state",
     "model_source_bulkhead_in_flight",
     "model_source_bulkhead_rejections_total",
     "model_source_dispatch_abandoned_total",
@@ -590,6 +618,7 @@ __all__ = [
     "requests_total",
     "stream_pool_capacity",
     "stream_pool_inflight",
+    "subscription_overflow_total",
     "upstream_reasoning_replay_400_total",
     "upstream_request_duration_seconds",
     "upstream_requests_total",

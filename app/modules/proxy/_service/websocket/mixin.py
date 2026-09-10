@@ -457,6 +457,10 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_response_id,
     _wrapped_websocket_error_event,
 )
+from app.modules.proxy._service.websocket.overflow import (
+    bounce_exhausted_websocket_turn,
+    bounce_pinned_or_anchored_websocket_turn,
+)
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
@@ -697,11 +701,10 @@ def _archive_received_websocket_message(
 def _websocket_archive_request_state_for_payload(
     pending_requests: deque[_WebSocketRequestState],
     *,
-    event: OpenAIEvent | None,
+    response_id: str | None,
     payload: dict[str, JsonValue] | None,
     event_type: str | None,
 ) -> _WebSocketRequestState | None:
-    response_id = _websocket_response_id(event, payload)
     if event_type == "response.created":
         if response_id is not None:
             existing = _find_websocket_request_state_by_response_id(pending_requests, response_id)
@@ -762,6 +765,8 @@ class _ParsedUpstreamWebSocketFrame:
     payload: dict[str, JsonValue] | None
     event_type: str | None
     event: OpenAIEvent | None
+    response_id: str | None
+    sequence_number: int | None
 
 
 def _parse_upstream_websocket_text_frame(
@@ -785,21 +790,26 @@ def _parse_upstream_websocket_text_frame(
         and isinstance(native_payload, dict)
         and (native_event_type is None or isinstance(native_event_type, str))
     ):
-        event = parse_sse_event_payload(native_payload) if native_event_type in _LIFECYCLE_EVENT_TYPES else None
-        return _ParsedUpstreamWebSocketFrame(
-            payload=native_payload,
-            event_type=native_event_type,
-            event=event,
-        )
-
-    try:
-        raw_payload = json.loads(text)
-    except json.JSONDecodeError:
-        raw_payload = None
-    payload = cast(dict[str, JsonValue], raw_payload) if isinstance(raw_payload, dict) else None
-    event_type = classify_event_type(payload)
+        payload = native_payload
+        event_type = native_event_type
+        routing = getattr(message, "routing", None)
+    else:
+        try:
+            raw_payload = json.loads(text)
+        except json.JSONDecodeError:
+            raw_payload = None
+        payload = cast(dict[str, JsonValue], raw_payload) if isinstance(raw_payload, dict) else None
+        event_type = classify_event_type(payload)
+        routing = None
     event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
-    return _ParsedUpstreamWebSocketFrame(payload=payload, event_type=event_type, event=event)
+    sequence = routing.sequence_number if routing is not None else payload.get("sequence_number") if payload else None
+    return _ParsedUpstreamWebSocketFrame(
+        payload=payload,
+        event_type=event_type,
+        event=event,
+        response_id=_websocket_response_id(event, payload, routing=routing),
+        sequence_number=sequence if isinstance(sequence, int) and not isinstance(sequence, bool) else None,
+    )
 
 
 async def _websocket_archive_request_id_for_message(
@@ -825,7 +835,7 @@ async def _websocket_archive_request_id_for_message(
     async with pending_lock:
         request_state = _websocket_archive_request_state_for_payload(
             pending_requests,
-            event=frame.event,
+            response_id=frame.response_id,
             payload=frame.payload,
             event_type=frame.event_type,
         )
@@ -1871,6 +1881,15 @@ class _WebSocketMixin:
                                             request_state.previous_response_owner_account_id,
                                         ),
                                     )
+                                if await bounce_pinned_or_anchored_websocket_turn(
+                                    proxy,
+                                    websocket,
+                                    client_send_lock=client_send_lock,
+                                    api_key=request_state.api_key or api_key,
+                                    request_state=request_state,
+                                    headers=headers,
+                                ):
+                                    continue
                                 if (
                                     upstream is not None
                                     and account is not None
@@ -3712,6 +3731,7 @@ class _WebSocketMixin:
                     require_security_work_authorized=request_state.require_security_work_authorized,
                     require_preferred_account=require_preferred_account,
                     defer_no_account_error=last_failover_exc is not None and not require_preferred_account,
+                    headers=headers,
                 )
             except _WebSocketConnectFailureEmitted:
                 return None, None
@@ -3925,6 +3945,7 @@ class _WebSocketMixin:
         require_security_work_authorized: bool = False,
         require_preferred_account: bool = False,
         defer_no_account_error: bool = False,
+        headers: Mapping[str, str] | None = None,
     ) -> Account | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4132,6 +4153,15 @@ class _WebSocketMixin:
                 error_code="previous_response_owner_unavailable",
                 error_message=message,
             )
+            return None
+        if error_code == USAGE_LIMIT_REACHED and await bounce_exhausted_websocket_turn(
+            proxy,
+            websocket,
+            client_send_lock=client_send_lock,
+            api_key=api_key,
+            request_state=request_state,
+            headers=headers or {},
+        ):
             return None
         _facade().logger.warning(
             "Websocket account selection failed request_id=%s model=%s preferred_account_id=%s "
@@ -5426,7 +5456,7 @@ class _WebSocketMixin:
         payload = parsed_frame.payload
         event_type = parsed_frame.event_type
         event = parsed_frame.event
-        response_id = _websocket_response_id(event, payload)
+        response_id = parsed_frame.response_id
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
             isinstance(payload, dict)
@@ -5503,12 +5533,11 @@ class _WebSocketMixin:
                 replay_created_will_be_suppressed = (
                     event_type == "response.created" and request_state.suppress_next_created_downstream
                 )
-                sequence_number = payload.get("sequence_number") if payload is not None else None
+                sequence_number = parsed_frame.sequence_number
                 if (
                     request_state.replay_downstream_response_id is not None
                     and request_state.last_downstream_sequence_number is not None
-                    and isinstance(sequence_number, int)
-                    and not isinstance(sequence_number, bool)
+                    and sequence_number is not None
                     and sequence_number <= request_state.last_downstream_sequence_number
                     and not replay_created_will_be_suppressed
                 ):
@@ -5571,8 +5600,8 @@ class _WebSocketMixin:
                     if rewritten_payload is not payload:
                         payload = rewritten_payload
                         text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-                    sequence_number = payload.get("sequence_number")
-                    if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
+                    sequence_number = parsed_frame.sequence_number
+                    if sequence_number is not None:
                         upstream_control.downstream_sequence_request_state = request_state
                         upstream_control.downstream_sequence_number = sequence_number
             if (
@@ -5595,6 +5624,12 @@ class _WebSocketMixin:
                         "error",
                     },
                 )
+                if request_state is not None:
+                    # Upstream generation ends here; everything after (affinity
+                    # refresh, settlement, cleanup) is local and must not stretch
+                    # the throughput sample's span. A later terminal for the same
+                    # turn (retry / replay) replaces it; those rows are not sampled.
+                    request_state.upstream_terminal_at = clock.monotonic()
                 if request_state is None and (
                     is_previous_response_not_found_matching_event or is_missing_tool_output_event
                 ):
@@ -6393,6 +6428,22 @@ class _WebSocketMixin:
             request_state.terminal_settlement_phase = None
             return
 
+        # Throughput clock stop: the terminal frame's parse stamp when the reader
+        # set one, else now -- either way before the gate release, the API-key
+        # settlement and the deferred health writes below, so local DB
+        # contention is never counted as generation time.
+        upstream_terminal_at = request_state.upstream_terminal_at
+        if upstream_terminal_at is None:
+            upstream_terminal_at = clock_for(proxy).monotonic()
+        # First-token clock start: the TTFT cohort sample is measured from the
+        # ``response.create`` send, so bridge pre-send work (session lookup,
+        # reconnect, prewarm, image inlining, slimming) that ``started_at``
+        # precedes is never attributed to the account. A turn without a send
+        # stamp cannot anchor a sample and the funnel drops it.
+        upstream_sent_at = request_state.response_create_sent_at
+        latency_upstream_send_ms = (
+            None if upstream_sent_at is None else max(0, int((upstream_sent_at - request_state.started_at) * 1000))
+        )
         if request_state.latency_first_token_ms is None:
             ttft_visible_at = _finalize_ttft_reasoning_deltas(
                 request_state.ttft_reasoning_deltas, now=clock_for(proxy).monotonic()
@@ -6567,6 +6618,17 @@ class _WebSocketMixin:
                     latency_first_upstream_event_ms=request_state.latency_first_upstream_event_ms,
                     latency_response_create_gate_wait_ms=request_state.latency_response_create_gate_wait_ms,
                     latency_bridge_queue_wait_ms=request_state.latency_bridge_queue_wait_ms,
+                    latency_upstream_send_ms=latency_upstream_send_ms,
+                    latency_upstream_terminal_ms=max(0, int((upstream_terminal_at - request_state.started_at) * 1000)),
+                    # TTFT is measured from started_at, so a retried send, a
+                    # transparent direct-WebSocket replay (replay_count; the
+                    # bridge counts attempts instead) or a capacity wait leaves
+                    # the failed attempt inside it.
+                    upstream_retried=(
+                        request_state.response_create_attempt_count > 1
+                        or request_state.replay_count > 0
+                        or request_state.account_capacity_wait_started_at is not None
+                    ),
                     prewarm_status=request_state.prewarm_status,
                     prewarm_latency_ms=request_state.prewarm_latency_ms,
                     session_previous_gap_ms=request_state.session_previous_gap_ms,
@@ -6677,6 +6739,7 @@ class _WebSocketMixin:
         request_state: _WebSocketRequestState,
         error_code: str,
         error_message: str,
+        status: str = "error",
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -6689,7 +6752,7 @@ class _WebSocketMixin:
             archive_request_id=request_state.archive_request_id,
             model=request_state.model or "",
             latency_ms=int((clock_for(proxy).monotonic() - request_state.started_at) * 1000),
-            status="error",
+            status=status,
             error_code=error_code,
             error_message=error_message,
             failure_phase=request_state.failure_phase_override,
@@ -6734,7 +6797,7 @@ class _WebSocketMixin:
                 else "direct"
             ),
             sticky=request_state.affinity_policy.key is not None or request_state.previous_response_id is not None,
-            status="error",
+            status=status,
         )
 
     async def _emit_websocket_connect_failure(

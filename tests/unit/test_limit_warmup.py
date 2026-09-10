@@ -102,7 +102,10 @@ class FakeWarmupRepo:
         attempted_at,
         status: str = "pending",
         reset_at_tolerance_seconds: int = 0,
+        require_no_prior_attempt: bool = False,
     ) -> AccountLimitWarmup | None:
+        if require_no_prior_attempt and any(row.account_id == account_id for row in self.rows):
+            return None
         if any(
             row.account_id == account_id
             and row.window == window
@@ -140,6 +143,13 @@ class FakeWarmupRepo:
         row.error_code = error_code
         row.error_message = error_message
         return row
+
+
+class LosingInitialClaimWarmupRepo(FakeWarmupRepo):
+    async def try_create_attempt(self, **kwargs: Any) -> AccountLimitWarmup | None:
+        if kwargs.get("require_no_prior_attempt"):
+            return None
+        return await super().try_create_attempt(**kwargs)
 
 
 class FailingCompletionWarmupRepo(FakeWarmupRepo):
@@ -1111,6 +1121,280 @@ async def test_monthly_free_quota_reset_warms_and_records_monthly_window() -> No
 
 
 @pytest.mark.asyncio
+async def test_unused_already_free_quota_warms_on_first_eligible_refresh() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+    refresh_started_at = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc).replace(tzinfo=None)
+    monthly_reset_at = int(refresh_started_at.replace(tzinfo=timezone.utc).timestamp()) + 43_200 * 60
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="secondary"),
+        before_primary={},
+        before_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=monthly_reset_at,
+                window="monthly",
+                recorded_at=refresh_started_at - timedelta(minutes=1),
+            )
+        },
+        after_primary={},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=monthly_reset_at,
+                window="monthly",
+                recorded_at=refresh_started_at,
+            )
+        },
+        previous_plan_types={account.id: "free"},
+        refresh_started_at=refresh_started_at,
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("monthly", monthly_reset_at, "succeeded")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sample_age_seconds", "used_percent", "prior_attempt", "previous_plan_type"),
+    [
+        (-1, 0.0, False, "free"),
+        (0, 1.0, False, "free"),
+        (0, 0.0, True, "free"),
+        (0, 0.0, False, None),
+    ],
+    ids=["stale-sample", "partially-used", "prior-attempt", "unknown-prior-plan"],
+)
+async def test_initial_free_quota_candidate_rejects_unsafe_evidence(
+    sample_age_seconds: int,
+    used_percent: float,
+    prior_attempt: bool,
+    previous_plan_type: str | None,
+) -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+    refresh_started_at = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc).replace(tzinfo=None)
+    monthly_reset_at = int(refresh_started_at.replace(tzinfo=timezone.utc).timestamp()) + 43_200 * 60
+    if prior_attempt:
+        await repo.try_create_attempt(
+            account_id=account.id,
+            window="primary",
+            reset_at=monthly_reset_at - 1,
+            model="gpt-5.1-codex-mini",
+            attempted_at=refresh_started_at - timedelta(days=1),
+        )
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="secondary"),
+        before_primary={},
+        before_secondary={},
+        after_primary={},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=used_percent,
+                reset_at=monthly_reset_at,
+                window="monthly",
+                recorded_at=refresh_started_at + timedelta(seconds=sample_age_seconds),
+            )
+        },
+        previous_plan_types={account.id: previous_plan_type},
+        refresh_started_at=refresh_started_at,
+    )
+
+    assert sender.calls == []
+    assert len(repo.rows) == int(prior_attempt)
+
+
+@pytest.mark.asyncio
+async def test_initial_free_quota_warmup_does_not_repeat_when_reset_at_slides() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+    first_refresh_at = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc).replace(tzinfo=None)
+    first_reset_at = int(first_refresh_at.replace(tzinfo=timezone.utc).timestamp()) + 43_200 * 60
+    first_sample = _usage(
+        account.id,
+        used_percent=0,
+        reset_at=first_reset_at,
+        window="monthly",
+        recorded_at=first_refresh_at,
+    )
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="secondary"),
+        before_primary={},
+        before_secondary={},
+        after_primary={},
+        after_secondary={account.id: first_sample},
+        previous_plan_types={account.id: "free"},
+        refresh_started_at=first_refresh_at,
+    )
+
+    second_refresh_at = first_refresh_at + timedelta(minutes=1)
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="secondary"),
+        before_primary={},
+        before_secondary={account.id: first_sample},
+        after_primary={},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=first_reset_at + 60,
+                window="monthly",
+                recorded_at=second_refresh_at,
+            )
+        },
+        previous_plan_types={account.id: "free"},
+        refresh_started_at=second_refresh_at,
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at) for row in repo.rows] == [("monthly", first_reset_at)]
+
+
+@pytest.mark.asyncio
+async def test_primary_attempt_created_in_same_refresh_closes_initial_free_quota_path() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+    refresh_started_at = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc).replace(tzinfo=None)
+    monthly_reset_at = int(refresh_started_at.replace(tzinfo=timezone.utc).timestamp()) + 43_200 * 60
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="both"),
+        before_primary={account.id: _usage(account.id, used_percent=100, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=monthly_reset_at,
+                window="monthly",
+                recorded_at=refresh_started_at,
+            )
+        },
+        previous_plan_types={account.id: "free"},
+        refresh_started_at=refresh_started_at,
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 2000, "succeeded")]
+
+
+@pytest.mark.asyncio
+async def test_skipped_primary_attempt_created_in_same_refresh_closes_initial_free_quota_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.modules.limit_warmup.service.get_model_registry",
+        lambda: SimpleNamespace(get_models_with_fallback=lambda: {}),
+    )
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+    refresh_started_at = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc).replace(tzinfo=None)
+    monthly_reset_at = int(refresh_started_at.replace(tzinfo=timezone.utc).timestamp()) + 43_200 * 60
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="both", limit_warmup_model="auto"),
+        before_primary={account.id: _usage(account.id, used_percent=100, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=monthly_reset_at,
+                window="monthly",
+                recorded_at=refresh_started_at,
+            )
+        },
+        previous_plan_types={account.id: "free"},
+        refresh_started_at=refresh_started_at,
+    )
+
+    assert sender.calls == []
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 2000, "skipped")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_available", [True, False], ids=["priced-model", "model-unavailable"])
+async def test_lost_initial_free_claim_stops_before_staggered_idle_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+    model_available: bool,
+) -> None:
+    refresh_started_at = datetime.fromtimestamp(30, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: refresh_started_at)
+    if not model_available:
+        monkeypatch.setattr(
+            "app.modules.limit_warmup.service.get_model_registry",
+            lambda: SimpleNamespace(get_models_with_fallback=lambda: {}),
+        )
+    repo = LosingInitialClaimWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_windows="secondary",
+            limit_warmup_model="gpt-5.1-codex-mini" if model_available else "auto",
+            limit_warmup_staggered_idle_enabled=True,
+        ),
+        before_primary={},
+        before_secondary={},
+        after_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=18_000,
+                recorded_at=refresh_started_at,
+            )
+        },
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=2_592_060,
+                window="monthly",
+                recorded_at=refresh_started_at,
+            )
+        },
+        previous_plan_types={account.id: "free"},
+        refresh_started_at=refresh_started_at,
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
 async def test_confirmed_paid_to_free_transition_warms_fresh_monthly_window() -> None:
     repo = FakeWarmupRepo()
     sender = FakeSender()
@@ -1147,14 +1431,12 @@ async def test_confirmed_paid_to_free_transition_warms_fresh_monthly_window() ->
 @pytest.mark.parametrize(
     ("previous_plan_type", "current_plan_type", "sample_age_seconds", "used_percent", "minimum_available"),
     [
-        ("free", "free", 0, 0.0, 100.0),
         ("plus", "plus", 0, 0.0, 100.0),
         ("plus", "free", -1, 0.0, 100.0),
         ("plus", "free", 0, 2.0, 99.0),
         ("plus", "free", 0, 100.0, 100.0),
     ],
     ids=[
-        "already-free",
         "unconfirmed",
         "stale-monthly",
         "below-availability-gate",

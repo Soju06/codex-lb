@@ -51,21 +51,6 @@ Live snapshot writes SHALL be throttled per account by a change fingerprint and 
 - **WHEN** a snapshot's used percentage or reset timestamp differs from the last persisted values
 - **THEN** the write is not deferred by the unchanged-write interval
 
-### Requirement: Live ingestion is decoupled and switchable
-
-The core client layer SHALL publish snapshots through a hub that no-ops until the module layer registers an ingestor at startup. Ingestion SHALL be enabled by default and disableable via `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED`.
-
-#### Scenario: Kill switch disables ingestion
-
-- **WHEN** `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` is false
-- **THEN** proxied responses do not produce usage writes
-- **AND** the background poller remains the only usage source
-
-#### Scenario: Unregistered hub is inert
-
-- **WHEN** snapshots are published before an ingestor is registered
-- **THEN** they are discarded without error
-
 ### Requirement: Captured live snapshots survive account consolidation
 
 The proxy MUST enqueue both the serving local account id and the upstream
@@ -229,4 +214,19 @@ leave it registered-less while it still runs.
   restoration tracking before its shutdown started)
 - **WHEN** the current registration stops concurrently
 - **THEN** A is never restored, even if its consumer task has not yet finished
+
+### Requirement: Live ingestion is decoupled and always on
+
+The core client layer SHALL publish snapshots through a hub that no-ops until the module layer registers an ingestor at startup. The module layer SHALL register the ingestor unconditionally at startup; there is no operator switch for live ingestion, and `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` is a removed setting that startup reports and ignores.
+
+#### Scenario: Removed kill switch is ignored
+
+- **WHEN** the process starts with `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED=false`
+- **THEN** the ingestor is still registered and proxied responses produce usage writes
+- **AND** startup logs the removed-setting warning once
+
+#### Scenario: Unregistered hub is inert
+
+- **WHEN** snapshots are published before an ingestor is registered
+- **THEN** they are discarded without error
 

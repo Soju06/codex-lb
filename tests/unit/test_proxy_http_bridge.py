@@ -23720,7 +23720,7 @@ async def test_failed_creator_retains_marker_until_created_session_cleanup(
     key = proxy_service._HTTPBridgeSessionKey("prompt_cache_key", "sid-cleanup-retention", None)
     created_session = _make_bridge_session(key=key, key_value=key.affinity_key)
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(http_bridge_mixin_module, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     create_calls = 0
     create_started = asyncio.Event()
     claim_started = asyncio.Event()
@@ -23766,7 +23766,7 @@ async def test_failed_creator_retains_marker_until_created_session_cleanup(
             request_model="gpt-5.4",
             idle_ttl_seconds=120.0,
             max_sessions=8,
-            request_deadline=time.monotonic() + 1.0,
+            request_deadline=http_bridge_helpers_module.clock_for(service).monotonic() + 1.0,
         )
 
     owner_task = asyncio.create_task(get_session())
@@ -24067,7 +24067,7 @@ async def test_generated_turn_state_inflight_timeout_skips_owner_observation(
     setattr(inflight_future, http_bridge_helpers_module._HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, owner_task)
     service._http_bridge_inflight_sessions[synthesized_key] = inflight_future
     settings = _make_app_settings()
-    settings.proxy_admission_wait_timeout_seconds = 0.01
+    monkeypatch.setattr(http_bridge_mixin_module, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     wait_for_owner = AsyncMock(return_value=True)
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
@@ -24599,7 +24599,13 @@ async def test_capacity_waiter_waits_for_retained_failed_owner_before_retry(
     setattr(retained_future, http_bridge_helpers_module._HTTP_BRIDGE_INFLIGHT_OWNER_TASK_ATTR, owner_task)
     service._http_bridge_inflight_sessions[owner_key] = retained_future
 
-    settings = _make_app_settings(proxy_admission_wait_timeout_seconds=0.2)
+    admission_wait_timeout_seconds = 0.2
+    settings = _make_app_settings()
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_proxy_admission_wait_timeout_seconds",
+        lambda: admission_wait_timeout_seconds,
+    )
     create_http_bridge_session = AsyncMock(return_value=replacement)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
@@ -24662,7 +24668,13 @@ async def test_capacity_waiter_passes_request_deadline_to_retained_failed_owner_
     )
     service._http_bridge_inflight_sessions[owner_key] = retained_future
 
-    settings = _make_app_settings(proxy_admission_wait_timeout_seconds=0.2)
+    admission_wait_timeout_seconds = 0.2
+    settings = _make_app_settings()
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_proxy_admission_wait_timeout_seconds",
+        lambda: admission_wait_timeout_seconds,
+    )
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
@@ -24696,7 +24708,7 @@ async def test_capacity_waiter_passes_request_deadline_to_retained_failed_owner_
     cleanup.assert_awaited_once_with(
         service,
         retained_future,
-        timeout=pytest.approx(settings.proxy_admission_wait_timeout_seconds),
+        timeout=pytest.approx(admission_wait_timeout_seconds),
         request_deadline=pytest.approx(request_deadline),
     )
 
@@ -25236,7 +25248,12 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-late-owner", None)
     settings = _make_app_settings()
-    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
+    monkeypatch.setattr(http_bridge_mixin_module, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_wait_for_http_bridge_aborted_owner_within_budget",
+        AsyncMock(return_value=False),
+    )
     created = _make_bridge_session(key_value="sid-late-owner")
     created.key = key
     create_started = asyncio.Event()
@@ -25244,7 +25261,10 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
 
     async def create_session(*_: object, **__: object) -> proxy_service._HTTPBridgeSession:
         create_started.set()
-        await finish_create.wait()
+        try:
+            await finish_create.wait()
+        except asyncio.CancelledError:
+            await finish_create.wait()
         return created
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
@@ -25273,6 +25293,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
             request_model="gpt-5.4",
             idle_ttl_seconds=120.0,
             max_sessions=8,
+            request_deadline=http_bridge_helpers_module.clock_for(service).monotonic() + 1.0,
         )
 
     owner_task = asyncio.create_task(get_session())
@@ -25284,7 +25305,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
 
     assert waiter_exc_info.value.status_code == 429
     assert waiter_exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
-    assert key not in service._http_bridge_inflight_sessions
+    assert service._http_bridge_inflight_sessions[key].done()
 
     finish_create.set()
     with pytest.raises(ProxyResponseError) as owner_exc_info:
@@ -25292,6 +25313,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
 
     assert owner_exc_info.value.status_code == 429
     assert owner_exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
+    assert key not in service._http_bridge_inflight_sessions
     assert key not in service._http_bridge_sessions
     close_http_bridge_session.assert_awaited_once_with(created, release_durable_session=True)
 
@@ -38510,8 +38532,8 @@ async def test_inflight_waiter_retries_after_aborted_owner_finalizes(
         assert owner_cancelled.is_set()
         return replacement
 
-    settings = _make_app_settings(proxy_admission_wait_timeout_seconds=0.01)
-    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
+    settings = _make_app_settings()
+    monkeypatch.setattr(http_bridge_mixin_module, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
@@ -38580,7 +38602,8 @@ async def test_capacity_waiter_retries_after_aborted_owner_finalizes(
         assert key == waiter_key
         return replacement
 
-    settings = _make_app_settings(proxy_admission_wait_timeout_seconds=0.01)
+    settings = _make_app_settings()
+    monkeypatch.setattr(http_bridge_mixin_module, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
@@ -38648,7 +38671,8 @@ async def test_inflight_waiter_returns_429_when_aborted_owner_resists_cancellati
             await release_owner.wait()
         return created
 
-    settings = _make_app_settings(proxy_admission_wait_timeout_seconds=0.01)
+    settings = _make_app_settings()
+    monkeypatch.setattr(http_bridge_mixin_module, "_proxy_admission_wait_timeout_seconds", lambda: 0.01)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())

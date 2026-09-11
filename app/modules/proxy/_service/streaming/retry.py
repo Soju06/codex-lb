@@ -2379,6 +2379,10 @@ class _StreamingRetryMixin:
                                     )
                                 return
                             if isinstance(tex, ProxyResponseError) and tex.status_code != 500:
+                                if tex.status_code == 401:
+                                    # The outer auth handler owns refresh and
+                                    # settlement-before-health after its retry.
+                                    raise
                                 error = _parse_openai_error(tex.payload)
                                 code = _normalize_error_code(
                                     error.code if error else None,

@@ -55860,8 +55860,8 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_retries_same
     assert "phase=post_refresh retry=1/3 delay=1.00s" in caplog.text
     assert scheduler.sleeps == [1.0]
     assert service._load_balancer._runtime[account.id].burst_backoff_until is not None
-    # Only the 401 wrote health; the burst retry engaged the cooldown alone.
-    assert [call.kwargs.get("http_status") for call in handle_stream_error.await_args_list] == [401]
+    # Refresh recovered the 401; the burst retry engaged the cooldown alone.
+    handle_stream_error.assert_not_awaited()
     cast(AsyncMock, service._load_balancer.record_success).assert_awaited_once_with(account)
 
 

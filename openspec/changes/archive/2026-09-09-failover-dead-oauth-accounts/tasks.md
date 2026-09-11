@@ -20,3 +20,9 @@
 - [x] 4.1 Map terminal `token_revoked` Images errors to HTTP 401 independently of the upstream error type.
 - [x] 4.2 Cover generation and edit HTTP envelopes on canonical and Codex-base routes for `response.failed` and `error` events without an authentication type.
 - [x] 4.3 Verify the updated branch after merging current main and sync the requirements.
+
+## 5. Proxy-route review follow-up
+
+- [x] 5.1 Cover a Responses request whose forced refresh succeeds but whose same-account retry still returns `token_revoked`, including failover, persisted reauthentication status, and reservation settlement before health writes.
+- [x] 5.2 Cover WebSocket `error` and `response.failed` revoked-token frames without an authentication type, including same-request replay ownership and accepted-response-ID no-replay guards.
+- [x] 5.3 Run focused route regressions, lint, type checks, and strict OpenSpec validation.

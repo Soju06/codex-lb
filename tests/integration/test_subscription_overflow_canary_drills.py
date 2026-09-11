@@ -884,11 +884,11 @@ async def test_drill_clear_then_touch_expires_at_day_seven(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("switch", "pinned_status", "clears_designation"),
+    ("switch", "pinned_status", "clears_designation", "fresh_outcome", "pinned_outcome"),
     [
-        ("off", 200, True),
-        ("disable-source", 400, False),
-        ("delete-source", 400, True),
+        ("off", 200, True, "declined_drain_mode", "dispatched_pinned"),
+        ("disable-source", 400, False, "declined_no_source", "pinned_unservable_source_disabled"),
+        ("delete-source", 400, True, "declined_drain_mode", "pinned_unservable_source_deleted"),
     ],
 )
 async def test_drill_kill_switches_restore_subscription_behaviour(
@@ -898,6 +898,8 @@ async def test_drill_kill_switches_restore_subscription_behaviour(
     switch: str,
     pinned_status: int,
     clears_designation: bool,
+    fresh_outcome: str,
+    pinned_outcome: str,
 ) -> None:
     """Runbook row **Kill switches**: Off, then disable, then delete the source.
 
@@ -906,14 +908,19 @@ async def test_drill_kill_switches_restore_subscription_behaviour(
     decision module stubbed out and against the committed golden literal --
     with no hint header and no ``Retry-After``. A pinned reasoning-bearing
     conversation never reaches a subscription account either way: while the
-    drain is armed its source keeps serving it, and once the source is gone it
-    ends with ``400``.
+    drain is armed its source keeps serving it -- which is what the row means
+    by "pinned conversations drain", asserted here as the served turn, its
+    ``subscription_overflow_pinned`` row, the ``dispatched_pinned`` outcome and
+    the surviving pin rows, still the source's and still inside the idle TTL --
+    and once the source is gone it ends with ``400`` and keeps its pin.
     """
 
     attempts = _forbid_subscription_stream(monkeypatch)
+    outcomes = _spy_overflow_outcomes(monkeypatch)
     scene = await _exhausted_scene(async_client, source_upstream, tag=f"drill_switch_{switch[:6]}")
     pinned_thread = f"thr_drill_switch_{switch}"
-    await _write_pin(thread_pin_key(_thread_key(pinned_thread)), kind=PIN_KIND_THREAD, source_id=scene.source_id)
+    pinned_key = thread_pin_key(_thread_key(pinned_thread))
+    await _write_pin(pinned_key, kind=PIN_KIND_THREAD, source_id=scene.source_id)
 
     if switch == "off":
         await _designate(async_client, None)
@@ -963,9 +970,35 @@ async def test_drill_kill_switches_restore_subscription_behaviour(
     await _drain(async_client)
 
     assert pinned.status_code == pinned_status, pinned.text
-    if pinned_status == 400:
-        assert _error(pinned)["code"] == SOURCE_UNAVAILABLE_CODE
     assert attempts == [], "a reasoning-bearing pinned conversation never lands on an account"
+    assert outcomes == [
+        (ROUTE_CODEX_RESPONSES, fresh_outcome),
+        (ROUTE_CODEX_RESPONSES, pinned_outcome),
+    ]
+    rows = [(row.status, row.source, row.error_code) for row in await _all_rows()]
+    # The ``_twice`` pair: two rows of today's decline, with no source
+    # attribution on either -- a declined request is not an overflow attempt.
+    assert rows[:2] == [("error", None, "usage_limit_reached")] * 2
+    pins = {row.pin_key: row for row in await _pin_rows()}
+    if pinned_status == 200:
+        # "Pinned conversations drain for <= 7 days": the source served the
+        # turn, the row says which source kind it was, the pin (and the anchor
+        # the served turn minted) survived the switch still pointing at that
+        # source, and neither is live beyond the idle TTL.
+        assert rows[2:] == [("success", REQUEST_LOG_SOURCE_PINNED, None)]
+        assert set(pins) == {pinned_key, anchor_pin_key(None, "resp_dispatch_1")}
+        assert {row.source_id for row in pins.values()} == {scene.source_id}
+        now = _aware(utcnow())
+        for row in pins.values():
+            assert now < _aware(row.expires_at) <= now + PIN_IDLE_TTL, (row.pin_key, row.expires_at)
+    else:
+        assert _error(pinned)["code"] == SOURCE_UNAVAILABLE_CODE
+        # A refusal is not a release: the conversation stays the source's, and
+        # a turn that never reached an upstream writes no request-log row.
+        assert rows[2:] == []
+        assert set(pins) == {pinned_key}
+        assert pins[pinned_key].source_id == scene.source_id
+    assert get_source_bulkhead().in_flight(scene.source_id) == 0
 
 
 @pytest.mark.asyncio

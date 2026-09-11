@@ -16,7 +16,7 @@ pytestmark = pytest.mark.integration
 _AFFINITY = "20260910_180000_merge_affinity_guest_heads"
 _IDENTITY = "20260909_030000_add_audit_actor_columns"
 _HEAD = "20260910_200000_merge_affinity_identity_heads"
-_CURRENT = "20260910_220000_merge_affinity_invite_heads"
+_CURRENT = "20260911_040000_merge_affinity_model_source_pin_heads"
 _COLUMNS = ("sticky_key_source", "sticky_kind", "sticky_key_hash")
 _AUTH_TABLES = ("dashboard_roles", "dashboard_role_grants", "dashboard_users", "dashboard_identities")
 

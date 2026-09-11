@@ -20,7 +20,7 @@ from tests.integration.test_affinity_identity_migration import (
 pytestmark = pytest.mark.integration
 _AFFINITY = "20260910_200000_merge_affinity_identity_heads"
 _INVITES = "20260909_040000_add_dashboard_user_invites"
-_HEAD = "20260910_220000_merge_affinity_invite_heads"
+_HEAD = "20260911_040000_merge_affinity_model_source_pin_heads"
 _TABLES = ("accounts", "request_logs", "api_keys", "dashboard_settings", "audit_logs", "dashboard_user_invites")
 
 

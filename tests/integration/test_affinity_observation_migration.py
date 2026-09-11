@@ -15,7 +15,7 @@ _PARENT = "20260910_010000_dashboard_spool_retention"
 _REVISION = "20260910_143000_request_log_affinity"
 _GUEST = "20260908_000000_add_guest_session_generation"
 _MERGE = "20260910_180000_merge_affinity_guest_heads"
-_HEAD = "20260910_220000_merge_affinity_invite_heads"
+_HEAD = "20260911_040000_merge_affinity_model_source_pin_heads"
 _COLUMNS = ("sticky_key_source", "sticky_kind", "sticky_key_hash")
 
 

@@ -468,10 +468,13 @@ class AccountDeletionScheduler:
         # wake set here is sticky: whatever the loop is doing, its next wait
         # returns at once and the loop exits on the gate instead of parking for
         # another ``interval_seconds``. ``cancel()`` alone is not enough — a
-        # tick body can absorb it (``run_if_leader`` swallows a
-        # ``CancelledError`` that lands while it awaits its already-cancelled
-        # heartbeat in its ``finally``), and a swallowed cancel would otherwise
-        # hold shutdown for the full interval, well past the drain budget.
+        # tick body can absorb it. The tick's own session teardown does: when
+        # its ``SELECT`` fails, ``get_background_session`` runs
+        # ``_safe_rollback`` on this frame, and that helper discards a
+        # ``CancelledError`` landing inside it (dropped outright by the bounded
+        # SQLite wait, re-raised into ``except BaseException: return`` on the
+        # unbounded one). A swallowed cancel would otherwise hold shutdown for
+        # the full interval, well past the drain budget.
         self._wake.set()
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

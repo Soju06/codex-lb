@@ -2,11 +2,13 @@
 
 The loop's idle wait is ``DELETION_INTERVAL_SECONDS`` long, so ``stop()`` has
 to end it on the same event-loop turn. Cancellation alone does not guarantee
-that: ``LeaderElection.run_if_leader`` swallows a ``CancelledError`` that lands
-while it awaits its already-cancelled heartbeat in its ``finally``
-(``except asyncio.CancelledError: pass``), and a swallowed cancel used to leave
-the loop parked for a whole interval — longer than the shutdown drain budget
-and than the owned launcher's lifespan-cleanup bound.
+that: the tick's own session teardown swallows it. When the tick's ``SELECT``
+fails, ``get_background_session`` runs ``_safe_rollback`` on the loop's frame,
+and that helper discards a ``CancelledError`` landing inside it — dropped
+outright by the bounded SQLite teardown wait, re-raised into
+``except BaseException: return`` on the unbounded one. A swallowed cancel used
+to leave the loop parked for a whole interval — longer than the shutdown drain
+budget and than the owned launcher's lifespan-cleanup bound.
 """
 
 from __future__ import annotations

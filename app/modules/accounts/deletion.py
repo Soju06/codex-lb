@@ -463,6 +463,16 @@ class AccountDeletionScheduler:
         if not self._task:
             return
         self._stop.set()
+        # Release the interval wait without depending on cancellation delivery.
+        # The loop only clears ``_wake`` AFTER passing the ``_stop`` gate, so a
+        # wake set here is sticky: whatever the loop is doing, its next wait
+        # returns at once and the loop exits on the gate instead of parking for
+        # another ``interval_seconds``. ``cancel()`` alone is not enough — a
+        # tick body can absorb it (``run_if_leader`` swallows a
+        # ``CancelledError`` that lands while it awaits its already-cancelled
+        # heartbeat in its ``finally``), and a swallowed cancel would otherwise
+        # hold shutdown for the full interval, well past the drain budget.
+        self._wake.set()
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._task

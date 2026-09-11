@@ -31,6 +31,33 @@ The residual exposure is therefore bounded at **one duplicated generation per
 operation for the whole of its retention**, and the owner accepted that in
 exchange for conversations that survive account loss.
 
+## What the production numbers changed about this design
+
+The 7-day measurement in the proposal was run to answer one question: is the
+ambiguous class large enough to be worth its fences, or is it a tail case that
+carries most of the risk for a sliver of the benefit? It is not a tail case —
+993 distinct conversations against 367 for the definitive class.
+
+Two details from that measurement changed the spec rather than just confirming
+it.
+
+First, `upstream_operation_status_unknown` fired zero times in the window. The
+bounded 503 is real code, but it lives on the HTTP bridge submit path, and the
+ambiguous eventless failures that actually happen in production surface on the
+streaming path as `stream_incomplete`. So "a refused claim terminates with the
+existing 503" was only true for one transport. The requirement now says a
+refused claim terminates through whatever fail-closed outcome its own transport
+already produces, and forbids the two wrong answers: a second dispatch, or
+reporting the refusal as pool exhaustion.
+
+Second, the definitive class concentrates about five dead turns onto each
+affected conversation while the ambiguous class averages under two and a half.
+That asymmetry is the client retry loop: a thread whose anchor is owned by a
+gone account fails identically on every retry, so the same conversation
+generates a 502 over and over. It is a useful signal for verification — if the
+definitive lane works, the turns-per-conversation ratio for that error code
+should collapse toward one before the absolute count does.
+
 ## Why the zero-event precondition is the real fence
 
 The claim budget stops *concurrent* duplicates. The zero-event check stops the

@@ -40,14 +40,8 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
 from app.core.errors import synthetic_stream_failure_event as response_failed_event
-from app.core.openai.parsing import (
-    _LIFECYCLE_EVENT_TYPES,
-    classify_event_type,
-    parse_sse_event_payload,
-)
-from app.core.openai.requests import (
-    ResponsesRequest,
-)
+from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, classify_event_type, parse_sse_event_payload
+from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -403,6 +397,7 @@ from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
     _sticky_key_from_session_header,  # noqa: F401
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -481,6 +476,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         request_id: str,
         allow_retry: bool,
         *,
+        affinity_observation: AffinityObservation | None = None,
         request_started_at: float,
         allow_transient_retry: bool = False,
         api_key: ApiKeyData | None,
@@ -1049,6 +1045,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.error_code = error_code
             settlement.error_message = error_message
             await proxy._write_request_log(
+                affinity_observation=affinity_observation,
                 account_id=account_id_value,
                 api_key=api_key,
                 request_id=response_id,

@@ -4,7 +4,9 @@
 Define the OpenAI-compatible Images API adapter that exposes public `gpt-image-*`
 requests while routing through the existing Responses `image_generation` tool
 pipeline.
+
 ## Requirements
+
 ### Requirement: OpenAI-compatible image generation endpoint
 
 The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Images API request shape (`model`, `prompt`, `n`, `size`, `quality`, `background`, `output_format`, `output_compression`, `moderation`, `partial_images`, `stream`, `user`). The endpoint MUST require `model` to start with `gpt-image-` and MUST treat `gpt-image-2` as the default if unspecified; the default is the fixed constant `DEFAULT_PUBLIC_IMAGE_MODEL` in `app/core/openai/images.py` and MUST NOT be operator-configurable. The endpoint MUST NOT expose the internal "host" Responses model used to invoke the built-in `image_generation` tool.
@@ -283,3 +285,18 @@ Non-streaming image generation and edit routes, including their Codex-base alias
 - **THEN** the canonical and Codex-base routes return HTTP 401
 - **AND** the JSON error envelope preserves `token_revoked` and the upstream
   message even when the collector defaults the error type to `server_error`
+
+### Requirement: Internal host selection
+Images generation and edit routes MUST select the first candidate with nonempty registry plan visibility and no suppression, ordered as `gpt-5.6-luna`, `gpt-5.5`. If none qualifies, they MUST use `gpt-5.6-luna`. Public image model IDs MUST remain unchanged.
+
+#### Scenario: Cold registry prefers the current host
+- **WHEN** the registry uses the bootstrap catalog
+- **THEN** the internal model is `gpt-5.6-luna`
+
+#### Scenario: Preferred model unavailable in registry
+- **WHEN** only `gpt-5.5` has registry plan visibility without suppression
+- **THEN** the internal model is `gpt-5.5`
+
+#### Scenario: No candidate qualifies
+- **WHEN** neither candidate has plan visibility without suppression
+- **THEN** the selected host is `gpt-5.6-luna` and existing downstream error handling applies

@@ -104,3 +104,12 @@ collector's error envelope.
    `/backend-api/codex/images/generations` or
    `/backend-api/codex/images/edits`; codex-lb handles the request through the
    existing Images compatibility pipeline.
+
+## Internal host compatibility
+
+Images and default account probes prefer `gpt-5.6-luna`, then `gpt-5.5`,
+using registry plan visibility and suppression. With neither candidate available,
+they default to Luna. For example, a stale catalog still advertising both now
+selects Luna rather than the withdrawn host reported in #2134. Visibility does
+not establish account entitlement. Existing errors are preserved; no host retry
+is performed. Public image models and explicit account-probe models are unchanged.

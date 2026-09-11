@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+import app.core.config.spool_retention as spool_retention_module
 import app.modules.sticky_sessions.cleanup_scheduler as cleanup_scheduler
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
@@ -33,6 +34,27 @@ class _FakeLeader:
 
     async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
         return await fn()
+
+
+def _spool_retention_settings_repo(retention_seconds: float = 604800.0) -> AsyncMock:
+    """``SettingsRepository`` double whose row carries only the retention window."""
+    repo = AsyncMock()
+    repo.get_or_create = AsyncMock(return_value=_spool_retention_row(retention_seconds))
+    return repo
+
+
+def _spool_retention_row(retention_seconds: float = 604800.0) -> DashboardSettings:
+    """Minimal ``dashboard_settings`` snapshot for the operation retention pass.
+
+    ``_run_operation_retention`` resolves its window from the row the pass
+    already loaded (R2 spool retention), so the unit tests hand it one.
+    """
+    return cast(
+        DashboardSettings,
+        SimpleNamespace(
+            http_responses_session_bridge_operation_spool_retention_seconds=retention_seconds,
+        ),
+    )
 
 
 def _purge_batch(
@@ -271,7 +293,7 @@ async def test_operation_retention_cleanup_failure_is_observable(monkeypatch) ->
 
     with (
         patch.object(cleanup_scheduler, "get_background_session", FakeSession),
-        patch.object(cleanup_scheduler, "SettingsRepository"),
+        patch.object(cleanup_scheduler, "SettingsRepository", return_value=_spool_retention_settings_repo()),
         patch.object(cleanup_scheduler, "StickySessionsRepository"),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
         patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
@@ -305,6 +327,24 @@ async def test_operation_retention_cleanup_failure_is_observable(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_operation_retention_cutoff_follows_the_dashboard_window(monkeypatch) -> None:
+    """R2 spool retention: the dashboard column wins over the deprecated env alias."""
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_operation_spool_batch = AsyncMock(return_value=_purge_batch(0))
+    monkeypatch.setattr(
+        spool_retention_module,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_operation_spool_retention_seconds=604800.0),
+    )
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
+
+    await scheduler._run_operation_retention(bridge_repo, _spool_retention_row(7200.0))
+
+    cutoff = bridge_repo.purge_operation_spool_batch.call_args.kwargs["cutoff"]
+    assert abs((utcnow() - timedelta(seconds=7200.0) - cutoff).total_seconds()) < 5.0
+
+
+@pytest.mark.asyncio
 async def test_operation_retention_failure_log_omits_exception_detail(monkeypatch, caplog) -> None:
     bridge_repo = AsyncMock()
     bridge_repo.purge_operation_spool_batch = AsyncMock(
@@ -318,7 +358,7 @@ async def test_operation_retention_failure_log_omits_exception_detail(monkeypatc
     scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
 
     with caplog.at_level("INFO", logger=cleanup_scheduler.__name__):
-        backlog_likely = await scheduler._run_operation_retention(bridge_repo)
+        backlog_likely = await scheduler._run_operation_retention(bridge_repo, _spool_retention_row())
 
     assert backlog_likely is True
     assert scheduler._operation_retention_attempt_failed is True
@@ -342,7 +382,7 @@ async def test_operation_retention_noop_logs_aggregate_without_prometheus(monkey
     scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
 
     with caplog.at_level("INFO", logger=cleanup_scheduler.__name__):
-        backlog_likely = await scheduler._run_operation_retention(bridge_repo)
+        backlog_likely = await scheduler._run_operation_retention(bridge_repo, _spool_retention_row())
 
     assert backlog_likely is False
     assert "deleted_operations=0 batches=1 outcome=completed" in caplog.text
@@ -367,7 +407,7 @@ async def test_operation_retention_noop_avoids_duplicate_log_with_prometheus(mon
     scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
 
     with caplog.at_level("INFO", logger=cleanup_scheduler.__name__):
-        backlog_likely = await scheduler._run_operation_retention(bridge_repo)
+        backlog_likely = await scheduler._run_operation_retention(bridge_repo, _spool_retention_row())
 
     assert backlog_likely is False
     assert "HTTP bridge operation transcript retention" not in caplog.text
@@ -390,7 +430,7 @@ async def test_operation_retention_noop_logs_aggregate_when_metrics_disabled(mon
     scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
 
     with caplog.at_level("INFO", logger=cleanup_scheduler.__name__):
-        backlog_likely = await scheduler._run_operation_retention(bridge_repo)
+        backlog_likely = await scheduler._run_operation_retention(bridge_repo, _spool_retention_row())
 
     assert backlog_likely is False
     assert "deleted_operations=0 batches=1 outcome=completed" in caplog.text
@@ -421,7 +461,7 @@ async def test_full_cleanup_cancellation_records_partial_result_and_preserves_ba
     leader = LeaseLossLeader()
 
     async def cancelled_retention(self) -> bool | None:
-        return await self._run_operation_retention(AsyncMock())
+        return await self._run_operation_retention(AsyncMock(), _spool_retention_row())
 
     monkeypatch.setattr(
         cleanup_scheduler,
@@ -495,6 +535,9 @@ async def test_full_cleanup_lease_loss_during_session_teardown_preserves_confirm
     monkeypatch.setattr(cleanup_scheduler, "_get_leader_election", lambda: leader)
     monkeypatch.setattr(cleanup_scheduler, "get_background_session", SessionThatBlocksOnExit)
     monkeypatch.setattr(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True)
+    # R2 spool retention: the retention pass resolves its window from the
+    # dashboard row this pass loads.
+    monkeypatch.setattr(cleanup_scheduler, "SettingsRepository", lambda _session: _spool_retention_settings_repo())
     monkeypatch.setattr(
         cleanup_scheduler,
         "get_settings",
@@ -567,7 +610,7 @@ async def test_operation_retention_partial_failure_keeps_backlog_retry(monkeypat
     )
     scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
 
-    backlog_likely = await scheduler._run_operation_retention(AsyncMock())
+    backlog_likely = await scheduler._run_operation_retention(AsyncMock(), _spool_retention_row())
 
     assert backlog_likely is True
     assert scheduler._operation_retention_attempt_failed is True
@@ -577,6 +620,9 @@ async def test_operation_retention_partial_failure_keeps_backlog_retry(monkeypat
 async def test_operation_retention_catchup_does_not_run_other_maintenance(monkeypatch) -> None:
     bridge_repo = AsyncMock()
     run_retention = AsyncMock(return_value=False)
+    dashboard_settings = _spool_retention_row()
+    settings_repo = AsyncMock()
+    settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
 
     class FakeSession:
         async def __aenter__(self):
@@ -589,7 +635,7 @@ async def test_operation_retention_catchup_does_not_run_other_maintenance(monkey
     with (
         patch.object(cleanup_scheduler, "get_background_session", FakeSession),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
-        patch.object(cleanup_scheduler, "SettingsRepository") as settings_repository,
+        patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
         patch.object(cleanup_scheduler, "StickySessionsRepository") as sticky_repository,
         patch.object(cleanup_scheduler, "RingMembershipService") as ring_membership_service,
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
@@ -602,8 +648,10 @@ async def test_operation_retention_catchup_does_not_run_other_maintenance(monkey
         backlog_likely = await scheduler._cleanup_operation_retention_as_leader()
 
     assert backlog_likely is False
-    run_retention.assert_awaited_once_with(bridge_repo)
-    settings_repository.assert_not_called()
+    # R2 spool retention: the catch-up pass reads the dashboard row for its
+    # retention window, and nothing else -- no sticky, bridge-session or ring
+    # maintenance is accelerated.
+    run_retention.assert_awaited_once_with(bridge_repo, dashboard_settings)
     sticky_repository.assert_not_called()
     ring_membership_service.assert_not_called()
 
@@ -932,7 +980,7 @@ async def test_cleanup_once_gates_abandoned_purge_on_prompt_cache_reuse_ttl(monk
 
 @pytest.mark.asyncio
 async def test_cleanup_once_retains_operation_purge_when_sticky_cleanup_disabled(monkeypatch) -> None:
-    settings_repo = AsyncMock()
+    settings_repo = _spool_retention_settings_repo()
     sticky_repo = AsyncMock()
     bridge_repo = AsyncMock()
     bridge_repo.purge_operation_spool_batch = AsyncMock(return_value=_purge_batch(0))
@@ -961,7 +1009,10 @@ async def test_cleanup_once_retains_operation_purge_when_sticky_cleanup_disabled
     ):
         await scheduler._cleanup_once()
 
-    settings_repo.get_or_create.assert_not_awaited()
+    # R2 spool retention: the dashboard row is read for the retention window
+    # even with sticky-mapping cleanup disabled; no sticky or bridge-session
+    # maintenance runs.
+    settings_repo.get_or_create.assert_awaited_once()
     sticky_repo.purge_prompt_cache_before.assert_not_awaited()
     bridge_repo.purge_closed_before.assert_not_awaited()
     bridge_repo.purge_operation_spool_batch.assert_awaited_once()

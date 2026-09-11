@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends, Query
 
+from app.core.auth.dashboard_access import Permission
 from app.core.auth.dependencies import (
+    require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
@@ -31,7 +33,11 @@ router = APIRouter(
 )
 
 
-@router.get("", response_model=StickySessionsListResponse)
+@router.get(
+    "",
+    response_model=StickySessionsListResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def list_sticky_sessions(
     kind: StickySessionKind | None = Query(default=None),
     stale_only: bool = Query(default=False, alias="staleOnly"),

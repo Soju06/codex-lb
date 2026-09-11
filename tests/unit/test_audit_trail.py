@@ -105,8 +105,8 @@ async def test_audit_log_async_is_fire_and_forget(monkeypatch: pytest.MonkeyPatc
     started = asyncio.Event()
     allow_write_finish = asyncio.Event()
 
-    async def slow_write(action: str, actor_ip: str | None, details: dict | None, request_id: str | None) -> None:
-        _ = (action, actor_ip, details, request_id)
+    async def slow_write(event: audit_service_module.AuditEvent) -> None:
+        _ = event
         started.set()
         await allow_write_finish.wait()
 
@@ -166,8 +166,8 @@ async def test_audit_log_task_failure_is_consumed_and_cleaned_up(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def fail_write(action: str, actor_ip: str | None, details: dict | None, request_id: str | None) -> None:
-        _ = (action, actor_ip, details, request_id)
+    async def fail_write(event: audit_service_module.AuditEvent) -> None:
+        _ = event
         raise RuntimeError("unexpected audit failure")
 
     monkeypatch.setattr(audit_service_module, "_write_audit_log", fail_write)
@@ -188,8 +188,8 @@ async def test_audit_log_drain_reports_overdue_task(
     started = asyncio.Event()
     allow_write_finish = asyncio.Event()
 
-    async def blocked_write(action: str, actor_ip: str | None, details: dict | None, request_id: str | None) -> None:
-        _ = (action, actor_ip, details, request_id)
+    async def blocked_write(event: audit_service_module.AuditEvent) -> None:
+        _ = event
         started.set()
         await allow_write_finish.wait()
 

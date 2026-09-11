@@ -5,11 +5,20 @@ Until now the drills existed only as prose: a seven-row table in
 ``add-subscription-overflow-model-source`` spec delta. An operator ran them by
 hand against a canary deployment and compared what they saw with a sentence.
 This module is the same list, executable: one ``test_drill_*`` per table row,
-each asserting the **union** the row promises -- the wire answer, the
-``request_logs`` row, the API-key reservation, the ``model_source_pins`` rows,
-the bulkhead and breaker state and the counter label -- so a regression in any
-one of them fails a test instead of surviving until someone re-runs the
-runbook.
+each asserting what **that row** promises rather than a fixed checklist -- the
+wire answer every time (its exact message where the row states one; for
+Disconnect, that nothing reached the client at all), and then whichever of the
+``request_logs`` rows, the ``model_source_pins`` rows, the outcome label, the
+API-key reservation, the source bulkhead and the breaker state the row is
+actually about. No drill asserts all six: one that runs without an API key has
+no reservation to check, Disconnect and Silent headers pin the counters their
+own rows are about (the abandonment ``stage``, the timeout ``phase``) rather
+than the outcome label, and only Stall is a row about the breaker. Padding the
+rest with vacuous assertions would say less, not more. ``docs/routing.md``
+states the same rule beside the table, and names the two clauses of the Kill
+switches row its own drill does not cover: the cross-replica settings-cache
+window (manual, it needs a second replica) and the release half, which is the
+Neutral release drill's subject on a disabled source.
 
 What it is and is not (design v3 §13.4): these are in-process ASGI tests
 against a stub aiohttp source and the test database. ``make
@@ -33,9 +42,9 @@ call time -- which is exactly the string the runbook tells the operator to
 expect, asserted verbatim while the test runs in fractions of a second.
 
 Overlap with the narrower suites (``test_subscription_overflow_routing.py``'s
-abandonment and release tests, the forwarding deadline suite, #2354's anchor
-tests) is deliberate: those pin one mechanism each, and none asserts the union
-a drill row promises.
+abandonment and release tests, the forwarding deadline suite, the retention
+suite's pin purge, #2354's anchor tests) is deliberate: those pin one mechanism
+each, and none of them asserts one drill row's outcomes together.
 """
 
 from __future__ import annotations

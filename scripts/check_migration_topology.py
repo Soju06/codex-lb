@@ -308,7 +308,7 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
         )
         report.error(
             f"alembic_timestamp_prefix_collision prefix={prefix} count={len(group)}: {described}. "
-            f"Two revisions took the same timestamp slot, which means they were authored in parallel: "
+            f"{len(group)} revisions took the same timestamp slot, which means they were authored in parallel: "
             f"{consequence}. Re-stamp the newer revision with a fresh <YYYYMMDD>_<HHMMSS> "
             "(scripts/rewrite_alembic_revisions.py) and re-point its down_revision at the current head."
         )

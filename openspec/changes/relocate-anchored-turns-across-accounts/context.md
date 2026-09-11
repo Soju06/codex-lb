@@ -7,9 +7,10 @@ identifier names a response object owned by the account that produced it, so it
 cannot be presented to a different account. Relocation is the proxy rebuilding
 the conversation itself — from the request body and terminal response it already
 spooled for every parent turn — and dispatching it as an anchor-free request.
-The client sees a slower turn instead of a dead thread. It is not a transport
-concern: the same decision applies to direct HTTP streaming, the downstream
-WebSocket and the HTTP session bridge.
+The client sees a slower turn instead of a dead thread. The *decision* is
+transport-independent and this change gives it one home; the *material* is not,
+and today only the HTTP session bridge records it (see "The coverage this change
+does not have").
 
 ## What the two evidence classes actually cost
 
@@ -21,11 +22,17 @@ to consume — a failed rebuild simply rolls back.
 **② ambiguous.** The frame left and the connection died before any event. The
 turn may have run. Re-dispatching can therefore cost a second generation of the
 same turn: duplicate model tokens, and duplicate execution of any upstream-hosted
-tool such as web search. It does **not** cost duplicate client-side tool
-execution, for two independent reasons: relocation is refused once any output is
-downstream-visible, and the relocated dispatch carries the origin operation's
-side-effect replay-dedupe identity, so a repeated side-effecting call is
-suppressed with the dedicated terminal failure rather than executed.
+tool such as web search.
+
+It does **not** cost duplicate client-side tool execution, for two reasons that
+do not hold equally. The first is unconditional: relocation is refused once any
+output is downstream-visible, so a tool call the client already executed cannot
+be re-emitted by a relocation. The second is conditional: the relocated dispatch
+carries the origin operation's side-effect replay-dedupe identity, so a repeated
+side-effecting call is suppressed with the dedicated terminal failure — but that
+dedupe is wired only on the HTTP session bridge. That asymmetry is why the fenced
+lane is restricted to transports that implement it rather than being offered
+everywhere with a weaker guarantee.
 
 The residual exposure is therefore bounded at **one duplicated generation per
 operation for the whole of its retention**, and the owner accepted that in
@@ -57,6 +64,31 @@ gone account fails identically on every retry, so the same conversation
 generates a 502 over and over. It is a useful signal for verification — if the
 definitive lane works, the turns-per-conversation ratio for that error code
 should collapse toward one before the absolute count does.
+
+## The coverage this change does not have
+
+`DurableBridgeRepository.record_operation` has exactly one caller,
+`app/modules/proxy/_service/http_bridge/request_submit.py`. The WebSocket path
+imports `DurableBridgeLookup` for owner resolution and one frame-rewriting
+helper from the bridge module, and records nothing. So a downstream-WebSocket
+turn has no stored request body, no event spool and no parent link — there is
+no transcript to rebuild and no operation to claim.
+
+That matters because the deaths are mostly there: of the measured dead turns,
+2,151 definitive and 1,768 ambiguous were downstream-WebSocket, against 30 and
+622 on the HTTP path. The mechanism in this change is correct and the spool it
+reads is healthy where it is written (33,920 operations, all with a stored
+request body, 96.6% with a complete event spool) — it simply does not reach the
+larger lane.
+
+This is stated in the requirements rather than left implicit: a transport
+without durable material must report an absent transcript and keep today's
+behaviour, and a transport without the side-effect dedupe contract must not take
+the fenced lane at all. Extending either to the WebSocket path is its own piece
+of work with its own failure modes, not a variation on this one.
+
+The honest reading of this change is: it fixes the bridge lane, and it makes the
+shape of the WebSocket fix obvious.
 
 ## Why the zero-event precondition is the real fence
 

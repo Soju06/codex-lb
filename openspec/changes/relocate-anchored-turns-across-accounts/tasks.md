@@ -1,8 +1,14 @@
-- [ ] **Blocker, resolve first**: PR #2366 (`retire-recovery-dispatch-storage`)
-  deletes `claim_unknown_operation_for_recovery`, the `recovery_dispatch_count`
-  ORM mapping and the `expected_recovery_dispatch_count` CAS predicates as
-  callerless. This change is the caller. Close #2366 or re-scope it before
-  implementing the fenced lane.
+- [x] Resolve the fence-retirement collision. #2366 merged and was reverted by
+  #2383, so `claim_unknown_operation_for_recovery` and the
+  `expected_recovery_dispatch_count` CAS predicates are back on `main`. Keep the
+  dependency recorded so the retirement is not reattempted.
+- [ ] Gate every relocation lane on the transport actually having the material
+  it needs. `record_operation` has exactly one caller
+  (`_service/http_bridge/request_submit.py`), so only bridge turns have a
+  durable chain, and the side-effect dedupe is wired only there too. A transport
+  without durable material must report an absent transcript and keep today's
+  behaviour; a transport without the dedupe contract must not take the fenced
+  lane. Add the negative tests for both.
 - [ ] New pure module `app/modules/proxy/replay_relocation.py`:
   `RelocationInputs` / `RelocationVerdict` / `decide_relocation`. Decline order:
   downstream-visible output, then ownership facts (`single_account`, file pin,
@@ -11,8 +17,10 @@
   `responses_payload_is_account_neutral_fresh_replay`. Closed vocabulary for
   `decline_reason`. No lenient fallback projection.
 - [ ] `app/modules/proxy/replay_safety.py`: add the pure transcript rebuild —
-  parent-chain assembly oldest-last, prefix-overlap dedupe against the client
-  suffix, terminal-output extraction from the spooled SSE with the
+  parent-chain assembly oldest first (the order the repository returns), prefix-overlap dedupe against the client
+  suffix — compare items AFTER the account-neutral projection, not before, or
+  the spool's item ids and reasoning items make identical turns compare unequal
+  and the conversation is doubled — terminal-output extraction from the spooled SSE with the
   `response.output_item.done` fallback when `response.incomplete` omits
   `response.output`. Keep the module free of persistence imports by accepting
   transcript turns structurally. Use one overlap routine, not two.
@@ -34,8 +42,9 @@
   identity on the relocated dispatch; restore the claim via
   `mark_operation_unknown(restore_recovery_dispatch_claim=True)` on
   post-claim/pre-frame failure and `rollback_operation_before_dispatch` when
-  nothing was written; keep the refused-claim
-  `upstream_operation_status_unknown` 503 with its cooldown hint.
+  nothing was written; on a refused claim terminate through the transport's own
+  existing fail-closed outcome (the bridge's `upstream_operation_status_unknown`
+  503 with its cooldown hint) without a second dispatch.
 - [ ] Unfenced lane (case ①): definitive evidence rolls back rather than claims;
   assert in tests that it never decrements the recovery budget.
 - [ ] Constants, not settings: the relocation transcript caps, the ambiguity
@@ -62,5 +71,8 @@
   `get_replayable_transcript` returns `None` after a reset.
 - [ ] `tests/unit/test_proxy_errors.py`: restore the classification cases the
   #2336 archive removed, in the new shape.
+- [ ] Fix the chain-order statement everywhere it is repeated: the repository
+  returns turns oldest first (`turns.reverse()` before return), and any test
+  name or comment saying "oldest last" is wrong even where the code is right.
 - [ ] `openspec validate --specs`, `uv run ruff check`,
   `codex review --base origin/main`.

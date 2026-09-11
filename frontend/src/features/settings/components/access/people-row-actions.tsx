@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
+import { AlertMessage } from "@/components/alert-message";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -29,11 +30,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { DashboardRole, DashboardUser } from "@/features/access/api";
 import type { useAccessMutations } from "@/features/access/hooks";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import type { IssuedLink } from "@/features/settings/components/access/invite-dialog";
+import { RoleSelectItems } from "@/features/settings/components/access/role-picker";
 
 // The migrated `admin` account keeps its role and status and cannot be deleted
 // in this release (`409 compat_user_locked`); its TOTP can only be reset while
@@ -75,6 +77,8 @@ export function PeopleRowActions({
   const name = user.displayName ?? user.username;
   const assignable = roles.filter((role) => assignableRoleIds.includes(role.id));
   const isCompat = user.username === COMPAT_ADMIN_USERNAME;
+  // The company login owns this role; changing it pins the account to manual.
+  const managedExternally = user.roleSource !== "manual";
   const locked = isSelf || isCompat;
 
   const run = (promise: Promise<unknown>, successKey: string) =>
@@ -84,8 +88,9 @@ export function PeopleRowActions({
 
   const items: MenuItem[] = [];
   if (user.status === "invited") {
-    items.push(
-      {
+    // An SSO-only account has no link: nothing to resend.
+    if (!user.pendingInvite?.ssoOnly) {
+      items.push({
         key: "resend",
         label: t("access.people.actions.copyNewLink"),
         onSelect: () =>
@@ -93,7 +98,9 @@ export function PeopleRowActions({
             .mutateAsync(user.id)
             .then((invite) => onIssued({ invite, username: null }))
             .catch(() => undefined),
-      },
+      });
+    }
+    items.push(
       {
         key: "revoke",
         label: t("access.people.actions.revokeInvite"),
@@ -105,7 +112,9 @@ export function PeopleRowActions({
     if (!locked) {
       items.push({
         key: "role",
-        label: t("access.people.actions.changeRole"),
+        label: managedExternally
+          ? t("access.people.actions.takeOverRole")
+          : t("access.people.actions.changeRole"),
         onSelect: () => {
           setRoleId(user.role.id);
           setDialog("role");
@@ -173,16 +182,15 @@ export function PeopleRowActions({
             <DialogTitle>{t("access.people.changeRole.title")}</DialogTitle>
             <DialogDescription>{t("access.people.changeRole.description", { name })}</DialogDescription>
           </DialogHeader>
+          {managedExternally ? (
+            <AlertMessage variant="warning">{t("access.people.changeRole.takeOverWarning")}</AlertMessage>
+          ) : null}
           <Select value={roleId} onValueChange={setRoleId}>
             <SelectTrigger aria-label={t("access.invite.roleLabel")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {assignable.map((role) => (
-                <SelectItem key={role.id} value={role.id}>
-                  {role.name}
-                </SelectItem>
-              ))}
+              <RoleSelectItems roles={assignable} />
             </SelectContent>
           </Select>
           <DialogFooter>
@@ -195,12 +203,18 @@ export function PeopleRowActions({
               onClick={() => {
                 setDialog(null);
                 run(
-                  mutations.updateUser.mutateAsync({ userId: user.id, payload: { roleId } }),
+                  mutations.updateUser.mutateAsync({
+                    userId: user.id,
+                    // Confirming here IS the take-over the server asks for.
+                    payload: managedExternally ? { roleId, force: true } : { roleId },
+                  }),
                   "access.people.toasts.roleChanged",
                 );
               }}
             >
-              {t("access.people.changeRole.submit")}
+              {managedExternally
+                ? t("access.people.changeRole.takeOverSubmit")
+                : t("access.people.changeRole.submit")}
             </Button>
           </DialogFooter>
         </DialogContent>

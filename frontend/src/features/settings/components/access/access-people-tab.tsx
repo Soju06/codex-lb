@@ -55,12 +55,16 @@ function StatusCell({ user }: { user: DashboardUser }) {
       </Badge>
     );
   }
-  const expiresIn = user.pendingInvite ? formatExpiresIn(user.pendingInvite.expiresAt) : null;
+  const expiresIn = user.pendingInvite?.expiresAt ? formatExpiresIn(user.pendingInvite.expiresAt) : null;
   return (
     <div className="space-y-0.5">
       <Badge variant="outline">{t("access.people.status.invited")}</Badge>
       <p className="text-[11px] text-muted-foreground">
-        {expiresIn ? t("access.people.inviteExpires", { when: expiresIn }) : t("access.people.inviteExpired")}
+        {user.pendingInvite?.ssoOnly
+          ? t("access.people.awaitingSignIn")
+          : expiresIn
+            ? t("access.people.inviteExpires", { when: expiresIn })
+            : t("access.people.inviteExpired")}
       </p>
     </div>
   );
@@ -210,7 +214,15 @@ export function AccessPeopleTab({ fullPage = false, onOpenMySignIn, onInvite, on
                     </div>
                   </TableCell>
                   <TableCell>
-                    <RoleBadge role={user.role} roles={roles} descriptors={descriptors} />
+                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                      <RoleBadge role={user.role} roles={roles} descriptors={descriptors} />
+                      {/* The company login owns this role until someone takes it over. */}
+                      {user.roleSource !== "manual" ? (
+                        <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
+                          {t("access.people.managedExternally")}
+                        </Badge>
+                      ) : null}
+                    </span>
                   </TableCell>
                   <TableCell>
                     <StatusCell user={user} />

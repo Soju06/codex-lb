@@ -32,7 +32,6 @@ export function AccessCard(props: AccessMySignInTabProps) {
   const { hash, key: locationKey } = useLocation();
   const tier = useAuthStore((state) => state.tier);
   const user = useAuthStore((state) => state.user);
-  const authMode = useAuthStore((state) => state.authMode);
   const canManageUsers = usePermission("users:manage");
   const hashTab = accessTabFromHash(hash);
   // The hash wins on every navigation; a click overrides it only for the
@@ -43,9 +42,9 @@ export function AccessCard(props: AccessMySignInTabProps) {
   const [issued, setIssued] = useState<IssuedLink | null>(null);
   // People needs a team, the permission, and an account the backend can
   // attribute the changes to (`409 admin_account_required` otherwise): the
-  // implicit local admin, trusted-header and disabled-auth principals get
-  // their own sign-in controls only.
-  const showPeople = tier !== "individual" && canManageUsers && user !== null && authMode === "standard";
+  // implicit local admin and the disabled-auth principal get their own
+  // sign-in controls only. A reverse-proxy account is an account.
+  const showPeople = tier !== "individual" && canManageUsers && user !== null;
 
   useEffect(() => {
     if (hashTab === null) {

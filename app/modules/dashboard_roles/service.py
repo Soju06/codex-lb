@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from app.core.auth.dashboard_access import (
+    ASSIGNABLE_PRESET_ROLES,
     OWN_SCOPED_PERMISSIONS,
     PERMISSION_IMPLIES,
     PRESET_ROLE_GRANTS,
@@ -19,6 +20,7 @@ from app.core.auth.dashboard_access import (
     Scope,
 )
 from app.db.models import DashboardRoleGrant, DashboardRoleRecord
+from app.modules.dashboard_roles.repository import DashboardRolesRepository
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,41 @@ def resolve_role_grants(role: DashboardRoleRecord) -> Grants:
     if RoleKind(role.kind) is RoleKind.PRESET:
         return PRESET_ROLE_GRANTS[PresetRoleSlug(role.slug)]
     return grants_from_rows(role.grants)
+
+
+class RoleNotAssignableError(ValueError):
+    pass
+
+
+#: Presets a person may hold. Code is the truth; the row's flag only mirrors it.
+_ASSIGNABLE_PRESET_SLUGS = frozenset(slug.value for slug in ASSIGNABLE_PRESET_ROLES)
+
+
+def role_assignable_to_users(role: DashboardRoleRecord) -> bool:
+    """Whether this role may be given to a person, presets from code and custom roles from the row.
+
+    One predicate for every surface that hands a role out or offers one, so a
+    picker can never list a role the write path would refuse.
+    """
+
+    if RoleKind(role.kind) is RoleKind.PRESET:
+        return role.slug in _ASSIGNABLE_PRESET_SLUGS
+    return role.assignable_to_users
+
+
+async def resolve_assignable_role(roles: DashboardRolesRepository, role_id: str) -> DashboardRoleRecord:
+    """The role row a person may be given: an assignable preset or an assignable custom role.
+
+    Used wherever a role is handed out (account creation and edits, the role
+    an unknown identity receives) so every path applies the same rule.
+    """
+
+    role = await roles.get_role(role_id)
+    if role is None:
+        raise RoleNotAssignableError("Unknown role")
+    if not role_assignable_to_users(role):
+        raise RoleNotAssignableError(f"Role '{role.slug}' cannot be assigned to an account")
+    return role
 
 
 #: One plain sentence per permission for role pickers and the editor grid.

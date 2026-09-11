@@ -103,6 +103,19 @@ PRIVILEGED_PERMISSIONS: frozenset[Permission] = frozenset(
     }
 )
 
+#: Permissions whose mutations additionally require a recent re-verification
+#: of the caller ("step-up", PLAN §5 H5): a stolen cookie alone must not be
+#: enough to change who may sign in or to export account credentials.
+STEP_UP_PERMISSIONS: frozenset[Permission] = frozenset(
+    {
+        Permission.SECURITY_WRITE,
+        Permission.USERS_MANAGE,
+        Permission.ROLES_MANAGE,
+        Permission.ACCOUNTS_EXPORT,
+    }
+)
+assert STEP_UP_PERMISSIONS <= PRIVILEGED_PERMISSIONS
+
 #: The legacy ``write`` alias means "may perform every mutation the generic
 #: write gate protects", which today spans accounts, API keys, and operations.
 _WRITE_ALIAS_PERMISSIONS: frozenset[Permission] = frozenset(
@@ -313,7 +326,8 @@ class DashboardPrincipal:
     user. ``user_id`` is ``None`` for principals without a user row.
     ``totp_enrollment_required`` marks a user whose install requires TOTP but
     who has not enrolled yet: only the dashboard-auth self-service routes may
-    serve such a principal.
+    serve such a principal. ``step_up_verified_at`` is the unix time the
+    session cookie last recorded a step-up re-verification (``su``), if any.
     """
 
     role: DashboardRole
@@ -326,6 +340,7 @@ class DashboardPrincipal:
     role_slug: str | None = field(default=None, kw_only=True)
     auth_method: str | None = field(default=None, kw_only=True)
     totp_enrollment_required: bool = field(default=False, kw_only=True)
+    step_up_verified_at: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         validate_grants(self.grants)
@@ -385,13 +400,15 @@ def user_principal(
     *,
     auth_method: str | None,
     totp_enrollment_required: bool = False,
+    auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD,
+    step_up_verified_at: int | None = None,
 ) -> DashboardPrincipal:
     """A signed-in user account. ``grants`` is the resolved grant table of ``user.role``."""
 
     return DashboardPrincipal(
         role=DashboardRole.ADMIN,
         permissions=legacy_permissions(grants),
-        auth_mode=DashboardAuthMode.STANDARD,
+        auth_mode=auth_mode,
         actor=user.username,
         grants=grants,
         user_id=user.id,
@@ -399,6 +416,7 @@ def user_principal(
         role_slug=user.role.slug,
         auth_method=auth_method,
         totp_enrollment_required=totp_enrollment_required,
+        step_up_verified_at=step_up_verified_at,
     )
 
 

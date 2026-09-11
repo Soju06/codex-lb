@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+import pyotp
 import pytest
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
@@ -297,6 +298,21 @@ async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
     guest_payload = guest_settings.json()
     assert guest_payload["conversationArchiveDir"] is None
     assert guest_payload["conversationArchiveEnabled"] is False
+
+
+async def _step_up_header_account(client: AsyncClient, proxy_headers: dict[str, str]) -> None:
+    """Security writes need a recent step-up (H5); a proxy account without a password enrols TOTP for it."""
+
+    start = await client.post("/api/dashboard-auth/totp/setup/start", json={}, headers=proxy_headers)
+    assert start.status_code == 200, start.text
+    secret = start.json()["secret"]
+    code = pyotp.TOTP(secret).now()
+    confirm = await client.post(
+        "/api/dashboard-auth/totp/setup/confirm", json={"secret": secret, "code": code}, headers=proxy_headers
+    )
+    assert confirm.status_code == 200, confirm.text
+    stepped = await client.post("/api/dashboard-auth/step-up", json={"code": code}, headers=proxy_headers)
+    assert stepped.status_code == 200, stepped.text
 
 
 @pytest.mark.asyncio
@@ -839,6 +855,7 @@ async def test_trusted_header_mode_rejects_guest_login_without_proxy_header(asyn
     )
 
     proxy_headers = {"Remote-User": "admin@example.com"}
+    await _step_up_header_account(async_client, proxy_headers)
     read_settings = await async_client.get("/api/settings", headers=proxy_headers)
     assert read_settings.status_code == 200
     enabled_settings = await async_client.put("/api/settings", json={"guestAccessEnabled": True}, headers=proxy_headers)
@@ -886,6 +903,7 @@ async def test_trusted_header_mode_blocks_passwordless_guest_without_proxy_heade
             )
             assert setup.status_code == 200
 
+            await _step_up_header_account(local_client, proxy_headers)
             read_settings = await local_client.get("/api/settings", headers=proxy_headers)
             assert read_settings.status_code == 200
             enabled_settings = await local_client.put(
@@ -935,6 +953,7 @@ async def test_trusted_header_mode_blocks_passwordless_guest_login_on_proxied_lo
             )
             assert setup.status_code == 200
 
+            await _step_up_header_account(local_client, proxy_headers)
             read_settings = await local_client.get("/api/settings", headers=proxy_headers)
             assert read_settings.status_code == 200
             enabled_settings = await local_client.put(

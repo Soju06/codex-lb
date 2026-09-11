@@ -476,6 +476,7 @@ async def test_admin_role_policy_migration_upgrades_and_downgrades(tmp_path) -> 
         await to_thread.run_sync(lambda: command.downgrade(config, _PARENT_REVISION))
         assert "totp_required_for_admin_role" not in await _columns()
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        # A later Phase-2 revision may stack on top; the walk must still reach head.
         assert result.current_revision == _HEAD_REVISION
         assert "totp_required_for_admin_role" in await _columns()
     finally:

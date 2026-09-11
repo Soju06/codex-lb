@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
 from time import time
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import bcrypt
 import segno
@@ -28,6 +28,8 @@ from app.core.auth.dashboard_access import (
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
+from app.core.auth.providers.registry import ActiveProvider, get_auth_provider_registry
+from app.core.auth.step_up import StepUpMethod, is_step_up_fresh, step_up_expires_at, step_up_methods
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -40,7 +42,9 @@ from app.modules.dashboard_auth.schemas import (
     DashboardLoginProvider,
     DashboardMeResponse,
     DashboardSessionUser,
+    DashboardStepUpState,
     DashboardUserRoleSummary,
+    LoginProviderKind,
     TotpSetupStartResponse,
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
@@ -91,6 +95,8 @@ class DashboardAuthRepositoryProtocol(Protocol):
     async def get_user_counts(self) -> DashboardUserCounts: ...
 
     async def count_custom_roles(self) -> int: ...
+
+    async def count_role_mappings(self) -> int: ...
 
     async def create_first_admin(self, password_hash: str) -> DashboardUser | None: ...
 
@@ -174,6 +180,10 @@ class PasswordSessionRequiredError(ValueError):
     pass
 
 
+class StepUpUnavailableError(ValueError):
+    """The account holds neither a password nor a TOTP secret, so nothing can be re-verified."""
+
+
 SessionKind = Literal["user", "guest"]
 
 
@@ -184,7 +194,9 @@ class DashboardSessionState:
     ``kind == "user"`` carries the account id and the ``session_generation`` the
     cookie was minted under; the request path re-reads the user row and rejects
     the cookie when the account is gone, disabled, or has revoked its sessions.
-    ``kind == "guest"`` carries only the guest generation.
+    ``kind == "guest"`` carries only the guest generation. ``step_up_verified_at``
+    (``su``) is when the account last re-verified a credential for a sensitive
+    change; absent until it does.
     """
 
     expires_at: int
@@ -196,6 +208,7 @@ class DashboardSessionState:
     totp_verified: bool = False
     auth_method: str | None = None
     guest_session_generation: int | None = None
+    step_up_verified_at: int | None = None
 
     @property
     def is_user(self) -> bool:
@@ -240,20 +253,22 @@ class DashboardSessionStore:
         totp_verified: bool,
         ttl_seconds: int,
         auth_method: str = AUTH_METHOD_PASSWORD,
+        step_up_verified_at: int | None = None,
     ) -> str:
         now = int(time())
-        return self._seal(
-            {
-                "v": SESSION_PAYLOAD_VERSION,
-                "exp": now + ttl_seconds,
-                "iat": now,
-                "uid": user_id,
-                "sg": session_generation,
-                "pv": password_verified,
-                "tp": totp_verified,
-                "am": auth_method,
-            }
-        )
+        payload: dict[str, object] = {
+            "v": SESSION_PAYLOAD_VERSION,
+            "exp": now + ttl_seconds,
+            "iat": now,
+            "uid": user_id,
+            "sg": session_generation,
+            "pv": password_verified,
+            "tp": totp_verified,
+            "am": auth_method,
+        }
+        if step_up_verified_at is not None:
+            payload["su"] = step_up_verified_at
+        return self._seal(payload)
 
     def create_guest_session(self, *, ttl_seconds: int, guest_session_generation: int) -> str:
         now = int(time())
@@ -310,11 +325,72 @@ class DashboardSessionStore:
             password_verified=pv,
             totp_verified=tp,
             auth_method=am,
+            step_up_verified_at=_as_int(data.get("su")),
         )
 
     def delete(self, session_id: str | None) -> None:
         # Stateless: deletion is handled by clearing the cookie client-side.
         return
+
+
+def session_clock() -> int:
+    """The clock sessions and step-ups are minted and checked against (one clock, one truth)."""
+
+    return int(time())
+
+
+class StepUpCookieStore:
+    """The ``codex_lb_step_up`` cookie: a step-up for principals without a session cookie.
+
+    Trusted-header accounts prove who they are on every request through the
+    proxy header and carry no session cookie, so their re-verification rides
+    in this separate short-lived cookie (``{v, uid, sg, su, exp}``). It is
+    only honoured for the account it was minted for, and only while that
+    account's ``session_generation`` is unchanged: resetting its TOTP or
+    revoking its sessions must void the proof, not leave it usable for the
+    rest of the window.
+    """
+
+    PAYLOAD_VERSION = 1
+
+    def __init__(self) -> None:
+        self._encryptor: TokenEncryptor | None = None
+
+    def _get_encryptor(self) -> TokenEncryptor:
+        if self._encryptor is None:
+            self._encryptor = TokenEncryptor()
+        return self._encryptor
+
+    def create(self, user_id: str, *, session_generation: int, verified_at: int) -> str:
+        payload = {
+            "v": self.PAYLOAD_VERSION,
+            "uid": user_id,
+            "sg": session_generation,
+            "su": verified_at,
+            "exp": step_up_expires_at(verified_at),
+        }
+        return self._get_encryptor().encrypt(json.dumps(payload, separators=(",", ":"))).decode("ascii")
+
+    def get(self, token: str | None, *, user_id: str, session_generation: int) -> int | None:
+        """The verification time the cookie records for this account, or ``None``.
+
+        A generation bump (TOTP reset, sessions revoked) voids the proof.
+        """
+
+        if not token or not token.strip():
+            return None
+        try:
+            data = json.loads(self._get_encryptor().decrypt(token.strip().encode("ascii")))
+        except Exception:
+            return None
+        if not isinstance(data, dict) or data.get("v") != self.PAYLOAD_VERSION or data.get("uid") != user_id:
+            return None
+        if _as_int(data.get("sg")) != session_generation:
+            return None
+        verified_at, exp = _as_int(data.get("su")), _as_int(data.get("exp"))
+        if verified_at is None or exp is None or exp < session_clock():
+            return None
+        return verified_at
 
 
 @dataclass(slots=True, frozen=True)
@@ -334,6 +410,7 @@ class SessionDescription:
 
 
 AuthStateProvider = Callable[[], Awaitable[LocalAuthState]]
+ActiveProvidersProvider = Callable[[], Awaitable[list[ActiveProvider]]]
 
 
 @dataclass(slots=True, frozen=True)
@@ -416,14 +493,16 @@ class DashboardAuthService:
         session_store: DashboardSessionStore,
         *,
         auth_state_provider: AuthStateProvider | None = None,
+        active_providers_provider: ActiveProvidersProvider | None = None,
     ) -> None:
         self._repository = repository
         self._session_store = session_store
         self._encryptor = TokenEncryptor()
         # The session response is served on every page load; it reads the derived
-        # auth state through the process cache. Login and setup decisions keep
-        # reading the repository directly.
+        # auth state and the active providers through the process caches. Login
+        # and setup decisions keep reading the repository directly.
         self._auth_state = auth_state_provider or _cached_local_auth_state
+        self._active_providers = active_providers_provider or _cached_active_providers
 
     # --- session resolution ---
 
@@ -512,6 +591,7 @@ class DashboardAuthService:
 
         user: DashboardUser | None = None
         grants: Grants
+        step_up: DashboardStepUpState | None = None
         totp_configured = False
         totp_pending = False
         totp_enrollment_required = False
@@ -539,6 +619,7 @@ class DashboardAuthService:
             authenticated = not totp_pending
             role = DashboardRole.ADMIN
             auth_method = resolved.state.auth_method
+            step_up = step_up_state(user, verified_at=resolved.state.step_up_verified_at)
         elif not password_required:
             authenticated = True
             role = DashboardRole.ADMIN
@@ -560,6 +641,7 @@ class DashboardAuthService:
         response = DashboardAuthSessionResponse(
             authenticated=authenticated,
             password_required=password_required,
+            local_password_configured=auth_state.active_local_password_users > 0,
             totp_required_on_login=totp_pending,
             totp_configured=totp_configured,
             role=role,
@@ -570,17 +652,26 @@ class DashboardAuthService:
             auth_method=auth_method,
             must_change_password=bool(user is not None and user.must_change_password),
             totp_enrollment_required=totp_enrollment_required,
-            login=self.login_hint(auth_state),
+            login=await self.login_hint(auth_state),
             access_summary=await self.access_summary() if manages_users else None,
             assignable_role_ids=assignable_role_ids() if manages_users else [],
+            step_up=step_up,
         )
         return SessionDescription(response=response, resolved=resolved)
 
-    @staticmethod
-    def login_hint(auth_state: LocalAuthState) -> DashboardLoginHint:
+    async def login_hint(self, auth_state: LocalAuthState) -> DashboardLoginHint:
         return DashboardLoginHint(
             username_field="hidden" if auth_state.active_local_password_users == 1 else "shown",
-            providers=[DashboardLoginProvider(kind="password", label="Password", login_url=None)],
+            providers=[
+                DashboardLoginProvider(
+                    # The registry only activates kinds with an implementation, which are the wire kinds.
+                    kind=cast(LoginProviderKind, item.row.kind),
+                    provider_key=item.row.provider_key,
+                    label=item.row.label,
+                    login_url=None,
+                )
+                for item in await self._active_providers()
+            ],
             local_login="enabled",
         )
 
@@ -594,8 +685,8 @@ class DashboardAuthService:
             pending_invites=counts.pending_invites,
             non_admin_users=counts.non_admin,
             custom_roles=await self._repository.count_custom_roles(),
-            providers_enabled=["password"],
-            role_mappings=0,
+            providers_enabled=[item.row.kind for item in await self._active_providers()],
+            role_mappings=await self._repository.count_role_mappings(),
             scim_tokens=0,
             audit_sinks=0,
             local_login_policy="enabled",
@@ -808,8 +899,21 @@ class DashboardAuthService:
 
     # --- TOTP (per user) ---
 
-    async def start_totp_setup(self, *, session_id: str | None) -> TotpSetupStartResponse:
-        resolved = await self.require_password_session(session_id)
+    async def _account_for_totp(
+        self, session_id: str | None, resolved: ResolvedUserSession | None
+    ) -> ResolvedUserSession:
+        """The account a TOTP route acts on: the password session, or the account the route already resolved.
+
+        Routes pass ``resolved`` for a trusted-header account, which has no
+        session cookie but may still enrol TOTP (it is its only step-up method).
+        """
+
+        return resolved if resolved is not None else await self.require_password_session(session_id)
+
+    async def start_totp_setup(
+        self, *, session_id: str | None, resolved: ResolvedUserSession | None = None
+    ) -> TotpSetupStartResponse:
+        resolved = await self._account_for_totp(session_id, resolved)
         if resolved.user.totp_secret_encrypted is not None:
             raise TotpAlreadyConfiguredError("TOTP is already configured. Disable it before setting a new secret")
         secret = generate_totp_secret()
@@ -827,8 +931,9 @@ class DashboardAuthService:
         secret: str,
         code: str,
         actor_ip: str | None = None,
+        resolved: ResolvedUserSession | None = None,
     ) -> None:
-        resolved = await self.require_password_session(session_id)
+        resolved = await self._account_for_totp(session_id, resolved)
         if resolved.user.totp_secret_encrypted is not None:
             raise TotpAlreadyConfiguredError("TOTP is already configured. Disable it before setting a new secret")
         try:
@@ -895,6 +1000,14 @@ class DashboardAuthService:
         now = int(time())
         inherited_ttl = max(1, existing_state.expires_at - now)
         applied_ttl = min(inherited_ttl, ttl_seconds)
+        # Completing the second factor of a sign-in that just happened is a
+        # step-up: both credentials were presented within the window. Verifying
+        # against an old session is not — the password behind it was proven
+        # long ago (and whoever holds the cookie could have enrolled the secret
+        # themselves), so that path keeps whatever step-up the session already
+        # carried and leaves /step-up to ask for the password.
+        completing_fresh_login = is_step_up_fresh(existing_state.issued_at, now=now)
+        step_up_verified_at = now if completing_fresh_login else existing_state.step_up_verified_at
         new_session_id = self._session_store.create_user_session(
             user.id,
             user.session_generation,
@@ -902,27 +1015,40 @@ class DashboardAuthService:
             totp_verified=True,
             ttl_seconds=applied_ttl,
             auth_method=existing_state.auth_method or AUTH_METHOD_PASSWORD,
+            step_up_verified_at=step_up_verified_at,
         )
         return new_session_id, applied_ttl
 
-    async def disable_totp(self, *, session_id: str | None, code: str, actor_ip: str | None = None) -> None:
-        resolved = await self._require_totp_verified_session(session_id)
-        user = resolved.user
+    async def _consume_totp_code(self, user: DashboardUser, code: str) -> None:
+        """Check ``code`` against the account's secret and advance its replay counter, or raise."""
+
         secret_encrypted = user.totp_secret_encrypted
         if secret_encrypted is None:
             raise TotpNotConfiguredError("TOTP is not configured")
         secret = self._encryptor.decrypt(secret_encrypted)
-        verification = verify_totp_code(
-            secret,
-            code,
-            window=1,
-            last_verified_step=user.totp_last_verified_step,
-        )
+        verification = verify_totp_code(secret, code, window=1, last_verified_step=user.totp_last_verified_step)
         if not verification.is_valid or verification.matched_step is None:
             raise TotpInvalidCodeError("Invalid TOTP code")
-        updated = await self._repository.try_advance_user_totp_step(user.id, verification.matched_step)
-        if not updated:
+        if not await self._repository.try_advance_user_totp_step(user.id, verification.matched_step):
             raise TotpInvalidCodeError("Invalid TOTP code")
+
+    async def disable_totp(
+        self,
+        *,
+        session_id: str | None,
+        code: str,
+        actor_ip: str | None = None,
+        resolved: ResolvedUserSession | None = None,
+    ) -> DashboardUser:
+        """Drop the account's secret after a valid code; returns the account.
+
+        A header account never carries a TOTP-verified cookie; its valid
+        ``code`` is the verification (a password session still needs ``tp``).
+        """
+
+        resolved = resolved if resolved is not None else await self._require_totp_verified_session(session_id)
+        user = resolved.user
+        await self._consume_totp_code(user, code)
         await self._repository.set_user_totp_secret(user.id, None)
         AuditService.log_async(
             "totp_disabled",
@@ -931,9 +1057,65 @@ class DashboardAuthService:
             actor=_user_actor(user, resolved.state.auth_method or AUTH_METHOD_PASSWORD),
             target=_user_target(user),
         )
+        return user
+
+    # --- step-up (per user) ---
+
+    async def verify_step_up(
+        self,
+        user: DashboardUser,
+        *,
+        password: str | None,
+        code: str | None,
+        actor_ip: str | None = None,
+        auth_method: str | None = None,
+    ) -> list[StepUpMethod]:
+        """Re-verify ``user`` with every factor it holds; returns the methods that were checked.
+
+        Password accounts present the password (and a TOTP code when the account
+        has a secret); provider-only accounts present a TOTP code. Every refusal
+        is the same ``InvalidCredentialsError``. An account with no factor at all
+        raises ``StepUpUnavailableError`` instead — the client is told to enrol.
+        """
+
+        methods = step_up_methods(user)
+        if not methods:
+            raise StepUpUnavailableError("The account holds no credential to re-verify")
+        username = user.username
+        actor, target = _user_actor(user, auth_method or AUTH_METHOD_PASSWORD), _user_target(user)
+        if "password" in methods and (
+            user.password_hash is None or not _check_password(password or "", user.password_hash)
+        ):
+            log_login_failed(actor_ip, "step_up", "bad_password", username=username)
+            raise InvalidCredentialsError("Invalid credentials")
+        if "totp" in methods:
+            try:
+                await self._consume_totp_code(user, code or "")
+            except (TotpInvalidCodeError, TotpNotConfiguredError) as exc:
+                log_login_failed(actor_ip, "step_up", "bad_totp", username=username)
+                raise InvalidCredentialsError("Invalid credentials") from exc
+        AuditService.log_async(
+            "step_up_verified",
+            actor_ip=actor_ip,
+            details={"username": username, "methods": list(methods)},
+            actor=actor,
+            target=target,
+        )
+        return methods
 
     def logout(self, session_id: str | None) -> None:
         self._session_store.delete(session_id)
+
+
+def step_up_state(user: DashboardUser, *, verified_at: int | None) -> DashboardStepUpState:
+    """The session response's ``step_up`` block: a still-fresh verification and the account's methods."""
+
+    fresh = verified_at if is_step_up_fresh(verified_at, now=session_clock()) else None
+    return DashboardStepUpState(
+        verified_at=fresh,
+        expires_at=step_up_expires_at(fresh) if fresh is not None else None,
+        methods=step_up_methods(user),
+    )
 
 
 def assignable_role_ids() -> list[str]:
@@ -944,7 +1126,12 @@ async def _cached_local_auth_state() -> LocalAuthState:
     return await get_dashboard_users_cache().local_auth_state()
 
 
+async def _cached_active_providers() -> list[ActiveProvider]:
+    return await get_auth_provider_registry().get_active_providers(get_settings().dashboard_auth_mode)
+
+
 _dashboard_session_store = DashboardSessionStore()
+_step_up_cookie_store = StepUpCookieStore()
 _totp_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="totp")
 _password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
 _guest_password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="guest_password")
@@ -958,6 +1145,10 @@ _invite_accept_token_rate_limiter = DatabaseRateLimiter(max_attempts=5, window_s
 
 def get_dashboard_session_store() -> DashboardSessionStore:
     return _dashboard_session_store
+
+
+def get_step_up_cookie_store() -> StepUpCookieStore:
+    return _step_up_cookie_store
 
 
 def get_totp_rate_limiter() -> DatabaseRateLimiter:

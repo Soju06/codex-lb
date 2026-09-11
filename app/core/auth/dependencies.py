@@ -14,6 +14,7 @@ from starlette.requests import HTTPConnection
 from app.core.auth import generate_unique_account_id
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.dashboard_access import (
+    STEP_UP_PERMISSIONS,
     DashboardPermission,
     DashboardPrincipal,
     Permission,
@@ -24,8 +25,10 @@ from app.core.auth.dashboard_access import (
     totp_policy_applies,
     user_principal,
 )
-from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
+from app.core.auth.dashboard_mode import DashboardAuthMode, DashboardRequestAuth, get_dashboard_request_auth
 from app.core.auth.dashboard_users_cache import DashboardUsersCache, get_dashboard_users_cache
+from app.core.auth.external_identity import resolve_trusted_header_request
+from app.core.auth.step_up import STEP_UP_COOKIE, STEP_UP_UNAVAILABLE_MESSAGE, is_step_up_fresh, step_up_methods
 from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -45,6 +48,8 @@ from app.modules.dashboard_auth.service import (
     DASHBOARD_SESSION_COOKIE,
     DashboardSessionState,
     get_dashboard_session_store,
+    get_step_up_cookie_store,
+    session_clock,
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
 
@@ -243,6 +248,7 @@ def _user_session_principal(
         grants,
         auth_method=state.auth_method,
         totp_enrollment_required=totp_enrollment_required,
+        step_up_verified_at=state.step_up_verified_at,
     )
     # An account that still has to enrol may only reach the self-service routes
     # listed above; those routes gate themselves, so every other route that
@@ -255,12 +261,65 @@ def _user_session_principal(
     return _set_dashboard_principal(request, principal)
 
 
+async def _password_fallback_principal(request: Request) -> DashboardPrincipal | None:
+    """A password-verified cookie for an active account, so the break-glass admin
+    stays reachable while the proxy asserts an identity the resolver refuses."""
+
+    users_cache = get_dashboard_users_cache()
+    state = get_dashboard_session_store().get(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+    session_user = await _resolve_session_user(state, users_cache)
+    if state is None or session_user is None or not state.password_verified:
+        return None
+    settings = await get_settings_cache().get()
+    return _user_session_principal(request, session_user, state, settings=settings)
+
+
+async def _trusted_header_principal(request: Request, request_auth: DashboardRequestAuth) -> DashboardPrincipal:
+    """The account behind the proxy-asserted identity, or a 401 naming why there is none.
+
+    Unknown identities become accounts through the provider's
+    ``unknown_identity_role_id`` (admin by default, D10). A refused identity
+    answers ``identity_not_provisioned`` and a disabled account
+    ``account_disabled`` -- unless a password-verified cookie rides along, in
+    which case that account is served (a resolved header account always wins
+    over the cookie). The TOTP policy is not applied to header sessions yet:
+    there is no cookie to carry a verified step, so applying it would lock
+    every header user out (the step-up change wires it, honouring the
+    provider's ``idp_mfa_enforced``).
+    """
+
+    resolution = await resolve_trusted_header_request(request, request_auth)
+    if resolution is None:
+        raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
+    if resolution.user is None:
+        fallback = await _password_fallback_principal(request)
+        if fallback is not None:
+            return fallback
+        if resolution.denial == "account_disabled":
+            raise DashboardAuthError("This account is disabled", code="account_disabled")
+        raise DashboardAuthError(
+            "Your account is not ready yet; ask an administrator to add you", code="identity_not_provisioned"
+        )
+    grants = resolve_role_grants(resolution.user.role)
+    if not scope_satisfies(grants.get(Permission.DASHBOARD_READ), Scope.ALL):
+        raise DashboardPermissionError(
+            f"Dashboard permission '{Permission.DASHBOARD_READ.value}' is required",
+            code="permission_required",
+            param=Permission.DASHBOARD_READ.value,
+        )
+    return user_principal(
+        resolution.user, grants, auth_method=request_auth.mode.value, auth_mode=DashboardAuthMode.TRUSTED_HEADER
+    )
+
+
 async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     cached = _get_cached_dashboard_principal(request)
     if cached is not None:
         return cached
 
     request_auth = get_dashboard_request_auth(request)
+    if request_auth is not None and request_auth.mode == DashboardAuthMode.TRUSTED_HEADER:
+        return _set_dashboard_principal(request, await _trusted_header_principal(request, request_auth))
     if request_auth is not None:
         return _set_dashboard_principal(
             request,
@@ -367,11 +426,80 @@ def ensure_dashboard_permission(
     )
 
 
+_SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def recorded_step_up(request: Request, user: DashboardUser) -> int | None:
+    """The most recent step-up this request carries for ``user``, wherever it rides.
+
+    A trusted-header account has no session cookie, so its step-up rides in
+    the separate step-up cookie — or in a fallback password session of the
+    same account that happens to accompany the request. Both are bound to the
+    account's ``session_generation``, so revoking its sessions or resetting
+    its TOTP voids the proof instead of leaving it usable for the rest of the
+    window. Enforcement and the session response read the same sources, so
+    what the dashboard reports is what the gate accepts.
+    """
+
+    from_cookie = get_step_up_cookie_store().get(
+        request.cookies.get(STEP_UP_COOKIE),
+        user_id=user.id,
+        session_generation=user.session_generation,
+    )
+    state = get_dashboard_session_store().get(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+    from_session = (
+        state.step_up_verified_at
+        if state is not None
+        and state.is_user
+        and state.user_id == user.id
+        and state.password_verified
+        and state.session_generation == user.session_generation
+        else None
+    )
+    recorded = [value for value in (from_cookie, from_session) if value is not None]
+    return max(recorded) if recorded else None
+
+
+async def ensure_step_up(request: Request, principal: DashboardPrincipal, permission: Permission) -> None:
+    """Require a fresh step-up (PLAN §5 H5) before a mutation guarded by ``permission``.
+
+    Reads are never gated. Principals without an account (the implicit local
+    admin, the disabled-auth principal) have no credential to re-verify and are
+    exempt; every account is held to it, whatever provider signed it in. A
+    stale or missing step-up answers ``403 step_up_required`` naming the
+    factors the account can present; an account with no factor at all answers
+    ``403 step_up_unavailable``.
+    """
+
+    if request.method in _SAFE_METHODS or principal.user_id is None:
+        return
+    user = await get_dashboard_users_cache().get_user(principal.user_id)
+    # The principal's own claim came from a cookie this request already
+    # validated against the account's generation; the other sources are
+    # checked against it inside recorded_step_up.
+    recorded = [principal.step_up_verified_at] if principal.step_up_verified_at is not None else []
+    if user is not None:
+        recorded += [value for value in (recorded_step_up(request, user),) if value is not None]
+    if recorded and is_step_up_fresh(max(recorded), now=session_clock()):
+        return
+    methods = step_up_methods(user) if user is not None else []
+    if not methods:
+        raise DashboardPermissionError(STEP_UP_UNAVAILABLE_MESSAGE, code="step_up_unavailable", param=permission.value)
+    raise DashboardPermissionError(
+        "Confirm your identity to continue",
+        code="step_up_required",
+        param=permission.value,
+        details={"methods": list(methods)},
+    )
+
+
 class DashboardPermissionDependency:
     """Route dependency: validate the dashboard session, then enforce one permission.
 
-    Instances are callable so FastAPI can resolve them with ``Depends`` while
-    route-authorization audits read :attr:`requirement` without invoking them.
+    Mutations guarded by a :data:`STEP_UP_PERMISSIONS` member also require a
+    recent step-up. Instances are callable so FastAPI can resolve them with
+    ``Depends`` while route-authorization audits read :attr:`requirement`
+    without invoking them.
     """
 
     __slots__ = ("requirement",)
@@ -386,6 +514,8 @@ class DashboardPermissionDependency:
             self.requirement.permission,
             minimum_scope=self.requirement.minimum_scope,
         )
+        if self.requirement.permission in STEP_UP_PERMISSIONS:
+            await ensure_step_up(request, principal, self.requirement.permission)
         return principal
 
 

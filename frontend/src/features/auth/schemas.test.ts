@@ -40,11 +40,14 @@ describe("AuthSessionSchema", () => {
       totpEnrollmentRequired: false,
       login: {
         usernameField: "hidden",
-        providers: [{ kind: "password", label: "Password", loginUrl: null }],
+        providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }],
         localLogin: "enabled",
+        pendingIdentity: false,
       },
       accessSummary: null,
       assignableRoleIds: [],
+      localPasswordConfigured: false,
+      stepUp: null,
     });
   });
 

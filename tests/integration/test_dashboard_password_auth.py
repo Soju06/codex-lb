@@ -334,8 +334,9 @@ async def test_bootstrap_creates_admin_account_and_describes_the_session(async_c
     assert payload["totpEnrollmentRequired"] is False
     assert payload["login"] == {
         "usernameField": "hidden",
-        "providers": [{"kind": "password", "label": "Password", "loginUrl": None}],
+        "providers": [{"kind": "password", "providerKey": "default", "label": "Password", "loginUrl": None}],
         "localLogin": "enabled",
+        "pendingIdentity": False,
     }
     assert payload["accessSummary"]["usersTotal"] == 1
     assert payload["accessSummary"]["usersActive"] == 1

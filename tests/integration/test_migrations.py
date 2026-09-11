@@ -3081,7 +3081,7 @@ async def test_codex_context_migration_preserves_rows_and_round_trips(db_setup):
 async def test_codex_context_migration_rejects_unowned_tables_without_changes(db_setup, existing_tables):
     from sqlalchemy import inspect as sa_inspect
 
-    parent = "20260910_000000_add_totp_required_for_admin_role"
+    parent = "20260910_020000_add_dashboard_role_mappings"
     await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, parent, bootstrap_legacy=False))
     async with SessionLocal() as session:
         for table in existing_tables:

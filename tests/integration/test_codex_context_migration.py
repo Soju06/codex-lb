@@ -12,11 +12,16 @@ pytestmark = pytest.mark.integration
 DEPLOYED_CONTEXT = "20260905_120000_add_codex_context_ownership"
 PREVIOUS_UPSTREAM = "20260910_000000_request_logs_missing_cost_index"
 PREVIOUS_MERGE = "20260910_120000_merge_codex_context_heads"
-UPSTREAM_HEAD = "20260910_000000_add_totp_required_for_admin_role"
-MERGED_HEAD = "20260910_180000_merge_context_dashboard_heads"
+DASHBOARD_UPSTREAM = "20260910_000000_add_totp_required_for_admin_role"
+DEPLOYED_HEAD = "20260910_180000_merge_context_dashboard_heads"
+UPSTREAM_HEAD = "20260910_020000_add_dashboard_role_mappings"
+MERGED_HEAD = "20260911_020000_merge_context_auth_provider_heads"
 
 
-@pytest.mark.parametrize("starting_revision", [DEPLOYED_CONTEXT, PREVIOUS_UPSTREAM, PREVIOUS_MERGE, UPSTREAM_HEAD])
+@pytest.mark.parametrize(
+    "starting_revision",
+    [DEPLOYED_CONTEXT, PREVIOUS_UPSTREAM, PREVIOUS_MERGE, DASHBOARD_UPSTREAM, DEPLOYED_HEAD, UPSTREAM_HEAD],
+)
 async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_path, starting_revision):
     database = tmp_path / "context-upgrade.sqlite"
     url = f"sqlite+aiosqlite:///{database}"
@@ -29,7 +34,7 @@ async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_pa
         if starting_revision == DEPLOYED_CONTEXT:
             columns = {row[1] for row in db.execute("PRAGMA table_info(dashboard_settings)")}
             assert "model_context_window_overrides" not in columns
-        if starting_revision in {DEPLOYED_CONTEXT, PREVIOUS_MERGE}:
+        if starting_revision in {DEPLOYED_CONTEXT, PREVIOUS_MERGE, DEPLOYED_HEAD}:
             db.execute(
                 "INSERT INTO codex_context_sessions VALUES ('00000000-0000-4000-8000-000000000011','key','owner')"
             )
@@ -49,7 +54,7 @@ async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_pa
             "totp_last_verified_step = ? WHERE id = 1",
             credentials,
         )
-        if starting_revision == UPSTREAM_HEAD:
+        if starting_revision in {DASHBOARD_UPSTREAM, DEPLOYED_HEAD, UPSTREAM_HEAD}:
             db.execute(
                 "INSERT INTO dashboard_users "
                 "(id, username, role_id, password_hash, totp_secret_encrypted, totp_last_verified_step) "
@@ -72,7 +77,7 @@ async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_pa
             == credentials
         )
         assert db.execute("SELECT totp_required_for_admin_role FROM dashboard_settings WHERE id = 1").fetchone() == (0,)
-        if starting_revision == UPSTREAM_HEAD:
+        if starting_revision in {DASHBOARD_UPSTREAM, DEPLOYED_HEAD, UPSTREAM_HEAD}:
             assert db.execute("SELECT id FROM dashboard_users WHERE username = 'admin'").fetchone() == (
                 "existing-admin",
             )

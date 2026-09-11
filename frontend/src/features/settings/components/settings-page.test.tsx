@@ -633,4 +633,19 @@ describe("SettingsPage", () => {
     elementLookup.mockRestore();
   });
 
+
+  it("mounts the Access card for a reverse-proxy account that cannot write", async () => {
+    // No password session, no `write`: its own two-factor is still how it
+    // confirms sensitive changes, so the card must be reachable.
+    useAuthStore.setState({
+      canWrite: false,
+      passwordManagementEnabled: true,
+      passwordSessionActive: false,
+      user: createSessionUser({ id: "user_viewer", username: "viewer" }),
+    });
+
+    renderSettings();
+
+    expect(await screen.findByText("Access")).toBeInTheDocument();
+  });
 });

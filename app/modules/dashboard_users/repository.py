@@ -101,12 +101,16 @@ def _invite_query():
 
 
 def live_invite_filter(now: datetime) -> ColumnElement[bool]:
-    """An invite that can still be accepted: not consumed, not revoked, not expired."""
+    """An invite that can still be accepted: not consumed, not revoked, and not expired.
+
+    An SSO-only invite has no link to expire: the account waits for its first
+    provider sign-in for as long as the administrator leaves it in place.
+    """
 
     return and_(
         DashboardUserInvite.consumed_at.is_(None),
         DashboardUserInvite.revoked_at.is_(None),
-        DashboardUserInvite.expires_at > now,
+        or_(DashboardUserInvite.sso_only.is_(True), DashboardUserInvite.expires_at > now),
     )
 
 
@@ -128,6 +132,22 @@ class DashboardUsersRepository:
         stmt = _user_query().where(DashboardUser.email == normalized_email)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def get_identity(self, provider: str, provider_key: str, subject: str) -> DashboardIdentity | None:
+        """The identity row for a provider triple, with its account and role loaded."""
+
+        stmt = (
+            select(DashboardIdentity)
+            .options(
+                selectinload(DashboardIdentity.user)
+                .selectinload(DashboardUser.role)
+                .selectinload(DashboardRoleRecord.grants)
+            )
+            .where(DashboardIdentity.provider == provider)
+            .where(DashboardIdentity.provider_key == provider_key)
+            .where(DashboardIdentity.subject == subject)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def list_users(self) -> Sequence[DashboardUser]:
         stmt = _user_query().order_by(DashboardUser.created_at.asc(), DashboardUser.id.asc())
         return (await self._session.execute(stmt)).scalars().all()
@@ -144,6 +164,17 @@ class DashboardUsersRepository:
     async def count_identities(self, user_id: str) -> int:
         stmt = select(func.count()).select_from(DashboardIdentity).where(DashboardIdentity.user_id == user_id)
         return int((await self._session.execute(stmt)).scalar_one())
+
+    async def primary_identity_provider(self, user_id: str) -> str | None:
+        """The provider of the account's oldest identity (which sign-in method manages it)."""
+
+        stmt = (
+            select(DashboardIdentity.provider)
+            .where(DashboardIdentity.user_id == user_id)
+            .order_by(DashboardIdentity.created_at.asc(), DashboardIdentity.id.asc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalars().first()
 
     async def count_active_admins(self, *, exclude_user_id: str | None = None) -> int:
         """Active accounts holding the admin *preset* (custom roles never count, however wide)."""
@@ -322,9 +353,41 @@ class DashboardUsersRepository:
         )
         return result.scalar_one_or_none() is not None
 
-    async def live_invite_expiry(self, user_id: str, now: datetime) -> datetime | None:
+    async def find_invite_expecting_identity(
+        self, provider: str, provider_key: str, subject: str, now: datetime
+    ) -> DashboardUserInvite | None:
+        """The live invite of an ``invited`` account pre-created for exactly this identity triple."""
+
         stmt = (
-            select(DashboardUserInvite.expires_at)
+            _invite_query()
+            .join(DashboardUser, DashboardUser.id == DashboardUserInvite.user_id)
+            .where(DashboardUser.status == DashboardUserStatus.INVITED.value)
+            .where(live_invite_filter(now))
+            .where(DashboardUserInvite.expected_provider == provider)
+            .where(DashboardUserInvite.expected_provider_key == provider_key)
+            .where(DashboardUserInvite.expected_subject == subject)
+            .order_by(DashboardUserInvite.created_at.asc(), DashboardUserInvite.id.asc())
+        )
+        return (await self._session.execute(stmt)).scalars().first()
+
+    async def consume_invite_by_identity(self, invite_id: str, *, now: datetime) -> bool:
+        """Consume the invite via its expected identity (compare-and-set); ``False`` = no longer live (no commit)."""
+
+        result = await self._session.execute(
+            update(DashboardUserInvite)
+            .where(DashboardUserInvite.id == invite_id)
+            .where(live_invite_filter(now))
+            .values(consumed_at=now)
+            .returning(DashboardUserInvite.id)
+            .execution_options(synchronize_session=False)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def live_invite_for_user(self, user_id: str, now: datetime) -> DashboardUserInvite | None:
+        """The live invite of a still-``invited`` account, or ``None``."""
+
+        stmt = (
+            _invite_query()
             .join(DashboardUser, DashboardUser.id == DashboardUserInvite.user_id)
             .where(DashboardUserInvite.user_id == user_id)
             .where(DashboardUser.status == DashboardUserStatus.INVITED.value)
@@ -356,6 +419,7 @@ class DashboardUsersRepository:
             select(DashboardUserInvite.id)
             .where(DashboardUserInvite.user_id == DashboardUser.id)
             .where(DashboardUserInvite.consumed_at.is_(None))
+            .where(DashboardUserInvite.sso_only.is_(False))
             .where(DashboardUserInvite.expires_at <= now)
             .exists()
         )
@@ -405,7 +469,7 @@ class DashboardUsersRepository:
 
     # --- writes ---
 
-    def add(self, *rows: DashboardUser | DashboardUserInvite) -> None:
+    def add(self, *rows: DashboardUser | DashboardUserInvite | DashboardIdentity) -> None:
         self._session.add_all(rows)
 
     async def commit_user(self, user_id: str, *, bump_generation: bool = False) -> DashboardUser:

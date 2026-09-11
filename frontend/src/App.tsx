@@ -16,6 +16,7 @@ import {
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthGate } from "@/features/auth/components/auth-gate";
+import { StepUpDialog } from "@/features/auth/components/step-up-dialog";
 import { hasPermission, useAuthStore } from "@/features/auth/hooks/use-auth";
 import { TelemetryConsentDialog } from "@/features/settings/components/telemetry-consent-dialog";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
@@ -101,10 +102,13 @@ export default function App() {
   return (
     <TooltipProvider>
       <Toaster richColors />
+      <StepUpDialog />
       <AuthGate>
         <Routes>
           <Route element={<AppLayout />}>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            {/* Public pending screen: once the account exists, "Try again" lands in the app. */}
+            <Route path="/auth/pending" element={<Navigate to="/dashboard" replace />} />
             <Route element={<RouteGuard />}>
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/reports" element={<ReportsPage />} />

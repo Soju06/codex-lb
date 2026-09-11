@@ -11,7 +11,8 @@
 ## Verification
 - [x] Run affected context/transport/migration tests and relevant static guards.
 - [x] Validate the active change and owning specs.
-- [ ] Update PR description and respond to the maintainer with evidence and design tradeoffs.
+- [x] Update the PR description with evidence and design tradeoffs.
+- [ ] Respond to the maintainer after the architecture decision.
 
 Full CI runs in GitHub Actions. Local verification here is scoped to the affected behavior; earlier test counts belong to earlier commits and are not cumulative.
 
@@ -28,3 +29,9 @@ Full CI runs in GitHub Actions. Local verification here is scoped to the affecte
 - [x] Join the previous context merge and the new dashboard migration chain without rewriting either ancestry.
 - [x] Verify upgrades from the deployed context revision, the previous local merge and the new upstream head, including existing dashboard credentials.
 - [x] Run the affected context, bridge, dashboard access and migration checks, then refresh the isolated candidate evidence.
+
+## September 11 publication compatibility
+- [x] Integrate upstream `4096c18a` and retain the context fork contract.
+- [x] Join the deployed context/dashboard head with the new authentication-provider migration chain.
+- [x] Verify upgrades from the deployed head and new upstream head, preserving identities, credentials and context ownership.
+- [x] Refresh affected tests and isolated native recovery evidence before the production cutover.

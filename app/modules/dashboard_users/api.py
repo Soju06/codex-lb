@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
 
 from fastapi import APIRouter, Body, Depends, Request, Response
 
@@ -23,9 +22,10 @@ from app.core.exceptions import (
     DashboardPermissionError,
     DashboardValidationError,
 )
-from app.db.models import DashboardUser
+from app.db.models import DashboardUser, DashboardUserInvite
 from app.dependencies import DashboardUsersContext, get_dashboard_users_context
 from app.modules.dashboard_auth.service import role_summary
+from app.modules.dashboard_roles.service import RoleNotAssignableError
 from app.modules.dashboard_users.credentials import CredentialRequiredError
 from app.modules.dashboard_users.schemas import (
     DashboardUserCreateRequest,
@@ -41,14 +41,18 @@ from app.modules.dashboard_users.service import (
     AdminAccountRequiredError,
     CompatUserLockedError,
     EmailTakenError,
+    ForceWithoutRoleChangeError,
+    IdentityTakenError,
     InvalidEmailError,
     InvalidUsernameError,
     InviteNotPendingError,
     InvitePendingError,
     IssuedInvite,
     LastAdminProtectedError,
-    RoleNotAssignableError,
+    RoleManagedExternallyError,
     SelfModificationForbiddenError,
+    SsoNotAvailableError,
+    SsoOnlyInviteError,
     UsernameTakenError,
     UserNotActiveError,
     UserNotFoundError,
@@ -76,7 +80,12 @@ _ERROR_MAP: dict[type[Exception], tuple[type[AppError], str]] = {
     InviteNotPendingError: (DashboardConflictError, "invite_not_pending"),
     InvitePendingError: (DashboardConflictError, "invite_pending"),
     UserNotActiveError: (DashboardConflictError, "user_not_active"),
+    RoleManagedExternallyError: (DashboardConflictError, "role_managed_externally"),
+    ForceWithoutRoleChangeError: (DashboardValidationError, "validation_error"),
     CredentialRequiredError: (DashboardConflictError, "credential_required"),
+    SsoNotAvailableError: (DashboardConflictError, "sso_not_available"),
+    IdentityTakenError: (DashboardConflictError, "identity_taken"),
+    SsoOnlyInviteError: (DashboardConflictError, "sso_only_invite"),
 }
 
 
@@ -105,7 +114,17 @@ def _client_host(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
-def user_response(user: DashboardUser, *, pending_invite_expires_at: datetime | None = None) -> DashboardUserResponse:
+def pending_invite_summary(invite: DashboardUserInvite | None) -> PendingInviteSummary | None:
+    """An SSO-only account waits for its first sign-in and has no expiry to show."""
+
+    if invite is None:
+        return None
+    return PendingInviteSummary(
+        expires_at=None if invite.sso_only else as_utc(invite.expires_at), sso_only=invite.sso_only
+    )
+
+
+def user_response(user: DashboardUser, *, pending_invite: PendingInviteSummary | None = None) -> DashboardUserResponse:
     return DashboardUserResponse(
         id=user.id,
         username=user.username,
@@ -119,9 +138,7 @@ def user_response(user: DashboardUser, *, pending_invite_expires_at: datetime | 
         has_password=user.password_hash is not None,
         created_at=user.created_at,
         last_login_at=user.last_login_at,
-        pending_invite=(
-            None if pending_invite_expires_at is None else PendingInviteSummary(expires_at=pending_invite_expires_at)
-        ),
+        pending_invite=pending_invite,
     )
 
 
@@ -134,7 +151,7 @@ async def list_users(
     context: DashboardUsersContext = Depends(get_dashboard_users_context),
 ) -> list[DashboardUserResponse]:
     return [
-        user_response(listing.user, pending_invite_expires_at=listing.pending_invite_expires_at)
+        user_response(listing.user, pending_invite=pending_invite_summary(listing.pending_invite))
         for listing in await context.service.list_users()
     ]
 
@@ -147,9 +164,14 @@ async def create_user(
     context: DashboardUsersContext = Depends(get_dashboard_users_context),
 ) -> DashboardUserCreateResponse:
     with mapped_user_errors():
-        user, invite = await context.service.create_user(principal, payload, actor_ip=_client_host(request))
+        created = await context.service.create_user(principal, payload, actor_ip=_client_host(request))
+    # An SSO-only account has no link to hand over: the plaintext token never leaves the server.
+    summary = PendingInviteSummary(
+        expires_at=None if created.sso_only else created.invite.expires_at, sso_only=created.sso_only
+    )
     return DashboardUserCreateResponse(
-        user=user_response(user, pending_invite_expires_at=invite.expires_at), invite=_invite_response(invite)
+        user=user_response(created.user, pending_invite=summary),
+        invite=None if created.sso_only else _invite_response(created.invite),
     )
 
 
@@ -162,8 +184,9 @@ async def list_pending_invites(
             user_id=invite.user_id,
             username=invite.user.username,
             role_id=invite.user.role_id,
-            expires_at=as_utc(invite.expires_at),
+            expires_at=None if invite.sso_only else as_utc(invite.expires_at),
             created_by_user_id=invite.created_by_user_id,
+            sso_only=invite.sso_only,
         )
         for invite in await context.service.list_pending_invites()
     ]
@@ -179,7 +202,7 @@ async def update_user(
 ) -> DashboardUserResponse:
     with mapped_user_errors():
         listing = await context.service.update_user(principal, user_id, payload, actor_ip=_client_host(request))
-    return user_response(listing.user, pending_invite_expires_at=listing.pending_invite_expires_at)
+    return user_response(listing.user, pending_invite=pending_invite_summary(listing.pending_invite))
 
 
 @router.delete("/{user_id}", status_code=204)

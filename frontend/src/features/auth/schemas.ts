@@ -59,14 +59,19 @@ export const AuthSessionUserSchema = z.object({
 
 export const LoginProviderSchema = z.object({
   kind: z.string(),
+  providerKey: z.string().default("default"),
   label: z.string(),
   loginUrl: z.string().nullable().default(null),
 });
 
 export const LoginHintSchema = z.object({
   usernameField: z.enum(["hidden", "shown"]).default("hidden"),
-  providers: z.array(LoginProviderSchema).default([{ kind: "password", label: "Password", loginUrl: null }]),
+  providers: z
+    .array(LoginProviderSchema)
+    .default([{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }]),
   localLogin: z.string().default("enabled"),
+  // The request carried a provider identity that has no account here yet.
+  pendingIdentity: z.boolean().default(false),
 });
 
 // Team-size facts served only to `users:manage` holders; `null` for everyone
@@ -86,9 +91,21 @@ export const AccessSummarySchema = z.object({
   localLoginPolicy: z.string().default("enabled"),
 });
 
+// Step-up (re-verification for sensitive changes): when the account last
+// re-verified, and which factors `/step-up` will ask for. Empty `methods`
+// means the account must enrol two-factor or set a password first.
+export const StepUpMethodSchema = z.enum(["password", "totp"]);
+export const StepUpStateSchema = z.object({
+  verifiedAt: z.number().int().nullable().default(null),
+  expiresAt: z.number().int().nullable().default(null),
+  methods: z.array(StepUpMethodSchema).default([]),
+});
+
 export const AuthSessionSchema = z.object({
   authenticated: z.boolean(),
   passwordRequired: z.boolean(),
+  // An active account holds a password (proxy-created accounts do not count).
+  localPasswordConfigured: z.boolean().default(false),
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
   bootstrapRequired: z.boolean().optional().default(false),
@@ -114,6 +131,7 @@ export const AuthSessionSchema = z.object({
     .transform((value) => value ?? LoginHintSchema.parse({})),
   accessSummary: AccessSummarySchema.nullable().default(null),
   assignableRoleIds: z.array(z.string()).default([]),
+  stepUp: StepUpStateSchema.nullable().default(null),
 });
 
 // Mirrors the backend username rule (case-folded on the server).
@@ -186,9 +204,20 @@ export const StatusResponseSchema = z.object({
   status: z.string(),
 });
 
+export const StepUpRequestSchema = z.object({
+  password: z.string().min(1).optional(),
+  code: z.string().length(6, "settings.totp.validation.codeLength").optional(),
+});
+
+export const StepUpResponseSchema = z.object({
+  verifiedAt: z.number().int(),
+  expiresAt: z.number().int(),
+});
+
 export type AuthSession = z.infer<typeof AuthSessionSchema>;
 export type AuthSessionUser = z.infer<typeof AuthSessionUserSchema>;
 export type LoginHint = z.infer<typeof LoginHintSchema>;
+export type LoginProvider = z.infer<typeof LoginProviderSchema>;
 export type AccessSummary = z.infer<typeof AccessSummarySchema>;
 export type Permission = z.infer<typeof PermissionSchema>;
 export type PermissionScope = z.infer<typeof PermissionScopeSchema>;
@@ -207,6 +236,8 @@ export type TotpVerifyRequest = z.infer<typeof TotpVerifyRequestSchema>;
 export type TotpSetupConfirmRequest = z.infer<typeof TotpSetupConfirmRequestSchema>;
 export type TotpSetupStartResponse = z.infer<typeof TotpSetupStartResponseSchema>;
 export type StatusResponse = z.infer<typeof StatusResponseSchema>;
+export type StepUpState = z.infer<typeof StepUpStateSchema>;
+export type StepUpRequest = z.infer<typeof StepUpRequestSchema>;
 
 export function getFirstZodIssueMessage(error: unknown): string | null {
   if (!(error instanceof z.ZodError)) {

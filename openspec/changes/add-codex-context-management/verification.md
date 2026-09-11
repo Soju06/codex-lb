@@ -1,4 +1,27 @@
-# Upstream refresh verification, September 10
+# Publication integration verification, September 11 (UTC)
+
+Integrated upstream `4096c18acffcfca9267258057678e3898744db85`, including the three authentication commits published after the preceding candidate. The context runtime hooks merged without conflicts. The operator/viewer migration test retains both the current-head and restored-column assertions.
+
+The no-op revision `20260911_020000_merge_context_auth_provider_heads` joins the deployed `20260910_180000_merge_context_dashboard_heads` with upstream `20260910_020000_add_dashboard_role_mappings`. Earlier migration ancestry remains unchanged. Six SQLite upgrade starting points cover the original deployed context revision, both preceding integration stages and the upstream dashboard/authentication heads.
+
+Scoped local results:
+
+- Context/replay, history/notes, HTTP fork behavior, pool dispatch, ownership, transient retries and realtime routes: 194 passed.
+- Migration, policy, context upgrade and dashboard schema suites: 138 passed; 8 PostgreSQL-only cases skipped in this SQLite run.
+- PostgreSQL 16 context/fork/dispatch and ownership migrations: 51 passed. A separate database upgraded from the deployed dashboard/context head, retaining its context owner, participant, dashboard user ID and password; provider seeds, empty role mappings and schema drift checks passed.
+- Affected authentication suites: 277 initially passed and one stale global-head assertion failed. The assertion was corrected and all 14 tests in the affected role-mappings API file then passed.
+- Affected frontend suites: 178 passed in 15 files. The full image build passed, and all 16 referenced JavaScript/CSS assets matched the image bytes.
+- `make lint`, full Ty and focused Ruff/format checks passed. Strict validation passed for the active OpenSpec change and all repository specs.
+
+A consistent snapshot from the deployed dashboard/context head upgraded in isolation. Hash comparison preserved all original columns and rows in all 67 pre-existing application tables. Dashboard credentials, the encryption key, SQLite integrity and foreign-key checks passed. This is test evidence; cutover requires a separate fresh backup.
+
+Codex CLI/app-server 0.153.4 with Astra completed all six native turns through the isolated candidate: parent notes, a real fork replay, independent fork notes, preserved parent notes and recovery of notes/history for both tasks from a new client after restarting the test proxy. Every recorded context and response request returned HTTP 200. Active authentication remained unchanged and the temporary copy was removed.
+
+Deployment candidate `codex-lb:context-fork-main-4096c18a-wsfix-20260911` adds the separate native WebSocket rejection patch `cf7d6f35`. Its 62 tests passed. All 699 Python application files matched the candidate; only the deliberately patched transport file differs from this context branch. The transport fix remains outside this PR.
+
+These scopes overlap and are not additive unique-test totals. Full current-head GitHub CI and the maintainer's architecture decision are separate from these local checks. No live quota exhaustion, forced upstream outage or cross-replica restoration was exercised.
+
+# Earlier upstream refresh verification, September 10
 
 Integrated the 18 commits from `c858dcc864d59871f4dcd844db7286d1ef0d174c` through `aa75e1c12aa802b6364c68aafd3da194b3c3cf01`. The updated bridge, dashboard authentication, users, roles and migrations are retained. The context hooks merged without runtime conflicts. The migration-test conflict retains both sets of tests.
 

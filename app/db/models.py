@@ -941,6 +941,12 @@ class ApiKeyDeactivatedReason(str, Enum):
     EXPIRED = "expired"
 
 
+class AuthProviderKind(str, Enum):
+    PASSWORD = "password"
+    TRUSTED_HEADER = "trusted_header"
+    OIDC = "oidc"
+
+
 #: Username of the account the legacy shared dashboard password is migrated
 #: into. During the expand/contract release its credentials are mirrored to the
 #: legacy ``dashboard_settings`` columns so older replicas keep working.
@@ -1047,6 +1053,18 @@ class DashboardUserInvite(Base):
     """
 
     __tablename__ = "dashboard_user_invites"
+    __table_args__ = (
+        # One open invite per expected identity: two pre-created accounts must not wait for the same person.
+        Index(
+            "uq_dashboard_user_invites_expected_identity",
+            "expected_provider",
+            "expected_provider_key",
+            "expected_subject",
+            unique=True,
+            postgresql_where=text("consumed_at IS NULL AND revoked_at IS NULL"),
+            sqlite_where=text("consumed_at IS NULL AND revoked_at IS NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(
@@ -1062,9 +1080,100 @@ class DashboardUserInvite(Base):
     created_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
     sso_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     username_locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    #: The external identity this pre-created account waits for; the identity
+    #: resolver links it (and activates the account) on an exact triple match.
+    expected_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expected_provider_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    expected_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     user: Mapped["DashboardUser"] = relationship("DashboardUser")
+
+
+class DashboardAuthProvider(Base):
+    """One way of signing in to the dashboard (password, trusted header, later OIDC).
+
+    Rows carry the settings the identity resolver reads: which role an unknown
+    identity gets (``NULL`` = refuse), where a mapped user without a matching
+    mapping lands, whether e-mail linking is allowed, and whether the IdP is
+    trusted for MFA. The password and trusted-header providers have one row
+    each (``provider_key`` ``default``). ``enabled`` is not a copy of the auth
+    mode: a provider is *active* when its row is enabled and the mode allows
+    it. ``config_encrypted`` holds provider secrets (OIDC) and is never returned
+    in clear.
+    """
+
+    __tablename__ = "dashboard_auth_providers"
+    __table_args__ = (UniqueConstraint("kind", "provider_key", name="uq_dashboard_auth_providers_kind_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    unknown_identity_role_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    no_match_role_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    link_by_email: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    skip_role_sync: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    idp_mfa_enforced: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class DashboardRoleMappingClaim(str, Enum):
+    """Which fact about an identity a rule matches on.
+
+    A plain string column validated here, not a database enum: a later claim
+    (an OIDC claim name, a SCIM attribute) must not need a type migration.
+    """
+
+    GROUPS = "groups"
+    EMAIL_DOMAIN = "email_domain"
+
+
+class DashboardRoleMapping(Base):
+    """One "identities like this get that role" rule of a sign-in provider.
+
+    Rules are evaluated in descending ``priority`` and the first match wins;
+    ``UNIQUE(provider, provider_key, priority)`` makes a tie impossible and the
+    order server-owned (the rows of one provider are always the contiguous
+    integers ``N..1``). ``role_id`` is RESTRICT: a role a rule hands out cannot
+    be deleted while the rule exists.
+    """
+
+    __tablename__ = "dashboard_role_mappings"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_key", "priority", name="uq_dashboard_role_mappings_priority"),
+        Index("idx_dashboard_role_mappings_provider", "provider", "provider_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    claim_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: Normalized (trimmed, case-folded; an ``email_domain`` value carries no leading ``@``).
+    claim_value: Mapped[str] = mapped_column(String(320), nullable=False)
+    role_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_roles.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class DashboardRoleRecord(Base):

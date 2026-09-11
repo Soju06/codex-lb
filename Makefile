@@ -14,6 +14,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
+	tests/integration/test_auth_provider_abstraction.py \
 	tests/integration/test_migration_serialization.py::test_concurrent_upgrades_on_fresh_postgresql_database_apply_head_exactly_once \
 	tests/integration/test_migration_serialization.py::test_postgresql_run_upgrade_times_out_when_advisory_lock_is_held \
 	tests/integration/test_usage_repository.py::test_latest_by_account_primary_query_plan_uses_normalized_window_index_postgresql \

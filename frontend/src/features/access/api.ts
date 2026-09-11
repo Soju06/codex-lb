@@ -31,7 +31,11 @@ export const DashboardUserSchema = z.object({
   hasPassword: z.boolean(),
   createdAt: z.string(),
   lastLoginAt: z.string().nullable().default(null),
-  pendingInvite: z.object({ expiresAt: z.string() }).nullable().default(null),
+  // `expiresAt` is null for an SSO-only account: it waits for its first provider sign-in.
+  pendingInvite: z
+    .object({ expiresAt: z.string().nullable().default(null), ssoOnly: z.boolean().default(false) })
+    .nullable()
+    .default(null),
 });
 
 export const IssuedInviteSchema = z.object({
@@ -41,15 +45,17 @@ export const IssuedInviteSchema = z.object({
 
 export const DashboardUserCreateResponseSchema = z.object({
   user: DashboardUserSchema,
-  invite: IssuedInviteSchema,
+  // `null` for an SSO-only account: there is no link to hand over.
+  invite: IssuedInviteSchema.nullable(),
 });
 
 export const PendingInviteSchema = z.object({
   userId: z.string(),
   username: z.string(),
   roleId: z.string(),
-  expiresAt: z.string(),
+  expiresAt: z.string().nullable().default(null),
   createdByUserId: z.string(),
+  ssoOnly: z.boolean().default(false),
 });
 
 export const DashboardRoleSchema = z.object({
@@ -85,6 +91,10 @@ export const DashboardUserCreateRequestSchema = z.object({
   displayName: z.string().trim().max(128, { message: "access.invite.validation.displayNameMax" }).optional(),
   // Empty until the roles list has loaded; the dialog fills in the preselected role.
   roleId: z.string(),
+  // SSO-only: no link, the account is activated by its first provider sign-in
+  // matching `expectedIdentity` exactly (needs an active non-password provider).
+  ssoOnly: z.boolean().optional(),
+  expectedIdentity: z.object({ provider: z.string(), providerKey: z.string(), subject: z.string() }).optional(),
 });
 
 export type DashboardUser = z.infer<typeof DashboardUserSchema>;
@@ -94,7 +104,12 @@ export type PendingInvite = z.infer<typeof PendingInviteSchema>;
 export type DashboardRole = z.infer<typeof DashboardRoleSchema>;
 export type PermissionDescriptor = z.infer<typeof PermissionDescriptorSchema>;
 export type DashboardUserCreateRequest = z.infer<typeof DashboardUserCreateRequestSchema>;
-export type DashboardUserUpdateRequest = { roleId?: string; status?: "active" | "disabled" };
+export type DashboardUserUpdateRequest = {
+  roleId?: string;
+  status?: "active" | "disabled";
+  /** Take a role the company login manages back under manual control (`409 role_managed_externally` otherwise). */
+  force?: boolean;
+};
 
 const StatusSchema = z.object({ status: z.string() });
 

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { AlertMessage } from "@/components/alert-message";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import type { DashboardRole, PendingInvite } from "@/features/access/api";
@@ -51,32 +52,46 @@ export function PendingInvitesSheet({ open, onOpenChange, invites, roles, onIssu
           ) : null}
           {invites.length === 0 ? <p className="text-sm text-muted-foreground">{t("access.pending.empty")}</p> : null}
           {invites.map((invite) => {
-            const expiresIn = formatExpiresIn(invite.expiresAt);
+            const expiresIn = invite.expiresAt ? formatExpiresIn(invite.expiresAt) : null;
             return (
               <div key={invite.userId} className="flex items-center justify-between gap-3 rounded-lg border p-3">
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{invite.username}</p>
+                  <p className="flex items-center gap-2 truncate text-sm font-medium">
+                    {invite.username}
+                    {invite.ssoOnly ? (
+                      <Badge variant="secondary" className="text-[10px]">
+                        {t("access.pending.ssoOnly")}
+                      </Badge>
+                    ) : null}
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     {roles.find((role) => role.id === invite.roleId)?.name ?? invite.roleId} ·{" "}
-                    {expiresIn ? t("access.pending.expires", { when: expiresIn }) : t("access.people.inviteExpired")}
+                    {invite.ssoOnly
+                      ? t("access.people.awaitingSignIn")
+                      : expiresIn
+                        ? t("access.pending.expires", { when: expiresIn })
+                        : t("access.people.inviteExpired")}
                   </p>
                 </div>
                 <div className="flex shrink-0 gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-8 text-xs"
-                    disabled={mutations.busy}
-                    onClick={() =>
-                      void mutations.resend
-                        .mutateAsync(invite.userId)
-                        .then((issued) => onIssued({ invite: issued, username: null }))
-                        .catch(() => undefined)
-                    }
-                  >
-                    {t("access.people.actions.copyNewLink")}
-                  </Button>
+                  {/* An SSO-only account has no link: nothing to resend. */}
+                  {invite.ssoOnly ? null : (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 text-xs"
+                      disabled={mutations.busy}
+                      onClick={() =>
+                        void mutations.resend
+                          .mutateAsync(invite.userId)
+                          .then((issued) => onIssued({ invite: issued, username: null }))
+                          .catch(() => undefined)
+                      }
+                    >
+                      {t("access.people.actions.copyNewLink")}
+                    </Button>
+                  )}
                   <Button
                     type="button"
                     size="sm"

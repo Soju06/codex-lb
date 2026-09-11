@@ -1540,7 +1540,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 operation, "rebound_from_parent_response_id", None
             )
             request_state.operation_persisted_response_id = getattr(operation, "response_id", None)
-            request_state.operation_attempt_generation = getattr(operation, "recovery_dispatch_count", 0)
 
         async def _cleanup_unsubmitted_recovery_claim() -> None:
             if (

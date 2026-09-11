@@ -388,7 +388,6 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
     request_state.recovery_attempt_fingerprint = "recovery-attempt-abandoned-operation"
     request_state.recovery_attempt_session_id = session.durable_session_id
     request_state.recovery_attempt_owner_epoch = session.durable_owner_epoch
-    claim_unknown = AsyncMock()
     rollback_recovery_attempt = AsyncMock(return_value=True)
     service._durable_bridge = cast(
         Any,
@@ -396,7 +395,6 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
             get_operation_by_fingerprint=AsyncMock(return_value=abandoned),
             get_operation=AsyncMock(return_value=abandoned),
             record_operation=AsyncMock(return_value=abandoned),
-            claim_unknown_operation_for_recovery=claim_unknown,
             rollback_recovery_attempt_before_dispatch=rollback_recovery_attempt,
         ),
     )
@@ -424,7 +422,6 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
     assert exc_info.value.payload["error"]["type"] == "invalid_request_error"
     assert exc_info.value.payload["error"]["code"] == "previous_response_not_found"
     assert exc_info.value.payload["error"]["param"] == "previous_response_id"
-    claim_unknown.assert_not_awaited()
     send_text.assert_not_awaited()
     # The journaled UNKNOWN checkpoint is released with the rejection so an
     # identical resend is not refused as an in-flight recovery request.
@@ -7520,7 +7517,6 @@ async def test_terminal_append_failure_retains_last_persisted_response_id_after_
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = SimpleNamespace(
         operation_id="op-terminal-retry-reset",
-        operation_attempt_generation=0,
         operation_persisted_response_id=None,
         request_id="req-terminal-retry-reset",
         response_id="resp-before-retry",
@@ -7599,7 +7595,6 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
         skip_request_log=True,
     )
     request_state.operation_id = "op-terminal-append-fallback-order"
-    request_state.operation_attempt_generation = 2
     request_state.replay_downstream_response_id = replay_response_id
     session = _make_bridge_session(
         key_value="terminal-append-fallback-order",
@@ -7657,9 +7652,9 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     release_append.set()
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
     assert append_kwargs["response_id"] == replay_response_id
-    assert append_kwargs["expected_recovery_dispatch_count"] == 2
+    assert "expected_recovery_dispatch_count" not in append_kwargs
     assert settlement_kwargs["expected_response_id"] == expected_response_id
-    assert settlement_kwargs["expected_recovery_dispatch_count"] == 2
+    assert "expected_recovery_dispatch_count" not in settlement_kwargs
     assert settlement_kwargs["alternate_expected_response_id"] == alternate_expected_response_id
     assert settlement_kwargs["response_id"] == replay_response_id
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block

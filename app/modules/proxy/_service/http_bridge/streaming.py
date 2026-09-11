@@ -2079,9 +2079,6 @@ class _HTTPBridgeStreamingMixin:
                 else None
             )
             prior_operation_registered = request_state.operation_registered if preserve_operation_identity else False
-            prior_operation_attempt_generation = (
-                request_state.operation_attempt_generation if preserve_operation_identity else 0
-            )
             prior_operation_persisted_response_id = (
                 request_state.operation_persisted_response_id if preserve_operation_identity else None
             )
@@ -2114,7 +2111,6 @@ class _HTTPBridgeStreamingMixin:
                 request_state.operation_fingerprint = prior_operation_fingerprint
                 request_state.operation_parent_response_id = prior_operation_parent_response_id
                 request_state.operation_registered = prior_operation_registered
-                request_state.operation_attempt_generation = prior_operation_attempt_generation
                 request_state.operation_persisted_response_id = prior_operation_persisted_response_id
                 request_state.operation_rebind_required = True
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
@@ -3856,7 +3852,6 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.operation_fingerprint = request_state.operation_fingerprint
                 retry_request_state.operation_parent_response_id = request_state.operation_parent_response_id
                 retry_request_state.operation_registered = request_state.operation_registered
-                retry_request_state.operation_attempt_generation = request_state.operation_attempt_generation
                 retry_request_state.operation_persisted_response_id = request_state.operation_persisted_response_id
                 retry_request_state.operation_rebind_required = request_state.operation_rebind_required
                 # An anchored recovery replays the proxy's own anchor, so the

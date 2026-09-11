@@ -175,7 +175,21 @@ settings, merged as PRs #1351, #1360, #1362, #1363, #1364 in v1.21.x):
    `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` /
    `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS` are in `_REMOVED_SETTINGS` for
    their warning release. See `openspec/specs/data-retention/context.md`.
-3. **Retire the removal warning itself.** `_REMOVED_SETTINGS` and
+3. **Drop the retired bridge recovery-dispatch column.**
+   `http_bridge_operations.recovery_dispatch_count` has been unwritten since
+   `drop-bridge-recovery-modes` deleted the server-owned recovery dispatch and
+   is no longer mapped by the `HttpBridgeOperationRecord` ORM model since
+   `retire-recovery-dispatch-storage` (v1.25); the physical column is
+   allow-listed in `_LEGACY_EXTRA_COLUMNS` (`app/db/migrate.py`). It could not
+   be dropped in the same release that retired the mapping, for the same
+   reason as "Drop the deprecated prewarm request-log columns (phase B)"
+   above: the Helm migration Job runs before old replicas drain,
+   and a previous-release replica still maps the column and renders an
+   explicit value in its operation INSERTs. Once v1.25 is the oldest supported
+   release, add the Alembic drop revision (batch-mode `drop_column` for
+   SQLite, `NOT NULL` re-add with `server_default 0` on downgrade) and remove
+   the allow-list entry in the same PR.
+4. **Retire the removal warning itself.** `_REMOVED_SETTINGS` and
    `warn_removed_settings()` in `app/core/config/settings.py` are a
    one-release courtesy per removed batch ("at least one release"). The
    phase 1-4 names were pruned by `remove-dead-env-settings` (their warning release shipped in

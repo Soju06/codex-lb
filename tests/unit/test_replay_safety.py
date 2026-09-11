@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import json
+import time
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import cast
+
 import pytest
 
 from app.core.openai.requests import ResponsesRequest
@@ -9,6 +15,9 @@ from app.modules.proxy.continuity import (
     make_http_bridge_account_neutral_replay_key,
 )
 from app.modules.proxy.replay_safety import (
+    RELOCATION_TRANSCRIPT_MAX_TURNS,
+    _replay_prefix_overlap,
+    project_durable_transcript_for_account_neutral_fresh_replay,
     project_responses_input_for_account_neutral_fresh_replay,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
@@ -2613,3 +2622,461 @@ def test_account_neutral_replay_marker_requires_tagged_existing_hard_kind() -> N
 def test_account_neutral_replay_marker_rejects_empty_nonce() -> None:
     with pytest.raises(ValueError, match="nonce"):
         make_http_bridge_account_neutral_replay_key("")
+
+
+@dataclass(frozen=True)
+class _TranscriptOperation:
+    request_text: str | None
+
+
+@dataclass(frozen=True)
+class _TranscriptTurn:
+    operation: _TranscriptOperation
+    events: tuple[str, ...]
+
+
+def _request_frame(body: dict[str, JsonValue]) -> str:
+    return json.dumps({"type": "response.create", **body}, separators=(",", ":"))
+
+
+def _sse_block(payload: dict[str, JsonValue]) -> str:
+    return f"event: {payload['type']}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+
+def _user_item(text: str) -> dict[str, JsonValue]:
+    return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+
+def _assistant_item(text: str, *, item_id: str | None = None) -> dict[str, JsonValue]:
+    item: dict[str, JsonValue] = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text}],
+    }
+    return item if item_id is None else {"id": item_id, **item}
+
+
+def _reasoning_item(item_id: str) -> dict[str, JsonValue]:
+    return {"id": item_id, "type": "reasoning", "summary": []}
+
+
+def _transcript_turn(
+    input_items: Sequence[JsonValue],
+    output_items: Sequence[JsonValue],
+    *,
+    response_id: str = "resp_1",
+    terminal_type: str = "response.completed",
+    include_terminal_output: bool = True,
+    include_item_events: bool = False,
+) -> _TranscriptTurn:
+    events: list[str] = []
+    if include_item_events:
+        events.extend(_sse_block({"type": "response.output_item.done", "item": item}) for item in output_items)
+    terminal_response: dict[str, JsonValue] = {"id": response_id}
+    if include_terminal_output:
+        terminal_response["output"] = list(output_items)
+    events.append(_sse_block({"type": terminal_type, "response": terminal_response}))
+    return _TranscriptTurn(
+        operation=_TranscriptOperation(request_text=_request_frame({"model": "gpt-5.4", "input": list(input_items)})),
+        events=tuple(events),
+    )
+
+
+def _current_frame(input_items: Sequence[JsonValue], **extra: JsonValue) -> str:
+    return _request_frame(
+        {"model": "gpt-5.4", "input": list(input_items), "previous_response_id": "resp_owner", **extra}
+    )
+
+
+def _rebuild(
+    transcript: Sequence[object],
+    current_input: Sequence[JsonValue],
+    **extra: JsonValue,
+) -> dict[str, JsonValue] | None:
+    return project_durable_transcript_for_account_neutral_fresh_replay(
+        transcript,
+        current_request_text=_current_frame(current_input, **extra),
+    )
+
+
+def test_durable_rebuild_joins_the_parent_chain_oldest_turn_first() -> None:
+    transcript = (
+        _transcript_turn(
+            [_user_item("first")],
+            [_reasoning_item("rs_1"), _assistant_item("first answer", item_id="msg_1")],
+            response_id="resp_1",
+        ),
+        _transcript_turn(
+            [_user_item("second")],
+            [_assistant_item("second answer", item_id="msg_2")],
+            response_id="resp_2",
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("third")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [
+        _user_item("first"),
+        _assistant_item("first answer"),
+        _user_item("second"),
+        _assistant_item("second answer"),
+        _user_item("third"),
+    ]
+
+
+def test_durable_rebuild_drops_the_anchor_and_keeps_the_clients_other_fields() -> None:
+    transcript = (_transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),)
+
+    rebuilt = _rebuild(transcript, [_user_item("second")], instructions="be brief")
+
+    assert rebuilt is not None
+    assert "previous_response_id" not in rebuilt
+    assert rebuilt["model"] == "gpt-5.4"
+    assert rebuilt["instructions"] == "be brief"
+
+
+def test_durable_rebuild_expands_a_stored_scalar_turn_input() -> None:
+    transcript = (
+        _TranscriptTurn(
+            operation=_TranscriptOperation(
+                request_text=_request_frame({"model": "gpt-5.4", "input": "first"}),
+            ),
+            events=(
+                _sse_block(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_1", "output": [_assistant_item("answer", item_id="msg_1")]},
+                    }
+                ),
+            ),
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("second")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
+
+
+def test_durable_rebuild_dedupes_a_client_full_resend_of_the_whole_chain() -> None:
+    # The two sides of this join never look alike before projection. The chain
+    # carries the spool's verbatim response.output -- the owner account's item
+    # ids and its reasoning item -- while the client restates the same turn as
+    # the plain conversation it displays.
+    transcript = (
+        _transcript_turn(
+            [_user_item("first")],
+            [_reasoning_item("rs_1"), _assistant_item("answer", item_id="msg_1")],
+        ),
+    )
+
+    rebuilt = _rebuild(
+        transcript,
+        [_user_item("first"), _assistant_item("answer"), _user_item("second")],
+    )
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
+
+
+@pytest.mark.parametrize("restated_by_the_client", [True, False])
+def test_durable_rebuild_dedupes_a_single_item_overlap_from_either_join(
+    restated_by_the_client: bool,
+) -> None:
+    first_turn = _transcript_turn(
+        [_user_item("first")],
+        [_reasoning_item("rs_1"), _assistant_item("answer", item_id="msg_1")],
+    )
+    if restated_by_the_client:
+        transcript: tuple[object, ...] = (first_turn,)
+        current_input = [_assistant_item("answer"), _user_item("second")]
+    else:
+        transcript = (
+            first_turn,
+            _transcript_turn(
+                [_assistant_item("answer", item_id="msg_1"), _user_item("second")],
+                [],
+                response_id="resp_2",
+            ),
+        )
+        current_input = []
+
+    rebuilt = _rebuild(transcript, current_input)
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
+
+
+def test_durable_rebuild_dedupes_a_single_leading_item_a_later_turn_restates() -> None:
+    transcript = (
+        _transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),
+        _transcript_turn(
+            [_user_item("first"), _user_item("second")],
+            [_assistant_item("second answer", item_id="msg_2")],
+            response_id="resp_2",
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("third")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [
+        _user_item("first"),
+        _assistant_item("answer"),
+        _user_item("second"),
+        _assistant_item("second answer"),
+        _user_item("third"),
+    ]
+
+
+def test_durable_rebuild_keeps_a_repeated_message_that_no_overlap_covers() -> None:
+    transcript = (_transcript_turn([_user_item("ping")], [_assistant_item("pong", item_id="msg_1")]),)
+
+    rebuilt = _rebuild(transcript, [_user_item("ping")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("ping"), _assistant_item("pong"), _user_item("ping")]
+
+
+def test_durable_rebuild_falls_back_to_item_events_when_an_incomplete_terminal_omits_output() -> None:
+    transcript = (
+        _transcript_turn(
+            [_user_item("first")],
+            [_reasoning_item("rs_1"), _assistant_item("partial", item_id="msg_1")],
+            terminal_type="response.incomplete",
+            include_terminal_output=False,
+            include_item_events=True,
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("second")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _assistant_item("partial"), _user_item("second")]
+
+
+def test_durable_rebuild_prefers_the_terminal_output_over_accumulated_items() -> None:
+    transcript = (
+        _transcript_turn(
+            [_user_item("first")],
+            [_assistant_item("answer", item_id="msg_1")],
+            include_item_events=True,
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("second")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
+
+
+def test_durable_rebuild_refuses_a_turn_with_no_terminal_marker() -> None:
+    transcript = (
+        _TranscriptTurn(
+            operation=_TranscriptOperation(
+                request_text=_request_frame({"model": "gpt-5.4", "input": [_user_item("first")]}),
+            ),
+            events=(
+                _sse_block({"type": "response.output_item.done", "item": _assistant_item("answer", item_id="msg_1")}),
+            ),
+        ),
+    )
+
+    assert _rebuild(transcript, [_user_item("second")]) is None
+
+
+@pytest.mark.parametrize(
+    "incomplete_turn",
+    [
+        # What a chain the repository could not complete hands back: nothing at
+        # all for a broken or cyclic parent walk, or a turn whose durable row is
+        # missing its request body or its event spool.
+        _TranscriptTurn(operation=_TranscriptOperation(request_text=None), events=()),
+        _TranscriptTurn(
+            operation=_TranscriptOperation(request_text=_request_frame({"input": [_user_item("first")]})),
+            events=(),
+        ),
+        _TranscriptTurn(operation=_TranscriptOperation(request_text="{not json"), events=()),
+        _TranscriptTurn(operation=_TranscriptOperation(request_text="[]"), events=()),
+        _TranscriptTurn(
+            operation=_TranscriptOperation(request_text=json.dumps({"type": "response.cancel", "input": []})),
+            events=(),
+        ),
+        _TranscriptTurn(
+            operation=_TranscriptOperation(request_text=_request_frame({"input": 7})),
+            events=(),
+        ),
+    ],
+)
+def test_durable_rebuild_refuses_an_incomplete_chain(incomplete_turn: object) -> None:
+    assert _rebuild((incomplete_turn,), [_user_item("second")]) is None
+
+
+@pytest.mark.parametrize("empty_transcript", [(), []])
+def test_durable_rebuild_refuses_an_empty_chain(empty_transcript: Sequence[object]) -> None:
+    assert _rebuild(empty_transcript, [_user_item("second")]) is None
+
+
+@pytest.mark.parametrize(
+    "current_request_text",
+    [
+        None,
+        "{not json",
+        "[]",
+        json.dumps({"type": "response.cancel", "input": []}),
+        # A scalar input is the new prompt alone and cannot stand in for the
+        # conversation the dropped anchor represented.
+        _request_frame({"model": "gpt-5.4", "input": "second"}),
+        _request_frame({"model": "gpt-5.4"}),
+    ],
+)
+def test_durable_rebuild_refuses_an_unusable_current_request(current_request_text: str | None) -> None:
+    transcript = (_transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),)
+
+    assert (
+        project_durable_transcript_for_account_neutral_fresh_replay(
+            transcript,
+            current_request_text=current_request_text,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("current_input", "extra_fields"),
+    [
+        # An unsettled tool call: the new account would be asked to continue a
+        # call whose output no one holds.
+        ([{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}], {}),
+        # A tool declaration no other account can serve.
+        ([_user_item("second")], {"tools": [{"type": "code_interpreter"}]}),
+        # Account-scoped state the projection does not remove.
+        ([{"type": "input_file", "file_id": "file_owner"}], {}),
+        ([_user_item("second")], {"conversation": "conv_owner"}),
+    ],
+)
+def test_durable_rebuild_refuses_a_body_the_strict_predicate_declines(
+    current_input: Sequence[JsonValue],
+    extra_fields: dict[str, JsonValue],
+) -> None:
+    transcript = (_transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),)
+
+    assert _rebuild(transcript, current_input, **extra_fields) is None
+
+
+def test_durable_rebuild_refuses_account_owned_state_that_survives_projection() -> None:
+    transcript = (
+        _transcript_turn(
+            [_user_item("first")],
+            [{"id": "ir_1", "type": "item_reference"}, _assistant_item("answer", item_id="msg_1")],
+        ),
+    )
+
+    assert _rebuild(transcript, [_user_item("second")]) is None
+
+
+def test_durable_rebuild_result_satisfies_the_strict_predicate() -> None:
+    transcript = (_transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),)
+
+    rebuilt = _rebuild(transcript, [_user_item("second")])
+
+    assert rebuilt is not None
+    assert responses_payload_is_account_neutral_fresh_replay(rebuilt) is True
+
+
+def _chain_of_turns(turn_count: int) -> tuple[object, ...]:
+    return tuple(
+        _transcript_turn(
+            [_user_item(f"question {index}")],
+            [_assistant_item(f"answer {index}", item_id=f"msg_{index}")],
+            response_id=f"resp_{index}",
+        )
+        for index in range(turn_count)
+    )
+
+
+def test_durable_rebuild_accepts_a_chain_at_the_turn_cap() -> None:
+    rebuilt = _rebuild(_chain_of_turns(RELOCATION_TRANSCRIPT_MAX_TURNS), [_user_item("next")])
+
+    assert rebuilt is not None
+    assert len(cast(list[JsonValue], rebuilt["input"])) == RELOCATION_TRANSCRIPT_MAX_TURNS * 2 + 1
+
+
+def test_durable_rebuild_refuses_a_chain_past_the_turn_cap() -> None:
+    assert _rebuild(_chain_of_turns(RELOCATION_TRANSCRIPT_MAX_TURNS + 1), [_user_item("next")]) is None
+
+
+@pytest.mark.parametrize(("max_turns", "expected_rebuild"), [(2, True), (1, False)])
+def test_durable_rebuild_honours_an_explicit_turn_cap(max_turns: int, expected_rebuild: bool) -> None:
+    rebuilt = project_durable_transcript_for_account_neutral_fresh_replay(
+        _chain_of_turns(2),
+        current_request_text=_current_frame([_user_item("next")]),
+        max_turns=max_turns,
+    )
+
+    assert (rebuilt is not None) is expected_rebuild
+
+
+def test_durable_rebuild_refuses_material_past_the_byte_cap() -> None:
+    transcript = _chain_of_turns(1)
+    stored_bytes = len(cast(_TranscriptTurn, transcript[0]).operation.request_text or "")
+
+    assert (
+        project_durable_transcript_for_account_neutral_fresh_replay(
+            transcript,
+            current_request_text=_current_frame([_user_item("next")]),
+            max_bytes=stored_bytes,
+        )
+        is None
+    )
+
+
+def test_durable_rebuild_admits_material_inside_the_byte_cap() -> None:
+    transcript = _chain_of_turns(1)
+    turn = cast(_TranscriptTurn, transcript[0])
+    turn_bytes = len(turn.operation.request_text or "") + sum(len(event) for event in turn.events)
+
+    assert (
+        project_durable_transcript_for_account_neutral_fresh_replay(
+            transcript,
+            current_request_text=_current_frame([_user_item("next")]),
+            max_bytes=turn_bytes,
+        )
+        is not None
+    )
+
+
+def test_durable_rebuild_dedupes_a_restated_prefix_longer_than_any_fixed_window() -> None:
+    restated_count = 3000
+    restated = [_user_item(f"turn {index}") for index in range(restated_count)]
+    transcript = (_transcript_turn(restated, [_assistant_item("answer", item_id="msg_1")]),)
+
+    rebuilt = _rebuild(transcript, [*restated, _assistant_item("answer"), _user_item("next")])
+
+    assert rebuilt is not None
+    assert cast(list[JsonValue], rebuilt["input"]) == [*restated, _assistant_item("answer"), _user_item("next")]
+
+
+def test_replay_prefix_overlap_stays_linear_in_the_item_count() -> None:
+    # Every item here is a near-match, which is the shape that makes a
+    # candidate-by-candidate tail search do quadratic work. Only the byte caps
+    # constrain the item count, and items this small put hundreds of thousands
+    # of them inside those caps -- so the failover path must not walk them
+    # squared.
+    item_count = 30000
+    divergence = item_count // 2
+    chain: list[JsonValue] = [_user_item("ping")] * item_count
+    restated: list[JsonValue] = [
+        *([_user_item("ping")] * divergence),
+        _user_item("pong"),
+        *([_user_item("ping")] * (item_count - divergence - 1)),
+    ]
+
+    started_at = time.perf_counter()
+    overlap = _replay_prefix_overlap(chain, restated)
+    elapsed_seconds = time.perf_counter() - started_at
+
+    assert overlap == divergence
+    assert elapsed_seconds < 2.0

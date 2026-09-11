@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections import deque
-from collections.abc import Container, Mapping
+from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
@@ -122,6 +123,18 @@ _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
         "item_reference",
     }
 )
+# A rebuilt conversation is dispatched whole to a replacement account, so both
+# what the rebuild reads and what it costs to assemble have to stop somewhere.
+# These are transport invariants rather than operator knobs, and the Settings
+# ratchet is full.
+RELOCATION_TRANSCRIPT_MAX_TURNS = 128
+RELOCATION_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
+
+_RESPONSE_CREATE_EVENT_TYPE = "response.create"
+_SSE_DATA_FIELD_PREFIX = "data:"
+_SSE_DONE_SENTINEL = "[DONE]"
+_TERMINAL_RESPONSE_EVENT_TYPES = frozenset({"response.completed", "response.incomplete"})
+_RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE = "response.output_item.done"
 _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION = frozenset(
     {
         "conversation",
@@ -1083,6 +1096,254 @@ def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> boo
         if identifiers is not None and identifiers != []:
             return True
     return False
+
+
+def project_durable_transcript_for_account_neutral_fresh_replay(
+    transcript: Sequence[object],
+    *,
+    current_request_text: str | None,
+    max_turns: int = RELOCATION_TRANSCRIPT_MAX_TURNS,
+    max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
+) -> dict[str, JsonValue] | None:
+    """Rebuild an anchor-free request body from a durable parent-response chain.
+
+    A Codex continuation carries only its new turn plus ``previous_response_id``,
+    and that anchor names a response object only the account that produced it can
+    resolve. The durable operation spool holds every parent turn's request body
+    and the terminal response it produced, so the conversation can be reassembled
+    here and offered to another account as a fresh request.
+
+    ``transcript`` is consumed structurally -- ``turn.operation.request_text`` and
+    ``turn.events``, oldest turn first, matching the order the durable repository
+    returns -- so this module stays independent of the persistence layer. The
+    caps are applied to the material this rebuild actually consumes rather than
+    left to whichever loader fetched the chain. Anything the rebuild cannot prove
+    returns ``None``, leaving the caller on the owner-bound behaviour it has
+    without a transcript.
+    """
+
+    if not transcript or len(transcript) > max_turns or not isinstance(current_request_text, str):
+        return None
+    current_payload = _responses_request_frame_payload(current_request_text)
+    if current_payload is None:
+        return None
+    current_input = current_payload.get("input")
+    # A scalar input is the new prompt by itself. It cannot carry the prior
+    # conversation the anchor stood for, so there is nothing safe to join.
+    if not isinstance(current_input, list):
+        return None
+
+    rebuilt_input: list[JsonValue] = []
+    remaining_bytes = max_bytes
+    for turn in transcript:
+        operation = getattr(turn, "operation", None)
+        events = getattr(turn, "events", None)
+        remaining_bytes -= _durable_turn_byte_size(operation, events)
+        if remaining_bytes < 0:
+            return None
+        turn_input = _transcript_turn_input_items(operation)
+        terminal_output = _terminal_response_output_items(events)
+        if turn_input is None or terminal_output is None:
+            return None
+        # The spooled turns carry response-owned bookkeeping -- item ids,
+        # reasoning -- that belonged to the account that produced them, and the
+        # client's restatement of the same turn carries none of it. Project
+        # every side before joining, or structurally identical turns compare
+        # unequal, the dedupe collapses to nothing and the conversation is
+        # doubled while each duplicated message stays individually valid.
+        _join_without_restated_prefix(rebuilt_input, _account_neutral_replay_items(turn_input))
+        rebuilt_input.extend(_account_neutral_replay_items(terminal_output))
+
+    _join_without_restated_prefix(rebuilt_input, _account_neutral_replay_items(cast(list[JsonValue], current_input)))
+    # A chain that assembled nothing is not a conversation another account can
+    # continue; relocating on it would silently drop the thread it came for.
+    if not rebuilt_input:
+        return None
+    replay_payload = dict(current_payload)
+    replay_payload["input"] = cast(JsonValue, rebuilt_input)
+    replay_payload.pop("previous_response_id", None)
+    # Anything account-owned that survived projection still fails closed here.
+    if not responses_payload_is_account_neutral_fresh_replay(replay_payload):
+        return None
+    return replay_payload
+
+
+def _durable_turn_byte_size(operation: object, events: object) -> int:
+    """The stored bytes one chain turn contributes, counted as the spool stores them."""
+
+    request_text = getattr(operation, "request_text", None)
+    turn_bytes = len(request_text.encode("utf-8")) if isinstance(request_text, str) else 0
+    if isinstance(events, Sequence) and not isinstance(events, (str, bytes, bytearray)):
+        turn_bytes += sum(len(event.encode("utf-8")) for event in events if isinstance(event, str))
+    return turn_bytes
+
+
+def _account_neutral_replay_items(input_items: list[JsonValue]) -> list[JsonValue]:
+    """``input_items`` with their former owner's response-owned bookkeeping removed."""
+
+    projected_items: list[JsonValue] = []
+    for item in input_items:
+        projected_item = _project_account_neutral_replay_item(item, preserve_developer_message_ids=False)
+        if projected_item is not None:
+            projected_items.append(projected_item)
+    return projected_items
+
+
+def _join_without_restated_prefix(rebuilt: list[JsonValue], appended: list[JsonValue]) -> None:
+    rebuilt.extend(appended[_replay_prefix_overlap(rebuilt, appended) :])
+
+
+def _responses_request_frame_payload(request_text: str) -> dict[str, JsonValue] | None:
+    """Return the Responses body inside a stored request frame.
+
+    The session bridge spools the exact upstream frame, which wraps the body in a
+    ``response.create`` envelope; the direct paths store the body alone. Any other
+    envelope is not a turn this rebuild knows how to replay.
+    """
+
+    try:
+        payload = json.loads(request_text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    event_type = payload.get("type")
+    if event_type is not None and event_type != _RESPONSE_CREATE_EVENT_TYPE:
+        return None
+    return {key: value for key, value in payload.items() if key != "type"}
+
+
+def _transcript_turn_input_items(operation: object) -> list[JsonValue] | None:
+    request_text = getattr(operation, "request_text", None)
+    if not isinstance(request_text, str):
+        return None
+    payload = _responses_request_frame_payload(request_text)
+    if payload is None:
+        return None
+    turn_input = payload.get("input")
+    if isinstance(turn_input, str):
+        # A stored scalar input is that turn's whole user message and loses
+        # nothing by taking the item form the rebuilt chain concatenates.
+        return [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": turn_input}]}]
+    return cast(list[JsonValue], turn_input) if isinstance(turn_input, list) else None
+
+
+def _canonical_replay_item(item: JsonValue) -> str:
+    """A stable representation of one input item, independent of key order."""
+
+    return json.dumps(item, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _replay_prefix_overlap(rebuilt: list[JsonValue], appended: list[JsonValue]) -> int:
+    """How many leading ``appended`` items the rebuilt chain already contains.
+
+    Both joins the rebuild performs -- one chain turn onto the turns before it,
+    and the client's own suffix onto the finished chain -- ask this same question,
+    so they ask it here rather than each deciding for itself. Restated items run
+    up to where the chain ends, so the tail form is the one that proves a
+    restatement, and a single repeated item proves it as well as ten do. The
+    leading form then catches a sender that repeated the conversation from its
+    start, but only while it still contributes something past the repetition: a
+    leading match that swallowed the whole contribution would delete the very
+    turn the sender came to add, and a message repeated verbatim later in a
+    conversation is ordinary. Everything past the matched overlap is preserved.
+    """
+
+    max_overlap = min(len(rebuilt), len(appended))
+    if max_overlap == 0:
+        return 0
+    canonical_appended = [_canonical_replay_item(item) for item in appended[:max_overlap]]
+    canonical_tail = [_canonical_replay_item(item) for item in rebuilt[-max_overlap:]]
+    tail_overlap = _longest_tail_prefix_match(canonical_tail, canonical_appended)
+    if tail_overlap:
+        return tail_overlap
+    canonical_head = [_canonical_replay_item(item) for item in rebuilt[:max_overlap]]
+    leading_overlap = 0
+    while leading_overlap < max_overlap and canonical_head[leading_overlap] == canonical_appended[leading_overlap]:
+        leading_overlap += 1
+    return leading_overlap if leading_overlap < len(appended) else 0
+
+
+def _longest_tail_prefix_match(tail: list[str], prefix: list[str]) -> int:
+    """The longest suffix of ``tail`` that is also a leading run of ``prefix``.
+
+    Trying each candidate length in turn costs quadratic comparisons whenever
+    the items nearly match, which is exactly what a restated conversation looks
+    like, and the transcript bounds are byte bounds: items small enough to
+    repeat cheaply fit hundreds of thousands of times inside them. This runs on
+    the failover path while a client waits, so it walks the Knuth-Morris-Pratt
+    border table once instead -- the same answer, one pass, no ceiling on how
+    much overlap it can still find.
+    """
+
+    borders = [0] * len(prefix)
+    matched = 0
+    for index in range(1, len(prefix)):
+        while matched and prefix[index] != prefix[matched]:
+            matched = borders[matched - 1]
+        if prefix[index] == prefix[matched]:
+            matched += 1
+        borders[index] = matched
+
+    matched = 0
+    final_index = len(tail) - 1
+    for index, value in enumerate(tail):
+        while matched and value != prefix[matched]:
+            matched = borders[matched - 1]
+        if value == prefix[matched]:
+            matched += 1
+        # A full match mid-scan cannot be the suffix that ends at ``tail``; fall
+        # back to its longest border and keep looking for one that does.
+        if matched == len(prefix) and index < final_index:
+            matched = borders[matched - 1]
+    return matched
+
+
+def _terminal_response_output_items(events: object) -> list[JsonValue] | None:
+    """One turn's terminal response output, or ``None`` when the turn never settled.
+
+    Some upstream versions omit ``response.output`` from a ``response.incomplete``
+    terminal while still emitting every ``response.output_item.done`` frame; the
+    accumulated items are complete enough to preserve that turn's context. Without
+    a terminal marker at all there is no proof the turn settled, so the whole
+    rebuild fails closed rather than continuing on a truncated conversation.
+    """
+
+    if not isinstance(events, Sequence) or isinstance(events, (str, bytes, bytearray)):
+        return None
+    completed_items: list[JsonValue] = []
+    saw_terminal = False
+    for event_text in events:
+        if not isinstance(event_text, str):
+            continue
+        for line in event_text.splitlines():
+            if not line.startswith(_SSE_DATA_FIELD_PREFIX):
+                continue
+            event_data = line[len(_SSE_DATA_FIELD_PREFIX) :].strip()
+            if not event_data or event_data == _SSE_DONE_SENTINEL:
+                continue
+            try:
+                event_payload = json.loads(event_data)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(event_payload, dict):
+                continue
+            event_type = event_payload.get("type")
+            if event_type == _RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE:
+                item = event_payload.get("item")
+                if isinstance(item, dict):
+                    completed_items.append(cast(JsonValue, item))
+                continue
+            if event_type not in _TERMINAL_RESPONSE_EVENT_TYPES:
+                continue
+            saw_terminal = True
+            response = event_payload.get("response")
+            if not isinstance(response, dict):
+                continue
+            output = response.get("output")
+            if isinstance(output, list):
+                return cast(list[JsonValue], output)
+    return completed_items if saw_terminal else None
 
 
 # --- Provider portability (#2123 WP-C1, design v3 §4.4) -------------------------

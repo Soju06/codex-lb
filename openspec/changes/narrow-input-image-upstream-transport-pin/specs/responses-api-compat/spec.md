@@ -198,8 +198,8 @@ through to the global `http_downstream_transport_policy`.
 
 - **GIVEN** `upstream_stream_transport` is `"auto"`
 - **AND** a request carries an `input_image` part whose `image_url` is an
-  external `http(s)` URL, in a top-level input item or in that item's
-  `content` array
+  external `http(s)` URL, anywhere in the input — including inside a
+  tool-output array, which the image inliner never rewrites
 - **WHEN** the proxy resolves the upstream transport
 - **THEN** the request MUST be sent over upstream HTTP `POST`
 

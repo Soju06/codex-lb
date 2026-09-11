@@ -186,6 +186,43 @@ async def test_external_image_url_request_still_pins_http(async_client, promotio
 
 
 @pytest.mark.asyncio
+async def test_external_image_url_inside_a_tool_output_still_pins_http(async_client, promotion_transport):
+    # A ``function_call_output`` output array is a routine Codex tool-result
+    # shape, and the URL inliner never walks into it, so an external URL there
+    # is still external at the upstream. It has to keep the pin even though it
+    # is deeper than the shapes ``_count_external_image_urls`` visits.
+    upstreams, raw_calls, _ = promotion_transport
+    history = _promotion_history()
+    history[-1] = {
+        "type": "function_call_output",
+        "call_id": "call_shot",
+        "output": [{"type": "input_image", "image_url": "https://example.com/shot.png"}],
+    }
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_inline_image_inside_a_tool_output_does_not_pin_http(async_client, promotion_transport):
+    # The counterpart that makes the clause above narrow rather than a
+    # reinstatement of the old blanket pin: an inline image nested just as
+    # deeply is carried by the websocket unchanged, so it must not pin.
+    upstreams, raw_calls, _ = promotion_transport
+    history = _promotion_history()
+    history[-1] = {
+        "type": "function_call_output",
+        "call_id": "call_shot",
+        "output": [{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}],
+    }
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "auto"
+
+
+@pytest.mark.asyncio
 async def test_promotion_counts_reuse_separately_from_admission(async_client, promotion_transport, monkeypatch):
     routing_counter, connection_counter = Mock(), Mock()
     monkeypatch.setattr(observability, "http_bridge_routing_total", routing_counter)

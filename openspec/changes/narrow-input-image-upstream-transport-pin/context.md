@@ -64,38 +64,15 @@ hang on a path nobody watches.
 
 ## Known bounds
 
-- `_count_external_image_urls` sees top-level `input_image` items and one level
-  of `content`, exactly the shapes `_inline_input_image_urls` can rewrite. An
-  external URL nested deeper (for example inside a `function_call_output`
-  content array) is invisible to both, so such a request can now reach the
-  upstream WebSocket with a raw `https://` URL. The blind spot is identical to
-  the existing HTTP bridge guard's; no deployment gains a hazard the bridge path
-  did not already have, but the raw path had been masked by the pin until now.
-  Widening that traversal is deliberately out of scope, so the spec's "external
-  image URL still forces HTTP" scenario names the two shapes the guard actually
-  reads rather than promising coverage it does not have, and the capability
-  `context.md` records the same bound.
-- The residual pin still overrides an explicit operator
-  `upstream_stream_transport = "websocket"`, so precedence item 2 still beats
-  item 1 for these two cases. This inversion is deliberate rather than
-  overlooked: with an explicit WebSocket pin `_resolve_stream_transport`
-  short-circuits and no size gate runs, so removing the override would turn an
-  oversized image payload into a local 400 `payload_too_large` that operators do
-  not get today. The spec text now states the wart instead of leaving it
-  implicit. It is site A that inverts the precedence, so it applies to every
-  request that reaches the bridge routing decision — all of `/v1/responses` and
-  `/backend-api/codex/responses`. Site B keeps both residual clauses behind its
-  pre-existing `not explicit_transport` gate, so a `/v1/chat/completions`
-  request whose bridge admission already declined the bridge follows the
-  explicit override instead. That asymmetry predates this change and widening
-  site B would be a separate behaviour change; the spec text scopes the claim
-  rather than asserting a rule the code does not implement.
-- There is no image marker on `request_logs`, so the production error-rate split
-  between image and non-image traffic is not derivable from LB telemetry. This
-  change is verifiable as a ratio shift on
-  `codex_lb_upstream_transport_decisions_total` (`policy="explicit"` falling,
-  `"auto"` rising) with `http_bridge_routing{reason="image"}` flat — not as a
-  direct WebSocket count.
+- The transport predicate's external-URL check recurses the whole input, so an
+  external URL nested inside a tool-output array keeps the pin. It deliberately
+  does not reuse `_count_external_image_urls`, whose traversal stops at one
+  level of `content`.
+- `_inline_input_image_urls` and the HTTP bridge's post-inline guard
+  (`_count_external_image_urls`) still read only those two shallow shapes, so a
+  bridged request carrying an external URL nested deeper is neither inlined nor
+  rejected and reaches the upstream WebSocket raw. That is pre-existing and
+  unchanged by this PR; widening the inliner is a separate change.
 
 ## Example
 

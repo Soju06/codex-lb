@@ -181,6 +181,27 @@ def _responses_request_contains_input_image(payload: ResponsesRequest) -> bool:
     return any(_json_value_contains_input_image_part(item) for item in input_value)
 
 
+def _json_value_contains_external_input_image(value: JsonValue) -> bool:
+    """Whether ``value`` holds an ``input_image`` part that still names an external URL.
+
+    Recurses the same way :func:`_json_value_contains_input_image_part` does,
+    rather than walking the two shapes ``_count_external_image_urls`` knows
+    (a top-level item and its ``content`` array). The transport decision has to
+    see every external URL the payload carries, including one nested in a
+    ``function_call_output`` output array, because an image the URL inliner
+    never visits is precisely the one that is still external when the request
+    reaches the upstream websocket.
+    """
+    if _input_part_is_image(value):
+        image_url = value.get("image_url") if is_json_mapping(value) else None
+        return isinstance(image_url, str) and image_url.startswith(("http://", "https://"))
+    if isinstance(value, list):
+        return any(_json_value_contains_external_input_image(item) for item in value)
+    if is_json_mapping(value):
+        return any(_json_value_contains_external_input_image(child) for child in value.values())
+    return False
+
+
 def _input_image_request_requires_http_upstream(
     payload: ResponsesRequest,
     *,
@@ -197,12 +218,22 @@ def _input_image_request_requires_http_upstream(
     historical inline image with an omission notice. An external ``http(s)``
     image URL may still be there after ``_inline_content_images`` gives up on a
     failed fetch, and the upstream websocket does not accept one.
+
+    The external-URL check recurses the whole input rather than reusing
+    ``_count_external_image_urls``, whose traversal stops at an item's
+    ``content`` array. An ``input_image`` nested deeper — in a
+    ``function_call_output`` output array, a routine Codex tool-result shape —
+    is exactly the one the URL inliner also never visits, so it is still
+    external at the upstream and must keep the pin.
     """
-    if not _responses_request_contains_input_image(payload):
+    input_value = payload.input
+    if not isinstance(input_value, list):
+        return False
+    if not any(_json_value_contains_input_image_part(item) for item in input_value):
         return False
     if payload_size_estimate_bytes > _ws_transport_payload_budget_bytes():
         return True
-    return _count_external_image_urls({"input": payload.input}) > 0
+    return any(_json_value_contains_external_input_image(item) for item in input_value)
 
 
 def _responses_request_uses_image_generation(payload: ResponsesRequest) -> bool:

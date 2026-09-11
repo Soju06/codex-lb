@@ -205,6 +205,34 @@ async def test_external_image_url_inside_a_tool_output_still_pins_http(async_cli
 
 
 @pytest.mark.asyncio
+async def test_external_image_url_pins_http_under_an_explicit_websocket_override(async_client, promotion_transport):
+    # The residual pin is deliberately evaluated ahead of an explicit websocket
+    # override: the override short-circuits the transport resolver, so without
+    # the pin the upstream WebSocket would be handed a URL it does not accept.
+    upstreams, raw_calls, dashboard = promotion_transport
+    dashboard.upstream_stream_transport = "websocket"
+    history = _image_history("https://example.com/shot.png")
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", ["https", "HTTPS", "HtTp"])
+async def test_external_image_url_scheme_match_is_case_insensitive(async_client, promotion_transport, scheme):
+    # URL schemes are case-insensitive, and this is the fail-safe direction:
+    # missing one sends a raw external URL to a websocket that accepts only
+    # ``data:``.
+    upstreams, raw_calls, _ = promotion_transport
+    history = _image_history(f"{scheme}://example.com/shot.png")
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+
+
+@pytest.mark.asyncio
 async def test_inline_image_inside_a_tool_output_does_not_pin_http(async_client, promotion_transport):
     # The counterpart that makes the clause above narrow rather than a
     # reinstatement of the old blanket pin: an inline image nested just as

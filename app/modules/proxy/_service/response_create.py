@@ -194,7 +194,11 @@ def _json_value_contains_external_input_image(value: JsonValue) -> bool:
     """
     if _input_part_is_image(value):
         image_url = value.get("image_url") if is_json_mapping(value) else None
-        return isinstance(image_url, str) and image_url.startswith(("http://", "https://"))
+        # URL schemes are case-insensitive, and this decision is the fail-safe
+        # direction: missing one sends a raw external URL to a websocket that
+        # only accepts ``data:``. ``_count_external_image_urls`` still matches
+        # case-sensitively; that is the bridge's own guard and out of scope here.
+        return isinstance(image_url, str) and image_url.lower().startswith(("http://", "https://"))
     if isinstance(value, list):
         return any(_json_value_contains_external_input_image(item) for item in value)
     if is_json_mapping(value):

@@ -172,10 +172,21 @@ through to the global `http_downstream_transport_policy`.
 
 - **GIVEN** `upstream_stream_transport` is explicitly `"websocket"`
 - **AND** no recent upstream WS failure marker is active
-- **WHEN** a single-shot downstream HTTP request with no sticky signals
-  resolves the upstream transport under any policy
+- **WHEN** a single-shot downstream HTTP request with no sticky signals, and
+  which trips none of the precedence item 2 bypasses, resolves the upstream
+  transport under any policy
 - **THEN** the explicit override MUST win and the request MUST use
   upstream WebSocket
+
+#### Scenario: external image URL still forces HTTP under an explicit websocket override
+
+- **GIVEN** `upstream_stream_transport` is explicitly `"websocket"`
+- **AND** a request passing through the HTTP bridge routing decision carries an
+  `input_image` part whose `image_url` is an external `http(s)` URL
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST be sent over upstream HTTP `POST`, because the
+  override would otherwise short-circuit the residual pin and hand the upstream
+  WebSocket a URL it does not accept
 
 #### Scenario: oversized payload bypass still forces HTTP under always_websocket
 

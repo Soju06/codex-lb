@@ -43530,6 +43530,42 @@ async def test_closing_http_bridge_session_retires_unpinned_owner_fence() -> Non
 
 
 @pytest.mark.asyncio
+async def test_closing_http_bridge_session_drains_terminal_finalizers_before_lease_release() -> None:
+    """Terminal spool finalizers must commit while the session's durable owner is still held."""
+    session = _denied_anchor_session()
+    order: list[str] = []
+
+    async def fail_pending(**_kwargs: Any) -> bool:
+        order.append("fail_pending")
+        return True
+
+    async def drain_finalizers() -> None:
+        order.append("drain_finalizers")
+
+    async def release_live_session(**_kwargs: Any) -> SimpleNamespace:
+        order.append("release_live_session")
+        return SimpleNamespace(owner_instance_id=None, owner_epoch=session.durable_owner_epoch)
+
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(release_live_session=release_live_session),
+        _fail_pending_websocket_requests=fail_pending,
+        _http_bridge_operation_event_batcher=SimpleNamespace(drain_terminal_finalizers=drain_finalizers),
+    )
+
+    await http_bridge_helpers_module._close_http_bridge_session_resources(
+        service,
+        session,
+        turn_state_lock_held=True,
+    )
+
+    assert order == ["fail_pending", "drain_finalizers", "release_live_session"]
+
+
+@pytest.mark.asyncio
 async def test_closing_http_bridge_session_retires_unpinned_sibling_advanced_fence() -> None:
     """A sibling-advanced denial is historical, not unresolved cleanup."""
     session = _denied_anchor_session(anchor="resp-successor")

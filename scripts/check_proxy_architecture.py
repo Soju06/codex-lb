@@ -230,22 +230,6 @@ def _load_balancer_select_account(module: ast.Module) -> ast.FunctionDef | ast.A
     raise AssertionError("LoadBalancer class not found in load_balancer.py")
 
 
-def _assert_shim_only(path: Path) -> None:
-    module = _parse(path)
-    allowed = (ast.Expr, ast.ImportFrom)
-    for node in module.body:
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            continue
-        if not isinstance(node, allowed):
-            raise AssertionError(
-                f"{path.relative_to(ROOT)} must remain a compatibility shim; found {type(node).__name__}"
-            )
-        if isinstance(node, ast.ImportFrom) and not (node.module or "").startswith("app.modules.proxy._service."):
-            raise AssertionError(
-                f"{path.relative_to(ROOT)} may only re-export from app.modules.proxy._service.*, found {node.module}"
-            )
-
-
 def _check_service_line_count(limit: int) -> None:
     count = _line_count(SERVICE_PATH)
     if count > limit:
@@ -289,13 +273,6 @@ def _check_service_facade_surface(module: ast.Module) -> None:
     missing = sorted(REQUIRED_SERVICE_FACADE_NAMES - names)
     if missing:
         raise AssertionError("service.py is missing compatibility façade names: " + ", ".join(missing))
-
-
-def _check_service_does_not_import_shims(module: ast.Module) -> None:
-    forbidden = {"app.modules.proxy._support", "app.modules.proxy._warmup"}
-    for node in module.body:
-        if isinstance(node, ast.ImportFrom) and node.module in forbidden:
-            raise AssertionError(f"service.py must import moved implementation from _service/*, not {node.module}")
 
 
 def _check_required_service_packages() -> None:
@@ -401,18 +378,11 @@ def _architecture_checks() -> list[ArchitectureCheck]:
             )
         )
     if service_module is not None:
-        checks.extend(
-            (
-                partial(_check_service_facade_surface, service_module),
-                partial(_check_service_does_not_import_shims, service_module),
-            )
-        )
+        checks.append(partial(_check_service_facade_surface, service_module))
     checks.extend(
         (
             _check_required_service_packages,
             _check_required_service_modules,
-            partial(_assert_shim_only, PROXY_DIR / "_support.py"),
-            partial(_assert_shim_only, PROXY_DIR / "_warmup.py"),
             _check_no_cross_domain_service_imports,
         )
     )

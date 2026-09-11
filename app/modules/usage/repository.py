@@ -428,61 +428,6 @@ def _additional_scope_sqlite_clause(scope: AdditionalQuotaQueryScope) -> tuple[s
     return f"({' or '.join(clauses)})", params
 
 
-def _additional_latest_by_account_sqlite(
-    db_path: str,
-    scope: AdditionalQuotaQueryScope,
-    window: str,
-    account_ids: list[str] | None,
-    since: datetime | None,
-) -> dict[str, AdditionalUsageHistory]:
-    scope_clause, scope_params = _additional_scope_sqlite_clause(scope)
-    account_filter = ""
-    account_params: list[object] = []
-    if account_ids is not None:
-        if not account_ids:
-            return {}
-        account_filter = f"and account_id in ({','.join('?' for _ in account_ids)})"
-        account_params = list(account_ids)
-    since_filter = ""
-    since_params: list[object] = []
-    if since is not None:
-        since_filter = "and recorded_at >= ?"
-        since_params = [since.isoformat(sep=" ")]
-
-    accounts_sql = f"""
-        select distinct account_id
-        from additional_usage_history
-        where {scope_clause}
-          and window = ?
-          {account_filter}
-          {since_filter}
-    """
-    latest_sql = f"""
-        select id, account_id, quota_key, limit_name, metered_feature, window,
-               used_percent, reset_at, window_minutes, recorded_at
-        from additional_usage_history
-        where account_id = ?
-          and {scope_clause}
-          and window = ?
-          {since_filter}
-        order by recorded_at desc, used_percent desc, id desc
-        limit 1
-    """
-
-    latest: dict[str, AdditionalUsageHistory] = {}
-    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
-        conn.execute("PRAGMA query_only=ON")
-        conn.execute("PRAGMA busy_timeout=30000")
-        accounts_params = [*scope_params, window, *account_params, *since_params]
-        accounts = [str(row[0]) for row in conn.execute(accounts_sql, accounts_params)]
-        for account_id in accounts:
-            row = conn.execute(latest_sql, [account_id, *scope_params, window, *since_params]).fetchone()
-            if row is not None:
-                entry = _additional_usage_history_from_sqlite_row(row)
-                latest[entry.account_id] = entry
-    return latest
-
-
 def _bulk_history_since_sqlite(
     db_path: str,
     account_ids: list[str],

@@ -110,3 +110,45 @@ def test_rust_job_runs_native_routed_wire_probe_with_built_helper() -> None:
         "CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress"
     ) in rust_job
     assert "- rust" in required_job
+
+
+RELEASE_GUARDS_WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "release-guards.yml"
+
+
+def _pull_request_trigger_types(text: str) -> set[str]:
+    trigger_block = text.split("concurrency:", maxsplit=1)[0]
+    pull_request_block = trigger_block.split("  pull_request:", maxsplit=1)[1]
+    types_match = re.search(r"^    types: \[(?P<types>[^\]]*)\]$", pull_request_block, re.MULTILINE)
+    assert types_match is not None
+    return {item.strip() for item in types_match.group("types").split(",")}
+
+
+def test_ci_matrix_does_not_restart_on_pr_metadata_edits() -> None:
+    workflow = _ci_workflow_text()
+
+    # ci.yml cancels the in-flight run per ref, so any extra trigger type
+    # restarts ~30 jobs for an unchanged head. `edited` (title/body PATCH by
+    # agents and review bots) must therefore never be a ci.yml trigger.
+    assert "cancel-in-progress: true" in workflow
+    assert _pull_request_trigger_types(workflow) == {"opened", "reopened", "synchronize", "ready_for_review"}
+
+    # The PR-body-dependent release guards live in release-guards.yml, and the
+    # aggregate must not reference a job that no longer exists here.
+    assert re.search(r"^  beta-release-guard:\n", workflow, re.MULTILINE) is None
+    assert re.search(r"^  stable-release-guard:\n", workflow, re.MULTILINE) is None
+    assert "- beta-release-guard" not in _job_block(workflow, "ci-required")
+
+
+def test_release_guards_revalidate_pr_metadata_edits_in_their_own_workflow() -> None:
+    workflow = RELEASE_GUARDS_WORKFLOW.read_text(encoding="utf-8")
+
+    assert _pull_request_trigger_types(workflow) == {"opened", "reopened", "synchronize", "edited", "ready_for_review"}
+    assert "group: ${{ github.workflow }}-${{ github.ref }}" in workflow
+
+    beta_job = _job_block(workflow, "beta-release-guard")
+    stable_job = _job_block(workflow, "stable-release-guard")
+    # Check context names are unchanged from their ci.yml days.
+    assert "name: Beta release guard" in beta_job
+    assert "python -m scripts.guard_beta_release" in beta_job
+    assert "name: Stable release guard" in stable_job
+    assert "python -m scripts.guard_stable_release" in stable_job

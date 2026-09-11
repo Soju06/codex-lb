@@ -437,7 +437,7 @@ async def test_request_logs_api_rejects_guest_conversation_filter_and_preserves_
         app_instance.dependency_overrides.pop(validate_dashboard_session, None)
 
     assert guest_response.status_code == 403
-    assert guest_response.json()["error"]["code"] == "admin_access_required"
+    assert guest_response.json()["error"]["code"] == "permission_required"
 
     admin_response = await async_client.get(
         "/api/request-logs",
@@ -535,3 +535,81 @@ async def test_request_log_total_count_is_cached_per_filter_signature(async_clie
     # One COUNT for the shared default signature (page 2 reuses it), one for
     # the status-filtered signature.
     assert len(count_statements) == 2
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_filters_by_repeated_source_params(async_client, db_setup):
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        for index, source in enumerate(("subscription_overflow", "subscription_overflow_pinned", "limit_warmup", None)):
+            await logs_repo.add_log(
+                account_id=None,
+                request_id=f"req_api_source_{index}",
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=1,
+                latency_ms=10,
+                status="success",
+                error_code=None,
+                source=source,
+                requested_at=utcnow() - timedelta(minutes=index),
+            )
+
+    unfiltered = await async_client.get("/api/request-logs?limit=50")
+    assert unfiltered.status_code == 200
+    assert unfiltered.json()["total"] == 4
+
+    single = await async_client.get("/api/request-logs?limit=50&source=subscription_overflow")
+    assert single.status_code == 200
+    single_payload = single.json()
+    assert single_payload["total"] == 1
+    assert [entry["source"] for entry in single_payload["requests"]] == ["subscription_overflow"]
+
+    both = await async_client.get(
+        "/api/request-logs?limit=50&source=subscription_overflow&source=subscription_overflow_pinned"
+    )
+    assert both.status_code == 200
+    both_payload = both.json()
+    assert both_payload["total"] == 2
+    assert sorted(entry["source"] for entry in both_payload["requests"]) == [
+        "subscription_overflow",
+        "subscription_overflow_pinned",
+    ]
+
+    unknown = await async_client.get("/api/request-logs?limit=50&source=nope")
+    assert unknown.status_code == 200
+    assert unknown.json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_request_log_options_expose_no_source_facet(async_client, db_setup):
+    """The filter's two values are compile-time constants in the UI.
+
+    ``/options`` already runs four DISTINCT/skip-scan passes per panel load; a
+    fifth for a two-value domain is pure cost, so the facet response must stay
+    exactly as it was.
+    """
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_options_source",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            source="subscription_overflow",
+        )
+
+    response = await async_client.get("/api/request-logs/options")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert sorted(payload.keys()) == ["accountIds", "apiKeys", "modelOptions", "statuses"]
+    # A `source` query parameter on the facet endpoint stays unrecognised, so the
+    # facets never self-filter on it.
+    filtered = await async_client.get("/api/request-logs/options?source=subscription_overflow")
+    assert filtered.status_code == 200
+    assert filtered.json() == payload

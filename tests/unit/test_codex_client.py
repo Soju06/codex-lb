@@ -22,6 +22,7 @@ from app.core.clients.native_egress import (
     NativeEgressRequest,
     NativeEgressTransportError,
     NativeEgressUnavailable,
+    NativeSseOptions,
     NativeWebSocketRequest,
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
@@ -200,7 +201,11 @@ async def test_request_passes_resolver_proxy_and_builtin_fingerprint(route: Reso
 
 
 @pytest.mark.asyncio
-async def test_routed_request_prefers_native_single_endpoint_attempt(route: ResolvedUpstreamRoute) -> None:
+@pytest.mark.parametrize("native_sse", [None, NativeSseOptions(3, 1024)])
+@pytest.mark.parametrize("total_timeout", [90, None])
+async def test_routed_request_prefers_native_single_endpoint_attempt(
+    route: ResolvedUpstreamRoute, native_sse: NativeSseOptions | None, total_timeout: int | None
+) -> None:
     session = _Session()
     native = _NativeClient()
     client = CodexClient(session, native_egress_client=cast(Any, native))
@@ -212,7 +217,9 @@ async def test_routed_request_prefers_native_single_endpoint_attempt(route: Reso
         params={"client": "codex"},
         json={"input": "hello"},
         headers={"Authorization": "Bearer token"},
-        timeout=aiohttp.ClientTimeout(total=90, sock_connect=7, sock_read=30),
+        timeout=aiohttp.ClientTimeout(total=total_timeout, sock_connect=7, sock_read=30),
+        buffer_response=native_sse is None,
+        native_sse=native_sse,
     )
 
     assert result.route.endpoint_id == "ep_1"
@@ -224,9 +231,10 @@ async def test_routed_request_prefers_native_single_endpoint_attempt(route: Reso
     assert request.url == "https://upstream.test/responses?existing=1&client=codex"
     assert request.body == b'{"input":"hello"}'
     assert request.headers["Content-Type"] == "application/json"
-    assert request.timeout_seconds == 90
+    assert request.timeout_seconds == total_timeout
     assert request.connect_timeout_seconds == 7
     assert request.response_head_timeout_seconds == 30
+    assert request.sse is native_sse
 
 
 @pytest.mark.asyncio
@@ -251,20 +259,36 @@ async def test_routed_native_request_serializes_multipart_once(route: ResolvedUp
 
 
 @pytest.mark.asyncio
-async def test_routed_native_unavailable_falls_back_before_dispatch(route: ResolvedUpstreamRoute) -> None:
+@pytest.mark.parametrize("native_sse", [None, NativeSseOptions(3, 1024)])
+async def test_routed_native_unavailable_falls_back_before_dispatch(
+    route: ResolvedUpstreamRoute, native_sse: NativeSseOptions | None
+) -> None:
     session = _Session()
     native = _NativeClient(request_results=[NativeEgressUnavailable("missing helper")])
     client = CodexClient(session, native_egress_client=cast(Any, native))
 
-    await client.request_with_route_metadata("POST", "https://upstream.test", route=route, json={"x": 1})
+    await client.request_with_route_metadata(
+        "POST",
+        "https://upstream.test",
+        route=route,
+        json={"x": 1},
+        buffer_response=native_sse is None,
+        native_sse=native_sse,
+    )
 
     assert len(native.request_calls) == 1
     assert len(session.calls) == 1
     _assert_credentialed_proxy_call(session.calls[0])
+    assert "native_sse" not in session.calls[0]
+    assert "sse" not in session.calls[0]
+    assert native.request_calls[0].sse is native_sse
 
 
 @pytest.mark.asyncio
-async def test_routed_native_confirmed_connect_failure_uses_next_endpoint(route: ResolvedUpstreamRoute) -> None:
+@pytest.mark.parametrize("native_sse", [None, NativeSseOptions(3, 1024)])
+async def test_routed_native_confirmed_connect_failure_uses_next_endpoint(
+    route: ResolvedUpstreamRoute, native_sse: NativeSseOptions | None
+) -> None:
     native = _NativeClient(
         request_results=[
             NativeEgressTransportError(
@@ -282,10 +306,13 @@ async def test_routed_native_confirmed_connect_failure_uses_next_endpoint(route:
         "https://upstream.test",
         route=route,
         json={"x": 1},
+        buffer_response=native_sse is None,
+        native_sse=native_sse,
     )
 
     assert result.fallback_used is True
     assert result.route.endpoint_id == "ep_2"
+    assert all(request.sse is native_sse for request in native.request_calls)
     assert [request.proxy_url for request in native.request_calls] == [
         _route_basic_auth_url("u", "p", "proxy.test:8080"),
         "http://proxy-two.test:8081",
@@ -293,6 +320,7 @@ async def test_routed_native_confirmed_connect_failure_uses_next_endpoint(route:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native_sse", [None, NativeSseOptions(3, 1024)])
 @pytest.mark.parametrize(
     "failure",
     [
@@ -309,6 +337,7 @@ async def test_routed_native_confirmed_connect_failure_uses_next_endpoint(route:
 async def test_routed_native_unsafe_post_failure_never_replays(
     route: ResolvedUpstreamRoute,
     failure: NativeEgressTransportError,
+    native_sse: NativeSseOptions | None,
 ) -> None:
     session = _Session()
     native = _NativeClient(request_results=[failure])
@@ -320,11 +349,24 @@ async def test_routed_native_unsafe_post_failure_never_replays(
             "https://upstream.test",
             route=route,
             json={"x": 1},
+            buffer_response=native_sse is None,
+            native_sse=native_sse,
         )
 
     assert len(native.request_calls) == 1
     assert session.calls == []
     assert exc_info.value.retryable_same_contract is False
+
+
+@pytest.mark.asyncio
+async def test_routed_native_sse_rejects_buffering_before_dispatch(route: ResolvedUpstreamRoute) -> None:
+    native = _NativeClient()
+    session = _Session()
+    client = CodexClient(session, native_egress_client=cast(Any, native))
+    with pytest.raises(ValueError, match="buffer_response=False"):
+        await client.request("POST", "https://upstream.test", route=route, native_sse=NativeSseOptions(3, 1024))
+    assert native.request_calls == []
+    assert session.calls == []
 
 
 @pytest.mark.asyncio

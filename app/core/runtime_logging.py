@@ -65,7 +65,13 @@ _SENSITIVE_LOG_KEY_PATTERN = re.compile(r"(?i)(password|passwd|pwd|token|secret|
 # Case-folded substrings that must be present before the keyed/bearer/
 # authorization/JSON patterns above can match; keeps the per-record cost of
 # credential-free lines to a casefold plus substring scans.
+# Invite tokens travel in the URL path (``GET /api/dashboard-auth/invite/<token>``)
+# and would otherwise land in access logs and 404/429 error lines. ``/invite/accept``
+# is a route name, not a token, and stays readable.
+_INVITE_PATH_TOKEN_PATTERN = re.compile(r"(/api/dashboard-auth/invite/)(?!accept(?:[/?#\s]|$))[A-Za-z0-9_-]{20,}")
+_INVITE_PATH_PRECHECK = "/api/dashboard-auth/invite/"
 _SECRET_HINTS = (
+    _INVITE_PATH_PRECHECK,
     "password",
     "passwd",
     "pwd",
@@ -88,8 +94,13 @@ def _redact_log_value(value: str | None) -> str | None:
     return _redact_secret_patterns(_USERINFO_PATTERN.sub(_redact_userinfo, collapsed))
 
 
+def _redact_invite_path_tokens_on_line(text: str) -> str:
+    return _INVITE_PATH_TOKEN_PATTERN.sub(_redact_path_secret, text)
+
+
 def _redact_secret_patterns_on_line(text: str) -> str:
-    redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, text)
+    redacted = _redact_invite_path_tokens_on_line(text)
+    redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
     redacted = _BASIC_TOKEN_PATTERN.sub(_redact_bearer_token, redacted)
@@ -130,6 +141,10 @@ def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
             redacted = _USERINFO_PATTERN.sub(_redact_userinfo, redacted)
         if any(precheck in text for precheck in _BASIC_TOKEN_PRECHECKS):
             redacted = _map_log_lines(redacted, _redact_basic_tokens_on_line)
+        if _INVITE_PATH_PRECHECK in text:
+            # Access logs are INFO: the path secret must be masked even when the
+            # keyed pass below is skipped for cost.
+            redacted = _map_log_lines(redacted, _redact_invite_path_tokens_on_line)
         if not keyed_secrets:
             return redacted
         folded = text.casefold()
@@ -143,6 +158,10 @@ def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
 
 def _redact_record_text(record: logging.LogRecord, text: str) -> str:
     return redact_rendered_log_text(text, keyed_secrets=record.levelno >= logging.WARNING)
+
+
+def _redact_path_secret(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_LOG_REDACTION}"
 
 
 def _redact_userinfo(match: re.Match[str]) -> str:

@@ -74,4 +74,36 @@ describe("useModelSources", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["models"] });
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["api-keys", "models"] });
   });
+
+  it("refreshes the subscription-overflow preflight after a source is edited or deleted", async () => {
+    // The Routing card's preflight panel stays mounted with the same source id
+    // while the operator fixes that source (tool declarations, context window,
+    // Responses support) on the same page, so the report must be refetched
+    // when the source changes rather than only on a settings save.
+    const queryClient = createTestQueryClient();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const source = createModelSource({ id: "source_1", name: "Source One" });
+    const preflightKey = { queryKey: ["settings", "subscription-overflow-preflight"] };
+
+    modelSourceApiMocks.listModelSources.mockResolvedValue({ sources: [source] });
+    modelSourceApiMocks.updateModelSource.mockResolvedValue(source);
+    modelSourceApiMocks.deleteModelSource.mockResolvedValue(undefined);
+
+    const { useModelSources } = await import("@/features/model-sources/hooks/use-model-sources");
+    const { result } = renderHook(() => useModelSources(), {
+      wrapper: createWrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.modelSourcesQuery.isSuccess).toBe(true));
+
+    await result.current.updateMutation.mutateAsync({
+      sourceId: source.id,
+      payload: { supportsResponses: false },
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith(preflightKey);
+
+    invalidateSpy.mockClear();
+    await result.current.deleteMutation.mutateAsync(source.id);
+    expect(invalidateSpy).toHaveBeenCalledWith(preflightKey);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["settings", "detail"] });
+  });
 });

@@ -1618,7 +1618,7 @@ async def test_accounts_list_stale_rate_limited_status_recovers_after_background
     now = 1_700_000_000.0
     past_reset = int(now - 300)
     blocked_at = int(now - 7200)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.utcnow",

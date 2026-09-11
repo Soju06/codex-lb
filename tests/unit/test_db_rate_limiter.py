@@ -17,6 +17,12 @@ from app.db.models import Base, RateLimitAttempt
 pytestmark = pytest.mark.unit
 
 
+async def _check_then_record_failure(limiter: DatabaseRateLimiter, key: str, session: AsyncSession) -> None:
+    """Mirror the login flow: refuse when the window is full, otherwise count the failure."""
+    await limiter.check(key, session)
+    await limiter.record_failure(key, session)
+
+
 @pytest.fixture
 async def async_session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -38,10 +44,10 @@ async def test_single_instance_blocks_after_eight_attempts(
 
     async with async_session_factory() as session:
         for _ in range(8):
-            await limiter.check_and_record("ip:single", session)
+            await _check_then_record_failure(limiter, "ip:single", session)
 
         with pytest.raises(DashboardRateLimitError):
-            await limiter.check_and_record("ip:single", session)
+            await _check_then_record_failure(limiter, "ip:single", session)
 
 
 @pytest.mark.asyncio
@@ -53,15 +59,15 @@ async def test_cross_replica_combined_attempts_are_enforced(
 
     async with async_session_factory() as session_one:
         for _ in range(4):
-            await replica_one.check_and_record("ip:replica", session_one)
+            await _check_then_record_failure(replica_one, "ip:replica", session_one)
 
     async with async_session_factory() as session_two:
         for _ in range(4):
-            await replica_two.check_and_record("ip:replica", session_two)
+            await _check_then_record_failure(replica_two, "ip:replica", session_two)
 
     async with async_session_factory() as session_one_again:
         with pytest.raises(DashboardRateLimitError):
-            await replica_one.check_and_record("ip:replica", session_one_again)
+            await _check_then_record_failure(replica_one, "ip:replica", session_one_again)
 
 
 @pytest.mark.asyncio
@@ -79,9 +85,9 @@ async def test_window_expiry_ignores_old_attempts(
         session.add(old_attempt)
         await session.commit()
 
-        await limiter.check_and_record("ip:expired", session)
+        await _check_then_record_failure(limiter, "ip:expired", session)
         with pytest.raises(DashboardRateLimitError):
-            await limiter.check_and_record("ip:expired", session)
+            await _check_then_record_failure(limiter, "ip:expired", session)
 
 
 def test_migration_upgrade_downgrade_upgrade_is_reversible(tmp_path: Path) -> None:
@@ -135,14 +141,14 @@ async def test_clear_for_key_resets_lockout(
     async with async_session_factory() as session:
         # Record 8 failed attempts
         for _ in range(8):
-            await limiter.check_and_record("ip:clear-test", session)
+            await _check_then_record_failure(limiter, "ip:clear-test", session)
 
         # clear_for_key (defined in app/core/rate_limiter/db_rate_limiter.py)
         # resets the lockout window for the given key.
         await limiter.clear_for_key("ip:clear-test", session)
 
         # After clearing, should be able to attempt again
-        await limiter.check_and_record("ip:clear-test", session)
+        await _check_then_record_failure(limiter, "ip:clear-test", session)
 
 
 @pytest.mark.asyncio
@@ -158,7 +164,7 @@ async def test_check_only_does_not_increment_counter(
             await limiter.check("ip:check-only", session)
 
         # Still able to record
-        await limiter.check_and_record("ip:check-only", session)
+        await _check_then_record_failure(limiter, "ip:check-only", session)
 
 
 @pytest.mark.asyncio

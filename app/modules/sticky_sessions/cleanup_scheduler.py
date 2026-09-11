@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Literal, Protocol, TypeVar, cast
+from typing import Literal
 
 from app.core import startup as startup_module
-from app.core.config.settings import Settings, get_settings
+from app.core.config.settings import get_settings
+from app.core.config.spool_retention import (
+    bridge_session_reuse_window_seconds,
+    resolve_operation_spool_retention_seconds,
+)
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     http_bridge_spool_cleanup_backlog_likely,
@@ -19,6 +21,7 @@ from app.core.metrics.prometheus import (
     http_bridge_spool_cleanup_duration_seconds,
     http_bridge_spool_cleanup_runs_total,
 )
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
 from app.db.session import SessionLocal, get_background_session
@@ -180,22 +183,7 @@ def _merge_backlog_signal(previous: bool, attempted: bool | None) -> bool:
     return previous if attempted is None else attempted
 
 
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
-
-
-def _abandoned_bridge_retention_seconds(
-    dashboard_settings: DashboardSettings,
-    app_settings: Settings,
-) -> float:
+def _abandoned_bridge_retention_seconds(dashboard_settings: DashboardSettings) -> float:
     """Retention for abandoned durable bridge rows.
 
     An idle local bridge session stays reusable until its effective idle TTL —
@@ -203,14 +191,12 @@ def _abandoned_bridge_retention_seconds(
     exceed the prompt-cache affinity max age. Purging the ACTIVE durable row
     earlier would strip a still-reusable session of its durable ownership and
     continuity aliases, so retention must cover the longest reuse window.
+
+    That window is also the first term of the operation spool retention floor,
+    so both read it from one definition (``app.core.config.spool_retention``).
     """
 
-    return max(
-        float(dashboard_settings.openai_cache_affinity_max_age_seconds),
-        float(dashboard_settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds),
-        float(app_settings.http_responses_session_bridge_idle_ttl_seconds),
-        float(app_settings.http_responses_session_bridge_codex_idle_ttl_seconds),
-    )
+    return bridge_session_reuse_window_seconds(dashboard_settings)
 
 
 @dataclass(slots=True)
@@ -286,10 +272,15 @@ class StickySessionCleanupScheduler:
         result = await _get_leader_election().run_if_leader(self._cleanup_operation_retention_as_leader)
         return result if result is not None else self._operation_retention_cancelled_backlog_likely
 
-    async def _run_operation_retention(self, bridge_repo: DurableBridgeRepository) -> bool | None:
-        operation_cutoff = utcnow() - timedelta(
-            seconds=get_settings().http_responses_session_bridge_operation_spool_retention_seconds
-        )
+    async def _run_operation_retention(
+        self,
+        bridge_repo: DurableBridgeRepository,
+        dashboard_settings: DashboardSettings,
+    ) -> bool | None:
+        # R2 spool retention: one resolve per pass from the snapshot this pass
+        # already loaded, so the retention window and the reuse windows the
+        # floor is derived from can never disagree inside one pass.
+        operation_cutoff = utcnow() - timedelta(seconds=resolve_operation_spool_retention_seconds(dashboard_settings))
         retention_started_at = time.monotonic()
         error_type: str | None = None
         cancellation: OperationRetentionCleanupCancelledError | None = None
@@ -337,7 +328,8 @@ class StickySessionCleanupScheduler:
                 async with get_background_session() as session:
                     if not startup_module._bridge_durable_schema_ready and await missing_durable_bridge_tables(session):
                         return False
-                    return await self._run_operation_retention(DurableBridgeRepository(session))
+                    dashboard_settings = await SettingsRepository(session).get_or_create()
+                    return await self._run_operation_retention(DurableBridgeRepository(session), dashboard_settings)
             except Exception as exc:
                 result = OperationRetentionCleanupResult(
                     deleted_operations=0,
@@ -366,10 +358,12 @@ class StickySessionCleanupScheduler:
                     settings_repo = SettingsRepository(session)
                     bridge_repo = DurableBridgeRepository(session)
                     sticky_repo = StickySessionsRepository(session)
-                    settings = await settings_repo.get_or_create() if self.enabled else None
+                    # R2 spool retention: operation retention needs the row
+                    # too, so it is loaded for every pass, not only when
+                    # sticky-mapping cleanup is enabled.
+                    settings = await settings_repo.get_or_create()
 
                     if self.enabled:
-                        assert settings is not None
                         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
                         deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                         if deleted_count > 0:
@@ -391,12 +385,11 @@ class StickySessionCleanupScheduler:
                             )
                     if startup_module._bridge_durable_schema_ready or not await missing_durable_bridge_tables(session):
                         if self.enabled:
-                            assert settings is not None
                             bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
                             if bridge_deleted_count > 0:
                                 logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)
                             abandoned_cutoff = utcnow() - timedelta(
-                                seconds=_abandoned_bridge_retention_seconds(settings, get_settings())
+                                seconds=_abandoned_bridge_retention_seconds(settings)
                             )
                             abandoned_deleted_count = await bridge_repo.purge_abandoned_before(abandoned_cutoff)
                             if abandoned_deleted_count > 0:
@@ -408,8 +401,7 @@ class StickySessionCleanupScheduler:
                                 # Abandonment tombstones guard continuity for
                                 # the bridge-retention window, not the circuit
                                 # TTL.
-                                tombstone_cutoff_epoch=time.time()
-                                - _abandoned_bridge_retention_seconds(settings, get_settings()),
+                                tombstone_cutoff_epoch=time.time() - _abandoned_bridge_retention_seconds(settings),
                             )
                             if retry_circuit_deleted_count > 0:
                                 logger.info(
@@ -418,7 +410,7 @@ class StickySessionCleanupScheduler:
                                 )
                         if self.operation_retention_enabled:
                             retention_attempted = True
-                            backlog_likely = await self._run_operation_retention(bridge_repo)
+                            backlog_likely = await self._run_operation_retention(bridge_repo, settings)
                 if self.enabled:
                     ring_cutoff = utcnow() - timedelta(seconds=RING_MEMBER_RETENTION_SECONDS)
                     ring_deleted_count = await RingMembershipService(SessionLocal).purge_stale_before(ring_cutoff)
@@ -431,8 +423,4 @@ class StickySessionCleanupScheduler:
 
 
 def build_sticky_session_cleanup_scheduler() -> StickySessionCleanupScheduler:
-    settings = get_settings()
-    return StickySessionCleanupScheduler(
-        interval_seconds=_CLEANUP_INTERVAL_SECONDS,
-        enabled=settings.sticky_session_cleanup_enabled,
-    )
+    return StickySessionCleanupScheduler(interval_seconds=_CLEANUP_INTERVAL_SECONDS, enabled=True)

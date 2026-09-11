@@ -897,6 +897,7 @@ async def _connect_upstream_websocket(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
+    use_native_egress: bool = True,
     policy: _UpstreamWebSocketPolicy,
     subprotocols: Sequence[str] = (),
     routing_hint: tuple[str, str | None] | None = None,
@@ -934,6 +935,7 @@ async def _connect_upstream_websocket(
                     max_msg_size=MAX_SSE_EVENT_BYTES,
                     heartbeat=heartbeat,
                     compress=15,
+                    use_native_egress=use_native_egress,
                     native_interpret_responses=policy.include_responses_beta,
                     **protocol_kwargs,
                 )
@@ -1043,7 +1045,7 @@ async def _connect_upstream_websocket(
     ping_timeout = (
         settings.proxy_downstream_websocket_idle_timeout_seconds if policy.enable_direct_ping_timeout else None
     )
-    native_client = discover_native_egress_client()
+    native_client = discover_native_egress_client() if use_native_egress else None
     if native_client is not None:
         native_headers = dict(upstream_headers)
         if subprotocols:
@@ -1268,6 +1270,7 @@ async def connect_responses_websocket(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
+    use_native_egress: bool = True,
     routing_hint: tuple[str, str | None] | None = None,
 ) -> UpstreamWebSocket:
     settings = get_settings()
@@ -1280,6 +1283,7 @@ async def connect_responses_websocket(
         route=route,
         codex_client=codex_client,
         allow_direct_egress=allow_direct_egress,
+        use_native_egress=use_native_egress,
         policy=_RESPONSES_WEBSOCKET_POLICY,
         routing_hint=routing_hint,
     )

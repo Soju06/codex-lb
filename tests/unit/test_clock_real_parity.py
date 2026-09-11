@@ -215,6 +215,7 @@ def test_real_scheduler_members_are_the_asyncio_primitives_themselves() -> None:
     assert scheduler.wait is asyncio.wait
     assert scheduler.create_task is asyncio.create_task
     assert scheduler.fail_after is anyio.fail_after
+    assert scheduler.timeout is asyncio.timeout
 
 
 @pytest.mark.asyncio

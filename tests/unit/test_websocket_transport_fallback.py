@@ -240,9 +240,15 @@ async def test_budget_exhaustion_during_websocket_open_arms_marker() -> None:
     # budgeted opener itself must arm the handshake-denial marker.
     class _StalledOpenHarness(ws_mixin._WebSocketMixin):
         async def _open_upstream_websocket(
-            self, account: Any, headers: Any, *, request_state: Any = None, connect_progress: Any = None
+            self,
+            account: Any,
+            headers: Any,
+            *,
+            request_state: Any = None,
+            use_native_egress: bool = True,
+            connect_progress: Any = None,
         ) -> Any:
-            del account, headers, request_state
+            del account, headers, request_state, use_native_egress
             if connect_progress is not None:
                 connect_progress.direct_upstream_connect_started = True
             await asyncio.sleep(5.0)
@@ -268,9 +274,15 @@ async def test_process_network_recovery_exhaustion_during_open_arms_marker(
     # the marker like the stalled-open branch.
     class _ConnectFailingOpenHarness(ws_mixin._WebSocketMixin):
         async def _open_upstream_websocket(
-            self, account: Any, headers: Any, *, request_state: Any = None, connect_progress: Any = None
+            self,
+            account: Any,
+            headers: Any,
+            *,
+            request_state: Any = None,
+            use_native_egress: bool = True,
+            connect_progress: Any = None,
         ) -> Any:
-            del account, headers, request_state
+            del account, headers, request_state, use_native_egress
             raise _transport_error(502, "upstream_unavailable", "Request to upstream timed out")
 
     monkeypatch.setattr(ws_mixin, "_wait_for_process_network_recovery", AsyncMock(return_value="exhausted"))
@@ -295,9 +307,15 @@ async def test_exhausted_route_resolution_failure_does_not_arm_marker(
     # evidence without connect provenance and must not deny handshakes.
     class _RouteFailingOpenHarness(ws_mixin._WebSocketMixin):
         async def _open_upstream_websocket(
-            self, account: Any, headers: Any, *, request_state: Any = None, connect_progress: Any = None
+            self,
+            account: Any,
+            headers: Any,
+            *,
+            request_state: Any = None,
+            use_native_egress: bool = True,
+            connect_progress: Any = None,
         ) -> Any:
-            del account, headers, request_state
+            del account, headers, request_state, use_native_egress
             raise _proxy_error(
                 502,
                 "upstream_proxy_unavailable",

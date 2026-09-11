@@ -17,7 +17,7 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
-from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
+from app.core.clients.codex import CodexClient, CodexTransportError, CodexWebSocketResult
 from app.core.clients.native_egress import (
     NativeEgressTransportError,
     NativeEgressUnavailable,
@@ -68,12 +68,11 @@ class _UnexpectedHttpClient:
 
 
 class _FakeConnection:
-    connection_lost_waiter: asyncio.Future[object]
-
     def __init__(self, *, subprotocol: str | None = None) -> None:
         self.sent: list[str | bytes] = []
         self.closed = False
         self.subprotocol = subprotocol
+        self.connection_lost_waiter: asyncio.Future[object] | None = None
 
     async def send(self, data: str | bytes) -> None:
         self.sent.append(data)
@@ -532,6 +531,43 @@ async def test_connect_responses_websocket_prefers_native_direct_transport(monke
 
 
 @pytest.mark.asyncio
+async def test_connect_responses_websocket_can_bypass_native_direct_transport(monkeypatch) -> None:
+    native_client = SimpleNamespace(
+        websocket=AsyncMock(side_effect=AssertionError("native transport must be bypassed"))
+    )
+    python_connection = _FakeConnection()
+    python_connect = AsyncMock(return_value=python_connection)
+    monkeypatch.setattr(proxy_websocket_module, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", python_connect)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_responses_websocket(
+        {},
+        "access-token",
+        "account-123",
+        allow_direct_egress=True,
+        use_native_egress=False,
+    )
+    await websocket.send_text("python-fallback")
+
+    native_client.websocket.assert_not_awaited()
+    python_connect.assert_awaited_once()
+    assert python_connection.sent == ["python-fallback"]
+    await websocket.close()
+    assert python_connection.closed is True
+
+
+@pytest.mark.asyncio
 async def test_connect_live_websocket_native_direct_preserves_subprotocol_offer(monkeypatch) -> None:
     native_websocket = _FakeNativeWebSocket(subprotocol="live.v1")
     native_client = SimpleNamespace(websocket=AsyncMock(return_value=native_websocket))
@@ -719,6 +755,75 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
     assert "max_size" not in call
     assert "protocols" not in call
     assert websocket.response_header("x-codex-turn-state") == "turn-routed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bypass_native", [False, True])
+@pytest.mark.parametrize("routing_tier", [None, "priority", "ultrafast"])
+async def test_routed_responses_preserve_native_interpretation_and_bridge_bypass(
+    monkeypatch: pytest.MonkeyPatch, bypass_native: bool, routing_tier: str | None
+) -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    native_websocket = _FakeNativeWebSocket()
+    legacy_websocket = _FakeCodexWebSocket()
+    native_open = AsyncMock(return_value=native_websocket)
+    legacy_open = AsyncMock(return_value=legacy_websocket)
+    client = CodexClient(
+        SimpleNamespace(ws_connect=legacy_open),
+        native_egress_client=cast(Any, SimpleNamespace(websocket=native_open)),
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+    options = {"use_native_egress": False} if bypass_native else {}
+    expected_hint = "model=gpt-5.4" + (f";tier={routing_tier}" if routing_tier is not None else "")
+    websocket = await connect_responses_websocket(
+        {"X-Codex-Routing-Hint": "model=untrusted;tier=flex"},
+        "access-token",
+        "account-123",
+        route=route,
+        codex_client=client,
+        routing_hint=("gpt-5.4", routing_tier),
+        **options,
+    )
+    try:
+        assert getattr(websocket, "upstream_proxy_endpoint_id") == "ep_1"
+        assert getattr(websocket, "upstream_proxy_fallback_used") is False
+        if bypass_native:
+            native_open.assert_not_awaited()
+            legacy_open.assert_awaited_once()
+            kwargs = legacy_open.call_args.kwargs
+            assert kwargs["proxy"] == "http://proxy.test:8080"
+            assert "native_interpret_responses" not in kwargs
+            assert "use_native_egress" not in kwargs
+            assert "routing_hint" not in kwargs
+            assert kwargs["headers"]["x-codex-routing-hint"] == expected_hint
+            assert "X-Codex-Routing-Hint" not in kwargs["headers"]
+        else:
+            legacy_open.assert_not_awaited()
+            native_open.assert_awaited_once()
+            request = native_open.call_args.args[0]
+            assert isinstance(request, NativeWebSocketRequest)
+            assert request.interpret_responses is True
+            assert request.proxy_url == "http://proxy.test:8080"
+            assert request.headers["x-codex-routing-hint"] == expected_hint
+            assert "X-Codex-Routing-Hint" not in request.headers
+    finally:
+        await websocket.close()
+    assert legacy_websocket.closed is bypass_native
+    assert native_websocket.closed == (None if bypass_native else (1000, ""))
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,28 @@ from app.modules.proxy._service.websocket import mixin
 FIXTURES = Path(__file__).resolve().parents[2] / "crates/codex-lb-responses/tests/fixtures/websocket-v1.json"
 
 
+@pytest.fixture
+def bridge_parser_session() -> Any:
+    return SimpleNamespace(pending_lock=anyio.Lock())
+
+
 @pytest.mark.asyncio
+async def test_bridge_parser_finishes_completed_scope_without_native_helper(bridge_parser_session: Any) -> None:
+    process = AsyncMock()
+    harness = SimpleNamespace(_process_parsed_http_bridge_upstream_event=process)
+    text = '{"type":"response.completed","response":{"id":"resp-completed"}}'
+    await bridge._HTTPBridgeUpstreamEventsMixin._process_http_bridge_upstream_text(
+        harness, bridge_parser_session, text, scheduler=REAL_SCHEDULER, clock=REAL_CLOCK
+    )
+    process.assert_awaited_once()
+    assert process.await_args is not None
+    assert process.await_args.args[0] is bridge_parser_session
+    scope = process.await_args.kwargs["completed_delivery_scope"]
+    assert scope is not None
+    assert scope.active is False
+    assert not bridge_parser_session.pending_lock.locked()
+
+
 async def test_native_websocket_oversized_integers_preserve_peer_exchanges() -> None:
     binary = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY")
     if not binary:
@@ -96,7 +117,9 @@ async def test_native_websocket_oversized_integers_preserve_peer_exchanges() -> 
 
 
 @pytest.mark.asyncio
-async def test_native_websocket_values_and_policy_match_python(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_native_websocket_values_and_policy_match_python(
+    monkeypatch: pytest.MonkeyPatch, bridge_parser_session: Any
+) -> None:
     binary = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY")
     if not binary:
         pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY to run the native wire probe")
@@ -180,7 +203,7 @@ async def test_native_websocket_values_and_policy_match_python(monkeypatch: pyte
                                 patch.setattr(bridge, "parse_sse_data_json_text", reject_decode)
                             await bridge._HTTPBridgeUpstreamEventsMixin._process_http_bridge_upstream_text(
                                 harness,
-                                cast(Any, None),
+                                bridge_parser_session,
                                 text,
                                 message=message,
                                 scheduler=REAL_SCHEDULER,

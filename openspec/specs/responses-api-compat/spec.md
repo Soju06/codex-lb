@@ -5960,6 +5960,131 @@ client-disconnect and drain behavior MUST remain unchanged.
 - **THEN** existing client-disconnect and upstream-drain behavior is preserved
 - **AND** no completed event is delivered to another request
 
+### Requirement: Live queue writes do not spawn per-event tasks
+
+HTTP-bridge live event writes MUST wait for finite queue capacity in the
+producer task without creating child enqueue, revocation, or cleanup tasks.
+A blocked payload MUST retain one process-wide byte reservation owned by that
+producer until the payload is enqueued or the wait ends. Cancellation or
+revocation before enqueue MUST release that reservation before returning,
+without an asynchronous cleanup wait. A producer cancelled after a capacity
+wakeup MUST NOT insert its payload or strand another waiting producer.
+
+#### Scenario: Blocked producer resumes without child tasks
+
+- **GIVEN** a live queue is full and a producer waits with a reserved payload
+- **WHEN** its consumer drains a slot
+- **THEN** the producer enqueues that payload without spawning a child task
+- **AND** dequeue releases its byte reservation exactly once
+
+#### Scenario: Cancellation races a capacity wakeup
+
+- **GIVEN** multiple producers are waiting on a full live queue
+- **WHEN** a slot is drained and one awakened producer is cancelled before enqueue
+- **THEN** its payload reservation is released without inserting the payload
+- **AND** another waiting producer can use the available slot
+
+### Requirement: Live queue reads do not spawn per-event tasks
+
+Buffered and waiting HTTP-bridge live event reads MUST use the consumer task
+without creating child tasks for item, terminal, revocation, or timeout signals.
+Cancellation before consumption MUST leave an arriving event in the queue.
+If a read deadline races an already-buffered event, the reader MUST return
+that event before reporting the timeout.
+
+#### Scenario: Waiting consumer receives an event
+
+- **GIVEN** a live queue is empty and its consumer awaits the next event
+- **WHEN** a producer publishes a live event or ordered terminal sequence
+- **THEN** the consumer wakes without per-event child tasks
+- **AND** cancellation before consumption leaves the payload and byte credit owned by the queue
+
+### Requirement: HTTP bridge live event delivery is bounded and deadline-aware
+
+For a streamed HTTP bridge Responses request, the proxy MUST retain live
+downstream events in a finite per-request queue and MUST apply backpressure to
+the shared upstream reader when that queue is full. The queue MUST use the
+existing process-wide retained-byte budget without adding an operator setting.
+When a full-queue enqueue reaches the request's existing bridge deadline, the
+proxy MUST revoke only that request's queue, return control to the shared
+reader without raising the enqueue timeout through the reader failure handler,
+and allow sibling request lifecycle and deadline settlement to continue.
+
+If the request's enqueue deadline expires before an event payload is accepted,
+the live queue MUST retain that delivery failure independently of producer
+revocation. The downstream consumer MUST receive the retained prefix followed
+by `response.failed` with `request_timeout` and EOS, never a later successful
+completion after dropped output. If the failure payload cannot fit the process
+byte budget, the existing fail-closed budget result MAY replace it. Terminal
+persistence and settlement MUST still complete for the upstream result.
+Expiry while adding only EOS after an accepted terminal payload MUST preserve
+that payload and append EOS without inventing a payload loss.
+
+If liveness or another terminal path revokes a queue while its live stream
+generator is still attaching or consuming, the proxy MUST retain that queue
+until the selected terminal failure and end-of-stream marker are delivered.
+Only explicit downstream detachment or another proven absence of a downstream
+owner MAY discard the queue and release unread-byte reservations.
+HTTP-bridge upstream WebSockets MUST bypass native egress until native
+per-stream flow control and cancellation can be proven; this constraint MUST
+NOT disable native egress for unrelated WebSocket transports.
+
+#### Scenario: Owner recovery closes an attached child stream
+
+- **GIVEN** owner-forward recovery is yielding an attached local child stream while completion owns its queue
+- **WHEN** the downstream caller closes the owner-recovery stream
+- **THEN** the wrapper MUST await the child stream's closure before its outer detachment
+- **AND** child cleanup MUST revoke downstream delivery without relying on asynchronous-generator garbage collection
+
+#### Scenario: Terminal flush loses deferred output at the enqueue deadline
+
+- **GIVEN** an attached consumer is paused and a terminal frame flushes more deferred reasoning events than its finite queue can retain
+- **WHEN** a deferred payload enqueue reaches the request deadline before the consumer resumes
+- **THEN** the producer and its owned tasks finish without another downstream read
+- **AND** the consumer receives the retained prefix followed by a timeout failure and EOS, not successful completion
+- **AND** terminal persistence, settlement, and queue byte release still complete
+
+#### Scenario: Paused queue reaches its request deadline
+
+- **GIVEN** an HTTP bridge request has a full live event queue and a paused
+  downstream consumer
+- **WHEN** the next upstream event cannot enqueue before that request's bridge
+  deadline
+- **THEN** the proxy revokes that request's queue and returns from the enqueue
+  without raising through the shared reader
+- **AND** a sibling pending request can settle its lifecycle or deadline while
+  the paused request remains bounded
+
+#### Scenario: Delayed generator receives a liveness terminal
+
+- **GIVEN** liveness settlement revokes a request queue before its live stream
+  generator enters the consumer loop
+- **WHEN** terminal bookkeeping selects the liveness failure
+- **THEN** the delayed generator receives that exact failure event followed by
+  the end-of-stream marker
+- **AND** the queue's unread-byte reservations remain accounted until delivery
+
+#### Scenario: Explicitly abandoned queue may be discarded
+
+- **GIVEN** downstream detachment proves that no generator can consume a
+  revoked request queue
+- **WHEN** terminal bookkeeping finishes
+- **THEN** the proxy may discard the queue and release its unread-byte
+  reservations
+- **AND** no later upstream event is delivered to that queue
+
+#### Scenario: HTTP bridge bypasses native egress
+
+- **WHEN** the bridge opens a direct or routed upstream Responses WebSocket
+- **THEN** it selects the existing non-native adapter
+- **AND** native egress is not selected for that bridge socket
+
+#### Scenario: Unrelated native WebSockets retain their default
+
+- **WHEN** a non-bridge direct or routed Responses WebSocket opens without an
+  explicit transport override
+- **THEN** native egress remains eligible under its existing selection rules
+
 ### Requirement: Replayed tool-call namespace metadata is local-only on upstream input
 
 For standard and compact Responses requests, the proxy MUST omit `namespace` from every replayed `input` item whose `type` is `function_call`, `custom_tool_call`, or `apply_patch_call` before forwarding the request upstream. The proxy MUST preserve all other fields on that item, MUST retain the original namespace metadata for local call-identity and replay-deduplication processing, and MUST NOT alter client-provided top-level tool entries as part of this normalization.
@@ -6965,7 +7090,7 @@ Before an HTTP/SSE Responses request enters the upstream WebSocket session bridg
 
 ### Requirement: Responses WebSocket preserves bidirectional transport semantics
 
-The Responses WebSocket relay MUST preserve ordered text and binary messages, selected subprotocol response metadata, close codes, and terminal error delivery across its downstream and upstream boundaries. Direct and account-routed upstream connections MUST use native Codex-family WebSocket egress when the fixed helper is available before dispatch, while Python MUST retain route-aware endpoint selection, fallback safety, metadata, and cleanup. Ping and pong control frames MUST remain transport-owned and MUST NOT surface as application events. A frame whose native send acknowledgement is ambiguous or failed MUST NOT be replayed.
+The Responses WebSocket relay MUST preserve ordered text and binary messages, selected subprotocol response metadata, close codes, and terminal error delivery across its downstream and upstream boundaries. Except for HTTP-bridge upstream WebSockets, which MUST use the bounded-delivery compatibility fallback until native per-stream flow control and cancellation are proven, direct and account-routed upstream connections MUST use native Codex-family WebSocket egress when the fixed helper is available before dispatch, while Python MUST retain route-aware endpoint selection, fallback safety, metadata, and cleanup. Ping and pong control frames MUST remain transport-owned and MUST NOT surface as application events. A frame whose native send acknowledgement is ambiguous or failed MUST NOT be replayed.
 
 #### Scenario: Native direct relay preserves frames
 

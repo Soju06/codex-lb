@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Coroutine, Iterable
-from contextlib import AbstractContextManager
+from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from datetime import datetime, timezone
 from typing import Any, Protocol, TypeVar
 
@@ -85,6 +85,10 @@ class Scheduler(Protocol):
         """Mirror ``anyio.fail_after``: cancel the enclosing scope after ``delay``."""
         ...
 
+    def timeout(self, delay: float) -> AbstractAsyncContextManager[Any]:
+        """Mirror ``asyncio.timeout`` without spawning a task, including at zero."""
+        ...
+
     def drain(self) -> Coroutine[Any, Any, None]: ...
 
     async def cancel_owned_tasks(self) -> None: ...
@@ -136,6 +140,7 @@ class RealScheduler:
     wait = staticmethod(asyncio.wait)
     create_task = staticmethod(asyncio.create_task)
     fail_after = staticmethod(anyio.fail_after)
+    timeout = staticmethod(asyncio.timeout)
 
     def sleep(self, delay: float, result: T | None = None) -> Coroutine[Any, Any, T | None]:
         return asyncio.sleep(delay, result=result)

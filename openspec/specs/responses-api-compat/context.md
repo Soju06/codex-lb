@@ -47,6 +47,32 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - A DRAINING durable row with a live lease is still owned. Foreign `claim_live_session` and local session create must not steal it, including when forced recovery would otherwise run because the owner endpoint is missing; expired or ownerless DRAINING rows remain recoverable.
 - Hard-affinity retry-circuit evidence is request-lifecycle evidence: retirement counts only while the bridge still owns an eventless pending request. Idle no-pending retirement remains observable but neutral, so routine socket churn cannot manufacture the first strike for a later real timeout.
 
+## Bounded HTTP-bridge delivery
+
+Live bridge queues retain two unread events under a fixed 256 MiB process-wide
+payload budget. A full queue pressures the shared reader until its consumer
+resumes, detaches, or reaches the paused request's bridge deadline.
+Shorter sibling deadlines do not settle independently while that enqueue blocks.
+
+Buffered reads remove their item synchronously. Empty reads await an owned
+future in the consumer task, so cancelling a wake cannot lose an item consumed
+by a child task. For example, publication followed by consumer cancellation
+leaves the event and byte credit in the queue for the next read. Revocation
+alone does not publish EOS; a delayed generator waits for its selected terminal.
+Explicit detachment permits disposal of unread payloads.
+
+HTTP-bridge direct and routed upstream sockets use the existing non-native
+adapter because native depth-limited queues abort slow consumers instead of
+providing per-stream flow control. Other WebSocket transports keep their native
+default. This fallback does not implement native flow control.
+
+Blocked producers also create no child tasks. A blocked producer holds its byte
+reservation locally, awaits a capacity future in its own task, and releases the
+reservation synchronously on cancellation or revocation. The process budget
+still uses a thread lock.
+See the bounded-queue change's performance evidence for measured costs and
+the limits of comparison with unbounded main.
+
 ## Fast Mode and Service Tiers
 
 codex-lb accepts the OpenAI/Codex `service_tier` field on Responses and Chat

@@ -115,6 +115,7 @@ async def test_direct_websocket_connect_egress_uses_selected_installation_metada
         *,
         route: object,
         allow_direct_egress: bool,
+        use_native_egress: bool,
         routing_hint: tuple[str, str | None] | None = None,
     ) -> object:
         captured["headers"] = dict(headers)
@@ -122,6 +123,7 @@ async def test_direct_websocket_connect_egress_uses_selected_installation_metada
         captured["account_id"] = account_id
         captured["route"] = route
         captured["allow_direct_egress"] = allow_direct_egress
+        captured["use_native_egress"] = use_native_egress
         captured["routing_hint"] = routing_hint
         return expected_upstream
 
@@ -160,6 +162,7 @@ async def test_direct_websocket_connect_egress_uses_selected_installation_metada
     assert captured["account_id"] == "account-123"
     assert captured["route"] is None
     assert captured["allow_direct_egress"] is True
+    assert captured["use_native_egress"] is True
     assert captured["routing_hint"] is None
     upstream_headers = cast(dict[str, str], captured["headers"])
     assert "x-codex-installation-id" not in upstream_headers

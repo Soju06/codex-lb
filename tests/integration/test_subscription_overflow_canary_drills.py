@@ -928,10 +928,15 @@ async def test_drill_kill_switches_restore_subscription_behaviour(
     assert settings.status_code == 200, settings.text
     designation = settings.json()["subscriptionOverflowSourceId"]
     drain_until = settings.json()["subscriptionOverflowDrainUntil"]
+    # Off and delete clear the designation and arm the drain in the same
+    # transaction; disabling is deliberately asymmetric -- it stops the source
+    # now and leaves the designation (and so no drain window) in place, which
+    # is why a disabled source refuses its pinned conversations instead of
+    # draining them.
     if clears_designation:
         assert designation is None and drain_until is not None, settings.text
     else:
-        assert designation == scene.source_id, settings.text
+        assert designation == scene.source_id and drain_until is None, settings.text
 
     real, stubbed = await _twice(
         async_client,

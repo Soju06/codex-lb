@@ -61,7 +61,18 @@ the walkable set includes `retryable_transient` — so a code-less burst 429, wh
 and a model-capacity 429, which must not be, both come back false from an
 exhaustion field. The requirement now states the selection predicate directly.
 
-The terminal probe could not answer inside the request. `pool_usage_exhaustion`
+The terminal probe could not answer inside the request, and the obvious repair
+did not work either. The first attempt wrote the missing usage sample in
+`handle_rate_limit`, mirroring `handle_quota_exceeded` exactly as this document
+suggested — and it was inert. Both write to the throwaway `AccountState` that
+`_state_for()` builds; `_sync_runtime_state` copies across only the fields
+`RuntimeState` declares, and a usage sample is not one of them, so the next read
+returns `None` and the probe still reports a healthy pool. The mirror this text
+recommended is discarded the same way the original was. The requirement now asks
+the walk to prove exhaustion from the evidence it already holds, and leaves the
+persisted-state probe authoritative only for the case the walk cannot speak to.
+
+The original diagnosis, for the record: `pool_usage_exhaustion`
 needs a status *and* an at-or-above-limit usage sample; `handle_quota_exceeded`
 writes the sample, `handle_rate_limit` does not, and the only other supplier is a
 debounced background refresh that cannot land before the terminal probe of the

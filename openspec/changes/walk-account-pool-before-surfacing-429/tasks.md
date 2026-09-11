@@ -1,20 +1,58 @@
 - [ ] `app/modules/proxy/helpers.py`: add `_USAGE_LIMIT_MESSAGE_MARKERS` beside
   the existing `_MODEL_CAPACITY_MESSAGE_MARKERS`, matched
-  punctuation-insensitively. In `classify_upstream_failure`, raise a code-less
-  or non-rate-limit-code envelope whose message asserts the usage limit from
-  `retryable_transient` to `rate_limit`. Leave every coded envelope's
-  classification exactly as it is.
-- [ ] `app/core/balancer/types.py` + `helpers.py`: add `account_exhaustion: bool`
-  to `ClassifiedFailure`, set false for a model-capacity message even under a
-  rate-limit code and true for usage-limit/quota evidence. Account selection
-  reads this field; account health keeps reading `failure_class`. Do not add a
-  second public classifier.
+  punctuation-insensitively. In `classify_upstream_failure`, raise an envelope
+  whose message asserts the usage limit from `retryable_transient` to
+  `rate_limit` ONLY when its normalized code is the `upstream_error` a missing
+  code normalizes to, or `invalid_request_error`. A code that already carries
+  its own classification decision — rate-limit, quota, `overloaded_error`, any
+  other transient code — keeps it, or this override silently reverses two
+  existing requirements the delta never declares MODIFIED.
+- [ ] `app/core/balancer/types.py` + `helpers.py`: add `excludes_account: bool`
+  to `ClassifiedFailure` — the SELECTION predicate, not an exhaustion one. True
+  for every walkable class (`rate_limit`, `quota`, `retryable_transient`,
+  which includes the code-less burst 429), false only for a model-capacity
+  rejection, with a usage-limit message outranking a capacity match. Naming it
+  after exhaustion collapses the burst 429 and the capacity 429 to the same
+  value and cannot drive the walk. Account selection reads this field; account
+  health keeps reading `failure_class`. Do not add a second public classifier.
+- [ ] Cover the wordings upstream actually sends. `"The usage limit has been
+  reached"` is the passive form the repo's own fixtures use most
+  (`tests/unit/test_proxy_http_bridge.py`, `tests/unit/test_proxy_utils.py`,
+  `tests/integration/test_automations_api.py` and others); a marker tuple built
+  only from the active voice is a no-op on the traffic this change exists for.
+  Build at least one test from an observed upstream envelope rather than from
+  the marker tuple, and bind the punctuation-insensitive fold with a message
+  that actually needs it. Fold `_WEBSOCKET_HANDSHAKE_ERROR_HINTS`
+  (`app/core/clients/proxy.py`) into the same predicate — it carries the
+  identical blind spot.
+- [ ] Preserve client retry guidance across the reclassification. A code-less
+  429 that stops being a burst rejection also stops getting
+  `_stamp_surfaced_burst_retry_after` (`retry.py`, both the pre-visible site and
+  its post-forced-refresh twin), and carries no `error.resets_at` to replace it.
+- [ ] Make usage-limit evidence provable inside the request: `handle_rate_limit`
+  must record the at-or-above-limit usage sample that `pool_usage_exhaustion`
+  requires, the way `handle_quota_exceeded` already does, and the
+  `_request_usage_refresh` hook in `_service/streaming/helpers.py` must be gated
+  on the classification rather than on `code == USAGE_LIMIT_REACHED`. Without
+  this the terminal probe reports a healthy pool however many accounts the walk
+  exhausted. Check whether `openspec/specs/usage-refresh-policy/spec.md` needs a
+  MODIFIED entry once the gate moves.
 - [ ] `app/core/balancer/logic.py`: replace `candidates_remaining: int` with
   `more_candidates_possible: bool` in `failover_decision`; move the
   `non_retryable` check ahead of the candidate check; add
   `MAX_ACCOUNT_ATTEMPTS_CEILING` beside `BURST_SAME_ACCOUNT_MAX_RETRIES` with
-  the same "not an operator knob" comment. Keep `candidates_remaining` as a
-  deprecated keyword shim for one release.
+  the same "not an operator knob" comment. Its value MUST exceed the largest
+  supported pool — this fleet runs 28 accounts, so a ceiling of 16 would silently
+  become the ordinary bound and re-introduce exactly the fixed cap this change
+  removes. Keep `candidates_remaining` as a deprecated keyword shim for one
+  release.
+- [ ] Record which bound ended a walk (non-retryable, exhausted pool, deadline,
+  ceiling, progress failure). `failover_decision` returning `surface` for all of
+  them is what makes the reorder unobservable today.
+- [ ] Carve the capacity-recovery re-admission out of the monotone-progress
+  check: `_service/streaming/retry.py` already calls
+  `excluded_account_ids.discard(...)` when waiting out a local cap, which is a
+  legitimate re-admission and must not trip `pool_walk_no_progress`.
 - [ ] New `app/modules/proxy/pool_terminal.py`:
   `resolve_pool_terminal_failure(...)` asks `probe_pool_usage_exhaustion`
   exactly once and returns either the canonical `usage_limit_reached` 429 with
@@ -35,8 +73,8 @@
 - [ ] `tests/unit/test_failover_foundation.py`: keep
   `test_rate_limit_code_takes_precedence_over_capacity_message` passing
   unchanged; add the usage-limit-message truth table; assert
-  `account_exhaustion` is `False` for a capacity message under a rate-limit code
-  and `True` for a usage-limit message; assert `is_upstream_burst_rejection` is
+  `excludes_account` is `False` for a capacity message under a rate-limit code,
+  `True` for a usage-limit message, and `True` for a code-less burst 429; assert `is_upstream_burst_rejection` is
   `False` for a usage-limit-message 429 and `True` for a model-capacity 429;
   cover the deprecated `candidates_remaining` shim.
 - [ ] `tests/integration/test_proxy_transient_retry.py`: A 429 -> B 429 -> C 200

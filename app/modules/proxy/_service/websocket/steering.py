@@ -571,16 +571,24 @@ async def submit_websocket_steering(
                 )
                 reservation = continuation.request_state.api_key_reservation
                 if reservation is None:
-                    reservation = await proxy._reserve_websocket_api_key_usage(
-                        refreshed_key,
-                        request_model=request.model,
-                        request_service_tier=request.service_tier,
-                        request_usage_budget=successor_usage_budget,
+
+                    async def reserve_and_attach() -> None:
+                        continuation.request_state.api_key_reservation = await proxy._reserve_websocket_api_key_usage(
+                            refreshed_key,
+                            request_model=request.model,
+                            request_service_tier=request.service_tier,
+                            request_usage_budget=successor_usage_budget,
+                        )
+                        proxy._start_request_state_api_key_reservation_heartbeat(
+                            continuation.request_state, api_key=refreshed_key, surface="websocket"
+                        )
+
+                    cancellation = await _await_cleanup_deferring_cancellation(
+                        reserve_and_attach(), scheduler=scheduler_for(proxy)
                     )
-                    continuation.request_state.api_key_reservation = reservation
-                    proxy._start_request_state_api_key_reservation_heartbeat(
-                        continuation.request_state, api_key=refreshed_key, surface="websocket"
-                    )
+                    if cancellation is not None:
+                        raise cancellation
+                    reservation = continuation.request_state.api_key_reservation
                 else:
                     extended = await proxy._extend_websocket_api_key_usage(
                         reservation,

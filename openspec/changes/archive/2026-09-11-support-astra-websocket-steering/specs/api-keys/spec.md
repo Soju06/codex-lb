@@ -18,6 +18,15 @@ budget under the existing request-admission policy; existing items SHALL extend
 only the new input increment. An exhausted newly applicable limit SHALL reject
 the new submission before dispatch without disturbing admitted work. Reconciliation
 SHALL keep one successor reservation and its existing terminal settlement owner.
+Cancellation during creation of a newly applicable reservation SHALL be deferred
+until that reservation is attached to the successor's cleanup owner, then
+propagated through normal socket teardown.
+
+#### Scenario: Sender cancellation races newly metered reservation attachment
+- **GIVEN** a previously unmetered successor is acquiring its first quota reservation
+- **WHEN** the sender is cancelled after the database commits but before the reservation result is attached
+- **THEN** the committed reservation SHALL remain owned until socket teardown releases it
+- **AND** the caller SHALL still receive cancellation without dispatching the new steer
 
 #### Scenario: A limit becomes applicable after unmetered steering
 - **GIVEN** the first steer has no applicable quota reservation

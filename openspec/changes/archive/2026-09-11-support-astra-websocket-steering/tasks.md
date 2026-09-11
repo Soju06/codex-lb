@@ -9,6 +9,7 @@
 - [x] 2.1 Extend one successor reservation for additional queued steers
 - [x] 2.2 Reduce only the unapplied increment on rejection; FOR UPDATE on that path
 - [x] 2.3 Reconcile newly applicable limits for additional steering, including missing reservations and items; prove rejection, admission and exact terminal accounting through the socket boundary
+- [x] 2.4 Defer sender cancellation until a newly committed reservation is attached to its cleanup owner; prove cancellation and concurrent first-steer rejection on real sockets for new and existing reservations
 
 ## 3. Verification
 

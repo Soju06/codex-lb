@@ -98,12 +98,12 @@ Steering configuration snapshots SHALL be retained only for downstream Astra Web
 - **THEN** the event is not assigned through the generic create queue
 - **AND** unrelated request identity, usage ownership and create admission remain unchanged
 
-#### Scenario: A suppressed successor's anonymous error does not settle unrelated work
-- **GIVEN** a late automatic successor was suppressed because its continuation was no longer pending
-- **AND** an unrelated visible request already has a response id
+#### Scenario: A suppressed successor's anonymous error does not settle an undispatched replacement
+- **GIVEN** a late automatic successor was suppressed before an explicit replacement reached transport handoff
+- **AND** the replacement has no response id and there is no eligible live request
 - **WHEN** an ID-less top-level error arrives
-- **THEN** the error is not assigned to the unrelated request
-- **AND** that unrelated request still owns its created event
+- **THEN** the error is not assigned to the undispatched replacement
+- **AND** that replacement retains its reservation and eligibility for its own created event after handoff
 
 #### Scenario: A live request owns anonymous errors before a successor tombstone
 - **GIVEN** a suppressed late successor and a visible request, including one that already has a response id

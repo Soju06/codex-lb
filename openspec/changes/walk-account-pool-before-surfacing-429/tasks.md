@@ -29,14 +29,21 @@
   429 that stops being a burst rejection also stops getting
   `_stamp_surfaced_burst_retry_after` (`retry.py`, both the pre-visible site and
   its post-forced-refresh twin), and carries no `error.resets_at` to replace it.
-- [ ] Make usage-limit evidence provable inside the request: `handle_rate_limit`
-  must record the at-or-above-limit usage sample that `pool_usage_exhaustion`
-  requires, the way `handle_quota_exceeded` already does, and the
-  `_request_usage_refresh` hook in `_service/streaming/helpers.py` must be gated
-  on the classification rather than on `code == USAGE_LIMIT_REACHED`. Without
-  this the terminal probe reports a healthy pool however many accounts the walk
-  exhausted. Check whether `openspec/specs/usage-refresh-policy/spec.md` needs a
-  MODIFIED entry once the gate moves.
+- [ ] Make exhaustion provable inside the request from the WALK's evidence, not
+  from account state. Writing `used_percent` in `handle_rate_limit` (or mirroring
+  `handle_quota_exceeded`) does nothing: both write to the transient
+  `AccountState` that `_state_for()` builds, `_sync_runtime_state` keeps only the
+  fields `RuntimeState` has, and `RuntimeState` has no usage sample — a re-read
+  returns `None` and the probe reports a healthy pool. Instead carry the
+  per-account exclusion evidence the walk already has to the terminal decision
+  and let it prove exhaustion directly. Keep the `_request_usage_refresh` gate
+  move (classification, not `code == USAGE_LIMIT_REACHED`), and check whether
+  `openspec/specs/usage-refresh-policy/spec.md` needs a MODIFIED entry for it.
+- [ ] Terminal rendering must skip the probe for the two bounds whose answer the
+  pool's state cannot give: a `non_retryable` failure surfaces as itself and an
+  exhausted budget yields `upstream_request_timeout`. Consult the probe at most
+  once per request for every other bound, and give the canonical pool rejection
+  a retry hint when no `error.resets_at` is available.
 - [ ] `app/core/balancer/logic.py`: replace `candidates_remaining: int` with
   `more_candidates_possible: bool` in `failover_decision`; move the
   `non_retryable` check ahead of the candidate check; add

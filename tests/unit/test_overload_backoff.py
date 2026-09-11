@@ -156,6 +156,30 @@ async def test_handle_stream_error_feeds_server_error_terminal_into_the_soft_win
 
 
 @pytest.mark.asyncio
+async def test_handle_stream_error_ignores_http_coded_server_error_for_the_soft_window() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-soft-500")
+
+    # An ordinary HTTP 5xx carrying the same string is a transient error, not a
+    # post-admission terminal: it must not deprioritize a healthy account.
+    for _ in range(6):
+        await streaming_helpers_module._handle_stream_error(
+            proxy,
+            account,
+            {"message": "boom"},
+            "server_error",
+            500,
+        )
+
+    # Nothing was recorded at all, so the account may not even have a runtime row.
+    runtime = balancer._runtime.get(account.id)
+    assert runtime is None or not runtime.soft_overload_rejections
+    assert runtime is None or not runtime.overload_rejections
+    assert runtime is None or not overload_backoff_active(runtime, clock.time())
+
+
+@pytest.mark.asyncio
 async def test_handle_stream_error_keeps_429_server_error_on_the_burst_branch() -> None:
     clock = VirtualClock(epoch_value=2_000_000_000.0)
     proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)

@@ -14,10 +14,14 @@ proxy MUST record such a terminal in a second replica-local window that shares
 the same 120-second horizon, and MUST count each of those observations at a
 fractional weight strictly between zero and one toward the same trip threshold,
 so a single `server_error` fault can never trip the window on its own while a
-sustained refusal still does. An upstream HTTP 429 carrying `server_error` is a
-per-account burst rejection and MUST continue to take the short replica-local
-burst cooldown instead of this window. Both windows MUST be pruned by the same
-horizon and cleared together when the window trips.
+sustained refusal still does. The terminal shape is what makes the observation
+an admission rejection, so the proxy MUST record it only when the failure
+carries no upstream HTTP status. A coded HTTP failure whose body reports the
+same string is an ordinary transient error and MUST NOT enter this window, and
+an upstream HTTP 429 carrying `server_error` is a per-account burst rejection
+that MUST continue to take the short replica-local burst cooldown instead. Both
+windows MUST be pruned by the same horizon and cleared together when the window
+trips.
 
 When the combined weight of both windows reaches at least three inside a 120-second window, the
 proxy MUST deprioritize the account for fresh (unbound) selection for a
@@ -129,6 +133,13 @@ body returned to the client MUST remain unchanged.
 - **GIVEN** account A has recorded two `server_error` terminals inside the window
 - **WHEN** two `server_is_overloaded` rejections arrive inside the same window
 - **THEN** account A enters overload backoff
+
+#### Scenario: A coded HTTP server_error failure never enters the soft window
+
+- **GIVEN** account A is healthy
+- **WHEN** six upstream HTTP 500 failures whose body code is `server_error`
+  arrive within 120 seconds
+- **THEN** account A is not deprioritized for fresh selection
 
 #### Scenario: HTTP 429 carrying server_error stays on the burst cooldown path
 

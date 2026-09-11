@@ -1160,11 +1160,14 @@ async def _handle_stream_error(
             code,
         )
         hard_overload = code in UPSTREAM_OVERLOAD_CODES
-        # A bare ``server_error`` *stream terminal* (no HTTP status) is the same
-        # observable condition as an explicit overload: upstream admitted the
-        # turn and then refused to run it. An HTTP 429 carrying the same code is
-        # a burst rejection instead and keeps its own cooldown branch below.
-        soft_overload = code in UPSTREAM_SOFT_OVERLOAD_CODES and http_status != 429
+        # A bare ``server_error`` *stream terminal* is the same observable
+        # condition as an explicit overload: upstream admitted the turn and then
+        # refused to run it. The terminal shape is what makes it an admission
+        # rejection, so it is keyed on the absence of an HTTP status. A coded
+        # HTTP failure carrying the same string is an ordinary transient error
+        # (and an HTTP 429 is a burst rejection with its own cooldown branch
+        # below); neither may deprioritize an otherwise healthy account.
+        soft_overload = code in UPSTREAM_SOFT_OVERLOAD_CODES and http_status is None
         if hard_overload or soft_overload:
             # Overload is an admission rejection that successes on the same
             # account's warm sessions keep masking from ``error_count``; feed

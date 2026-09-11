@@ -34,9 +34,11 @@ accounts as overload-free that were in practice refusing nearly everything.
   the 120-second window do, and the two classes combine naturally. Both windows
   are pruned by the same 120-second horizon and cleared together on a trip.
 - **Funnel wiring.** `_handle_stream_error` records a soft observation for a
-  `server_error` **stream terminal**. An HTTP 429 carrying the same code is a
-  burst rejection and keeps its existing `record_upstream_burst_rejection`
-  branch unchanged — the soft path is gated on `http_status != 429`.
+  `server_error` **stream terminal**, keyed on the absence of an upstream HTTP
+  status (`http_status is None`) because the terminal shape is what makes it an
+  admission rejection. A coded HTTP 5xx carrying the same string stays an
+  ordinary transient error, and an HTTP 429 carrying it keeps its existing
+  `record_upstream_burst_rejection` branch.
 - The backoff deadline, exponential level, decay, isolation trip level,
   soft-reroute semantics, failure classification, failover decision and the
   status and body returned to the client are all unchanged.

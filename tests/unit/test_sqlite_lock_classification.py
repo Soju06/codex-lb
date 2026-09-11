@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from typing import cast
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -82,7 +83,9 @@ def test_wrapper_without_a_driver_exception_is_not_a_lock_failure() -> None:
     # SQLAlchemy raises a wrapper with ``orig is None`` itself, so there is no
     # driver evidence to classify. Falling back to ``str(exc)`` there would
     # reintroduce the statement/parameter match this module exists to remove.
-    exc = OperationalError("UPDATE api_keys SET name = ?", {"name": "database is locked"}, None)
+    # ``cast`` because the stub types ``orig`` as non-optional even though
+    # SQLAlchemy leaves it unset on a wrapper it raises itself.
+    exc = OperationalError("UPDATE api_keys SET name = ?", {"name": "database is locked"}, cast(BaseException, None))
     assert exc.orig is None
     assert is_sqlite_lock_error(exc) is False
 

@@ -1486,6 +1486,17 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "mjakl",
+      "name": "Markus Jakl",
+      "avatar_url": "https://avatars.githubusercontent.com/u/40384?v=4",
+      "profile": "https://github.com/mjakl",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
     }
   ],
   "contributorsPerLine": 7,

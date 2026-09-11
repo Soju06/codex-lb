@@ -1697,7 +1697,7 @@ describe("RecentRequestsTable subscription-overflow attribution", () => {
         {...PAGINATION_PROPS}
         accounts={[]}
         requests={[PINNED_REQUEST]}
-        visibleColumns={["time", "model"]}
+        visibleColumns={ALL_REQUEST_LOG_COLUMNS.filter((column) => column !== "account")}
       />,
     );
 

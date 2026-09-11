@@ -24,6 +24,7 @@ from websockets.exceptions import (
 )
 from websockets.typing import Origin, Subprotocol
 
+from app.core.clients.account_scoped_identity import scope_session_headers
 from app.core.clients.codex import (
     CodexClient,
     CodexTransportError,
@@ -725,7 +726,13 @@ def _build_upstream_websocket_headers(
     include_responses_beta: bool = True,
     normalize_non_native_fingerprint: bool = True,
     routing_hint: tuple[str, str | None] | None = None,
+    scoped_identity_installation_id: str | None = None,
 ) -> dict[str, str]:
+    # ``scoped_identity_installation_id`` carries the selected account's
+    # ``codex_installation_id`` only while the account-scoped thread identity
+    # flag is on; ``None`` leaves this builder byte-for-byte as it was. This
+    # builder's input is the inbound header map, never another builder's
+    # output, so the (non-idempotent) scoping applies exactly once.
     headers = filter_inbound_websocket_headers(inbound)
     # ``filter_inbound_websocket_headers`` strips ``x-codex-installation-id`` because it
     # lives in ``IGNORE_INBOUND_HEADERS``. Callers normalize the selected account's
@@ -766,13 +773,17 @@ def _build_upstream_websocket_headers(
         headers[CODEX_ROUTING_HINT_HEADER] = f"model={model}"
         if service_tier is not None:
             headers[CODEX_ROUTING_HINT_HEADER] += f";tier={service_tier}"
-    return headers
+    if not scoped_identity_installation_id:
+        return headers
+    return scope_session_headers(headers, scoped_identity_installation_id)
 
 
 def _build_upstream_live_websocket_headers(
     inbound: dict[str, str],
     access_token: str,
     account_id: str | None,
+    *,
+    scoped_identity_installation_id: str | None = None,
 ) -> dict[str, str]:
     headers = _build_upstream_websocket_headers(
         inbound,
@@ -780,6 +791,7 @@ def _build_upstream_live_websocket_headers(
         account_id,
         include_responses_beta=False,
         normalize_non_native_fingerprint=False,
+        scoped_identity_installation_id=scoped_identity_installation_id,
     )
     beta_value = _pop_header_case_insensitive(headers, "openai-beta")
     if beta_value:
@@ -900,14 +912,29 @@ async def _connect_upstream_websocket(
     policy: _UpstreamWebSocketPolicy,
     subprotocols: Sequence[str] = (),
     routing_hint: tuple[str, str | None] | None = None,
+    codex_installation_id: str | None = None,
 ) -> UpstreamWebSocket:
     settings = with_dashboard_overrides(get_settings())
+    # Gate here rather than in the builders: this is the one place on the
+    # persistent-websocket path that already reads the dashboard overlay.
+    scoped_identity_installation_id = (
+        codex_installation_id if getattr(settings, "account_scoped_thread_identity_enabled", False) else None
+    )
     if policy.include_responses_beta:
         upstream_headers = _build_upstream_websocket_headers(
-            headers, access_token, account_id, routing_hint=routing_hint
+            headers,
+            access_token,
+            account_id,
+            routing_hint=routing_hint,
+            scoped_identity_installation_id=scoped_identity_installation_id,
         )
     else:
-        upstream_headers = _build_upstream_live_websocket_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_live_websocket_headers(
+            headers,
+            access_token,
+            account_id,
+            scoped_identity_installation_id=scoped_identity_installation_id,
+        )
     require_route_or_direct_egress_opt_in(
         route=route,
         allow_direct_egress=allow_direct_egress,
@@ -1269,6 +1296,7 @@ async def connect_responses_websocket(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
     routing_hint: tuple[str, str | None] | None = None,
+    codex_installation_id: str | None = None,
 ) -> UpstreamWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -1282,6 +1310,7 @@ async def connect_responses_websocket(
         allow_direct_egress=allow_direct_egress,
         policy=_RESPONSES_WEBSOCKET_POLICY,
         routing_hint=routing_hint,
+        codex_installation_id=codex_installation_id,
     )
 
 
@@ -1298,6 +1327,7 @@ async def connect_live_websocket(
     base_url: str = _OPENAI_LIVE_BASE_URL,
     query_params: list[tuple[str, str]] | None = None,
     subprotocols: Sequence[str] = (),
+    codex_installation_id: str | None = None,
 ) -> UpstreamWebSocket:
     """Connect an account-bound Codex realtime sideband without refreshing auth."""
 
@@ -1316,6 +1346,7 @@ async def connect_live_websocket(
         allow_direct_egress=allow_direct_egress,
         policy=_LIVE_SIDEBAND_WEBSOCKET_POLICY,
         subprotocols=subprotocols,
+        codex_installation_id=codex_installation_id,
     )
 
 

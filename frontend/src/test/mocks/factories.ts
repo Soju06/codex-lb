@@ -913,6 +913,7 @@ export function createDashboardSettings(
 		deterministicFailoverEnabled: true,
 		circuitBreakerEnabled: false,
 		httpResponsesSessionBridgeCodexPrewarmEnabled: false,
+		accountScopedThreadIdentityEnabled: false,
 		authGuardianEnabled: true,
 		authGuardianBlockedByTopology: false,
 		automationsSchedulerEnabled: true,

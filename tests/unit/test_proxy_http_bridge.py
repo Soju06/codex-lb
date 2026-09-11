@@ -47135,3 +47135,107 @@ async def test_http_bridge_reader_stamps_the_upstream_terminal_when_it_parses_th
 
     assert observed == {"terminal_at": 112.0, "finalizer_entered_at": 122.0}
     assert request_state.upstream_terminal_at == 112.0
+
+
+def _bridge_frame_text() -> str:
+    return json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "prompt_cache_key": "0189b4d0-9e1d-7f2a-8c3b-1f2e3d4c5b6a",
+            "previous_response_id": "resp_abc123",
+            "client_metadata": {"x-codex-parent-thread-id": "parent-7"},
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def test_bridge_scoped_identity_is_identity_without_a_salt() -> None:
+    text = _bridge_frame_text()
+    assert http_bridge_request_submit_module._text_with_account_scoped_thread_identity(text, None) == text
+
+
+def test_bridge_scoped_identity_leaves_previous_response_id_alone() -> None:
+    text = _bridge_frame_text()
+    scoped = http_bridge_request_submit_module._text_with_account_scoped_thread_identity(
+        text,
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
+    payload = json.loads(scoped)
+    assert payload["previous_response_id"] == "resp_abc123"
+    assert payload["prompt_cache_key"] != "0189b4d0-9e1d-7f2a-8c3b-1f2e3d4c5b6a"
+    assert payload["client_metadata"]["x-codex-parent-thread-id"] != "parent-7"
+
+
+@pytest.mark.asyncio
+async def test_bridge_send_scopes_the_frame_without_touching_the_durable_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scoped value is send-only.
+
+    ``_http_bridge_operation_fingerprint`` hashes ``request_state.request_text``
+    so the durable operation identity stays account-neutral; if the scoped
+    value were written back, every account swap would change the fingerprint
+    and the spool lookup would miss mid-recovery.
+    """
+    request_state = _make_eventless_http_bridge_owner()
+    original_text = _bridge_frame_text()
+    request_state.request_text = original_text
+    session = _make_bridge_session()
+    session.account = cast(
+        Any,
+        SimpleNamespace(
+            id="acc-bridge",
+            chatgpt_account_id="workspace-bridge",
+            codex_installation_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            status=AccountStatus.ACTIVE,
+            plan_type="plus",
+        ),
+    )
+    sent: list[str] = []
+
+    async def send_text(text: str) -> None:
+        sent.append(text)
+
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+
+    def _fingerprint() -> str:
+        return http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+            session_id="bridge-test",
+            api_key_scope="scope-1",
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+        )
+
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(account_scoped_thread_identity_enabled=False),
+    )
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        request_state,
+        original_text,
+    )
+    neutral_fingerprint = _fingerprint()
+    assert sent == [original_text]
+
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(account_scoped_thread_identity_enabled=True),
+    )
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        request_state,
+        original_text,
+    )
+
+    assert sent[1] != original_text
+    scoped_payload = json.loads(sent[1])
+    assert scoped_payload["prompt_cache_key"] != "0189b4d0-9e1d-7f2a-8c3b-1f2e3d4c5b6a"
+    assert scoped_payload["previous_response_id"] == "resp_abc123"
+    # The send-only rewrite never reached the durable state.
+    assert request_state.request_text == original_text
+    assert _fingerprint() == neutral_fingerprint

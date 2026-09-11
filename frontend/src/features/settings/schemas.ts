@@ -211,6 +211,9 @@ export const DashboardSettingsSchema = z
     // M3 codex prewarm: effective value; `provenance[<snake_name>]` says
     // whether the dashboard, the environment or the default owns it.
     httpResponsesSessionBridgeCodexPrewarmEnabled: z.boolean().optional().default(false),
+    // Account-scoped outbound thread identity: effective value;
+    // `provenance[<snake_name>]` says which layer owns it.
+    accountScopedThreadIdentityEnabled: z.boolean().optional().default(false),
     // M2 background jobs: effective values; `provenance[<snake_name>]` says
     // which layer supplied each. `authGuardianBlockedByTopology` is true when a
     // multi-replica ring without leader election keeps the guardian idle.
@@ -327,6 +330,9 @@ export const SettingsUpdateRequestSchema = z
     // M3 codex prewarm: tri-state (omitted = unchanged, null = reset to
     // inherited, boolean = dashboard value).
     httpResponsesSessionBridgeCodexPrewarmEnabled: z.boolean().nullable().optional(),
+    // Account-scoped outbound thread identity: tri-state (omitted = unchanged,
+    // null = reset to inherited, boolean = dashboard value).
+    accountScopedThreadIdentityEnabled: z.boolean().nullable().optional(),
     // M2 background jobs: tri-state like the resilience toggles.
     authGuardianEnabled: z.boolean().nullable().optional(),
     automationsSchedulerEnabled: z.boolean().nullable().optional(),

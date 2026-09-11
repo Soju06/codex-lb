@@ -27,6 +27,7 @@ from app.core.balancer import (
     failover_decision,
 )
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.clients.account_scoped_identity import scope_payload_thread_identity
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
@@ -869,6 +870,34 @@ async def _wait_for_process_network_recovery(
 def _websocket_text_with_account_installation_id(text_data: str, account: Account) -> str:
     codex_installation_id = getattr(account, "codex_installation_id", None)
     return _text_with_account_installation_id(text_data, codex_installation_id)
+
+
+def _websocket_text_with_account_scoped_thread_identity(text_data: str, account: Account | None) -> str:
+    """Scope the outbound frame's thread identifiers into the selected seat.
+
+    Send-only: the caller does not write the result back into
+    ``request_state.request_text``, so the dispatch-owner binding and every
+    replay/fingerprint comparison keep operating on the account-neutral text.
+    Returns ``text_data`` unchanged whenever the flag is off, so a disabled
+    flag is byte-for-byte identical to today.
+    """
+    if account is None:
+        return text_data
+    settings = _facade().get_settings()
+    if not getattr(settings, "account_scoped_thread_identity_enabled", False):
+        return text_data
+    installation_id = getattr(account, "codex_installation_id", None)
+    if not isinstance(installation_id, str) or not installation_id:
+        return text_data
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(payload, dict):
+        return text_data
+    if not scope_payload_thread_identity(payload, installation_id):
+        return text_data
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
 def _websocket_enforce_response_create_text_size(
@@ -2796,6 +2825,13 @@ class _WebSocketMixin:
                                     ),
                                 )
                             request_state.response_create_sent_at = clock.monotonic()
+                            scoped_text_data = _websocket_text_with_account_scoped_thread_identity(
+                                text_data,
+                                account,
+                            )
+                            if scoped_text_data is not text_data:
+                                _websocket_enforce_response_create_text_size(request_state, scoped_text_data)
+                                text_data = scoped_text_data
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
@@ -4823,6 +4859,10 @@ class _WebSocketMixin:
                         if request_state is not None and request_state.model is not None
                         else None
                     ),
+                    # Per-seat salt for account-scoped thread identity. The
+                    # connector gates on the dashboard flag, so this is a
+                    # no-op while the flag is off.
+                    "codex_installation_id": getattr(account, "codex_installation_id", None),
                 },
             )
             if request_state is not None:

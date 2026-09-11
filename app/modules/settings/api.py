@@ -269,6 +269,7 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
             settings.http_responses_session_bridge_codex_prewarm_enabled
         ),
         # end M3 codex prewarm
+        account_scoped_thread_identity_enabled=settings.account_scoped_thread_identity_enabled,
         sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
         sticky_reallocation_primary_budget_threshold_pct=settings.sticky_reallocation_primary_budget_threshold_pct,
         sticky_reallocation_secondary_budget_threshold_pct=settings.sticky_reallocation_secondary_budget_threshold_pct,
@@ -1337,6 +1338,13 @@ async def update_settings(
                     payload, "http_responses_session_bridge_codex_prewarm_enabled"
                 ),
                 # end M3 codex prewarm
+                # Account-scoped thread identity: tri-state via model_fields_set.
+                account_scoped_thread_identity_enabled=_dashboard_value(
+                    payload, "account_scoped_thread_identity_enabled"
+                ),
+                clear_account_scoped_thread_identity_enabled=_clears_dashboard_value(
+                    payload, "account_scoped_thread_identity_enabled"
+                ),
                 sticky_reallocation_budget_threshold_pct=resolved_legacy_threshold,
                 sticky_reallocation_primary_budget_threshold_pct=resolved_primary_threshold,
                 sticky_reallocation_secondary_budget_threshold_pct=(
@@ -1582,6 +1590,7 @@ async def update_settings(
             "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
             "http_responses_session_bridge_gateway_safe_mode",
             "http_responses_session_bridge_codex_prewarm_enabled",  # M3 codex prewarm
+            "account_scoped_thread_identity_enabled",
             "sticky_reallocation_budget_threshold_pct",
             "sticky_reallocation_primary_budget_threshold_pct",
             "sticky_reallocation_secondary_budget_threshold_pct",
@@ -1667,6 +1676,12 @@ async def update_settings(
     ) != updated.provenance.get("http_responses_session_bridge_codex_prewarm_enabled"):
         changed_fields.append("http_responses_session_bridge_codex_prewarm_enabled")
     # end M3 codex prewarm
+    # Account-scoped thread identity: same ownership-change audit rule.
+    scoped_identity_field = "account_scoped_thread_identity_enabled"
+    if scoped_identity_field not in changed_fields and current.provenance.get(
+        scoped_identity_field
+    ) != updated.provenance.get(scoped_identity_field):
+        changed_fields.append(scoped_identity_field)
     if upstream_route_inputs_changed:
         # Durably bump ``upstream_route`` (with the coalesced retry fallback)
         # rather than relying solely on the ``settings`` bump issued above:

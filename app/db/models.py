@@ -1411,6 +1411,7 @@ class DashboardSettings(Base):
     # NULL inherits the deprecated ``CODEX_LB_*`` env alias (then the code
     # default, off); a non-NULL value is dashboard-owned.
     http_responses_session_bridge_codex_prewarm_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    account_scoped_thread_identity_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # end M3 codex prewarm
     upstream_proxy_routing_enabled: Mapped[bool] = mapped_column(
         Boolean,

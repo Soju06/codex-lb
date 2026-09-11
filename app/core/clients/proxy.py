@@ -39,6 +39,10 @@ from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT, WebSocketDataQueue
 from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
 
+from app.core.clients.account_scoped_identity import (
+    scope_payload_thread_identity,
+    scope_session_headers,
+)
 from app.core.clients.codex import (
     CodexClient,
     CodexTransportError,
@@ -961,7 +965,14 @@ def _build_upstream_headers(
     account_id: str | None,
     accept: str = "text/event-stream",
     routing_hint: tuple[str, str | None] | None = None,
+    scoped_identity_installation_id: str | None = None,
 ) -> dict[str, str]:
+    # ``scoped_identity_installation_id`` is the selected account's
+    # ``codex_installation_id`` when the account-scoped thread identity flag is
+    # on, and ``None`` otherwise -- so a disabled flag leaves this builder
+    # byte-for-byte as it was. Scoping lives here rather than in
+    # ``apply_codex_installation_headers`` because that post-filter runs twice
+    # on this path and the mapping is deliberately not idempotent.
     connection_named_header_names = _connection_named_header_names(inbound)
     blocked_header_names = _HTTP_HOP_BY_HOP_HEADER_NAMES | connection_named_header_names
     sanitized_identity_headers = {
@@ -1028,7 +1039,9 @@ def _build_upstream_headers(
         headers[CODEX_ROUTING_HINT_HEADER] = f"model={model}" + (
             f";tier={service_tier}" if service_tier is not None else ""
         )
-    return headers
+    if not scoped_identity_installation_id:
+        return headers
+    return scope_session_headers(headers, scoped_identity_installation_id)
 
 
 _TRANSCRIBE_FORWARD_HEADER_PREFIXES = ("x-openai-", "x-codex-")
@@ -1062,6 +1075,7 @@ def _build_upstream_websocket_headers(
     access_token: str,
     account_id: str | None,
     routing_hint: tuple[str, str | None] | None = None,
+    scoped_identity_installation_id: str | None = None,
 ) -> dict[str, str]:
     connected_header_tokens: set[str] = set()
     for key, value in inbound.items():
@@ -1100,7 +1114,9 @@ def _build_upstream_websocket_headers(
         headers[CODEX_ROUTING_HINT_HEADER] = f"model={model}" + (
             f";tier={service_tier}" if service_tier is not None else ""
         )
-    return headers
+    if not scoped_identity_installation_id:
+        return headers
+    return scope_session_headers(headers, scoped_identity_installation_id)
 
 
 def _interesting_upstream_header_keys(headers: Mapping[str, str]) -> list[str]:
@@ -3725,6 +3741,18 @@ async def _stream_responses_with_session(
     )
     payload_dict = dict(payload.to_payload())
     apply_codex_installation_metadata(payload_dict, codex_installation_id)
+    # Account-scoped outbound thread identity. ``payload.prompt_cache_key``
+    # itself stays account-neutral -- ``_resolve_prompt_cache_key`` set it
+    # before account selection and the sticky key is derived from it -- so the
+    # scoped value is written only onto this outbound copy, after selection.
+    # ``http_payload_dict``, ``websocket_payload_dict`` and the
+    # websocket-rejection fallback all derive from ``payload_dict`` below, so
+    # one mutation covers both transports exactly once.
+    scoped_identity_installation_id = (
+        codex_installation_id if getattr(settings, "account_scoped_thread_identity_enabled", False) else None
+    )
+    if scoped_identity_installation_id:
+        scope_payload_thread_identity(payload_dict, scoped_identity_installation_id)
     payload_dict = await _inline_input_image_urls(
         payload_dict,
         _as_image_fetch_session(client_session),
@@ -3776,6 +3804,7 @@ async def _stream_responses_with_session(
             access_token,
             account_id,
             routing_hint=(payload.model, payload.service_tier) if synthesize_routing_hint else None,
+            scoped_identity_installation_id=scoped_identity_installation_id,
         )
         method = "GET"
     else:
@@ -3785,6 +3814,7 @@ async def _stream_responses_with_session(
             account_id,
             accept="application/json" if non_streaming_http else "text/event-stream",
             routing_hint=(payload.model, payload.service_tier) if synthesize_routing_hint else None,
+            scoped_identity_installation_id=scoped_identity_installation_id,
         )
         _apply_responses_lite_http_header(
             upstream_headers,
@@ -4185,6 +4215,7 @@ async def _stream_responses_with_session(
             access_token,
             account_id,
             routing_hint=(payload.model, payload.service_tier) if synthesize_routing_hint else None,
+            scoped_identity_installation_id=scoped_identity_installation_id,
         )
         _apply_responses_lite_http_header(
             upstream_headers,
@@ -4744,6 +4775,7 @@ async def compact_responses(
     chatgpt_account_id: str | None = None,
     allow_direct_egress: bool = True,
     synthesize_routing_hint: bool = False,
+    codex_installation_id: str | None = None,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
         transport = _CompactCommandTransport(
@@ -4758,6 +4790,7 @@ async def compact_responses(
             chatgpt_account_id=chatgpt_account_id,
             allow_direct_egress=allow_direct_egress,
             synthesize_routing_hint=synthesize_routing_hint,
+            codex_installation_id=codex_installation_id,
         )
         return await transport.execute()
 
@@ -4775,6 +4808,10 @@ class _CompactCommandTransport:
     chatgpt_account_id: str | None = None
     allow_direct_egress: bool = False
     synthesize_routing_hint: bool = False
+    # Selected account's per-seat installation id, used only as the
+    # account-scoped thread identity salt. Compact is a Responses body path
+    # with no per-account stamping today.
+    codex_installation_id: str | None = None
 
     async def execute(self) -> CompactResponsePayload:
         settings = with_dashboard_overrides(get_settings())
@@ -4789,12 +4826,16 @@ class _CompactCommandTransport:
         if self.route is None and self.route_trace is not None:
             self.route_trace.record_direct()
         upstream_account_id = self.chatgpt_account_id or self.account_id
+        scoped_identity_installation_id = (
+            self.codex_installation_id if getattr(settings, "account_scoped_thread_identity_enabled", False) else None
+        )
         upstream_headers = _build_upstream_headers(
             self.headers,
             self.access_token,
             upstream_account_id,
             accept="text/event-stream",
             routing_hint=(self.payload.model, self.payload.service_tier) if self.synthesize_routing_hint else None,
+            scoped_identity_installation_id=scoped_identity_installation_id,
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout()
@@ -4802,6 +4843,8 @@ class _CompactCommandTransport:
         payload_dict = _responses_compact_payload_for_responses_endpoint(self.payload)
         payload_dict["store"] = False
         payload_dict["stream"] = True
+        if scoped_identity_installation_id:
+            scope_payload_thread_identity(payload_dict, scoped_identity_installation_id)
         payload_dict = await _inline_input_image_urls(
             payload_dict,
             _as_image_fetch_session(self.session),

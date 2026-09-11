@@ -342,6 +342,13 @@ class Settings(BaseSettings):
     # T3 → dashboard (deprecated env alias, remove next minor): the same-name
     # ``dashboard_settings`` column wins when set (M3 codex prewarm).
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
+    # T3 → dashboard (deprecated env alias, remove next minor): the same-name
+    # ``dashboard_settings`` column wins when set. Rewrites the outbound
+    # thread identifiers (``prompt_cache_key`` and the session/conversation
+    # headers) into the selected account's namespace at dispatch. Default off:
+    # it changes what every pooled account presents upstream, so the first
+    # turn after enabling it is a deliberate, one-time cache miss per thread.
+    account_scoped_thread_identity_enabled: bool = False
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
     # Bound durable replay storage per operation so a long response cannot

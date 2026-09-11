@@ -103,6 +103,7 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
         "circuit_breaker_enabled": InheritableValue(False, "default", False, False),
         # M3 codex prewarm: NULL column, env double without the field -> off.
         "http_responses_session_bridge_codex_prewarm_enabled": InheritableValue(False, "default", False, False),
+        "account_scoped_thread_identity_enabled": InheritableValue(False, "default", False, False),
         # M2 background jobs: NULL columns, env double without the fields ->
         # code defaults (every scheduler on).
         "auth_guardian_enabled": InheritableValue(True, "default", True, True),

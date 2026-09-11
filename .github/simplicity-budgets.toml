@@ -55,8 +55,12 @@ max_items = 5
 # the ambiguous-continuation recovery mode selector (fail-closed is the only
 # behaviour now); 95 -> 96 dashboard_auth_proxy_groups_header (the reverse
 # proxy's group header must match that proxy's config, so it cannot be a
-# dashboard row, PR-2c-2).
-max = 96
+# dashboard row, PR-2c-2); 96 -> 97 account_scoped_thread_identity_enabled
+# (a rollout fence for a change in what every pooled account presents
+# upstream -- it cannot be a fixed default because turning it on costs one
+# deliberate cache miss per live thread, so an operator has to pick the moment
+# and be able to roll it back from the dashboard without a restart).
+max = 97
 
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and

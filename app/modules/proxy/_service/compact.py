@@ -1190,6 +1190,10 @@ class _CompactMixin:
                                     "route_trace": route_trace,
                                     "chatgpt_account_id": account_id,
                                     "synthesize_routing_hint": True,
+                                    # Per-seat salt for account-scoped thread
+                                    # identity; the client is a no-op when the
+                                    # dashboard flag is off.
+                                    "codex_installation_id": getattr(target, "codex_installation_id", None),
                                 },
                             ),
                             timeout=upstream_budget,

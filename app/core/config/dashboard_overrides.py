@@ -49,7 +49,12 @@ DASHBOARD_TIMEOUT_SETTINGS: Final[tuple[str, ...]] = (
 # the timeouts. Keeping them here means their single consumer reads the field
 # off ``Settings`` as before -- no extra snapshot read, and in particular no
 # ``await`` in the hot path that reads them.
-DASHBOARD_SWITCH_SETTINGS: Final[tuple[str, ...]] = ("http_responses_session_bridge_codex_prewarm_enabled",)
+DASHBOARD_SWITCH_SETTINGS: Final[tuple[str, ...]] = (
+    "http_responses_session_bridge_codex_prewarm_enabled",
+    # Account-scoped outbound thread identity: read on the dispatch path, which
+    # already holds ``with_dashboard_overrides(get_settings())``.
+    "account_scoped_thread_identity_enabled",
+)
 
 # Every ``Settings`` field whose dashboard column overrides the environment
 # value at runtime (the account-capacity caps have their own consumer path

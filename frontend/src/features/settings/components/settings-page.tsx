@@ -25,6 +25,7 @@ import { ModelCatalogueSettings } from "@/features/settings/components/model-cat
 import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
 import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
 import { SessionBridgeSettings } from "@/features/settings/components/session-bridge-settings";
+import { ThreadIdentitySettings } from "@/features/settings/components/thread-identity-settings";
 import { BackgroundJobsSettings } from "@/features/settings/components/background-jobs-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream-timeout-settings";
@@ -249,6 +250,7 @@ export function SettingsPage() {
               />
               <ResilienceSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <SessionBridgeSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+              <ThreadIdentitySettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <BackgroundJobsSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               {canWrite && upstreamProxyQuery.data ? (
                 <UpstreamProxySettings

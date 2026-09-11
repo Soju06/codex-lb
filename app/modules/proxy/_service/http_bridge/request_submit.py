@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
+from app.core.clients.account_scoped_identity import scope_payload_thread_identity
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401
@@ -362,6 +363,42 @@ async def _rollback_http_bridge_recovery_turn_state_registration(
     return await _await_task_deferring_cancellation(rollback_task)
 
 
+def _account_scoped_identity_salt(account: Any) -> str | None:
+    """The selected seat's installation id, or ``None`` while the flag is off.
+
+    ``None`` makes every scoping call a byte-for-byte no-op, which is what the
+    default-off feature flag has to mean on this path.
+    """
+    if not getattr(_service_get_settings(), "account_scoped_thread_identity_enabled", False):
+        return None
+    installation_id = getattr(account, "codex_installation_id", None)
+    return installation_id if isinstance(installation_id, str) and installation_id else None
+
+
+def _text_with_account_scoped_thread_identity(text_data: str, installation_id: str | None) -> str:
+    """Scope the frame's thread identifiers into the selected account's namespace.
+
+    Send-only, exactly like ``_text_with_operation_id``: the result is never
+    written back to ``request_state.request_text`` or
+    ``fresh_upstream_request_text``, because
+    ``_http_bridge_operation_fingerprint`` must keep hashing account-neutral
+    text. If the scoped value entered the durable fingerprint, every account
+    swap would change the operation identity and the spool lookup would miss
+    mid-recovery.
+    """
+    if not installation_id:
+        return text_data
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(payload, dict):
+        return text_data
+    if not scope_payload_thread_identity(payload, installation_id):
+        return text_data
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
 async def _send_http_bridge_request_text_with_archive_id(
     session: "_HTTPBridgeSession",
     request_state: _WebSocketRequestState,
@@ -371,6 +408,10 @@ async def _send_http_bridge_request_text_with_archive_id(
     clock: Clock = REAL_CLOCK,
 ) -> None:
     text_data = _text_with_operation_id(text_data, request_state.operation_id)
+    text_data = _text_with_account_scoped_thread_identity(
+        text_data,
+        _account_scoped_identity_salt(session.account),
+    )
     # Operation metadata is added after the initial payload sizing pass. Check
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.

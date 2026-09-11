@@ -103,6 +103,9 @@ class DashboardSettingsResponse(DashboardModel):
     # comes from the dashboard, the deprecated env alias or the code default.
     http_responses_session_bridge_codex_prewarm_enabled: bool
     # end M3 codex prewarm
+    # Account-scoped thread identity: effective value; ``provenance[<name>]``
+    # says whether it comes from the dashboard, the env alias or the default.
+    account_scoped_thread_identity_enabled: bool
     sticky_reallocation_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
     sticky_reallocation_primary_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
     sticky_reallocation_secondary_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
@@ -274,6 +277,9 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     # code default, value = store).
     http_responses_session_bridge_codex_prewarm_enabled: bool | None = None
     # end M3 codex prewarm
+    # Account-scoped thread identity: tri-state via ``model_fields_set``
+    # (absent = unchanged, null = clear and inherit, value = store).
+    account_scoped_thread_identity_enabled: bool | None = None
     sticky_reallocation_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     sticky_reallocation_primary_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     sticky_reallocation_secondary_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)

@@ -102,6 +102,9 @@ class SettingsRepository:
             circuit_breaker_enabled=None,
             # M3 codex prewarm: NULL = inherit the env alias / default (off).
             http_responses_session_bridge_codex_prewarm_enabled=None,
+            # Account-scoped thread identity: NULL = inherit the env alias /
+            # default (off).
+            account_scoped_thread_identity_enabled=None,
             # M2 background jobs: NULL = inherit the env alias / default.
             auth_guardian_enabled=None,
             automations_scheduler_enabled=None,
@@ -238,6 +241,9 @@ class SettingsRepository:
         http_responses_session_bridge_codex_prewarm_enabled: bool | None = None,
         clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False,
         # end M3 codex prewarm
+        # Account-scoped thread identity (same tri-state contract).
+        account_scoped_thread_identity_enabled: bool | None = None,
+        clear_account_scoped_thread_identity_enabled: bool = False,
         # M1 stream/bridge budgets (same tri-state contract).
         http_responses_stream_request_budget_seconds: float | None = None,
         clear_http_responses_stream_request_budget_seconds: bool = False,
@@ -356,6 +362,12 @@ class SettingsRepository:
                 http_responses_session_bridge_codex_prewarm_enabled
             )
         # end M3 codex prewarm
+        # Account-scoped thread identity: clear flag resets to NULL (inherit
+        # the env alias / code default); a non-None value is dashboard-owned.
+        if clear_account_scoped_thread_identity_enabled:
+            settings.account_scoped_thread_identity_enabled = None
+        elif account_scoped_thread_identity_enabled is not None:
+            settings.account_scoped_thread_identity_enabled = account_scoped_thread_identity_enabled
         if sticky_reallocation_budget_threshold_pct is not None:
             settings.sticky_reallocation_budget_threshold_pct = sticky_reallocation_budget_threshold_pct
         if sticky_reallocation_primary_budget_threshold_pct is not None:

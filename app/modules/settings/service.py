@@ -74,6 +74,9 @@ class DashboardSettingsData:
     # env alias, else the code default); provenance carries the source.
     http_responses_session_bridge_codex_prewarm_enabled: bool
     # end M3 codex prewarm
+    # Account-scoped thread identity: effective value (dashboard column, else
+    # the env alias, else the code default); provenance carries the source.
+    account_scoped_thread_identity_enabled: bool
     sticky_reallocation_budget_threshold_pct: float
     sticky_reallocation_primary_budget_threshold_pct: float
     sticky_reallocation_secondary_budget_threshold_pct: float
@@ -266,6 +269,9 @@ class DashboardSettingsUpdateData:
     http_responses_session_bridge_codex_prewarm_enabled: bool | None = None
     clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False
     # end M3 codex prewarm
+    # Account-scoped thread identity (tri-state like the codex prewarm switch).
+    account_scoped_thread_identity_enabled: bool | None = None
+    clear_account_scoped_thread_identity_enabled: bool = False
     # M1 stream/bridge budgets (tri-state like the C2-1 timeouts).
     http_responses_stream_request_budget_seconds: float | None = None
     clear_http_responses_stream_request_budget_seconds: bool = False
@@ -465,6 +471,9 @@ class SettingsService:
                 payload.clear_http_responses_session_bridge_codex_prewarm_enabled
             ),
             # end M3 codex prewarm
+            # Account-scoped thread identity
+            account_scoped_thread_identity_enabled=payload.account_scoped_thread_identity_enabled,
+            clear_account_scoped_thread_identity_enabled=payload.clear_account_scoped_thread_identity_enabled,
             # M1 stream/bridge budgets
             http_responses_stream_request_budget_seconds=payload.http_responses_stream_request_budget_seconds,
             clear_http_responses_stream_request_budget_seconds=(
@@ -507,6 +516,8 @@ _ENVIRONMENT_INHERITABLE_SETTINGS = (
     # M3 codex prewarm: bool; a NULL column inherits the deprecated env alias.
     "http_responses_session_bridge_codex_prewarm_enabled",
     # end M3 codex prewarm
+    # Account-scoped thread identity: bool; a NULL column inherits the env alias.
+    "account_scoped_thread_identity_enabled",
     CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive (bool, env alias)
     # R2 spool retention: float; a NULL column inherits the deprecated env alias.
     OPERATION_SPOOL_RETENTION_SETTING,
@@ -631,6 +642,7 @@ def _settings_data(row: DashboardSettings, totp: TotpEnrollmentSummary) -> Dashb
             resolved["http_responses_session_bridge_codex_prewarm_enabled"].value
         ),
         # end M3 codex prewarm
+        account_scoped_thread_identity_enabled=bool(resolved["account_scoped_thread_identity_enabled"].value),
         sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
         sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
         sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,

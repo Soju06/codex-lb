@@ -362,6 +362,7 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "circuit_breaker_enabled",
         # M3 codex prewarm
         "http_responses_session_bridge_codex_prewarm_enabled",
+        "account_scoped_thread_identity_enabled",
         # M2 background jobs
         "auth_guardian_enabled",
         "automations_scheduler_enabled",
@@ -2712,3 +2713,69 @@ async def test_settings_api_rejects_raising_a_reuse_window_above_the_spool_reten
 
 
 # end R2 spool retention
+
+
+@pytest.mark.asyncio
+async def test_settings_api_account_scoped_thread_identity_round_trip_with_provenance(async_client, monkeypatch):
+    """Default -> dashboard -> cleared/env -> unchanged on omit."""
+    from app.modules.settings import service as settings_service
+
+    name = "account_scoped_thread_identity_enabled"
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["accountScopedThreadIdentityEnabled"] is False
+    assert payload["provenance"][name] == {"source": "default", "envValue": False, "default": False}
+
+    stored = await async_client.put("/api/settings", json={"accountScopedThreadIdentityEnabled": True})
+    assert stored.status_code == 200
+    assert stored.json()["accountScopedThreadIdentityEnabled"] is True
+    assert stored.json()["provenance"][name]["source"] == "dashboard"
+
+    # Storing the inherited value is still a dashboard value, not a clear.
+    stored_off = await async_client.put("/api/settings", json={"accountScopedThreadIdentityEnabled": False})
+    assert stored_off.status_code == 200
+    assert stored_off.json()["provenance"][name] == {"source": "dashboard", "envValue": False, "default": False}
+
+    # The environment is a fallback, never an override of a stored value.
+    inherited = settings_service.get_settings().model_copy(update={name: True})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    still_dashboard = await async_client.get("/api/settings")
+    assert still_dashboard.json()["accountScopedThreadIdentityEnabled"] is False
+    assert still_dashboard.json()["provenance"][name]["source"] == "dashboard"
+
+    # Explicit null clears the column and the environment alias applies again.
+    cleared = await async_client.put("/api/settings", json={"accountScopedThreadIdentityEnabled": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["accountScopedThreadIdentityEnabled"] is True
+    assert cleared.json()["provenance"][name] == {"source": "env", "envValue": True, "default": False}
+
+    # An unrelated save never copies the inherited value into the column.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["provenance"][name]["source"] == "env"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.account_scoped_thread_identity_enabled is None
+
+
+@pytest.mark.asyncio
+async def test_settings_api_account_scoped_thread_identity_reaches_the_dispatch_overlay(async_client):
+    """The dispatch path reads the dashboard value off the request-bound overlay,
+    with no database read and no restart."""
+    from app.core.config.dashboard_overrides import effective_settings
+    from app.core.config.settings import get_settings
+
+    startup_settings = get_settings()
+
+    async def enabled_for_the_next_request() -> bool:
+        snapshot = await get_settings_cache().get()
+        return effective_settings(snapshot, startup_settings).account_scoped_thread_identity_enabled
+
+    assert startup_settings.account_scoped_thread_identity_enabled is False
+    assert await enabled_for_the_next_request() is False
+
+    enabled = await async_client.put("/api/settings", json={"accountScopedThreadIdentityEnabled": True})
+    assert enabled.status_code == 200
+    assert await enabled_for_the_next_request() is True

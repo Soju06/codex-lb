@@ -1165,7 +1165,6 @@ class _WebSocketRequestState:
     # True after an existing UNKNOWN operation is claimed for this attempt.
     # If admission fails before send, cleanup must restore UNKNOWN rather than
     # treating the pre-existing row like a newly-created operation.
-    operation_recovery_claimed: bool = False
     # True only when this request created the durable operation row. A
     # pre-dispatch admission failure may remove that row; an existing row
     # represents an ambiguous upstream attempt and must remain fenced.

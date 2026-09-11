@@ -1,4 +1,28 @@
-# Fork compatibility and current-main verification, September 10
+# Upstream refresh verification, September 10
+
+Integrated the 18 commits from `c858dcc864d59871f4dcd844db7286d1ef0d174c` through `aa75e1c12aa802b6364c68aafd3da194b3c3cf01`. The updated bridge, dashboard authentication, users, roles and migrations are retained. The context hooks merged without runtime conflicts. The migration-test conflict retains both sets of tests.
+
+The new no-op merge revision `20260910_180000_merge_context_dashboard_heads` joins `20260910_120000_merge_codex_context_heads` and `20260910_000000_add_totp_required_for_admin_role`. Neither earlier ancestry was rewritten. Upgrade coverage starts from the deployed context revision, the previous upstream head, the previous local context merge and the new upstream head. It verifies context rows, existing dashboard credentials and the new admin TOTP policy's default-off behavior.
+
+Current scoped local results:
+
+- Context codec/replay, history/notes, HTTP fork behavior, pool dispatch, cost/ownership, transient retries and realtime routes: 194 passed.
+- HTTP bridge and native WebSocket integration suites: 339 passed.
+- Migration and migration-policy suites, the four context upgrade paths, populated overflow/transport round trips and dashboard roles schema: 120 passed, 8 PostgreSQL-only tests skipped in this SQLite run.
+- PostgreSQL 16 context/fork/dispatch and selected ownership/fresh-head migrations: 53 passed. A separate PostgreSQL database upgraded from the original deployed context revision while preserving its owner, participant and dashboard password. Migration policy and schema drift checks passed.
+- Dashboard login, TOTP, user-schema, operator/viewer permissions and CSRF checks passed. The original run had 80 passing tests and one stale assertion that a specific feature migration must remain the global head. After correcting that assertion, the entire affected 8-test operator/viewer file passed.
+- Selected frontend auth/access/guest and request-log schema suites: 190 passed in 15 files. The complete Docker frontend build passed, and the canary served the image's JavaScript and CSS assets unchanged.
+- `make lint`, full `ty check` and focused formatting checks passed. Strict OpenSpec validation passed for the active change and all 66 repository specs.
+
+An isolated candidate upgraded the retained consistent 1.34 GB production snapshot taken earlier on September 10. All original columns and rows matched their pre-upgrade hashes in the checked tables: 5 accounts, 7 API keys, 41,484 request logs, 216 context sessions and 222 participants. The legacy dashboard password and TOTP fields matched the migrated admin row. Integrity, foreign keys and schema drift passed. This snapshot is test evidence, not a fresh pre-cutover backup.
+
+Codex CLI/app-server 0.153.4 with Astra completed six native test turns. A new fork replayed two authenticated results from its parent with `reasoning.context=all_turns`, then wrote and read independent notes. After restarting the isolated proxy, a fresh client recovered notes and listed history windows for both tasks. The captured context and response requests all returned HTTP 200. The active client's authentication file remained unchanged and its temporary test copy was removed.
+
+For deployment testing only, image `codex-lb:context-fork-main-aa75e1c1-wsfix-20260910` adds the separate native WebSocket rejection fix `cf7d6f35`. All 62 tests for that fix passed against this combined source. The fix remains absent from the context PR diff. Application source hashes and served asset bytes were checked against the candidate image.
+
+These scopes overlap and are not additive unique-test totals. No live quota exhaustion, forced upstream outage or cross-replica restoration was exercised. Publication, current-head GitHub CI, the maintainer's architecture decision and production deployment remain pending.
+
+# Earlier fork compatibility verification, September 10
 
 Integrated upstream `c858dcc864d59871f4dcd844db7286d1ef0d174c` with the existing PR. The runtime implementation is in `77b81dd4c91e21af8ad3a55ce683ea25fa8d3e35`. Results below supersede the September 8 migration-head and global OpenSpec statements. These are scoped local checks; current-head GitHub CI and the maintainer's architecture decision remain pending.
 

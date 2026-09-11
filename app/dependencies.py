@@ -26,6 +26,9 @@ from app.modules.dashboard_auth.service import (
     DashboardAuthService,
     get_dashboard_session_store,
 )
+from app.modules.dashboard_roles.repository import DashboardRolesRepository
+from app.modules.dashboard_users.repository import DashboardUsersRepository
+from app.modules.dashboard_users.service import DashboardUsersService
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
@@ -80,6 +83,19 @@ class DashboardAuthContext:
     session: AsyncSession
     repository: DashboardAuthRepository
     service: DashboardAuthService
+
+
+@dataclass(slots=True)
+class DashboardUsersContext:
+    session: AsyncSession
+    repository: DashboardUsersRepository
+    service: DashboardUsersService
+
+
+@dataclass(slots=True)
+class DashboardRolesContext:
+    session: AsyncSession
+    repository: DashboardRolesRepository
 
 
 @dataclass(slots=True)
@@ -240,6 +256,20 @@ def get_dashboard_auth_context(
     repository = DashboardAuthRepository(session)
     service = DashboardAuthService(cast(DashboardAuthRepositoryProtocol, repository), get_dashboard_session_store())
     return DashboardAuthContext(session=session, repository=repository, service=service)
+
+
+def get_dashboard_users_context(
+    session: AsyncSession = Depends(get_session),
+) -> DashboardUsersContext:
+    repository = DashboardUsersRepository(session)
+    service = DashboardUsersService(repository, DashboardRolesRepository(session), DashboardAuthRepository(session))
+    return DashboardUsersContext(session=session, repository=repository, service=service)
+
+
+def get_dashboard_roles_context(
+    session: AsyncSession = Depends(get_session),
+) -> DashboardRolesContext:
+    return DashboardRolesContext(session=session, repository=DashboardRolesRepository(session))
 
 
 def get_proxy_context(request: Request) -> ProxyContext:

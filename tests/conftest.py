@@ -40,6 +40,7 @@ os.environ["CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS"] = "0"
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.modules.dashboard_roles.seed import seed_preset_dashboard_roles  # noqa: E402
 
 
 class _NoopScheduler:
@@ -129,6 +130,9 @@ def _recreate_test_schema(sync_conn) -> None:
     _drop_test_migration_tables(sync_conn)
     Base.metadata.drop_all(sync_conn)
     Base.metadata.create_all(sync_conn)
+    # Production seeds these through the migration and at startup; the test
+    # schema is built with create_all, so seed the preset role rows here too.
+    seed_preset_dashboard_roles(sync_conn)
 
 
 def _reset_test_database(sync_conn) -> None:
@@ -488,6 +492,12 @@ def _reset_global_state() -> None:
         # next load), so the fallback slot needs an explicit reset here or a
         # dashboard row leaks from one test into the next.
         settings_cache._last_loaded_settings = None
+    except Exception:
+        pass
+    try:
+        from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
+
+        get_dashboard_users_cache().clear()
     except Exception:
         pass
     try:

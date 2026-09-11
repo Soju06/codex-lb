@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { ADMIN_PERMISSIONS, createUpstreamProxyAdmin } from "@/test/mocks/factories";
 import type { AccountSummary } from "@/features/accounts/schemas";
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
@@ -65,6 +67,25 @@ vi.mock("@/features/settings/hooks/use-settings", () => ({
 
 const { useAccounts } = await import("@/features/accounts/hooks/use-accounts");
 const mockedUseAccounts = useAccounts as unknown as ReturnType<typeof vi.fn>;
+const { useUpstreamProxyAdmin } = await import("@/features/settings/hooks/use-settings");
+const mockedUseUpstreamProxyAdmin = useUpstreamProxyAdmin as unknown as ReturnType<typeof vi.fn>;
+
+function mockAccountsQuery(accounts: AccountSummary[]) {
+  mockedUseAccounts.mockReturnValue({
+    accountsQuery: { data: accounts, error: null, refetch: vi.fn() },
+    importMutation: idleMutation(),
+    pauseMutation: idleMutation(),
+    resumeMutation: idleMutation(),
+    probeMutation: idleMutation(),
+    usageResetMutation: idleMutation(),
+    deleteMutation: idleMutation(),
+    exportAuthMutation: idleMutation(),
+    setAliasMutation: idleMutation(),
+    limitWarmupMutation: idleMutation(),
+    routingPolicyMutation: idleMutation(),
+    updateMutation: idleMutation(),
+  } as unknown as ReturnType<typeof useAccounts>);
+}
 
 function idleMutation() {
   return {
@@ -89,6 +110,14 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
 
 describe("AccountsPage", () => {
   beforeEach(() => {
+    // The auth store starts least-privilege; these cases exercise admin actions.
+    useAuthStore.setState({
+      initialized: true,
+      authenticated: true,
+      role: "admin",
+      permissions: ADMIN_PERMISSIONS,
+      canWrite: true,
+    });
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
     vi.spyOn(Date, "now").mockReturnValue(
       new Date("2026-01-01T12:00:00.000Z").getTime(),
@@ -97,6 +126,86 @@ describe("AccountsPage", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true });
+  });
+
+  it("keeps the upstream-proxy admin query idle and hides OAuth help for read-only guests", () => {
+    useAuthStore.setState({ role: "guest", permissions: ["read"], canWrite: false, initialized: true });
+    // Guests receive a masked identity: no ChatGPT account/workspace ids and a redacted email.
+    mockAccountsQuery([
+      account({
+        accountId: "acc-masked",
+        email: "m***@example.com",
+        displayName: "m***@example.com",
+        chatgptAccountId: null,
+        workspaceId: null,
+      }),
+    ]);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    expect(mockedUseUpstreamProxyAdmin).toHaveBeenCalledWith({ enabled: false });
+    expect(screen.queryByRole("button", { name: "Need help?" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add account" })).toBeDisabled();
+    expect(screen.getByRole("heading", { name: "m***@example.com" })).toBeInTheDocument();
+    expect(screen.getAllByText(/Personal \/ unknown workspace/).length).toBeGreaterThan(0);
+  });
+
+  it("does not render cached upstream-proxy data in the proxy-binding panel for read-only guests", () => {
+    useAuthStore.setState({ role: "guest", permissions: ["read"], canWrite: false, initialized: true });
+    // `enabled: false` only stops fetching; an earlier admin session's response
+    // can still be in the cache and must not reach the panel.
+    mockedUseUpstreamProxyAdmin.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      accountBindingMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+    mockAccountsQuery([account({ accountId: "acc_primary" })]);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("heading", { name: "Accounts" })).toBeInTheDocument();
+    expect(screen.queryByText("Proxy binding")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Account proxy pool" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Primary pool")).not.toBeInTheDocument();
+  });
+
+  it("renders the proxy-binding panel from upstream-proxy data for writers", () => {
+    mockedUseUpstreamProxyAdmin.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      accountBindingMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+    mockAccountsQuery([account({ accountId: "acc_primary" })]);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Proxy binding")).toBeInTheDocument();
+  });
+
+  it("enables the upstream-proxy admin query and shows OAuth help for writers", () => {
+    mockAccountsQuery([account({})]);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    expect(mockedUseUpstreamProxyAdmin).toHaveBeenCalledWith({ enabled: true });
+    expect(screen.getByRole("button", { name: "Need help?" })).toBeInTheDocument();
   });
 
   it("defaults the selected account to the first account after display sorting", () => {

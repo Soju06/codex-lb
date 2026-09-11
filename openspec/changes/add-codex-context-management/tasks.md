@@ -22,3 +22,9 @@ Full CI runs in GitHub Actions. Local verification here is scoped to the affecte
 - [x] Restore the deployed context migration parent and add a merge revision with current main.
 - [x] Verify fresh upgrades and upgrades from the deployed context branch preserve context rows and apply missing upstream migrations.
 - [x] Validate the isolated candidate against a consistent copy of production state and native client fork continuation.
+
+## September 10 upstream refresh
+- [x] Integrate upstream `aa75e1c1`, preserving context ownership and the updated bridge fail-closed behavior.
+- [x] Join the previous context merge and the new dashboard migration chain without rewriting either ancestry.
+- [x] Verify upgrades from the deployed context revision, the previous local merge and the new upstream head, including existing dashboard credentials.
+- [x] Run the affected context, bridge, dashboard access and migration checks, then refresh the isolated candidate evidence.

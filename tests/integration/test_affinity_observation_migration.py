@@ -8,6 +8,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 
 from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrade
+from tests.integration.test_affinity_identity_migration import _current_head
 
 pytestmark = pytest.mark.integration
 
@@ -15,7 +16,6 @@ _PARENT = "20260910_010000_dashboard_spool_retention"
 _REVISION = "20260910_143000_request_log_affinity"
 _GUEST = "20260908_000000_add_guest_session_generation"
 _MERGE = "20260910_180000_merge_affinity_guest_heads"
-_HEAD = "20260910_220000_merge_affinity_invite_heads"
 _COLUMNS = ("sticky_key_source", "sticky_kind", "sticky_key_hash")
 
 
@@ -68,10 +68,10 @@ def test_fresh_upgrade_has_single_affinity_head_and_nullable_metadata(tmp_path: 
     path = tmp_path / "fresh.sqlite"
     url = f"sqlite+aiosqlite:///{path}"
     script = ScriptDirectory.from_config(_build_alembic_config(url))
-    assert script.get_heads() == [_HEAD]
+    head = _current_head(url)
     assert script.get_revision(_MERGE).down_revision == (_REVISION, _GUEST)
     assert script.get_revision(_REVISION).down_revision == _PARENT
-    assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
+    assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == head
     assert check_schema_drift(url) == ()
     engine = create_engine(f"sqlite:///{path}")
     try:
@@ -100,7 +100,7 @@ def test_bootstrap_existing_schema_preserves_affinity_values(tmp_path: Path) -> 
             )
             before = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
         result = run_upgrade(url, "head", bootstrap_legacy=True)
-        assert result.current_revision == _HEAD
+        assert result.current_revision == _current_head(url)
         assert check_schema_drift(url) == ()
         with engine.connect() as connection:
             after = dict(connection.execute(text("SELECT * FROM request_logs")).mappings().one())
@@ -171,7 +171,7 @@ def _prove_populated_branch_merge(url: str, starting_revision: str) -> None:
                 == 9
             )
         assert run_upgrade(url, _MERGE, bootstrap_legacy=False).current_revision == _MERGE
-        assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
+        assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _current_head(url)
         assert check_schema_drift(url) == ()
     finally:
         engine.dispose()

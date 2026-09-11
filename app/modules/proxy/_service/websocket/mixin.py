@@ -2810,6 +2810,11 @@ class _WebSocketMixin:
                         continue
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
+                        # Account-scoped thread identity is send-only: the
+                        # dispatch-owner binding above, ``request_state`` and
+                        # every replay comparison keep the account-neutral
+                        # text, so the rewrite lands in its own variable.
+                        outbound_text_data = text_data
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
                             if account is None or not _bind_websocket_request_dispatch_owner(
                                 request_state,
@@ -2831,9 +2836,9 @@ class _WebSocketMixin:
                             )
                             if scoped_text_data is not text_data:
                                 _websocket_enforce_response_create_text_size(request_state, scoped_text_data)
-                                text_data = scoped_text_data
+                                outbound_text_data = scoped_text_data
                         with _websocket_archive_request_context(archive_request_id):
-                            await upstream.send_text(text_data)
+                            await upstream.send_text(outbound_text_data)
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)

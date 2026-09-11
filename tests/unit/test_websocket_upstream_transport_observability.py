@@ -116,6 +116,7 @@ async def test_direct_websocket_connect_egress_uses_selected_installation_metada
         route: object,
         allow_direct_egress: bool,
         routing_hint: tuple[str, str | None] | None = None,
+        codex_installation_id: str | None = None,
     ) -> object:
         captured["headers"] = dict(headers)
         captured["access_token"] = access_token
@@ -123,6 +124,7 @@ async def test_direct_websocket_connect_egress_uses_selected_installation_metada
         captured["route"] = route
         captured["allow_direct_egress"] = allow_direct_egress
         captured["routing_hint"] = routing_hint
+        captured["codex_installation_id"] = codex_installation_id
         return expected_upstream
 
     class _DirectWebSocketFacade(_DummyFacade):
@@ -161,6 +163,9 @@ async def test_direct_websocket_connect_egress_uses_selected_installation_metada
     assert captured["route"] is None
     assert captured["allow_direct_egress"] is True
     assert captured["routing_hint"] is None
+    # The per-seat salt for account-scoped thread identity reaches the
+    # connector, which gates it on the (default-off) dashboard flag.
+    assert captured["codex_installation_id"] == "account-installation"
     upstream_headers = cast(dict[str, str], captured["headers"])
     assert "x-codex-installation-id" not in upstream_headers
     assert json.loads(upstream_headers["x-codex-turn-metadata"]) == {

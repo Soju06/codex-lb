@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from app.core import usage as usage_core
 from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorParam
+from app.core.errors import OpenAIErrorDetail, OpenAIErrorParam, is_upstream_usage_limit_message
 from app.core.openai.chat_responses import _coerce_number
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
@@ -37,12 +37,25 @@ PLAN_TYPE_PRIORITY = (
     "k12",
 )
 
-_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "usage_limit_reached"})
+_USAGE_LIMIT_CODE = "usage_limit_reached"
+_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", _USAGE_LIMIT_CODE})
 _QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exceeded"})
 _TRANSIENT_CODES = frozenset(
     {"server_error", "upstream_error", "stream_incomplete", "overloaded_error", "server_is_overloaded"}
 )
 _MODEL_CAPACITY_MESSAGE_MARKERS = ("selected model is at capacity",)
+# The only two normalized codes that carry no classification decision of their
+# own: ``upstream_error`` is what a missing code normalizes to, and
+# ``invalid_request_error`` is the generic envelope type upstream reuses for
+# rejections it has no code for. Every other code -- rate-limit, quota,
+# ``overloaded_error``, any transient code -- already decided how the failure
+# is classified, and a message must not reverse that decision.
+_MESSAGE_CLASSIFIED_CODES = frozenset({"upstream_error", "invalid_request_error"})
+# The classes whose account-health write benches the account outright: a
+# persisted rate-limited or quota status with a reset deadline. Selection
+# cannot use a benched account again in this request whatever its rejection
+# said, so for these the health write -- not the message -- settles exclusion.
+_BENCHING_FAILURE_CLASSES = frozenset({"rate_limit", "quota"})
 _MODEL_UNSUPPORTED_MESSAGE_RE = re.compile(
     r"^The '.+' model is not supported when using Codex with a ChatGPT account\.$"
 )
@@ -89,6 +102,19 @@ def is_upstream_model_capacity_error(message: str | None) -> bool:
     return any(marker in normalized_message for marker in _MODEL_CAPACITY_MESSAGE_MARKERS)
 
 
+def is_upstream_usage_limit_rejection(*, error_code: str, message: str | None) -> bool:
+    """True when upstream says this account's usage limit is spent.
+
+    Either the code names the limit or the message does. The message-only form
+    is how the code-less HTTP 429 and the serialized ``response.failed`` frame
+    arrive, and it is the same rejection: callers that key on the literal code
+    alone miss the majority of the traffic. Plain ``rate_limit_exceeded``
+    throttling is deliberately not included -- it says the request arrived too
+    fast, not that the subscription window is exhausted.
+    """
+    return error_code == _USAGE_LIMIT_CODE or is_upstream_usage_limit_message(message)
+
+
 def classify_upstream_failure(
     *,
     error_code: str,
@@ -96,16 +122,22 @@ def classify_upstream_failure(
     http_status: int | None,
     phase: FailurePhase,
 ) -> ClassifiedFailure:
+    message = error.get("message")
+    usage_limit_message = is_upstream_usage_limit_message(message)
+    model_capacity_message = is_upstream_model_capacity_error(message)
     failure_class: FailureClass
     if error_code in _RATE_LIMIT_CODES:
         failure_class = "rate_limit"
     elif error_code in _QUOTA_CODES:
         failure_class = "quota"
-    elif (
-        error_code in _TRANSIENT_CODES
-        or is_upstream_model_capacity_error(error.get("message"))
-        or (http_status is not None and http_status >= 500)
-    ):
+    elif usage_limit_message and error_code in _MESSAGE_CLASSIFIED_CODES:
+        # An account that is out of quota cannot be waited out on itself, so
+        # this must not reach the transient branch that
+        # ``is_upstream_burst_rejection`` reads as a burst and answers with
+        # same-account backoff. Only the two codes that decided nothing are
+        # raised this way; a coded envelope keeps the class its code chose.
+        failure_class = "rate_limit"
+    elif error_code in _TRANSIENT_CODES or model_capacity_message or (http_status is not None and http_status >= 500):
         failure_class = "retryable_transient"
     else:
         failure_class = "non_retryable"
@@ -115,14 +147,44 @@ def classify_upstream_failure(
         error_code=error_code,
         error=error,
         http_status=http_status,
+        # A capacity rejection describes the requested model, so moving off the
+        # account for it would rotate the pool over a condition no account can
+        # serve -- but that only holds while the account is still usable. A
+        # coded rate-limit or quota rejection benches it, and telling selection
+        # to keep an account the health write just took away is not a carve-out,
+        # it is a contradiction. The usage limit is account-scoped and outranks
+        # a capacity match on the class that does not bench. ``non_retryable``
+        # never excludes: the walk ends on it rather than rotating the pool.
+        excludes_account=(
+            failure_class in _BENCHING_FAILURE_CLASSES
+            or (failure_class == "retryable_transient" and (usage_limit_message or not model_capacity_message))
+        ),
     )
 
 
 def is_upstream_burst_rejection(*, failure_class: FailureClass, http_status: int | None) -> bool:
     """True for a code-less upstream HTTP 429: a per-account burst/concurrency
     rejection that ``classify_upstream_failure`` files as ``retryable_transient``
-    (coded 429s land in ``rate_limit`` / ``quota`` and are not bursts)."""
+    (a 429 whose code or message proves a quota or usage limit lands in
+    ``rate_limit`` / ``quota`` and is not a burst)."""
     return http_status == 429 and failure_class == "retryable_transient"
+
+
+def is_message_derived_usage_limit_rejection(classified: ClassifiedFailure) -> bool:
+    """True for an HTTP 429 whose usage limit was proven by its message alone.
+
+    Read off the classification rather than re-matched: with a code that
+    decided nothing, ``rate_limit`` on a 429 can only have come from the
+    message. Such a rejection is what a burst rejection would otherwise have
+    been, so it reaches the client with neither an upstream ``Retry-After`` nor
+    an ``error.resets_at`` -- the locally stamped hint is the only wait
+    guidance it can carry.
+    """
+    return (
+        classified["http_status"] == 429
+        and classified["failure_class"] == "rate_limit"
+        and classified["error_code"] in _MESSAGE_CLASSIFIED_CODES
+    )
 
 
 def _header_account_id(account_id: str | None) -> str | None:

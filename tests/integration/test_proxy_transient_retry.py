@@ -881,6 +881,44 @@ async def test_native_codex_stream_code_less_429_exhaustion_surfaces_http_429_wi
 
 
 @pytest.mark.asyncio
+async def test_native_codex_stream_message_only_usage_limit_429_still_carries_retry_after(
+    async_client, monkeypatch, caplog
+):
+    """A 429 whose usage limit is proven by its message is not a burst, so it skips the bounded
+    same-account backoff -- but the client still gets told when to come back. The envelope carries
+    no ``resets_at``, so the locally stamped ``Retry-After`` is the only wait guidance left."""
+    await _import_account(async_client, "acc_stream_usage_msg", "streamusagemsg@example.com")
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+    caplog.set_level("INFO", logger="app.modules.proxy.service")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        raise ProxyResponseError(
+            429,
+            {"error": {"message": "The usage limit has been reached"}},
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST", "/backend-api/codex/responses", json=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS
+    ) as resp:
+        body = json.loads(await resp.aread())
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "5"
+
+    assert body == {"error": {"message": "The usage limit has been reached"}}
+    # Out of quota: waiting on the same account cannot succeed, so no backoff.
+    assert seen_account_ids == ["acc_stream_usage_msg"]
+    assert slept == []
+    assert "failure_class=rate_limit action=surface" in caplog.text
+    assert "action=retry_same_account" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_native_codex_stream_code_less_429_exhaustion_preserves_upstream_retry_after(async_client, monkeypatch):
     await _import_account(async_client, "acc_stream_burst_native_ra", "streamburstnativera@example.com")
     _seen, slept = _install_always_burst_upstream(monkeypatch, retry_after_seconds=3, retry_after_header="3")

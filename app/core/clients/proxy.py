@@ -69,6 +69,7 @@ from app.core.errors import (
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
     ResponseFailedEvent,
+    is_upstream_usage_limit_message,
     openai_error,
     response_failed_event,
     synthetic_stream_failure_event,
@@ -304,9 +305,12 @@ _WEBSOCKET_HANDSHAKE_ERROR_HINTS = (
     ("usage_not_included", "usage not included"),
     ("insufficient_quota", "insufficient quota"),
     ("quota_exceeded", "quota exceeded"),
-    ("usage_limit_reached", "usage limit reached"),
-    ("rate_limit_exceeded", "rate limit"),
 )
+# The generic throttling substring, kept out of the table above so the
+# account-scoped usage limit -- read by ``is_upstream_usage_limit_message``, so
+# the handshake and the failure classifier agree on what upstream said -- is
+# tried first. It is the weaker reading of a sentence that carries both.
+_WEBSOCKET_RATE_LIMIT_HINT = "rate limit"
 
 _EDGE_CHALLENGE_BODY_MARKERS = (
     "cf-chl-",
@@ -1202,6 +1206,10 @@ def _infer_websocket_handshake_error_code(status: int | None, message: str) -> s
     for code, hint in _WEBSOCKET_HANDSHAKE_ERROR_HINTS:
         if hint in lowered:
             return code
+    if is_upstream_usage_limit_message(message):
+        return "usage_limit_reached"
+    if _WEBSOCKET_RATE_LIMIT_HINT in lowered:
+        return "rate_limit_exceeded"
     if status == 401:
         return "invalid_api_key"
     if status == 404:

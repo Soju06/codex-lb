@@ -54,6 +54,7 @@ from sqlalchemy import select
 
 import app.core.clients.http as http_module
 from app.core.config.settings_cache import get_settings_cache
+from app.core.retention.job import run_retention_pass
 from app.core.utils.time import utcnow
 from app.db.models import ApiKeyUsageReservation, DashboardSettings
 from app.db.session import SessionLocal
@@ -127,6 +128,7 @@ from tests.integration.test_subscription_overflow_routing import (
 pytestmark = [pytest.mark.integration, pytest.mark.overflow_drill]
 
 _OVERFLOW_LOGGER = "app.modules.proxy.overflow"
+_RETENTION_LOGGER = "app.core.retention.job"
 # A dropped-SYN address: RFC 5737 TEST-NET-1 on the discard port. Reserved for
 # documentation and routed nowhere, so the connect phase is what fails.
 _BLACK_HOLE_URL = "http://192.0.2.1:9/v1"
@@ -771,7 +773,7 @@ async def test_neutral_release_drill_refuses_a_ciphertext_transcript_whatever_it
 
 @pytest.mark.asyncio
 async def test_drill_clear_then_touch_expires_at_day_seven(
-    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Runbook row **Clear-then-touch**: Off, then keep using a pinned conversation daily.
 
@@ -782,7 +784,9 @@ async def test_drill_clear_then_touch_expires_at_day_seven(
     the touch slides its expiry to the clear plus ``PIN_IDLE_TTL``, never
     beyond, with ``purge_at`` still inside the lookup window. Day 8 -- the row
     is a tombstone: a ciphertext turn is refused permanently and a source-free
-    one is released to an account.
+    one is released to an account. At ``drain_until`` -- the row's last
+    promise -- the retention pass finds every remaining row purgeable and the
+    table ends empty, with no drain-invariant alarm.
     """
 
     attempts = _forbid_subscription_stream(monkeypatch)
@@ -874,9 +878,39 @@ async def test_drill_clear_then_touch_expires_at_day_seven(
     assert released.status_code == 200, released.text
     assert len(relayed) == 1
     assert outcomes == [(ROUTE_CODEX_RESPONSES, "pinned_released_neutral")]
-    assert {row.pin_key for row in await _pin_rows()} == {anchor_key, live_key}, (
-        "the tombstone is gone, the day-6 rows remain"
-    )
+    survivors = await _pin_rows()
+    assert {row.pin_key for row in survivors} == {anchor_key, live_key}, "the tombstone is gone, the day-6 rows remain"
+
+    # -- the drain deadline: the retention pass finds nothing left ------------------------------
+    # The rows above belong to a window that closes three weeks from now, so
+    # the deadline is rehearsed one last touch later: the same rows re-written
+    # an hour before a window that has just closed. That is the state CL-3
+    # guarantees production reaches -- every write inside the drain is capped
+    # to ``purge_at < drain_until`` however late it lands, which is *why* the
+    # table can be empty at the deadline rather than merely stale. The cap is
+    # production's, not the test's, and the pass that deletes the rows is the
+    # hourly one, run here with retention disabled as it is by default.
+    closed_drain_until = _aware(utcnow()) - timedelta(minutes=1)
+    for row in survivors:
+        await _write_pin(
+            row.pin_key,
+            kind=row.kind,
+            source_id=row.source_id,
+            api_key_id=row.api_key_id,
+            now=closed_drain_until - timedelta(hours=1),
+            drain_until=closed_drain_until,
+        )
+    await _set_overflow_settings(source_id=None, drain_until=closed_drain_until)
+    assert {row.pin_key for row in await _pin_rows() if _aware(row.purge_at) < closed_drain_until} == {
+        row.pin_key for row in survivors
+    }, "every row the drain wrote is purgeable once its window has closed"
+
+    with caplog.at_level(logging.WARNING, logger=_RETENTION_LOGGER):
+        pruned = await run_retention_pass()
+
+    assert pruned["model_source_pins"] == len(survivors)
+    assert await _pin_rows() == [], "the pin table is empty at the drain deadline"
+    assert "model_source_pins_drain_invariant_violated" not in caplog.text
 
 
 # == Drill 6 -- Kill switches ====================================================================

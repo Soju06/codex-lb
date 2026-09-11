@@ -348,6 +348,13 @@ class _RequestLogMixin:
             retried=upstream_retried,
         )
 
+    def request_persistence_pending_nowait(self) -> int:
+        """Count registered persistence owners, including queued done callbacks."""
+        proxy = cast(_RequestLogServiceProtocol, self)
+        # A completed settlement can still transfer ownership to release work
+        # in its done callback. Keep it visible until that callback unregisters it.
+        return sum(_is_persistence_task(task) for task in (proxy._request_log_tasks | proxy._background_cleanup_tasks))
+
     async def drain_persistence_tasks(
         self,
         timeout_seconds: float,

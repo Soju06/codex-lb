@@ -31,3 +31,9 @@ See `openspec/specs/proxy-runtime-observability/spec.md` for normative requireme
   constant validation only. They intentionally avoid request-scoped overrides,
   runtime-derived effective timeout values, payloads, API keys, access tokens,
   raw affinity keys, account emails, and other high-cardinality identifiers.
+
+## Request persistence during reversible drain
+
+`/internal/drain/status` reports `request_persistence_state` separately from request and bridge activity. For example, a closed HTTP stream can have global and bridge pending counts of0 while its detached API-key finalizer remains pending1. The count includes registered owners whose completion callback has not yet transferred fallback work. Unknown observation omits the count; consumers must not treat it as zero.
+
+The signal observes current ownership without waiting, DB access or changing admission. Drained does not certify historical write success or atomic stop safety. Admission, bridge activity and graceful lifecycle remain separate controls, and installing this field in a new candidate does not retrofit its running predecessor.

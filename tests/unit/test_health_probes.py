@@ -603,6 +603,7 @@ async def test_internal_drain_status_reports_shutdown_state():
         "draining": "true",
         "bridge_drain_active": "true",
         "in_flight": "2",
+        "request_persistence_state": "unknown",
     }
 
 

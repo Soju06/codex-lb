@@ -176,6 +176,16 @@ async def internal_drain_status(request: Request) -> HealthCheckResponse:
         except Exception as exc:
             checks["http_bridge_activity_error"] = type(exc).__name__
 
+    checks["request_persistence_state"] = "unknown"
+    try:
+        pending = proxy_service.request_persistence_pending_nowait() if proxy_service is not None else None
+        if type(pending) is int and pending >= 0:
+            checks["request_persistence_state"] = "pending" if pending else "drained"
+            checks["request_persistence_pending"] = str(pending)
+    except Exception:
+        # Missing/unsupported ownership observation cannot authorize a drain.
+        pass
+
     return HealthCheckResponse(status="ok", checks=checks)
 
 

@@ -19,9 +19,19 @@ an admission rejection, so the proxy MUST record it only when the failure
 carries no upstream HTTP status. A coded HTTP failure whose body reports the
 same string is an ordinary transient error and MUST NOT enter this window, and
 an upstream HTTP 429 carrying `server_error` is a per-account burst rejection
-that MUST continue to take the short replica-local burst cooldown instead. Both
-windows MUST be pruned by the same horizon and cleared together when the window
-trips.
+that MUST continue to take the short replica-local burst cooldown instead.
+
+Some failures reach the account-health write through a terminal renderer that
+has already discarded the response object, and others are delivered as a
+terminal frame that itself carries the upstream status. A caller on either
+shape MUST be able to report the upstream HTTP status to this window alone,
+without thereby altering the failure classification, the account-neutral and
+model-scoped rejection exemptions, the reasoning-replay counter, or the HTTP
+429 burst-cooldown path, all of which keep their existing inputs unchanged.
+Where such a status is reported, the failure MUST stay out of the soft window.
+
+Both windows MUST be pruned by the same horizon and cleared together when the
+window trips.
 
 When the combined weight of both windows reaches at least three inside a 120-second window, the
 proxy MUST deprioritize the account for fresh (unbound) selection for a
@@ -147,3 +157,24 @@ body returned to the client MUST remain unchanged.
 - **WHEN** account health is written for it
 - **THEN** the short replica-local burst cooldown is engaged
 - **AND** the soft overload window records nothing
+
+#### Scenario: An HTTP 5xx server_error surfaced by the terminal renderer stays out of the soft window
+
+- **GIVEN** upstream answered with an HTTP 500 whose body code is
+  `server_error`, and the terminal renderer writes account health from the
+  settled failure rather than from the response object
+- **WHEN** six such failures are recorded within 120 seconds
+- **THEN** the soft overload window records nothing and account A is not
+  deprioritized for fresh selection
+- **AND** the account-neutral and model-scoped rejection exemptions, the
+  reasoning-replay counter, and the burst cooldown behave exactly as they did
+  before the status was reported
+
+#### Scenario: A bridge terminal error frame carrying an HTTP status stays out of the soft window
+
+- **GIVEN** an HTTP-bridge terminal `error` frame whose payload carries
+  `status: 500` and whose normalized code is `server_error`
+- **WHEN** account health is written for it
+- **THEN** the soft overload window records nothing
+- **AND** an equivalent frame carrying no status is still recorded as a soft
+  observation

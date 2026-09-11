@@ -40,7 +40,7 @@ from app.modules.proxy._load_balancer.overload_backoff import (
 )
 from app.modules.proxy._load_balancer.types import RuntimeState
 from app.modules.proxy._service.streaming.retry import _transient_retry_error_code
-from app.modules.proxy._service.support import _TransientStreamError
+from app.modules.proxy._service.support import _http_error_status_from_payload, _TransientStreamError
 from app.modules.proxy.load_balancer import LoadBalancer
 from tests.simulation.virtual_time import VirtualClock
 from tests.unit.test_load_balancer_concurrency import (
@@ -197,6 +197,114 @@ async def test_handle_stream_error_keeps_429_server_error_on_the_burst_branch() 
     # The HTTP 429 burst path still owns this shape; the soft window stays empty.
     assert runtime.burst_backoff_until == pytest.approx(clock.time() + BURST_BACKOFF_DEFAULT_SECONDS)
     assert not runtime.soft_overload_rejections
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_ignores_a_terminal_renderer_server_error_with_a_known_status() -> None:
+    """retry.py call-site shape: a settlement rendered from an HTTP 5xx.
+
+    The terminal-renderer paths write health from ``settlement.error_code`` and
+    deliberately withhold the positional ``http_status`` (forwarding it would
+    also flip the account-neutral predicates and arm the 429 branch). They pass
+    the status as evidence instead, and that alone must keep the failure out of
+    the soft window.
+    """
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-soft-evidence-500")
+
+    for _ in range(6):
+        await streaming_helpers_module._handle_stream_error(
+            proxy,
+            account,
+            {"message": "An error occurred while processing your request."},
+            "server_error",
+            upstream_http_status=500,
+        )
+
+    runtime = balancer._runtime.get(account.id)
+    assert runtime is None or not runtime.soft_overload_rejections
+    assert runtime is None or not runtime.overload_rejections
+    assert runtime is None or not overload_backoff_active(runtime, clock.time())
+    # The evidence keyword gates the window only: the ordinary transient
+    # penalty these call sites already took is unchanged.
+    assert record_error.await_count == 6
+    mark_rate_limit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_ignores_a_bridge_error_frame_carrying_an_http_status() -> None:
+    """websocket call-site shape: an HTTP-bridge terminal ``error`` frame.
+
+    On the bridge an upstream HTTP status is delivered *as* a terminal frame,
+    which the bridge parses into ``error_http_status_override``. Terminal shape
+    alone therefore cannot tell the two apart; the parsed status must.
+    """
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-soft-bridge-500")
+
+    frame_payload: dict[str, Any] = {
+        "type": "error",
+        "status": 500,
+        "error": {"type": "server_error", "message": "An error occurred while processing your request."},
+    }
+    parsed_status = _http_error_status_from_payload(frame_payload)
+    assert parsed_status == 500
+
+    for _ in range(6):
+        await streaming_helpers_module._handle_stream_error(
+            proxy,
+            account,
+            {"message": "An error occurred while processing your request."},
+            "server_error",
+            upstream_http_status=parsed_status,
+        )
+
+    runtime = balancer._runtime.get(account.id)
+    assert runtime is None or not runtime.soft_overload_rejections
+    assert runtime is None or not overload_backoff_active(runtime, clock.time())
+
+
+@pytest.mark.asyncio
+async def test_upstream_http_status_evidence_never_engages_the_burst_cooldown() -> None:
+    """The evidence keyword must not reach the ``http_status == 429`` branch."""
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-soft-evidence-429")
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        account,
+        {"message": "boom"},
+        "server_error",
+        upstream_http_status=429,
+    )
+
+    runtime = balancer._runtime.get(account.id)
+    # Neither window nor cooldown: the caller withheld ``http_status``, so the
+    # burst branch stays exactly as unreachable as it was before this change.
+    assert runtime is None or runtime.burst_backoff_until is None
+    assert runtime is None or not runtime.soft_overload_rejections
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_still_records_a_status_less_terminal() -> None:
+    """Over-correction guard: with no status from either keyword, the window trips."""
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-soft-none-evidence")
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        account,
+        {"message": "An error occurred while processing your request."},
+        "server_error",
+        upstream_http_status=None,
+    )
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.soft_overload_rejections == [clock.time()]
 
 
 def test_rejections_outside_the_window_do_not_count() -> None:

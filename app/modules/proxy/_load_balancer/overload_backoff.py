@@ -68,6 +68,15 @@ logger = logging.getLogger(__name__)
 # reach ``_handle_stream_error`` normalized to ``retryable_transient``.
 UPSTREAM_OVERLOAD_CODES: frozenset[str] = frozenset({"server_is_overloaded", "overloaded_error"})
 
+# Upstream error codes that carry the same *observable shape* as an admission
+# rejection -- upstream accepted the turn and then terminated it -- but without
+# an explicit overload code. Upstream returns a bare ``server_error`` for both
+# genuine one-off faults and sustained capacity refusal, so these observations
+# are counted at ``SOFT_OVERLOAD_TRIP_WEIGHT`` rather than 1.0: a lone fault can
+# never trip the window by itself, while a sustained refusal still trips.
+UPSTREAM_SOFT_OVERLOAD_CODES: frozenset[str] = frozenset({"server_error"})
+SOFT_OVERLOAD_TRIP_WEIGHT = 0.5
+
 # Trip when this many rejections land inside the window. Three keeps a lone
 # rejection (upstream hiccup) from deprioritizing an account, while a rejected
 # account under real traffic trips within a minute or two.
@@ -145,9 +154,16 @@ def record_overload_rejection_locked(
     now: float,
     *,
     isolation: OverloadIsolationPolicy | None = None,
+    soft: bool = False,
 ) -> float | None:
     """Record one overload rejection observed at ``now``; return the new
     backoff deadline when it trips the window, else ``None``.
+
+    ``soft`` marks an observation whose code does not name overload explicitly
+    (a bare ``server_error`` terminal). Soft observations accumulate in their
+    own window and contribute ``SOFT_OVERLOAD_TRIP_WEIGHT`` each toward the
+    shared trip threshold, so they can trip the window on their own only when
+    sustained, and they combine naturally with explicit overload rejections.
 
     When ``isolation`` says the new level isolates, the deadline is the
     isolation interval and ``runtime.overload_isolated_until`` is set to it.
@@ -159,12 +175,18 @@ def record_overload_rejection_locked(
     if quiet_since is not None and now - quiet_since >= OVERLOAD_LEVEL_DECAY_SECONDS:
         runtime.overload_backoff_level = 0
     window_start = now - OVERLOAD_WINDOW_SECONDS
-    recent = [at for at in (runtime.overload_rejections or ()) if at > window_start]
-    recent.append(now)
-    if len(recent) < OVERLOAD_TRIP_COUNT:
-        runtime.overload_rejections = recent
+    hard = [at for at in (runtime.overload_rejections or ()) if at > window_start]
+    soft_recent = [at for at in (runtime.soft_overload_rejections or ()) if at > window_start]
+    if soft:
+        soft_recent.append(now)
+    else:
+        hard.append(now)
+    if len(hard) + len(soft_recent) * SOFT_OVERLOAD_TRIP_WEIGHT < OVERLOAD_TRIP_COUNT:
+        runtime.overload_rejections = hard
+        runtime.soft_overload_rejections = soft_recent
         return None
     runtime.overload_rejections = []
+    runtime.soft_overload_rejections = []
     runtime.overload_backoff_level = min(runtime.overload_backoff_level + 1, OVERLOAD_MAX_LEVEL)
     runtime.overload_last_trip_at = now
     isolated = isolation is not None and isolation.isolates(runtime.overload_backoff_level)
@@ -190,6 +212,7 @@ async def record_upstream_overload(
     *,
     redact_account_id: bool = False,
     isolation: OverloadIsolationPolicy | None = None,
+    soft: bool = False,
 ) -> None:
     """Record one upstream overload rejection for ``account`` at the balancer clock.
 
@@ -208,7 +231,7 @@ async def record_upstream_overload(
     async with lock:
         now = float(balancer._clock.time())
         runtime = runtime_map.setdefault(account.id, RuntimeState())
-        deadline = record_overload_rejection_locked(runtime, now, isolation=isolation)
+        deadline = record_overload_rejection_locked(runtime, now, isolation=isolation, soft=soft)
         isolated = deadline is not None and overload_isolation_active(runtime, now)
     if deadline is None:
         return

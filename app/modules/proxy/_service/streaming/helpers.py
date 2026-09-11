@@ -73,6 +73,7 @@ from app.db.models import (
 )
 from app.modules.proxy._load_balancer.overload_backoff import (
     UPSTREAM_OVERLOAD_CODES,
+    UPSTREAM_SOFT_OVERLOAD_CODES,
     record_upstream_burst_rejection,
     record_upstream_overload,
 )
@@ -1096,6 +1097,7 @@ async def _handle_stream_error(
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     retry_after_seconds: float | None = None,
     burst_cooldown_recorded: bool = False,
+    upstream_http_status: int | None = None,
 ) -> ClassifiedFailure:
     """Write account health for a stream failure and return its classification.
 
@@ -1103,6 +1105,14 @@ async def _handle_stream_error(
     deferred until after usage settlement: the replica-local burst cooldown
     was already engaged at rejection time, so the deferred write must not
     re-engage it (that would bench an account that has since succeeded).
+
+    ``upstream_http_status`` is evidence-only: it lets a caller that knows the
+    upstream HTTP status of this failure say so WITHOUT taking any of the
+    ``http_status`` side effects. It is read by the soft-overload gate below
+    and by nothing else -- never by ``classify_upstream_failure``, the
+    reasoning-replay metric, the account-neutral / model-scoped rejection
+    predicates, or the HTTP 429 burst-cooldown branch. Callers that want those
+    behaviours must pass the positional ``http_status`` instead.
     """
     classified = classify_upstream_failure(
         error_code=code,
@@ -1158,14 +1168,36 @@ async def _handle_stream_error(
             get_request_id(),
             code,
         )
-        if code in UPSTREAM_OVERLOAD_CODES:
+        hard_overload = code in UPSTREAM_OVERLOAD_CODES
+        # A bare ``server_error`` *stream terminal* is the same observable
+        # condition as an explicit overload: upstream admitted the turn and then
+        # refused to run it. The terminal shape is what makes it an admission
+        # rejection, so it is keyed on the absence of an HTTP status. A coded
+        # HTTP failure carrying the same string is an ordinary transient error
+        # (and an HTTP 429 is a burst rejection with its own cooldown branch
+        # below); neither may deprioritize an otherwise healthy account.
+        #
+        # Two status keywords are checked because several callers KNOW the
+        # upstream status yet deliberately do not forward it as ``http_status``:
+        # doing so would also flip the account-neutral / model-scoped predicates
+        # above from "skip the penalty" to "record it", arm the 429 branch below,
+        # and double-count the reasoning-replay metric for a frame already
+        # counted at ``_observe_terminal_stream_error_frame``. They pass
+        # ``upstream_http_status`` instead, which gates this window only. A
+        # status from EITHER keyword means the failure was not a status-less
+        # terminal and so must stay out of the soft window.
+        soft_overload = code in UPSTREAM_SOFT_OVERLOAD_CODES and http_status is None and upstream_http_status is None
+        if hard_overload or soft_overload:
             # Overload is an admission rejection that successes on the same
             # account's warm sessions keep masking from ``error_count``; feed
             # the dedicated sliding window so fresh selection can deprioritize.
+            # Soft observations count at a fractional weight, so a sustained
+            # refusal still trips the window while a lone fault never does.
             await record_upstream_overload(
                 proxy._load_balancer,
                 account,
                 redact_account_id=privacy_policy.redacts_sensitive_details,
+                soft=not hard_overload,
             )
         elif http_status == 429 and not burst_cooldown_recorded:
             # A code-less HTTP 429 (rate_limit / quota classes returned above)

@@ -6695,6 +6695,16 @@ class _WebSocketMixin:
                         account,
                         _stream_settlement_error_payload(settlement),
                         settlement.error_code or "upstream_error",
+                        # Evidence only, for the soft-overload window. On the
+                        # HTTP bridge a terminal ``error`` frame can carry the
+                        # upstream HTTP status, which the bridge already parsed
+                        # into this field; such a failure is not a status-less
+                        # terminal. It stays ``None`` for a direct WebSocket
+                        # terminal, which is the shape the window is for.
+                        # Forwarding it positionally would double-count the
+                        # reasoning-replay metric for a frame already counted at
+                        # ``_observe_terminal_stream_error_frame``.
+                        upstream_http_status=request_state.error_http_status_override,
                     )
                 except Exception:
                     _facade().logger.warning(

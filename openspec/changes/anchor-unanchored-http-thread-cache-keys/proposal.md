@@ -47,26 +47,50 @@ user item* `[:512]`. Append-only histories do stay stable, which is why one
   minted for that thread, modelled on `model_source_pins.PinCache`.
 - `_derive_prompt_cache_key` now anchors instead of hashing text. A turn reuses
   a thread's key **only** when the recorded item sequence, from some offset to
-  its end, is exactly the head of the new turn's items, with at least two items
-  matched. That covers appends, a client trimming its leading history, and an
-  identical re-derivation of the same body (bridge-to-HTTP fallback,
-  cross-transport replay). Nothing fuzzy, truncated, or summary-aware matches,
-  so this is **strictly fewer** false merges than today, not more: the two
-  512-character collision classes above disappear because item digests are
-  domain-separated by API key, model class and the **complete** `instructions`.
+  its end, is exactly the head of the new turn's items, with at least **four**
+  items matched — or when the two windows are byte-equal, which is an identical
+  re-derivation of the same body (bridge-to-HTTP fallback, cross-transport
+  replay). That covers appends and a client trimming its leading history.
+  Nothing fuzzy, truncated, or summary-aware matches, so this is **strictly
+  fewer** false merges than today, not more: the two 512-character collision
+  classes above disappear because item digests are domain-separated by API key,
+  model class and the **complete** `instructions`.
+- The four-item floor applies to a recorded window the new turn merely
+  *extends*, too. "Thread B opens with everything thread A recorded" and
+  "thread A appended a turn" are byte-identical evidence, so the only defence
+  is to demand a shared run too long to be a generic opening; one or two shared
+  leading items are exactly what parallel workers of one agent, or every
+  session in one repository, do share. Accepting them handed A's key to B and
+  then let B's `register` overwrite A's window, so A permanently lost the key
+  it owned. The cost of the floor is one extra mint per thread, on the smallest
+  body of its life: a two-item opening is not carried into the second turn, and
+  the key is held from four items on.
 - Compaction is handled by admitting it, not by bridging it: a compacted turn
   does not extend the recorded transcript, mints a new key, and is reported as
   `anchor_reset`. The upstream prefix cache is genuinely cold there.
 - The `uuid4` branch is gone. A body with nothing to anchor (a non-list input,
-  an empty input list, or an item too large to digest exactly) still gets a
-  stable derived `prompt_cache_key` forwarded upstream — the spec's MUST — but
-  supplies **no** sticky routing key, so selection takes the unbound path and
-  no single-use `sticky_sessions` row is written.
+  an empty input list) supplies **no** sticky routing key, so selection takes
+  the unbound path and no single-use `sticky_sessions` row is written — and
+  **nothing is attached to the payload** either. A value written there is
+  indistinguishable from a client-supplied one when the same payload object is
+  resolved a second time, which really happens on the
+  `_stream_via_http_bridge` -> `_stream_with_retry` fallback: the placeholder
+  came back through the client-supplied branch as a constant
+  `<class>-<apikey12>` PROMPT_CACHE key, collapsing every unanchorable thread
+  of one API key onto one row and one account. There is nothing for upstream to
+  cache in that case anyway.
 - Serialization is bounded *during* encoding (`iterencode`, chunks folded
   straight into the hash, 256 KiB per window, 32 items), so the unbounded join
-  on the hot path is gone. Items are hashed in **full**: a truncated digest
-  would re-introduce the prefix collision being removed, so an item past the
-  1 MiB per-item ceiling makes the body unanchorable instead.
+  on the hot path is gone. Neither bound may collapse the window, because a
+  window that differs every turn mints a key every turn: the byte ceiling never
+  stops the walk before `_MIN_WINDOW_ITEMS` (8) items are recorded, so a
+  thread whose items are 96 KiB or 256 KiB each — the p90 453k-token cohort
+  this change exists to serve — holds one key instead of one per turn. Items
+  are hashed in **full**: a truncated digest would re-introduce the prefix
+  collision being removed, so an item past the 1 MiB per-item ceiling is a
+  **window boundary** (the window is the items after it) rather than poison
+  that left the whole thread unanchorable for as many turns as the window is
+  deep.
 - Diagnostics: every resolution reports `payload` / `disabled` / `anchor_hit` /
   `anchor_new` / `anchor_reset` / `unanchorable` on the existing
   `proxy_request_shape` trace line next to `sticky_key_source`, and on a new
@@ -74,12 +98,16 @@ user item* `[:512]`. Append-only histories do stay stable, which is why one
   the open objection on #2347 — that the production percentages were
   reconstructed rather than correlated to resolved keys — from the fleet
   itself.
-- Migration: minted keys carry a `v2t-` prefix (`v2u-` for unanchorable), so
-  they are distinguishable from the retired `{model_class}-{api_key}-{hash}`
-  shape. `prompt_cache` rows of the old shape already expire through
-  `purge_prompt_cache_before`; `sticky_thread` rows have no TTL, so the cleanup
-  scheduler runs a one-shot bounded sweep over the three retired prefixes and
-  retires itself once a pass finds nothing.
+- Migration: minted keys carry a `v2t-` prefix, so they are distinguishable
+  from the retired `{model_class}-{api_key}-{hash}` shape. No `sticky_thread`
+  sweep is needed or wanted: a derived key is supplied only when
+  `openai_cache_affinity` is on, which is the branch that classifies the
+  mapping `prompt_cache` (the `STICKY_THREAD` branch is `elif
+  sticky_threads_enabled`, reachable only with cache affinity off, where the
+  derivation supplies no key at all), so `purge_prompt_cache_before` already
+  retires both shapes. A `sticky_thread` row whose key merely *looks* derived
+  is client-supplied, and `sticky_thread` has no TTL by design, so a key-prefix
+  sweep of that kind could only delete client locality.
 
 No new setting. The behaviour rides the existing dashboard
 `openai_cache_affinity` boolean, as the audit recommends, so the settings
@@ -102,7 +130,8 @@ None.
 
 ## Impact
 
-- Code: `app/modules/proxy/thread_anchors.py` (new),
+- Code: `app/modules/proxy/thread_anchors.py` (new; documented worst-case
+  process-local footprint ~17.6 MiB with every cap saturated),
   `app/modules/proxy/affinity.py` (derivation, resolution result, one policy
   field; the three `_extract_*` text helpers are deleted),
   `app/modules/proxy/_service/compact.py`,
@@ -115,9 +144,8 @@ None.
   deliberately **not** changed here: different blast radius (bridge socket
   sharing), and this derivation should be measurable on its own first.
 - Data: no schema change. Row volume moves from a few coarse keys to one row
-  per live thread; `prompt_cache` rows expire as before, the new recurring
-  purge gives the `sticky_thread` kind the same bound, and the one-shot sweep
-  removes the retired shape's leftovers.
+  per live thread; `prompt_cache` rows expire as before, which covers every
+  derived key of either shape, and no `sticky_thread` row is touched.
 - Operators: no action. Anchors are per process, so a restart or a blue/green
   window where both colors serve can leave one thread holding two keys and two
   owners for that window — bounded by the freshness window and worth one
@@ -128,11 +156,15 @@ None.
 ## Honest limits
 
 This recovers locality for threads that resend a transcript and either append
-to it or trim its front. It does **not** recover: a client that compacts every
-turn (each compaction is a genuine cache reset), a delta-only turn that shares
-no item with the previous one, a body carrying an item too large to digest
-exactly, an empty body, or anything after a process restart or an anchor
-eviction. Those cases are now *reported* — `anchor_reset` or `unanchorable` —
+to it or trim its front, from the turn where the transcript reaches four items.
+It does **not** recover: the first turns of a one- or two-item opening (one
+extra mint, deliberately traded for the shared-preamble false merge), a client
+that compacts every turn (each compaction is a genuine cache reset), a
+delta-only turn that shares no item with the previous one, a turn whose newest
+item alone is past the per-item ceiling, an empty body, or anything after a
+process restart or an anchor eviction. Two threads that diverge only *inside*
+an item past the per-item ceiling and then agree on the four items after it can
+still merge; that is the accepted price of not stranding the thread. Those cases are now *reported* — `anchor_reset` or `unanchorable` —
 rather than silently served by a key that looks sticky and is not. It also does
 nothing for `inferred_http_bridge_key`, which has the same defect and is left
 for a follow-up so this change can be measured on its own.

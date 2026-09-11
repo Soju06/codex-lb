@@ -289,10 +289,6 @@ def _extract_model_class(model: str) -> str:
 # be swept by key prefix. The readable model class and API-key prefix are kept
 # because operators search ``sticky_sessions`` by key text.
 _ANCHORED_KEY_VERSION = "v2t"
-# Attached upstream, never used as a sticky key: this request has no transcript
-# to anchor, so any per-request value would be a sticky key that can never be
-# hit again.
-_UNANCHORED_KEY_VERSION = "v2u"
 # Fallback when no caller supplies the dashboard freshness window. Matches the
 # ``openai_cache_affinity_max_age_seconds`` column default.
 _DEFAULT_ANCHOR_TTL_SECONDS = 1800
@@ -309,12 +305,21 @@ DERIVATION_OUTCOME_UNANCHORABLE = "unanchorable"
 class _PromptCacheAnchor:
     """Result of anchoring one turn.
 
-    ``attached_key`` is always forwarded upstream. ``sticky_key`` is ``None``
-    when the turn is unanchorable, so selection takes the unbound path instead
-    of writing a single-use ``sticky_sessions`` row.
+    ``sticky_key`` is both the value forwarded upstream and the sticky routing
+    key -- deliberately the same string, so there is no proxy-minted value that
+    is forwarded but must not be routed on. It is ``None`` when the turn is
+    unanchorable: there is no transcript to hold, so there is nothing to name,
+    selection takes the unbound path, and **nothing is written onto the
+    payload**.
+
+    That last part is load-bearing. The same payload object is resolved a
+    second time on the real bridge -> ``_stream_with_retry`` fallback, and a
+    written placeholder comes back through the client-supplied branch: a
+    constant ``<class>-<apikey12>`` string promoted to a PROMPT_CACHE sticky
+    key, collapsing every unanchorable thread of one API key onto one row and
+    one account, reported as ``source=payload``.
     """
 
-    attached_key: str
     sticky_key: str | None
     outcome: str
 
@@ -372,17 +377,13 @@ def _derive_prompt_cache_anchor(
         ),
     )
     if window is None:
-        return _PromptCacheAnchor(
-            attached_key="-".join([_UNANCHORED_KEY_VERSION, *readable_parts]),
-            sticky_key=None,
-            outcome=DERIVATION_OUTCOME_UNANCHORABLE,
-        )
+        return _PromptCacheAnchor(sticky_key=None, outcome=DERIVATION_OUTCOME_UNANCHORABLE)
 
     index = get_thread_anchor_index()
     anchored_key = index.lookup(window, ttl_seconds=max_age_seconds)
     if anchored_key is not None:
         index.register(anchored_key, window)
-        return _PromptCacheAnchor(anchored_key, anchored_key, DERIVATION_OUTCOME_ANCHOR_HIT)
+        return _PromptCacheAnchor(anchored_key, DERIVATION_OUTCOME_ANCHOR_HIT)
 
     minted_key = "-".join([_ANCHORED_KEY_VERSION, *readable_parts, uuid4().hex[:16]])
     index.register(minted_key, window)
@@ -394,7 +395,7 @@ def _derive_prompt_cache_anchor(
         if _input_contains_prior_assistant_turn(payload)
         else DERIVATION_OUTCOME_ANCHOR_NEW
     )
-    return _PromptCacheAnchor(minted_key, minted_key, outcome)
+    return _PromptCacheAnchor(minted_key, outcome)
 
 
 def _derive_prompt_cache_key(
@@ -402,10 +403,14 @@ def _derive_prompt_cache_key(
     api_key: ApiKeyData | None,
     *,
     max_age_seconds: int = _DEFAULT_ANCHOR_TTL_SECONDS,
-) -> str:
-    """Key attached to the payload and forwarded upstream. Never empty."""
+) -> str | None:
+    """Key attached to the payload and forwarded upstream, or ``None``.
 
-    return _derive_prompt_cache_anchor(payload, api_key, max_age_seconds=max_age_seconds).attached_key
+    ``None`` means the turn is unanchorable and nothing is attached; see
+    ``_PromptCacheAnchor``.
+    """
+
+    return _derive_prompt_cache_anchor(payload, api_key, max_age_seconds=max_age_seconds).sticky_key
 
 
 def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
@@ -711,11 +716,19 @@ def _resolve_prompt_cache_key(
     if not openai_cache_affinity:
         return _record_prompt_cache_resolution(_PromptCacheResolution(None, "none", DERIVATION_OUTCOME_DISABLED))
     anchor = _derive_prompt_cache_anchor(payload, api_key, max_age_seconds=max_age_seconds)
-    # Attached even when unanchorable: `responses-api-compat` requires a stable
-    # derived `prompt_cache_key` on the forwarded payload, and
-    # `http_continuation_signal` reads its presence. Only the routing key is
-    # withheld.
-    payload.prompt_cache_key = anchor.attached_key
+    if anchor.sticky_key is None:
+        # Unanchorable: attach nothing. A value written here is indistinguishable
+        # from a client-supplied one when this same payload object is resolved
+        # again (bridge -> `_stream_with_retry` fallback), which would promote a
+        # constant per-API-key string into a real sticky key. There is also
+        # nothing for upstream to cache: the body carried no digestible
+        # transcript. `http_continuation_signal` falls through to
+        # `http_history_signal`, which still classifies a real transcript.
+        return _record_prompt_cache_resolution(_PromptCacheResolution(None, "none", anchor.outcome))
+    # Attached so that a re-resolution of this same body -- the bridge fallback,
+    # or another replica after ring forwarding -- reuses the identical key
+    # through the client-supplied branch instead of re-deriving it.
+    payload.prompt_cache_key = anchor.sticky_key
     return _record_prompt_cache_resolution(_PromptCacheResolution(anchor.sticky_key, "derived", anchor.outcome))
 
 

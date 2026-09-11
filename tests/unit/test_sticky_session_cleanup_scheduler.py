@@ -711,9 +711,8 @@ async def test_unrelated_cleanup_failure_preserves_existing_backlog_retry(monkey
 @pytest.mark.asyncio
 async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     """_cleanup_once should purge prompt-cache entries by affinity TTL.
-    STICKY_THREAD is never purged wholesale here; only the two namespaced
-    key-prefix purges (retired derived shape, expired anchored shape) touch it.
-    CODEX_SESSION is only ever purged
+    STICKY_THREAD is never purged here, by any predicate: see
+    TestNoStickyThreadKeyPrefixSweep. CODEX_SESSION is only ever purged
     via the separate, account-status-gated purge_stale_hard_codex_session_mappings
     call (see test_sticky_repository.py), never by this TTL-based path."""
     dashboard_settings = SimpleNamespace(
@@ -1024,89 +1023,69 @@ async def test_cleanup_once_retains_operation_purge_when_sticky_cleanup_disabled
     bridge_repo.purge_operation_spool_batch.assert_awaited_once()
 
 
-class TestLegacyDerivedStickyThreadSweep:
-    """The retired content-hash derivation left non-expiring `sticky_thread` rows.
+class TestNoStickyThreadKeyPrefixSweep:
+    """A proxy-derived prompt-cache key is never a `sticky_thread` row.
 
-    `purge_prompt_cache_before` covers the `prompt_cache` half; these rows have
-    no TTL at all, so the shape change would strand them forever.
+    The derivation only runs with `openai_cache_affinity` enabled, and that is
+    the branch that classifies the mapping as `prompt_cache`; the
+    `sticky_thread` branch is reachable only with cache affinity off, where the
+    derivation supplies no sticky key. So a key-prefix sweep of `sticky_thread`
+    can never match a derived key of either shape, while it *can* match a
+    client-supplied key and delete it from the kind that has no TTL by design.
     """
 
     @pytest.mark.asyncio
-    async def test_sweep_deletes_each_retired_prefix_in_bounded_batches(self) -> None:
-        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
-        repo = AsyncMock()
-        repo.purge_before_for_key_prefix = AsyncMock(return_value=3)
-        cutoff = utcnow() - timedelta(seconds=1800)
-
-        await scheduler._sweep_legacy_derived_sticky_threads(repo, cutoff)
-
-        prefixes = [call.kwargs["key_prefix"] for call in repo.purge_before_for_key_prefix.await_args_list]
-        assert prefixes == list(cleanup_scheduler._LEGACY_DERIVED_PROMPT_CACHE_KEY_PREFIXES)
-        assert all(
-            call.kwargs["kind"].value == "sticky_thread" for call in repo.purge_before_for_key_prefix.await_args_list
+    async def test_cleanup_pass_never_purges_sticky_thread_by_key_prefix(self, monkeypatch) -> None:
+        dashboard_settings = SimpleNamespace(
+            openai_cache_affinity_max_age_seconds=600,
+            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
         )
-        assert scheduler._legacy_derived_sticky_thread_sweep_done is False
-
-    @pytest.mark.asyncio
-    async def test_sweep_retires_itself_once_a_pass_finds_nothing(self) -> None:
-        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
-        repo = AsyncMock()
-        repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
-        cutoff = utcnow() - timedelta(seconds=1800)
-
-        await scheduler._sweep_legacy_derived_sticky_threads(repo, cutoff)
-        assert scheduler._legacy_derived_sticky_thread_sweep_done is True
-
-        repo.purge_before_for_key_prefix.reset_mock()
-        await scheduler._sweep_legacy_derived_sticky_threads(repo, cutoff)
-        repo.purge_before_for_key_prefix.assert_not_awaited()
-
-
-class TestAnchoredStickyThreadPurge:
-    """`sticky_thread` has no TTL, and anchored keys are now per thread.
-
-    The anchor that could reuse such a key expires at the same freshness
-    window, so an idle row of that shape can never be hit again.
-    """
-
-    @pytest.mark.asyncio
-    async def test_purge_drains_bounded_batches_and_stops_when_empty(self) -> None:
-        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
-        repo = AsyncMock()
-        repo.purge_before_for_key_prefix = AsyncMock(side_effect=[5, 4, 0])
-        cutoff = utcnow() - timedelta(seconds=1800)
-
-        deleted = await scheduler._purge_expired_anchored_sticky_threads(repo, cutoff)
-
-        assert deleted == 9
-        assert repo.purge_before_for_key_prefix.await_count == 3
-        assert all(
-            call.kwargs["key_prefix"] == cleanup_scheduler._ANCHORED_PROMPT_CACHE_KEY_PREFIX
-            for call in repo.purge_before_for_key_prefix.await_args_list
+        settings_repo = AsyncMock()
+        settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
+        monkeypatch.setattr(
+            cleanup_scheduler,
+            "get_settings",
+            lambda: SimpleNamespace(
+                http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+            ),
         )
 
-    @pytest.mark.asyncio
-    async def test_purge_is_batch_capped_per_pass(self) -> None:
+        sticky_repo = AsyncMock()
+        sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
+        sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=5)
+        sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=7)
+        sticky_repo.purge_before = AsyncMock(return_value=0)
+        bridge_repo = AsyncMock()
+        bridge_repo.purge_closed_before = AsyncMock(return_value=0)
+        bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+        bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
+        bridge_repo.purge_operation_spool_batch = AsyncMock(return_value=_purge_batch(0))
+        ring_service = AsyncMock()
+        ring_service.purge_stale_before = AsyncMock(return_value=0)
+
+        class FakeSession:
+            async def __aenter__(self):
+                return AsyncMock()
+
+            async def __aexit__(self, *args):
+                pass
+
+        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=True)
+        with (
+            patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+            patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+            patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+            patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+            patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+            patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
+            patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
+        ):
+            await scheduler._cleanup_once()
+
+        sticky_repo.purge_prompt_cache_before.assert_awaited_once()
+        sticky_repo.purge_before_for_key_prefix.assert_not_awaited()
+
+    def test_scheduler_exposes_no_sticky_thread_prefix_sweep(self) -> None:
         scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
-        repo = AsyncMock()
-        repo.purge_before_for_key_prefix = AsyncMock(return_value=1000)
-        cutoff = utcnow() - timedelta(seconds=1800)
-
-        await scheduler._purge_expired_anchored_sticky_threads(repo, cutoff)
-
-        assert (
-            repo.purge_before_for_key_prefix.await_count == cleanup_scheduler._ANCHORED_STICKY_THREAD_PURGE_MAX_BATCHES
-        )
-
-    @pytest.mark.asyncio
-    async def test_purge_recurs_unlike_the_one_shot_legacy_sweep(self) -> None:
-        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
-        repo = AsyncMock()
-        repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
-        cutoff = utcnow() - timedelta(seconds=1800)
-
-        await scheduler._purge_expired_anchored_sticky_threads(repo, cutoff)
-        repo.purge_before_for_key_prefix.reset_mock()
-        await scheduler._purge_expired_anchored_sticky_threads(repo, cutoff)
-
-        repo.purge_before_for_key_prefix.assert_awaited()
+        assert not hasattr(scheduler, "_sweep_legacy_derived_sticky_threads")
+        assert not hasattr(scheduler, "_purge_expired_anchored_sticky_threads")

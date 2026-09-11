@@ -23,7 +23,7 @@ from app.core.metrics.prometheus import (
 )
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import utcnow
-from app.db.models import DashboardSettings, StickySessionKind
+from app.db.models import DashboardSettings
 from app.db.session import SessionLocal, get_background_session
 from app.modules.proxy.durable_bridge_repository import (
     DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
@@ -55,27 +55,23 @@ _STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS = 6 * 3600
 # Keep each pass large enough to outpace steady-state expiry, but small enough
 # that a historical backlog is resumed across scheduler ticks instead of
 # monopolizing the database in one drain-all loop.
-# Key prefixes written by the retired content-hash prompt-cache derivation
-# (``{model_class}-{api_key_id[:12]}-{hash}...``). PROMPT_CACHE rows of that
-# shape expire on their own through ``purge_prompt_cache_before``; STICKY_THREAD
-# rows have no TTL, so without this sweep the shape change would strand them in
-# the dashboard holding an account FK forever. Keys minted by the thread-anchor
-# derivation carry the ``v2t-``/``v2u-`` version prefix and are never matched.
-# A client-supplied key that happens to start with one of these prefixes and
-# has been idle past the freshness window loses only soft locality.
-_LEGACY_DERIVED_PROMPT_CACHE_KEY_PREFIXES = ("std-", "codex-", "mini-")
-
-# Namespace of keys minted by the thread-anchor derivation. The anchor that
-# can reuse such a key expires at `openai_cache_affinity_max_age_seconds`, so a
-# `sticky_thread` row of this shape that has been idle past the same window can
-# never be hit again. `prompt_cache` rows already expire through
-# `purge_prompt_cache_before`; this keeps the no-TTL `sticky_thread` kind from
-# accumulating one permanent row per thread.
-_ANCHORED_PROMPT_CACHE_KEY_PREFIX = "v2t-"
-# Bounded batches per pass, mirroring the retired-shape sweep. A backlog is
-# resumed on the next tick instead of monopolising the database.
-_ANCHORED_STICKY_THREAD_PURGE_MAX_BATCHES = 4
-
+# No key-prefix sweep of the `sticky_thread` kind exists, deliberately.
+#
+# A prompt-cache key derived by the proxy -- the retired content-hash shape
+# (`{model_class}-{api_key_id[:12]}-{hash}`) and the current thread-anchored
+# `v2t-` shape alike -- is only ever produced when `openai_cache_affinity` is
+# enabled, and that is exactly the branch that classifies the mapping as
+# PROMPT_CACHE (see `_sticky_key_for_responses_request` /
+# `_sticky_key_for_compact_request`: the STICKY_THREAD branch is `elif
+# sticky_threads_enabled`, reachable only with cache affinity off, where the
+# derivation supplies no sticky key at all). So a derived key can never be
+# written as a `sticky_thread` row, and `purge_prompt_cache_before` already
+# retires every derived row of either shape at the freshness window.
+#
+# A `sticky_thread` row whose key starts with `std-`/`codex-`/`mini-` is
+# therefore necessarily *client-supplied*, and `sticky_thread` has no TTL by
+# design. Deleting those rows by key prefix silently drops a client's soft
+# locality because its key text happens to look like a retired proxy shape.
 _OPERATION_RETENTION_BATCH_SIZE = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
 _OPERATION_RETENTION_MAX_BATCHES = 4
 _OPERATION_RETENTION_TIME_BUDGET_SECONDS = 5.0
@@ -232,9 +228,6 @@ class StickySessionCleanupScheduler:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _operation_retention_attempt_failed: bool = False
     _operation_retention_cancelled_backlog_likely: bool | None = None
-    # One-shot per process: each pass deletes at most one bounded batch per
-    # legacy prefix, and the sweep retires itself once a pass finds nothing.
-    _legacy_derived_sticky_thread_sweep_done: bool = False
 
     async def start(self) -> None:
         if not self.enabled and not self.operation_retention_enabled:
@@ -373,46 +366,6 @@ class StickySessionCleanupScheduler:
                 self._operation_retention_attempt_failed = True
                 return True
 
-    async def _sweep_legacy_derived_sticky_threads(
-        self,
-        sticky_repo: StickySessionsRepository,
-        cutoff: datetime,
-    ) -> None:
-        """Retire STICKY_THREAD rows left behind by the content-hash derivation."""
-
-        if self._legacy_derived_sticky_thread_sweep_done:
-            return
-        deleted = 0
-        for key_prefix in _LEGACY_DERIVED_PROMPT_CACHE_KEY_PREFIXES:
-            deleted += await sticky_repo.purge_before_for_key_prefix(
-                cutoff,
-                kind=StickySessionKind.STICKY_THREAD,
-                key_prefix=key_prefix,
-            )
-        if deleted == 0:
-            self._legacy_derived_sticky_thread_sweep_done = True
-            return
-        logger.info("Purged legacy derived sticky_thread mappings deleted_count=%s", deleted)
-
-    async def _purge_expired_anchored_sticky_threads(
-        self,
-        sticky_repo: StickySessionsRepository,
-        cutoff: datetime,
-    ) -> int:
-        """Drop `sticky_thread` rows whose thread anchor has already expired."""
-
-        deleted = 0
-        for _ in range(_ANCHORED_STICKY_THREAD_PURGE_MAX_BATCHES):
-            batch = await sticky_repo.purge_before_for_key_prefix(
-                cutoff,
-                kind=StickySessionKind.STICKY_THREAD,
-                key_prefix=_ANCHORED_PROMPT_CACHE_KEY_PREFIX,
-            )
-            deleted += batch
-            if batch == 0:
-                break
-        return deleted
-
     async def _cleanup_as_leader(self) -> bool | None:
         async with self._lock:
             backlog_likely = False
@@ -429,6 +382,9 @@ class StickySessionCleanupScheduler:
 
                     if self.enabled:
                         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
+                        # Retires every proxy-derived prompt-cache mapping, of
+                        # either key shape: see the module note above on why no
+                        # `sticky_thread` key-prefix sweep belongs here.
                         deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                         if deleted_count > 0:
                             logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)
@@ -446,13 +402,6 @@ class StickySessionCleanupScheduler:
                                 "Purged stale hard codex_session sticky mappings pinned to a durably unavailable "
                                 "owner deleted_count=%s",
                                 stale_hard_codex_session_deleted_count,
-                            )
-                        await self._sweep_legacy_derived_sticky_threads(sticky_repo, cutoff)
-                        anchored_deleted_count = await self._purge_expired_anchored_sticky_threads(sticky_repo, cutoff)
-                        if anchored_deleted_count > 0:
-                            logger.info(
-                                "Purged expired anchored sticky_thread mappings deleted_count=%s",
-                                anchored_deleted_count,
                             )
                     if startup_module._bridge_durable_schema_ready or not await missing_durable_bridge_tables(session):
                         if self.enabled:

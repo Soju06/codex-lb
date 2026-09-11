@@ -15,21 +15,59 @@ consumed exactly by the head of the new turn's window::
 
     stored[offset:] == incoming[:len(stored) - offset]
 
-with at least ``_MIN_OVERLAP_ITEMS`` items matched, or with the whole stored
-window matched (``offset == 0``) when the thread's recorded body was shorter
-than that. ``offset == 0`` is the append case -- and, when the two windows are
-equal, an identical re-derivation of the same body, which must return the same
-key. ``offset > 0`` is the leading-trim case: the client dropped the oldest
-items and kept a contiguous recent window. Nothing else matches. A compacted or summarised turn does not
-extend any stored window, so it mints a new anchor -- which is correct, because
-the upstream prefix cache is genuinely cold after compaction. There is no
-fuzzy, suffix-only, or "longest common prefix" fallback: partial evidence
-merges unrelated threads onto one account, which is strictly worse than the
-churn this module removes.
+and **either** at least ``_MIN_OVERLAP_ITEMS`` items are matched, **or** the
+two windows are byte-equal (an identical re-derivation of the same body, which
+must return the same key). Nothing else matches.
+
+``offset > 0`` is the append/leading-trim case: the window slid forward because
+the client appended a turn, or dropped its oldest items and kept a contiguous
+recent window. ``offset == 0`` with the incoming window strictly longer is the
+append case for a thread whose transcript is still shorter than the retained
+window.
+
+The ``_MIN_OVERLAP_ITEMS`` floor is the whole false-merge guard, and it applies
+to the ``offset == 0`` case too. A short stored window that is a *prefix* of an
+incoming window is structurally indistinguishable from "the same thread
+appended two items": the only defence is to require the shared run to be long
+enough that it cannot be a generic opening. One or two shared leading items
+routinely *are* generic -- every session in a repository opens with the same
+``<environment_context>`` block, and parallel workers of one agent open with a
+byte-identical preamble -- so accepting that evidence would hand one thread's
+key to another and then (via ``register``) overwrite the first thread's window,
+costing it the key it owns. Requiring four keeps both named shapes out with two
+items of margin. The price is that a thread does not hold a key until its
+transcript reaches four items; at two items per turn that is one extra mint, on
+the smallest body of the thread's life.
+
+A compacted or summarised turn does not extend any stored window, so it mints a
+new anchor -- which is correct, because the upstream prefix cache is genuinely
+cold after compaction. There is no fuzzy, suffix-only, or "longest common
+prefix" fallback: partial evidence merges unrelated threads onto one account,
+which is strictly worse than the churn this module removes.
 
 Item digests are domain-separated by (api key id, model class, **full**
 instructions). Two threads whose instructions differ only after the first 512
 characters -- which collide today -- therefore never share an anchor.
+
+Large items
+-----------
+Two ceilings bound the work, and neither may collapse the window, because a
+window that differs every turn mints a key every turn -- the exact churn this
+module removes, and worst for the p90 453k-token cohort it exists to serve:
+
+* ``_MAX_WINDOW_ENCODED_CHARS`` stops the backward walk, but never before
+  ``_MIN_WINDOW_ITEMS`` items are recorded. A single trailing item larger than
+  the whole-window ceiling therefore still yields a window deep enough to
+  survive an ordinary append.
+* an item whose canonical encoding exceeds ``_MAX_ITEM_ENCODED_CHARS`` is a
+  **window boundary**: the walk stops there and the window is the items that
+  follow it. It is not digested (a truncated digest would re-introduce the
+  prefix collision this module removes) and it does not make the body
+  unanchorable -- one 1 MiB tool result used to keep the whole thread
+  unanchorable for as many turns as the window is deep. Two threads that differ
+  only inside such an item and agree on the four items after it can merge; that
+  requires four byte-identical items after the divergence and is accepted as
+  the price of not stranding the thread.
 
 Memory bound
 ------------
@@ -42,8 +80,10 @@ existing bounded TTL-LRU process cache shape:
 * at most ``_MAX_INDEX_DIGESTS`` (65536) reverse-index rows, each holding at
   most ``_MAX_CANDIDATES_PER_DIGEST`` (8) thread-key references.
 
-Both are LRU-evicted ``OrderedDict``s, so the worst case is ~9 MiB per replica
-(measured with every cap saturated) and never grows with traffic. Anchors also expire after the caller's
+Both are LRU-evicted ``OrderedDict``s, so the worst case is **~17.6 MiB** per
+replica -- measured with every cap saturated, counting the ``OrderedDict``
+tables, the key strings and the per-row candidate lists, not just the digest
+payload -- and never grows with traffic. Anchors also expire after the caller's
 TTL (the dashboard ``openai_cache_affinity_max_age_seconds``) so an anchor can
 never outlive the ``sticky_sessions`` row it names. Losing an anchor is always
 safe: the next turn mints a new key and is reported as such.
@@ -59,6 +99,7 @@ import json
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum
 from hashlib import sha256
 
 from app.core.clock import REAL_CLOCK, Clock
@@ -71,22 +112,28 @@ _ITEM_DIGEST_BYTES = 8
 # leading-trim depth that can still be recognised.
 _MAX_WINDOW_ITEMS = 32
 # A body must carry at least one item to be anchorable at all.
-_MIN_WINDOW_ITEMS = 1
-# Two consecutive exactly-equal items are the least evidence accepted for a
-# *partial* alignment. One item is not enough there: independent threads
-# routinely share a single opening `<environment_context>` block or a one-word
-# prompt, and accepting a one-item tail alignment would merge them. A single
-# item is accepted only when it is the thread's whole recorded body and the new
-# turn extends it from item zero, which is the ordinary second turn of a
-# one-item opening.
-_MIN_OVERLAP_ITEMS = 2
+_MIN_ANCHORABLE_ITEMS = 1
+# Floor the whole-window byte ceiling may not undercut. A window shallower than
+# `_MIN_OVERLAP_ITEMS + items appended per turn` cannot survive an append, so a
+# byte ceiling that stops the walk early turns the window into "the newest
+# item", which differs every turn and mints a key every turn. Eight leaves room
+# for a four-item turn (reasoning + call + output + message) on top of the
+# four-item acceptance floor. Worst-case encoding work per request is therefore
+# `_MIN_WINDOW_ITEMS * _MAX_ITEM_ENCODED_CHARS`, i.e. 8 MiB -- reachable only by
+# a body that is itself at least 8 MiB, which the proxy has already parsed.
+_MIN_WINDOW_ITEMS = 8
+# Least evidence accepted for any reuse other than a byte-equal re-derivation.
+# See "Matching contract": one or two shared leading/trailing items are
+# routinely generic across independent threads, so accepting them merges those
+# threads onto one key and one account and destroys the loser's window.
+_MIN_OVERLAP_ITEMS = 4
 # Serialization ceilings, applied *during* encoding so a 450k-token item is
 # never materialised. Items are hashed in full -- a truncated digest would
 # re-introduce exactly the prefix collision this module removes -- so an item
-# past the per-item ceiling makes the body unanchorable instead.
+# past the per-item ceiling ends the window instead of being digested.
 _MAX_ITEM_ENCODED_CHARS = 1024 * 1024
 _MAX_WINDOW_ENCODED_CHARS = 256 * 1024
-# LRU caps. See "Memory bound" above. Measured at ~9 MiB with every cap
+# LRU caps. See "Memory bound" above. Measured at ~17.6 MiB with every cap
 # saturated; a replica serving the observed unanchored volume (16.6k requests
 # per 10 h, 1800 s freshness window) stays far below the thread cap.
 _MAX_ANCHORS = 2048
@@ -139,26 +186,70 @@ def thread_anchor_domain(*, api_key_id: str, model_class: str, instructions: str
     return sha256(framed).digest()
 
 
-def _bounded_item_digest(domain: bytes, item: JsonValue) -> tuple[bytes, int] | None:
-    """Digest one item's full canonical JSON, or ``None`` if it is unusable.
+class _ItemVerdict(Enum):
+    """Why an item was not digested. Both refuse a truncated digest."""
 
-    ``iterencode`` yields chunks lazily and each chunk is folded straight into
-    the hash, so the encoding is never materialised. ``None`` means the item
-    exceeds ``_MAX_ITEM_ENCODED_CHARS`` or the canonical encoder cannot
-    represent it; the body is then reported unanchorable rather than anchored
-    on a partial or non-deterministic encoding.
+    # Encoding exceeds ``_MAX_ITEM_ENCODED_CHARS``. The walk stops here and
+    # keeps the items that follow: the alternative -- reporting the whole body
+    # unanchorable -- strands the thread for as many turns as the window is
+    # deep while the oversized item stays in reach of the backward walk.
+    OVERSIZED = "oversized"
+    # The canonical encoder cannot represent the item, so no window containing
+    # or bounded by it is reproducible. The body is unanchorable.
+    UNENCODABLE = "unencodable"
+
+
+def _exceeds_item_ceiling(item: JsonValue) -> bool:
+    """Cheap structural pre-check for the per-item ceiling.
+
+    ``iterencode`` streams a container, but it yields a single *scalar* -- a
+    450k-token text part is one string -- as one already-materialised chunk, so
+    the size check inside the encode loop can only fire after allocating it.
+    The sum of raw string lengths is a lower bound on the canonical encoding
+    length (escaping and punctuation only add), so exceeding the ceiling here
+    proves the encoding would exceed it, and the walk never materialises the
+    encoding of an item it is going to refuse. Staying under is not a proof, so
+    the encode loop keeps its own exact check.
     """
 
+    pending: list[JsonValue] = [item]
+    total = 0
+    while pending:
+        node = pending.pop()
+        if isinstance(node, str):
+            total += len(node)
+        elif isinstance(node, dict):
+            pending.extend(node.keys())
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
+        else:
+            # Numbers, booleans and null all encode to a handful of characters.
+            total += 1
+        if total > _MAX_ITEM_ENCODED_CHARS:
+            return True
+    return False
+
+
+def _bounded_item_digest(domain: bytes, item: JsonValue) -> tuple[bytes, int] | _ItemVerdict:
+    """Digest one item's full canonical JSON, or say why it was not digested.
+
+    ``iterencode`` yields chunks lazily and each chunk is folded straight into
+    the hash, so the encoding is never materialised.
+    """
+
+    if _exceeds_item_ceiling(item):
+        return _ItemVerdict.OVERSIZED
     hasher = sha256(domain + b"\x1e")
     size = 0
     try:
         for chunk in _ITEM_ENCODER.iterencode(item):
             size += len(chunk)
             if size > _MAX_ITEM_ENCODED_CHARS:
-                return None
+                return _ItemVerdict.OVERSIZED
             hasher.update(chunk.encode())
     except (TypeError, ValueError):
-        return None
+        return _ItemVerdict.UNENCODABLE
     return hasher.digest()[:_ITEM_DIGEST_BYTES], size
 
 
@@ -175,22 +266,29 @@ def build_thread_window(input_value: JsonValue, *, domain: bytes) -> ThreadWindo
     if not isinstance(input_value, list):
         return None
     items: Sequence[JsonValue] = input_value
-    if len(items) < _MIN_WINDOW_ITEMS:
+    if len(items) < _MIN_ANCHORABLE_ITEMS:
         return None
     digests: list[bytes] = []
     encoded_chars = 0
     for item in reversed(items):
         if len(digests) >= _MAX_WINDOW_ITEMS:
             break
+        # The byte ceiling may only stop a walk that already holds a window
+        # deep enough to survive an append. Stopping earlier records "the
+        # newest item", which differs every turn.
         if encoded_chars >= _MAX_WINDOW_ENCODED_CHARS and len(digests) >= _MIN_WINDOW_ITEMS:
             break
         digested = _bounded_item_digest(domain, item)
-        if digested is None:
+        if digested is _ItemVerdict.UNENCODABLE:
             return None
+        if digested is _ItemVerdict.OVERSIZED:
+            # Window boundary, not poison: keep the items already collected.
+            break
+        assert not isinstance(digested, _ItemVerdict)
         digest, encoded_size = digested
         encoded_chars += encoded_size
         digests.append(digest)
-    if len(digests) < _MIN_WINDOW_ITEMS:
+    if len(digests) < _MIN_ANCHORABLE_ITEMS:
         return None
     digests.reverse()
     return ThreadWindow(digests=b"".join(digests), item_count=len(digests))
@@ -209,6 +307,33 @@ def _overlap_items(stored: bytes, incoming: bytes) -> int:
         if stored[offset:] == incoming[:suffix_length]:
             return suffix_length // _ITEM_DIGEST_BYTES
     return 0
+
+
+def _accepts_overlap(stored: bytes, incoming: bytes, overlap_items: int) -> bool:
+    """Whether ``overlap_items`` matched items may reuse ``stored``'s key.
+
+    The rule, and nothing else:
+
+    1. at least ``_MIN_OVERLAP_ITEMS`` items matched, or
+    2. the two windows are byte-equal -- the same items in the same order, an
+       identical re-derivation of one body, where nothing is being extended and
+       so there is no shared-opening ambiguity to resolve.
+
+    Rule 1 is deliberately applied to a stored window that the incoming window
+    merely *extends* as well. "Thread B opens with everything thread A has
+    recorded" and "thread A appended a turn" produce byte-identical evidence,
+    so the only available defence is to demand a shared run too long to be a
+    generic opening. Accepting less hands A's key to B and then lets B's
+    ``register`` overwrite A's window, so A permanently loses the key it owns:
+    a false merge pins unrelated work to one account and is worse than the
+    churn this module removes.
+    """
+
+    if overlap_items <= 0:
+        return False
+    if overlap_items >= _MIN_OVERLAP_ITEMS:
+        return True
+    return stored == incoming
 
 
 class ThreadAnchorIndex:
@@ -269,32 +394,58 @@ class ThreadAnchorIndex:
             for thread_key in list(candidates):
                 anchor = self._anchors.get(thread_key)
                 if anchor is None or now - anchor.stored_at >= ttl_seconds:
-                    self._anchors.pop(thread_key, None)
-                    candidates.remove(thread_key)
+                    dropped = self._anchors.pop(thread_key, None)
+                    if dropped is not None:
+                        self._forget_index_references(thread_key, dropped.digests)
+                    elif thread_key in candidates:
+                        candidates.remove(thread_key)
                     continue
                 if thread_key in seen:
                     continue
                 seen.add(thread_key)
                 overlap = _overlap_items(anchor.digests, window.digests)
-                accepted = overlap >= _MIN_OVERLAP_ITEMS or (
-                    overlap > 0 and overlap * _ITEM_DIGEST_BYTES == len(anchor.digests)
-                )
+                accepted = _accepts_overlap(anchor.digests, window.digests, overlap)
                 if accepted and overlap > best_overlap:
                     best_key = thread_key
                     best_overlap = overlap
             if not candidates:
-                del self._index[digest]
+                self._index.pop(digest, None)
         if best_key is not None:
             self._anchors.move_to_end(best_key)
         return best_key
 
+    def _forget_index_references(self, thread_key: str, digests: bytes) -> None:
+        """Remove one thread key from every digest row its window indexed.
+
+        Called whenever an anchor stops being reachable under a window --
+        expiry, LRU eviction, or a re-register that replaces the window. Left
+        behind, a dead key keeps occupying one of the
+        ``_max_candidates_per_digest`` slots on a popular digest row and can
+        crowd a live anchor out of a row before that anchor is ever verified.
+        """
+
+        for offset in range(0, len(digests), _ITEM_DIGEST_BYTES):
+            digest = digests[offset : offset + _ITEM_DIGEST_BYTES]
+            row = self._index.get(digest)
+            if row is None:
+                continue
+            if thread_key in row:
+                row.remove(thread_key)
+            if not row:
+                self._index.pop(digest, None)
+
     def register(self, thread_key: str, window: ThreadWindow) -> None:
         """Record this turn's window as the thread's anchor and index it."""
 
+        previous = self._anchors.get(thread_key)
+        if previous is not None and previous.digests != window.digests:
+            # The old window's digests no longer reach this thread.
+            self._forget_index_references(thread_key, previous.digests)
         self._anchors[thread_key] = _Anchor(digests=window.digests, stored_at=self._clock.monotonic())
         self._anchors.move_to_end(thread_key)
         while len(self._anchors) > self._max_anchors:
-            self._anchors.popitem(last=False)
+            evicted_key, evicted = self._anchors.popitem(last=False)
+            self._forget_index_references(evicted_key, evicted.digests)
         for offset in range(0, len(window.digests), _ITEM_DIGEST_BYTES):
             digest = window.digests[offset : offset + _ITEM_DIGEST_BYTES]
             row = self._index.get(digest)

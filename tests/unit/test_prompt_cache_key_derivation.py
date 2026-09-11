@@ -27,6 +27,7 @@ from app.modules.proxy.affinity import (
     DERIVATION_OUTCOME_UNANCHORABLE,
     _derive_prompt_cache_anchor,
     _derive_prompt_cache_key,
+    _prompt_cache_key_from_request_model,
     _resolve_prompt_cache_key,
     _sticky_key_for_responses_request,
 )
@@ -91,8 +92,17 @@ def _assistant(text: str) -> dict[str, object]:
 
 class TestAppendStability:
     def test_key_is_stable_across_a_growing_transcript(self):
+        """One mint while the transcript is below the acceptance floor, then held.
+
+        A two-item opening is below ``_MIN_OVERLAP_ITEMS`` (see
+        ``thread_anchors``: one or two shared leading items are routinely
+        generic), so its key is not carried into the second turn. From four
+        items on, the key never moves again.
+        """
         api_key = _make_api_key()
         items: list[object] = [_env_item(), _user("build a server")]
+        _derive_prompt_cache_key(_request(items), api_key)
+        items = [*items, _assistant("reply 0"), _user("follow-up 0")]
         first = _derive_prompt_cache_key(_request(items), api_key)
         for turn in range(1, 30):
             items = [*items, _assistant(f"reply {turn}"), _user(f"follow-up {turn}")]
@@ -103,7 +113,7 @@ class TestAppendStability:
     def test_transcript_longer_than_the_retained_window_stays_stable(self):
         """The window slides; the anchor does not."""
         api_key = _make_api_key()
-        items: list[object] = [_env_item(), _user("start")]
+        items: list[object] = [_env_item(), _user("start"), _assistant("a0"), _user("u0")]
         first = _derive_prompt_cache_key(_request(items), api_key)
         for turn in range(1, 200):
             items = [*items, _assistant(f"a{turn}"), _user(f"u{turn}")]
@@ -116,20 +126,30 @@ class TestAppendStability:
         keys = {_derive_prompt_cache_key(payload, api_key) for _ in range(10)}
         assert len(keys) == 1
 
-    def test_one_item_opening_turn_anchors_its_second_turn(self):
-        """The plain SDK shape: turn one is a single user item."""
+    def test_a_one_item_opening_does_not_carry_its_key_into_the_second_turn(self):
+        """The plain SDK shape: turn one is a single user item.
+
+        One shared item is the weakest possible evidence and is exactly what
+        parallel workers of one agent share, so it must not transfer a key --
+        not even to the same thread's next turn. The thread anchors from the
+        turn where its transcript reaches ``_MIN_OVERLAP_ITEMS`` items.
+        """
         api_key = _make_api_key()
         first = _derive_prompt_cache_anchor(_request([_user("build a server")]), api_key)
         assert first.sticky_key is not None
-        second = _derive_prompt_cache_anchor(
-            _request([_user("build a server"), _assistant("here"), _user("add logging")]),
-            api_key,
-        )
-        assert second.sticky_key == first.sticky_key
-        assert second.outcome == DERIVATION_OUTCOME_ANCHOR_HIT
+        items: list[object] = [_user("build a server"), _assistant("here"), _user("add logging")]
+        second = _derive_prompt_cache_anchor(_request(items), api_key)
+        assert second.sticky_key != first.sticky_key
+        # Five items recorded, so the next turn clears the four-item floor.
+        items = [*items, _assistant("done"), _user("now tests")]
+        third = _derive_prompt_cache_anchor(_request(items), api_key)
+        items = [*items, _assistant("green"), _user("ship it")]
+        fourth = _derive_prompt_cache_anchor(_request(items), api_key)
+        assert fourth.sticky_key == third.sticky_key
+        assert fourth.outcome == DERIVATION_OUTCOME_ANCHOR_HIT
 
     def test_a_one_item_tail_alignment_is_not_enough_to_merge(self):
-        """Partial alignment needs two items; one shared item must not merge."""
+        """Partial alignment needs four items; one shared item must not merge."""
         api_key = _make_api_key()
         established = _derive_prompt_cache_key(
             _request([_env_item(), _user("u0"), _assistant("a0"), _user("continue")]), api_key
@@ -182,8 +202,8 @@ class TestLeadingTrimStability:
 class TestDistinctThreadsStayDistinct:
     def test_two_threads_from_one_api_key_sharing_their_opening_item_stay_separate(self):
         api_key = _make_api_key()
-        thread_a = [_env_item(), _user("refactor the parser")]
-        thread_b = [_env_item(), _user("write the release notes")]
+        thread_a: list[object] = [_env_item(), _user("refactor the parser"), _assistant("a0"), _user("a-follow 0")]
+        thread_b: list[object] = [_env_item(), _user("write the release notes"), _assistant("b0"), _user("b-follow 0")]
         key_a = _derive_prompt_cache_key(_request(thread_a), api_key)
         key_b = _derive_prompt_cache_key(_request(thread_b), api_key)
         assert key_a != key_b
@@ -232,7 +252,10 @@ class TestDistinctThreadsStayDistinct:
         """Property-style: appends never move a key, and threads never cross."""
         api_key = _make_api_key()
         rng = random.Random(20260911)
-        threads: list[list[object]] = [[_env_item(), _user(f"seed-{index}")] for index in range(12)]
+        threads: list[list[object]] = [
+            [_env_item(), _user(f"seed-{index}"), _assistant(f"ack-{index}"), _user(f"go-{index}")]
+            for index in range(12)
+        ]
         keys = [_derive_prompt_cache_key(_request(items), api_key) for items in threads]
         assert len(set(keys)) == len(keys)
         for _ in range(200):
@@ -252,10 +275,11 @@ class TestUnanchorableRequests:
         first = _derive_prompt_cache_anchor(payload, None)
         second = _derive_prompt_cache_anchor(_request([], instructions=""), None)
         assert first.outcome == DERIVATION_OUTCOME_UNANCHORABLE
+        assert second.outcome == DERIVATION_OUTCOME_UNANCHORABLE
+        # No key at all -- not a fresh uuid, and not a constant placeholder
+        # that a second resolution would read back as client-supplied.
         assert first.sticky_key is None
-        # The forwarded key is still attached and is stable, not a fresh uuid.
-        assert first.attached_key == second.attached_key
-        assert first.attached_key
+        assert second.sticky_key is None
 
     def test_non_list_input_is_unanchorable(self):
         """`ResponsesRequest` normalises a bare string into a one-item list, so
@@ -277,8 +301,9 @@ class TestUnanchorableRequests:
         )
         assert policy.key is None
         assert policy.prompt_cache_derivation_outcome == DERIVATION_OUTCOME_UNANCHORABLE
-        # The spec still requires a stable derived key on the forwarded payload.
-        assert isinstance(payload.prompt_cache_key, str) and payload.prompt_cache_key
+        # And nothing is written onto the payload, so a second resolution of
+        # this same object cannot read a proxy value back as client-supplied.
+        assert _prompt_cache_key_from_request_model(payload) is None
 
     def test_anchored_request_still_carries_a_sticky_key(self):
         payload = _request([_env_item(), _user("do the thing")])
@@ -394,8 +419,244 @@ class TestThreadAnchorIndexBounds:
         # The byte ceiling stops the walk well before the item ceiling here.
         assert window.item_count < 32
 
-    def test_an_item_past_the_per_item_ceiling_makes_the_body_unanchorable(self):
-        """Never digest a truncated item: that is the collision being removed."""
+    def test_an_item_past_the_per_item_ceiling_is_never_digested(self):
+        """Never digest a truncated item: that is the collision being removed.
+
+        It ends the window instead of poisoning the body -- see
+        ``TestOversizedItemDoesNotPoisonTheThread`` -- so the two items here
+        yield a one-item window, and an oversized *last* item yields none.
+        """
         domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
         oversized = [_user("z" * (_MAX_ITEM_ENCODED_CHARS + 1)), _user("tail")]
-        assert build_thread_window(_json_value(oversized), domain=domain) is None
+        bounded = build_thread_window(_json_value(oversized), domain=domain)
+        assert bounded is not None
+        assert bounded.item_count == 1
+        trailing = [_user("head"), _user("z" * (_MAX_ITEM_ENCODED_CHARS + 1))]
+        assert build_thread_window(_json_value(trailing), domain=domain) is None
+
+
+class TestUnanchorableKeyIsNeverPromoted:
+    """A body with nothing to anchor must never acquire a sticky key.
+
+    The same payload object is resolved twice on the real
+    `_stream_via_http_bridge` -> `_stream_with_retry` fallback. If the first
+    resolution writes a proxy-minted placeholder onto the payload, the second
+    one reads it back through the client-supplied branch and returns a constant
+    per-API-key string as a PROMPT_CACHE sticky key, collapsing every
+    unanchorable thread of that API key onto one row and one account.
+    """
+
+    _KWARGS = {
+        "codex_session_affinity": True,
+        "openai_cache_affinity": True,
+        "openai_cache_affinity_max_age_seconds": 1800,
+        "sticky_threads_enabled": True,
+    }
+
+    def test_re_resolving_one_unanchorable_payload_never_yields_a_sticky_key(self):
+        payload = _request([], instructions="")
+        api_key = _make_api_key()
+        first = _resolve_prompt_cache_key(payload, openai_cache_affinity=True, api_key=api_key)
+        second = _resolve_prompt_cache_key(payload, openai_cache_affinity=True, api_key=api_key)
+        assert first.sticky_key is None
+        assert second.sticky_key is None
+        assert second.source != "payload"
+        assert second.outcome == DERIVATION_OUTCOME_UNANCHORABLE
+
+    def test_unanchorable_resolution_does_not_mutate_the_payload(self):
+        payload = _request([], instructions="")
+        _resolve_prompt_cache_key(payload, openai_cache_affinity=True, api_key=_make_api_key())
+        assert _prompt_cache_key_from_request_model(payload) is None
+
+    def test_second_affinity_pass_of_an_unanchorable_body_writes_no_sticky_row(self):
+        payload = _request([], instructions="")
+        api_key = _make_api_key()
+        first = _sticky_key_for_responses_request(payload, {}, api_key=api_key, **self._KWARGS)
+        second = _sticky_key_for_responses_request(payload, {}, api_key=api_key, **self._KWARGS)
+        assert first.key is None
+        assert second.key is None
+        assert second.prompt_cache_derivation_outcome == DERIVATION_OUTCOME_UNANCHORABLE
+
+    def test_unanchorable_threads_of_one_api_key_do_not_share_a_sticky_key(self):
+        api_key = _make_api_key()
+        payloads = [_request([], instructions="") for _ in range(3)]
+        for payload in payloads:
+            _sticky_key_for_responses_request(payload, {}, api_key=api_key, **self._KWARGS)
+        keys = {
+            _sticky_key_for_responses_request(payload, {}, api_key=api_key, **self._KWARGS).key for payload in payloads
+        }
+        assert keys == {None}
+
+
+class TestLargeTrailingItemsDoNotCollapseTheWindow:
+    """The p90 453k-token cohort this change exists to serve.
+
+    A trailing item at or past the whole-window byte ceiling used to end the
+    backward walk after one item, so the recorded window was "the newest item"
+    and differed every turn: a new key every turn, reported as a benign
+    `anchor_reset`.
+    """
+
+    @pytest.mark.parametrize("item_chars", [96 * 1024, 256 * 1024])
+    def test_ten_turns_of_large_items_hold_one_key(self, item_chars: int):
+        api_key = _make_api_key()
+        filler = "z" * item_chars
+        items: list[object] = [_env_item(), _user(f"open-{filler}")]
+        keys: list[str | None] = []
+        for turn in range(10):
+            items = [*items, _assistant(f"a{turn}-{filler}"), _user(f"u{turn}-{filler}")]
+            anchor = _derive_prompt_cache_anchor(_request(items), api_key)
+            keys.append(anchor.sticky_key)
+        assert None not in keys
+        assert len(set(keys)) == 1, f"{len(set(keys))} keys in 10 turns at {item_chars} chars per item"
+
+    @pytest.mark.parametrize("item_chars", [96 * 1024, 256 * 1024])
+    def test_window_keeps_the_documented_item_floor(self, item_chars: int):
+        from app.modules.proxy.thread_anchors import _MIN_WINDOW_ITEMS
+
+        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        items = [_user(f"{index}-" + "z" * item_chars) for index in range(20)]
+        window = build_thread_window(_json_value(items), domain=domain)
+        assert window is not None
+        assert window.item_count >= _MIN_WINDOW_ITEMS
+
+
+class TestOversizedItemDoesNotPoisonTheThread:
+    """One item past the per-item ceiling used to make ~16 turns unanchorable.
+
+    The reversed walk kept reaching it for as many turns as the window is
+    deep, so `sticky_key` stayed `None` and every one of those turns forwarded
+    unbound.
+    """
+
+    def test_an_oversized_item_bounds_the_window_instead_of_poisoning_the_body(self):
+        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        items = [
+            _user("z" * (_MAX_ITEM_ENCODED_CHARS + 1)),
+            _user("a"),
+            _user("b"),
+            _user("c"),
+            _user("d"),
+        ]
+        window = build_thread_window(_json_value(items), domain=domain)
+        assert window is not None
+        assert window.item_count == 4
+
+    def test_a_thread_re_anchors_within_a_few_turns_of_an_oversized_item(self):
+        api_key = _make_api_key()
+        items: list[object] = [_env_item(), _user("start"), _assistant("ok"), _user("go")]
+        _derive_prompt_cache_key(_request(items), api_key)
+        items = [*items, _assistant("z" * (_MAX_ITEM_ENCODED_CHARS + 1))]
+        anchors = []
+        for turn in range(10):
+            items = [*items, _user(f"u{turn}"), _assistant(f"a{turn}")]
+            anchors.append(_derive_prompt_cache_anchor(_request(items), api_key))
+        tail = anchors[-6:]
+        assert all(anchor.sticky_key is not None for anchor in tail)
+        assert len({anchor.sticky_key for anchor in tail}) == 1
+
+
+class TestSharedPreambleNeverTransfersAKey:
+    """`never merge two genuinely distinct threads onto one key`.
+
+    The whole-window-consumed acceptance branch let a sibling whose opening
+    items equal another thread's entire recorded window claim that thread's
+    key, and the sibling's `register` then overwrote the window, so the
+    original thread permanently lost the key it owned.
+    """
+
+    def test_a_two_item_shared_opening_does_not_transfer_the_key(self):
+        api_key = _make_api_key()
+        preamble = [_env_item(), _user("<user_instructions>read AGENTS.md")]
+        key_a = _derive_prompt_cache_key(_request(preamble), api_key)
+        key_b = _derive_prompt_cache_key(_request([*preamble, _user("worker B task")]), api_key)
+        assert key_b != key_a
+
+    def test_a_one_item_shared_opening_does_not_transfer_the_key(self):
+        api_key = _make_api_key()
+        opening = [_env_item()]
+        key_a = _derive_prompt_cache_key(_request(opening), api_key)
+        key_b = _derive_prompt_cache_key(_request([*opening, _assistant("ok"), _user("worker B")]), api_key)
+        assert key_b != key_a
+
+    def test_thread_a_never_loses_a_key_it_owns_to_a_shared_opening(self):
+        api_key = _make_api_key()
+        preamble = [_env_item(), _user("<user_instructions>read AGENTS.md")]
+        key_a = _derive_prompt_cache_key(_request(preamble), api_key)
+        for worker in range(4):
+            _derive_prompt_cache_key(_request([*preamble, _user(f"worker {worker}")]), api_key)
+        assert _derive_prompt_cache_key(_request(preamble), api_key) == key_a
+
+    def test_an_established_thread_keeps_its_anchor_while_siblings_share_its_preamble(self):
+        api_key = _make_api_key()
+        preamble = [_env_item(), _user("<user_instructions>read AGENTS.md")]
+        items: list[object] = [*preamble, _assistant("a0"), _user("u1")]
+        _derive_prompt_cache_key(_request(items), api_key)
+        items = [*items, _assistant("a1"), _user("u2")]
+        owned = _derive_prompt_cache_anchor(_request(items), api_key)
+        assert owned.outcome == DERIVATION_OUTCOME_ANCHOR_HIT
+        for worker in range(5):
+            sibling = _derive_prompt_cache_key(_request([*preamble, _user(f"worker {worker}")]), api_key)
+            assert sibling != owned.sticky_key
+        items = [*items, _assistant("a2"), _user("u3")]
+        again = _derive_prompt_cache_anchor(_request(items), api_key)
+        assert again.sticky_key == owned.sticky_key
+        assert again.outcome == DERIVATION_OUTCOME_ANCHOR_HIT
+
+
+class TestIndexReferencesFollowTheirAnchors:
+    """A dead thread key must not keep occupying reverse-index candidate slots.
+
+    Rows are capped at ``_MAX_CANDIDATES_PER_DIGEST``, so a stale reference on
+    a popular digest can crowd a live anchor out of its row before that anchor
+    is ever verified.
+    """
+
+    def _window(self, index: int):
+        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        window = build_thread_window(_json_value([_user(f"a{index}"), _user(f"b{index}")]), domain=domain)
+        assert window is not None
+        return window
+
+    def test_evicting_an_anchor_drops_its_reverse_index_rows(self):
+        clock = _FakeClock()
+        index = ThreadAnchorIndex(max_anchors=2, max_index_digests=1024, max_candidates_per_digest=8, clock=clock)
+        index.register("a", self._window(1))
+        index.register("b", self._window(2))
+        index.register("c", self._window(3))
+        assert len(index) == 2
+        # Two digests each for the two surviving anchors, none for the evicted.
+        assert index.index_size == 4
+
+    def test_re_registering_a_thread_drops_its_previous_window_rows(self):
+        index = ThreadAnchorIndex()
+        index.register("a", self._window(1))
+        index.register("a", self._window(2))
+        assert index.index_size == 2
+        assert index.lookup(self._window(1), ttl_seconds=1800.0) is None
+        assert index.lookup(self._window(2), ttl_seconds=1800.0) == "a"
+
+
+class TestPerItemCeilingIsEnforcedBeforeEncoding:
+    def test_an_oversized_item_is_refused_without_encoding_it(self, monkeypatch):
+        """`iterencode` yields a large string scalar as one materialised chunk.
+
+        Checking the size only inside the encode loop means allocating the very
+        encoding the walk is about to refuse.
+        """
+        from app.modules.proxy import thread_anchors
+
+        encoded: list[object] = []
+        real_iterencode = thread_anchors._ITEM_ENCODER.iterencode
+
+        def spy(value):
+            encoded.append(value)
+            return real_iterencode(value)
+
+        monkeypatch.setattr(thread_anchors._ITEM_ENCODER, "iterencode", spy)
+        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        items = [_user("z" * (_MAX_ITEM_ENCODED_CHARS + 1)), _user("a"), _user("b"), _user("c")]
+        window = build_thread_window(_json_value(items), domain=domain)
+        assert window is not None
+        assert window.item_count == 3
+        assert len(encoded) == 3, "the oversized item was handed to the encoder anyway"

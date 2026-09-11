@@ -435,7 +435,9 @@ credential-shape privacy scan. Overlap, command timeout, a missing scenario,
 or invalid result leaves the previous success unchanged.
 
 Before either runner starts, the suite stamps the isolated `auth.json`'s
-`last_refresh` to the current instant (mode 600, tokens untouched). An imported
+recorded refresh time to the current instant — every key the account importer
+accepts (`last_refresh`, `lastRefreshAt`), so no stale alias outranks the stamp
+— with mode 600 preserved and tokens untouched. An imported
 account inherits that timestamp, and codex-lb proactively exchanges a refresh
 token once the account is older than the fixed eight-day
 `TOKEN_REFRESH_INTERVAL_DAYS` window (`app/core/auth/refresh.py`). Without the

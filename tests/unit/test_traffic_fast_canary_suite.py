@@ -236,6 +236,7 @@ def test_auth_stamp_keeps_a_stale_canary_credential_inside_the_refresh_window(tm
 
     document = json.loads(config.auth_json.read_text())
     assert document["last_refresh"] == stamp
+    assert "lastRefreshAt" not in document
     assert document["tokens"] == _STALE_AUTH_JSON["tokens"]
     assert document["auth_mode"] == "chatgpt"
     assert stat.S_IMODE(config.auth_json.stat().st_mode) == 0o600
@@ -263,3 +264,29 @@ def test_auth_stamp_rejects_unusable_auth_json(tmp_path: Path) -> None:
     config.auth_json.write_text("[]")
     with pytest.raises(fast_canary_suite.FastCanaryError, match="JSON object"):
         fast_canary_suite.stamp_isolated_auth_refresh(config.auth_json)
+
+
+def test_auth_stamp_covers_every_timestamp_alias_the_importer_accepts(tmp_path: Path) -> None:
+    """``AuthFile`` prefers ``lastRefreshAt``; a stale alias must not survive."""
+    config = _config(tmp_path)
+    camel = {key: value for key, value in _STALE_AUTH_JSON.items() if key != "last_refresh"}
+    camel["lastRefreshAt"] = _STALE_AUTH_JSON["last_refresh"]
+    config.auth_json.write_text(json.dumps(camel))
+
+    stamp = fast_canary_suite.stamp_isolated_auth_refresh(config.auth_json)
+
+    document = json.loads(config.auth_json.read_text())
+    assert document["lastRefreshAt"] == stamp
+    assert "last_refresh" not in document
+    stamped = parse_auth_json(config.auth_json.read_bytes())
+    assert stamped.last_refresh_at is not None
+    assert should_refresh(to_utc_naive(stamped.last_refresh_at)) is False
+
+    # Both keys present: the preferred alias must not keep a stale value.
+    both = dict(camel)
+    both["last_refresh"] = _STALE_AUTH_JSON["last_refresh"]
+    config.auth_json.write_text(json.dumps(both))
+    stamp = fast_canary_suite.stamp_isolated_auth_refresh(config.auth_json)
+    document = json.loads(config.auth_json.read_text())
+    assert document["lastRefreshAt"] == stamp
+    assert document["last_refresh"] == stamp

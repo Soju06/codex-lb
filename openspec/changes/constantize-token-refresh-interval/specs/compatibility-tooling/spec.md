@@ -17,10 +17,11 @@ successful version or timestamp.
 Before any controlled runner starts, that repository-owned module MUST
 neutralise proactive credential refresh for the run through the isolated
 credential it was given, not through process configuration: it MUST record the
-isolated `auth.json` as refreshed at the current instant (rewriting only that
-timestamp, preserving the file's restrictive mode and never reading or logging
-token material), and MUST fail the run when that file cannot be read as a JSON
-object or written back. Every controlled runner imports that file into its
+isolated `auth.json` as refreshed at the current instant (rewriting only the
+recorded refresh time — EVERY key the account importer accepts for it, so no
+stale alias can outrank the stamp — preserving the file's restrictive mode and
+never reading or logging token material), and MUST fail the run when that file
+cannot be read as a JSON object or written back. Every controlled runner imports that file into its
 throwaway database, and the proactive-refresh window is a fixed constant, so a
 run started from a stale isolated credential would otherwise exchange a real,
 single-use refresh token against the authorization host — which is a protocol
@@ -78,8 +79,8 @@ environment to suppress refresh.
   the fixed proactive-refresh window
 - **WHEN** the suite starts a controlled run
 - **THEN** it records the file as refreshed at the current instant before the
-  first runner is invoked, leaving the token material and the file mode
-  unchanged
+  first runner is invoked, updating every recorded-refresh key the importer
+  accepts and leaving the token material and the file mode unchanged
 - **AND** no runner environment carries a removed refresh-interval variable
 - **AND** an `auth.json` that cannot be read as a JSON object or written back
   fails the run instead of starting it

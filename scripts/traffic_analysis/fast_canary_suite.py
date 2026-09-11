@@ -25,6 +25,10 @@ from scripts.traffic_analysis.failure_matrix import (
 from scripts.traffic_analysis.privacy_scan import scan_tree
 
 _RAW_RESULT_NAMES = ("client_a_reference", "client_a", "client_c", "strict")
+# Every key ``app.core.auth.AuthFile.last_refresh_at`` accepts, in the order it
+# resolves them. Stamping only one would leave a stale alias that the account
+# importer prefers, so all present keys are stamped together.
+_AUTH_LAST_REFRESH_KEYS = ("lastRefreshAt", "last_refresh")
 
 
 class FastCanaryError(RuntimeError):
@@ -122,9 +126,9 @@ def stamp_isolated_auth_refresh(auth_json: Path) -> str:
     Stamping the file keeps the whole run inside the window (a run lasts
     minutes, the window is days) without widening the window for the process,
     which is what the removed ``CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS=365``
-    injection used to do for the failure matrix only. ``last_refresh`` is the
-    only value that changes (the file is rewritten as formatted JSON); tokens
-    are neither inspected nor logged.
+    injection used to do for the failure matrix only. The recorded refresh time
+    is the only value that changes (the file is rewritten as formatted JSON);
+    tokens are neither inspected nor logged.
     """
     try:
         document = json.loads(auth_json.read_text(encoding="utf-8"))
@@ -133,7 +137,9 @@ def stamp_isolated_auth_refresh(auth_json: Path) -> str:
     if not isinstance(document, dict):
         raise FastCanaryError("isolated auth.json must contain a JSON object")
     stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
-    document["last_refresh"] = stamp
+    present = [key for key in _AUTH_LAST_REFRESH_KEYS if key in document]
+    for key in present or [_AUTH_LAST_REFRESH_KEYS[-1]]:
+        document[key] = stamp
     try:
         atomic_write_json(auth_json, document, mode=0o600)
     except OSError as exc:

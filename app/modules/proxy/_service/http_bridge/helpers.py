@@ -775,24 +775,12 @@ def _service_get_settings_cache() -> Any:
     return _service_global_or("get_settings_cache", get_settings_cache)()
 
 
-def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
-    """Return whether the one permitted server-side anchored replay is unused."""
-    settings = _service_get_settings()
-    return (
-        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
-        in {"server_anchored_replay_once", "server_indefinite_recovery"}
-        and request_state.previous_response_id is not None
-        and request_state.response_id is None
-        and request_state.response_event_count == 0
-        and (
-            request_state.replay_count == 0
-            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
-            == "server_indefinite_recovery"
-        )
-    )
-
-
 def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    """Ask the client to drop the anchor and resend its full local history.
+
+    Only used where the durable ledger has *proved* the anchored turn was
+    abandoned, so the resend cannot duplicate an accepted upstream response.
+    """
     payload = openai_error(
         "previous_response_not_found",
         "Previous response was not found; retry without previous_response_id.",
@@ -2849,12 +2837,18 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
         # sweep runs. Reconsider every detached generation so marker ordering
         # cannot leave a fully drained predecessor owning a socket and cap slot.
         detached_sessions = tuple(service._http_bridge_detached_sessions.values())
-    for session in detached_sessions:
-        # Bounded: this sweep is on every request's path, so one detached
-        # session whose lock stays busy (or wedged) must not stall the fleet.
+    deadline = clock_for(service).monotonic() + _HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS
+    for index, session in enumerate(detached_sessions):
+        remaining = deadline - clock_for(service).monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "Detached HTTP bridge retire sweep deadline exhausted: skipped_sessions=%d",
+                len(detached_sessions) - index,
+            )
+            break
         await service._retire_http_bridge_after_drain_if_ready(
             session,
-            lock_wait_timeout_seconds=_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS,
+            lock_wait_timeout_seconds=remaining,
         )
 
 
@@ -3493,13 +3487,10 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     }:
         return True
     if code in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout"}:
-        # Recovery-first server mode permits exactly one anchored retry on a
-        # fresh upstream socket. This keeps Codex unchanged; delivery remains
-        # at-least-once because upstream acceptance is ambiguous.
-        return _service_get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode in {
-            "server_anchored_replay_once",
-            "server_indefinite_recovery",
-        }
+        # An ambiguous transport failure is never locally recoverable: upstream
+        # may already have accepted the anchored request, and there is no
+        # idempotency or status endpoint to prove otherwise. Fail closed.
+        return False
     message_value = error.get("message")
     message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
     return _is_previous_response_not_found_error(code=code, param=param_state, message=message)

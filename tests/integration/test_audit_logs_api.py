@@ -54,7 +54,7 @@ async def test_guest_security_audit_identity_is_denied(
         app_instance.dependency_overrides.pop(original, None)
 
     assert response.status_code == 403
-    assert response.json()["error"]["code"] == "admin_access_required"
+    assert response.json()["error"]["code"] == "permission_required"
     assert ACTOR_IP not in response.text
     assert "acc-sensitive" not in response.text
     assert "key-sensitive" not in response.text

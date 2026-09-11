@@ -10,6 +10,8 @@ type RequestOptions = {
   credentials?: RequestCredentials;
   cache?: RequestCache;
   suppressUnauthorizedHandler?: boolean;
+  /** Internal: set on the single retry after a successful step-up so it cannot loop. */
+  skipStepUp?: boolean;
 };
 
 const JSON_CONTENT_TYPE = "application/json";
@@ -41,6 +43,31 @@ let unauthorizedHandler: (() => void) | null = null;
 
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
+}
+
+export const STEP_UP_REQUIRED_CODE = "step_up_required";
+export const STEP_UP_UNAVAILABLE_CODE = "step_up_unavailable";
+export type StepUpMethod = "password" | "totp";
+
+export type StepUpHandlers = {
+  /** Ask the person to re-verify with `methods`; resolve `true` once `/step-up` succeeded, `false` if they gave up. */
+  onRequired: (methods: StepUpMethod[]) => Promise<boolean>;
+  /** The account holds no factor to re-verify with; tell the person how to get one. */
+  onUnavailable: (message: string) => void;
+};
+
+let stepUpHandlers: StepUpHandlers | null = null;
+
+/** Registered once by the step-up dialog; every API call shares the one flow. */
+export function setStepUpHandlers(handlers: StepUpHandlers | null): void {
+  stepUpHandlers = handlers;
+}
+
+function stepUpMethodsFrom(details: unknown): StepUpMethod[] {
+  const parsed = z
+    .object({ details: z.object({ methods: z.array(z.enum(["password", "totp"])) }) })
+    .safeParse(details);
+  return parsed.success ? parsed.data.details.methods : [];
 }
 
 function isBodyInit(value: unknown): value is BodyInit {
@@ -168,6 +195,19 @@ async function request<T>(
   const payload = await readJsonPayload(response);
   if (!response.ok) {
     const parsedError = parseApiErrorPayload(payload);
+    // A sensitive mutation wants a recent re-verification: run the shared
+    // step-up flow once and replay the very same request, so callers see
+    // either their result or a plain error - never the interruption.
+    if (response.status === 403 && stepUpHandlers && !options?.skipStepUp) {
+      if (parsedError.code === STEP_UP_REQUIRED_CODE) {
+        const verified = await stepUpHandlers.onRequired(stepUpMethodsFrom(parsedError.details));
+        if (verified) {
+          return request(method, url, schema as ZodType<T>, { ...options, skipStepUp: true });
+        }
+      } else if (parsedError.code === STEP_UP_UNAVAILABLE_CODE) {
+        stepUpHandlers.onUnavailable(parsedError.message);
+      }
+    }
     throw new ApiError({
       status: response.status,
       code: parsedError.code,

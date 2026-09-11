@@ -541,7 +541,11 @@ class SourceDispatch:
         if self.pin_intent is None or self.pin_executor is None:
             return
         # The source response id is known only now: an anchored intent appends
-        # the anchor row here so both rows land in one transaction (design §3, §6.3).
+        # the anchor row here so both rows land in one transaction (design §3,
+        # §6.3). An intent that still owes its anchor at this point (the source
+        # minted no ``response.id`` yet) is refused by the executor
+        # (``anchor_pending`` -> ``not_written``, nothing issued), so no content
+        # frame is ever delivered unanchored (decision 78).
         outcome = await self.pin_executor.commit(
             self.pin_intent.resolve(holder.response_id),
             drain_until=self.drain_until,

@@ -268,7 +268,6 @@ class HttpBridgeOperationEventBatcher:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
         response_id: str | None = None,
     ) -> TerminalOperationEventAppendResult:
         """Drain queued events and atomically append the terminal outcome."""
@@ -306,7 +305,6 @@ class HttpBridgeOperationEventBatcher:
                     event_text=event_text,
                     max_bytes=max_bytes,
                     state=state,
-                    expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                     response_id=response_id,
                 )
             else:
@@ -318,7 +316,6 @@ class HttpBridgeOperationEventBatcher:
                     event_text=event_text,
                     max_bytes=max_bytes,
                     state=state,
-                    expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                     response_id=response_id,
                 )
             terminal_persisted = bool(persisted and not dropped)
@@ -351,7 +348,6 @@ class HttpBridgeOperationEventBatcher:
         owner_epoch: int,
         state: str,
         expected_response_id: str | None,
-        expected_recovery_dispatch_count: int = 0,
         alternate_expected_response_id: str | None = None,
         response_id: str | None = None,
     ) -> None:
@@ -364,7 +360,6 @@ class HttpBridgeOperationEventBatcher:
                 owner_epoch=owner_epoch,
                 state=state,
                 expected_response_id=expected_response_id,
-                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 alternate_expected_response_id=alternate_expected_response_id,
                 response_id=response_id,
             )

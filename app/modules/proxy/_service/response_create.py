@@ -33,6 +33,7 @@ from app.core.clients.proxy import (
     _response_create_too_large_error_envelope,
     _should_slim_historical_tool_output,
     _slim_historical_response_content,
+    _ws_transport_payload_budget_bytes,
     apply_codex_installation_metadata,
 )
 from app.core.config.settings import DEFAULT_HOME_DIR, get_settings
@@ -178,6 +179,30 @@ def _responses_request_contains_input_image(payload: ResponsesRequest) -> bool:
     if not isinstance(input_value, list):
         return False
     return any(_json_value_contains_input_image_part(item) for item in input_value)
+
+
+def _input_image_request_requires_http_upstream(
+    payload: ResponsesRequest,
+    *,
+    payload_size_estimate_bytes: int,
+) -> bool:
+    """Return whether an ``input_image`` request must stay on the upstream HTTP transport.
+
+    Inline ``data:`` images ride the upstream websocket unchanged, so carrying one
+    is not by itself a reason to pin upstream HTTP; the bridge bypass exists to
+    free bridge pending slots (#903), not to avoid the websocket. Two
+    websocket-specific hazards survive, and only those keep the pin (#2363). A
+    payload over the websocket frame budget would reach
+    ``_prepare_websocket_response_create_payload``, which replaces every
+    historical inline image with an omission notice. An external ``http(s)``
+    image URL may still be there after ``_inline_content_images`` gives up on a
+    failed fetch, and the upstream websocket does not accept one.
+    """
+    if not _responses_request_contains_input_image(payload):
+        return False
+    if payload_size_estimate_bytes > _ws_transport_payload_budget_bytes():
+        return True
+    return _count_external_image_urls({"input": payload.input}) > 0
 
 
 def _responses_request_uses_image_generation(payload: ResponsesRequest) -> bool:

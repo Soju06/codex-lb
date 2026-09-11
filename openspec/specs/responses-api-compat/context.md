@@ -272,7 +272,14 @@ OpenSpec change first.
 Healthy native HTTP requests use normal policy. The proxy cannot infer every
 client-local WebSocket failure from HTTP alone; it uses its existing 60-second
 upstream-connect failure marker as concrete failure evidence. Operator HTTP
-pins, image and size bypasses remain effective. No new retry/session registry.
+pins and size bypasses remain effective. The image bypass keeps requests off the
+HTTP session bridge but no longer pins the upstream transport, which is resolved
+by ordinary precedence; an `input_image` request keeps upstream HTTP only when
+its payload exceeds the WebSocket frame budget or still carries an external
+image URL. External-URL detection reads top-level `input_image` items and one
+level of `content`, exactly the shapes the image inliner can rewrite, so a URL
+nested deeper — inside a tool-output array, say — is invisible to both and does
+not keep the pin. No new retry/session registry.
 
 History-only locality is soft, scoped by the bridge's full API-key identifier,
 and hashes the complete first user item plus instructions and model. No client

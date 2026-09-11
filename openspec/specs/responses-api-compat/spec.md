@@ -3076,20 +3076,25 @@ account-owner requests whose upstream resource is bound to the selected account.
 The service MUST bypass the HTTP responses bridge when a `/v1/responses`,
 `/backend-api/codex/responses`, `/responses/compact`, or `/v1/responses/compact`
 request contains any `input_image` part in top-level input items, nested
-message content, or tool output content, and send the request over the raw HTTP
-Responses stream path. This bypass MUST happen after rejecting unsupported
-uploaded-image references and MUST be limited to the current request; subsequent
-text-only requests MAY continue using the HTTP responses bridge.
+message content, or tool output content, and send the request over the raw
+(non-bridge) Responses stream path. This bypass MUST happen after rejecting
+unsupported uploaded-image references and MUST be limited to the current
+request; subsequent text-only requests MAY continue using the HTTP responses
+bridge.
 
-The raw HTTP path is the source of truth for image validation and upstream image
-error semantics. The bridge MUST NOT hold image requests waiting for
-`response.created` when upstream rejects an invalid inline image payload.
+The raw (non-bridge) path is the source of truth for image validation and
+upstream image error semantics. The bridge MUST NOT hold image requests waiting
+for `response.created` when upstream rejects an invalid inline image payload.
+
+This bridge bypass MUST NOT by itself pin the upstream stream transport. The
+upstream transport for a bypassed image request MUST be resolved by the ordinary
+upstream-transport precedence.
 
 #### Scenario: Nested input_image bypasses bridge
 
 - **GIVEN** the HTTP responses bridge is enabled
 - **WHEN** a Responses request contains a nested content part with `type = "input_image"`
-- **THEN** the request is sent through the raw HTTP stream path
+- **THEN** the request is sent through the raw (non-bridge) stream path
 - **AND** the HTTP responses bridge is not used for that request
 
 #### Scenario: Image bypass does not disable future text bridge use
@@ -3098,6 +3103,15 @@ error semantics. The bridge MUST NOT hold image requests waiting for
 - **WHEN** an image-bearing request bypasses the bridge
 - **THEN** the bypass applies only to that request
 - **AND** a later text-only request can still use the HTTP responses bridge
+
+#### Scenario: Image bypass does not pin the upstream transport
+
+- **GIVEN** the HTTP responses bridge is enabled
+- **AND** `upstream_stream_transport` is `"auto"`
+- **WHEN** a Responses request carrying an inline `data:` image below the
+  WebSocket frame budget bypasses the bridge
+- **THEN** the request MUST NOT be forced onto upstream HTTP
+- **AND** the configured transport policy MUST decide its upstream transport
 
 ### Requirement: Security-work authorization errors can route to authorized accounts
 
@@ -4557,8 +4571,19 @@ Precedence (highest first), evaluated before the policy:
 
 1. Outside the existing recent upstream WS failure cooldown, an explicit
    `upstream_stream_transport` override of `"http"` or `"websocket"` wins.
-2. Oversized-payload bypass and image / image-generation bypass force
-   upstream HTTP.
+2. Oversized-payload bypass and the `image_generation` bypass force upstream
+   HTTP. A request carrying `input_image` parts forces upstream HTTP only when
+   its serialized payload exceeds the WebSocket frame budget, or when the
+   payload still carries an external `http(s)` image URL that the proxy may be
+   unable to inline; an inline `data:` image alone MUST NOT force upstream HTTP.
+   These two residual `input_image` pins are deliberately evaluated ahead of an
+   explicit `"websocket"` override wherever the request passes through the HTTP
+   bridge routing decision — every `/v1/responses` and
+   `/backend-api/codex/responses` request does — because that override
+   short-circuits the size gate and an oversized image payload would otherwise
+   fail locally with `400 payload_too_large`. A request that never reaches that
+   decision, such as a `/v1/chat/completions` request whose bridge admission has
+   already declined the bridge, follows item 1 instead.
 3. The effective policy (per-API-key `transport_policy_override` when
    set, otherwise the global `http_downstream_transport_policy`) decides.
 
@@ -4679,6 +4704,23 @@ through to the global `http_downstream_transport_policy`.
 - **WHEN** the proxy resolves the upstream transport
 - **THEN** the request MUST be sent over upstream HTTP `POST`, because the
   oversized-payload bypass has higher precedence than the policy
+
+#### Scenario: inline image alone does not force HTTP under always_websocket
+
+- **GIVEN** `http_downstream_transport_policy` is `"always_websocket"`
+- **AND** a request carries an inline `data:` image below the WebSocket
+  frame budget
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST keep upstream WebSocket
+
+#### Scenario: external image URL still forces HTTP
+
+- **GIVEN** `upstream_stream_transport` is `"auto"`
+- **AND** a request carries an `input_image` part whose `image_url` is an
+  external `http(s)` URL, in a top-level input item or in that item's
+  `content` array
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST be sent over upstream HTTP `POST`
 
 #### Scenario: native WebSocket clients are unaffected by the policy
 

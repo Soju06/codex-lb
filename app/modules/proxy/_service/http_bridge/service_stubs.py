@@ -223,6 +223,10 @@ def _responses_request_uses_image_generation(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_responses_request_uses_image_generation")(*args, **kwargs)
 
 
+def _input_image_request_requires_http_upstream(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_input_image_request_requires_http_upstream")(*args, **kwargs)
+
+
 def _input_prefix_matches_stored_context(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_input_prefix_matches_stored_context")(*args, **kwargs)
 

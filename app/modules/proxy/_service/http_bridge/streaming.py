@@ -141,6 +141,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _header_value_case_insensitive,
     _http_bridge_startup_keepalive_grace_seconds,
     _inject_missing_interrupted_function_call_outputs,
+    _input_image_request_requires_http_upstream,
     _input_prefix_matches_stored_context,
     _is_previous_response_not_found_error,
     _maybe_log_proxy_request_payload,
@@ -963,7 +964,20 @@ class _HTTPBridgeStreamingMixin:
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
         image_request = _responses_request_contains_input_image(payload)
         image_generation_request = _responses_request_uses_image_generation(payload)
-        force_upstream_stream_transport = "http" if image_request else None
+        # The bridge bypass below is about bridge pending slots; it must not also
+        # decide the upstream transport. An inline ``data:`` image rides the
+        # upstream websocket unchanged, so only the two websocket-specific
+        # hazards keep the pin (#2363). ``image_request`` gates the predicate
+        # because the predicate's own first check is that same walk of the whole
+        # input, and this runs on every request on the hot path.
+        force_upstream_stream_transport = (
+            "http"
+            if image_request
+            and _input_image_request_requires_http_upstream(
+                payload, payload_size_estimate_bytes=payload_size_estimate_bytes
+            )
+            else None
+        )
         if runtime_config.enabled and (image_request or image_generation_request):
             record_http_bridge_routing(stage="bypass", reason="image")
             logger.info(

@@ -219,6 +219,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+from app.modules.proxy.context_dispatch import context_dispatch_identity, record_context_dispatch
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
@@ -375,6 +376,7 @@ async def _send_http_bridge_request_text_with_archive_id(
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.
     _enforce_http_bridge_response_create_text_size(request_state, text_data)
+    await record_context_dispatch(request_state.context_dispatch, session.api_key, session.account.id)
     if on_send_started is not None:
         on_send_started()
     token = set_request_id(request_state.archive_request_id)
@@ -756,6 +758,10 @@ class _HTTPBridgeRequestSubmitMixin:
             request_log_id=request_log_id,
             archive_request_id=request_log_id or resolved_request_id,
             model=payload.model,
+            context_ciphertexts=set(payload._codex_lb_context_ciphertexts),
+            context_dispatch=context_dispatch_identity(
+                upstream_payload.get("reasoning"), upstream_payload.get("client_metadata")
+            ),
             service_tier=forwarded_service_tier,
             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
             api_key_reservation=api_key_reservation,
@@ -2425,6 +2431,7 @@ class _HTTPBridgeRequestSubmitMixin:
             warmup_state = _WebSocketRequestState(
                 request_id=f"http_prewarm_{uuid4().hex}",
                 model=request_state.model,
+                context_dispatch=request_state.context_dispatch,
                 service_tier=request_state.service_tier,
                 reasoning_effort=request_state.reasoning_effort,
                 api_key_reservation=None,
@@ -3901,7 +3908,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 # identity on its owner unless a dedicated rebind path has
                 # already replaced the operation ID.
                 candidate_portable = request_state.operation_id is None and (
-                    _websocket_request_text_is_account_neutral_fresh_replay(candidate_text)
+                    _websocket_request_text_is_account_neutral_fresh_replay(
+                        candidate_text, trusted_ciphertexts=request_state.context_ciphertexts
+                    )
                 )
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None or request_text != candidate_text:

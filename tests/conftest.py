@@ -557,6 +557,9 @@ def _reset_global_state() -> None:
 @pytest.fixture(autouse=True)
 def _reset_hot_path_caches():
     """Reset T20 hot-path caches between tests to prevent state leakage."""
+    from app.modules.proxy.context_dispatch import get_context_dispatch_cache
+
+    get_context_dispatch_cache().clear()
     _reset_global_state()
     yield
     _reset_global_state()

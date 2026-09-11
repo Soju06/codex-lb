@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -7290,6 +7292,40 @@ its representation. This handoff MUST NOT replay the request.
 - **THEN** it remains an error event and ends the stream under the existing policy
 - **AND** SDK mode retains the existing request-context-dependent error conversion
 
+### Requirement: Self-contained Codex context replay envelopes
+
+The account-neutral fresh-replay validator SHALL recognize `reasoning.context=all_turns` requests containing fully supplied messages and additional-tools bundles with Codex-local UUID labels. It SHALL accept canonical UUID labels with `msg_`, `at_`, `fc_`, `fco_`, `ctc_` and `ctco_` prefixes on the corresponding message, additional-tools, function and custom-tool items. It SHALL also recognize exactly 50 lowercase hexadecimal characters after `msg_` on assistant messages and after `fc_` or `ctc_` on tool calls. Classification MAY omit these labels and validated transcript metadata from a temporary projection, but MUST NOT rewrite the dispatched body.
+
+Transcript metadata SHALL contain only an optional nonblank `turn_id`, an optional finite nonnegative numeric `create_time`, and an optional nonempty list of nonblank `content_item_kinds`. The newly accepted client metadata keys SHALL be limited to nonblank string values for `session_id`, `thread_id`, `turn_id`, and `root_turn_id`, in addition to existing permitted keys.
+
+Client tool namespaces SHALL contain only a nonblank name, an optional textual description, and a nonempty list of independently validated function or custom tool declarations. Unknown namespace fields, nested namespaces, and hosted-resource tools within a namespace MUST remain nonportable.
+
+Unknown encrypted retained state, stored response/conversation references, input file IDs, container/vector-store references, incomplete tool exchanges, malformed local labels, and unknown metadata fields MUST continue to prevent cross-account replay. A non-null input item `type` that is not a string MUST make the request ineligible for cross-account replay without raising a classification exception. This requirement MUST NOT relax strict ownership or bypass API-key account scope, failure settlement or retry exclusions.
+
+Authenticated context tool outputs MAY replace only verified native ciphertext parts in the classification projection. HTTP streaming and WebSocket request state SHALL carry this verification evidence internally and MUST NOT accept it from client fields. The upstream request MUST preserve the native ciphertext. A complete tool exchange with recognized namespace and transcript metadata SHALL remain eligible for the existing replay policy; unverified ciphertext and encrypted reasoning MUST remain fenced.
+
+#### Scenario: Pre-visible quota rejection can change accounts
+- **GIVEN** a fully supplied Codex context request containing only the recognized envelope and client-side tool declarations
+- **WHEN** account A returns HTTP 429 before any output becomes visible
+- **THEN** the existing retry policy may exclude A and submit the unchanged body to eligible account B
+
+#### Scenario: An envelope also contains retained account state
+- **GIVEN** a recognized Codex context envelope containing unverified encrypted retained input or a stored account-specific reference
+- **WHEN** account A is rejected or becomes unavailable
+- **THEN** the proxy does not submit that retained body to account B
+
+#### Scenario: Verified context results survive pre-visible quota rotation
+- **GIVEN** a complete tool exchange containing authenticated context output and no other account-specific state
+- **WHEN** an HTTP or WebSocket request receives a pre-visible quota rejection
+- **THEN** existing retry policy may send the same native ciphertext to another eligible account
+- **AND** the request retains ordinary reservation settlement, file ownership and retry exclusions
+
+#### Scenario: An input item has a non-string type
+- **GIVEN** an `all_turns` request contains an input item with an array or object as its `type`
+- **WHEN** the proxy classifies replay eligibility
+- **THEN** it denies cross-account replay without changing the request body
+- **AND** an ordinary upstream validation rejection reaches the HTTP client without a proxy classification error
+
 ### Requirement: HTTP bridge cleanup ownership survives caller cancellation
 
 Grouped HTTP bridge terminal persistence MUST keep each terminal append barrier and terminal delivery barrier under exactly one strongly owned task until that barrier completes. A barrier MUST NOT be considered released before its callback finishes. If caller cancellation arrives while terminal append, terminal enqueue, or either barrier is pending, the service MUST complete the required terminal delivery and barrier ordering before propagating the original cancellation, and MUST NOT invoke either barrier callback more than once.
@@ -10758,4 +10794,3 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
-

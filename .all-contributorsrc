@@ -1476,6 +1476,17 @@
         "test",
         "bug"
       ]
+    },
+    {
+      "login": "leosanxyz",
+      "name": "Leo Sanchez",
+      "avatar_url": "https://avatars.githubusercontent.com/u/28820995?v=4",
+      "profile": "https://github.com/leosanxyz",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

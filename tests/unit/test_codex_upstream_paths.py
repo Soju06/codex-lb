@@ -1590,3 +1590,71 @@ async def test_routed_stream_tolerates_response_without_release(route: ResolvedU
     ]
 
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [200, 403])
+async def test_context_control_transport_preserves_bytes_headers_and_redacts_traces(
+    route: ResolvedUpstreamRoute,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    status_code: int,
+) -> None:
+    import logging
+
+    from app.core.clients.proxy import CodexControlRequestPrivacyPolicy
+    from app.core.config.settings import Settings
+
+    private_value = "context-private-content-sentinel"
+    response_body = b'{"result":"opaque-upstream-response"}'
+
+    class ContextResponse:
+        status = status_code
+        headers = {"content-type": "application/json"}
+        content = response_body
+
+        def json(self):
+            return {"error": {"code": "private_context_error", "message": private_value}}
+
+    client = _CodexClient(ContextResponse())
+    settings = Settings(trace="upstream_summary,upstream_payload")
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    caplog.set_level(logging.DEBUG)
+    payload = ('{ "content": "' + private_value + '" }').encode()
+    request = codex_control_request(
+        "alpha/notes/v2/write_file",
+        method="POST",
+        payload=payload,
+        query_params=[("limit", "1"), ("limit", "2")],
+        headers={
+            "content-type": "application/json",
+            "authorization": "Bearer proxy-key",
+            "x-openai-encrypted-tool-arguments": "true",
+            "x-openai-tool-output-truncation-policy": '{"Bytes":4000}',
+        },
+        access_token="upstream-secret",
+        account_id="private-account",
+        base_url="https://chatgpt.test/backend-api",
+        route=route,
+        codex_client=cast(Any, client),
+        privacy_policy=CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT,
+    )
+    if status_code == 200:
+        response = await request
+        assert response.body == response_body
+    else:
+        with pytest.raises(ProxyResponseError) as error:
+            await request
+        assert error.value.status_code == 403
+    call = client.calls[0]
+    assert call["url"] == "https://chatgpt.test/backend-api/codex/alpha/notes/v2/write_file"
+    assert call["data"] == payload
+    assert call["params"] == [("limit", "1"), ("limit", "2")]
+    headers = {k.lower(): v for k, v in call["headers"].items()}
+    assert headers["authorization"] == "Bearer upstream-secret"
+    assert headers["chatgpt-account-id"] == "private-account"
+    assert headers["x-openai-encrypted-tool-arguments"] == "true"
+    assert headers["x-openai-tool-output-truncation-policy"] == '{"Bytes":4000}'
+    assert "redacted" in caplog.text
+    for secret in [private_value, "upstream-secret", "proxy-key", "private-account"]:
+        assert secret not in caplog.text

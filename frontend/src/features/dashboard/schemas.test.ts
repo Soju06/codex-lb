@@ -322,6 +322,31 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.requestKind).toBe("limit_warmup");
   });
 
+  it("accepts mixed inference and context request pages, including failed context operations", () => {
+    const requests = [
+      { requestId: "req-inference", requestKind: "normal", status: "ok", model: "gpt-6-astra" },
+      { requestId: "req-notes", requestKind: "codex_context", status: "ok", model: "" },
+      { requestId: "req-history-error", requestKind: "codex_context", status: "error", model: "" },
+    ].map((request) => ({
+      requestedAt: ISO,
+      accountId: null,
+      errorCode: null,
+      errorMessage: null,
+      tokens: null,
+      cachedInputTokens: null,
+      reasoningEffort: null,
+      costUsd: null,
+      latencyMs: 42,
+      ...request,
+    }));
+
+    const parsed = RequestLogsResponseSchema.parse({ requests, total: 4, hasMore: true });
+
+    expect(parsed.requests).toMatchObject(requests);
+    expect(parsed.total).toBe(4);
+    expect(parsed.hasMore).toBe(true);
+  });
+
   it("accepts realtime live websocket request rows", () => {
     const parsed = RequestLogsResponseSchema.parse({
       requests: [

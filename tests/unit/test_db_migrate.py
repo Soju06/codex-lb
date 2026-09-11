@@ -1615,6 +1615,9 @@ def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
 
     sync_url = to_sync_database_url(url)
     with create_engine(sync_url, future=True).begin() as connection:
+        # The simulated historical revision predates the context tables.
+        connection.execute(text("DROP TABLE codex_context_participants"))
+        connection.execute(text("DROP TABLE codex_context_sessions"))
         connection.execute(
             text("UPDATE alembic_version SET version_num = :legacy"),
             {"legacy": "013_add_dashboard_settings_routing_strategy"},
@@ -1633,6 +1636,9 @@ def test_run_upgrade_auto_remaps_legacy_routing_security_merge_head(tmp_path: Pa
 
     sync_url = to_sync_database_url(url)
     with create_engine(sync_url, future=True).begin() as connection:
+        # The simulated historical revision predates the context tables.
+        connection.execute(text("DROP TABLE codex_context_participants"))
+        connection.execute(text("DROP TABLE codex_context_sessions"))
         connection.execute(
             text("UPDATE alembic_version SET version_num = :legacy"),
             {"legacy": "20260525_000000_merge_routing_settings_security_heads"},

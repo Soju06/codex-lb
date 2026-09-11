@@ -103,6 +103,27 @@ class ModelSourcePin(Base):
     __table_args__ = (Index("ix_model_source_pins_purge_at", "purge_at"),)
 
 
+class CodexContextSession(Base):
+    __tablename__ = "codex_context_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # Keep ownership tombstones after account/key deletion; never silently
+    # recreate a remote namespace under a different principal.
+    api_key_id: Mapped[str] = mapped_column(String, nullable=False)
+    owner_account_id: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class CodexContextParticipant(Base):
+    __tablename__ = "codex_context_participants"
+
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("codex_context_sessions.session_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+
+
 class Account(Base):
     __tablename__ = "accounts"
 

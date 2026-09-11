@@ -211,7 +211,11 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     # (and their own drift against the ORM), while the merge itself must stay a
     # no-op in both directions.
     command.downgrade(_build_alembic_config(database.url), _MERGE)
-    assert _revisions(database.engine) == (_MERGE,)
+    at_merge_revisions = _revisions(database.engine)
+    assert _MERGE in at_merge_revisions
+    # Later merge revisions can join independent branches. Downgrading this
+    # branch must preserve those unrelated heads and their schema.
+    other_heads = set(at_merge_revisions) - {_MERGE}
     at_merge = _state(database.engine)
     merge_drift = check_schema_drift(database.url)
 
@@ -220,7 +224,7 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
         # A direct downgrade to either immediate parent executes only the
         # no-op merge downgrade. Alembic records both unmerged parent heads;
         # it does not execute either parent's schema-removing downgrade.
-        assert _revisions(database.engine) == tuple(sorted(_PARENTS))
+        assert set(_revisions(database.engine)) == set(_PARENTS) | other_heads
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
 

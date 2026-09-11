@@ -130,6 +130,12 @@ def thread_anchor_domain(*, api_key_id: str, model_class: str, instructions: str
 
     parts = (api_key_id.encode(), model_class.encode(), instructions.encode())
     framed = b"".join(len(part).to_bytes(8, "big") + part for part in parts)
+    # codeql[py/weak-sensitive-data-hashing] ``api_key_id`` is the key's row id,
+    # not the key or any secret material, and this digest is never stored or
+    # compared as a credential: it is a process-local domain separator that
+    # keeps one tenant's thread anchors from colliding with another's. A
+    # deliberately slow password hash would be run on every turn for no
+    # security benefit.
     return sha256(framed).digest()
 
 

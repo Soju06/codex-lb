@@ -417,9 +417,37 @@ Behaviour is unchanged; each env name gets the one-release WARN.
 
 Helm also drops `config.stickySessionCleanupEnabled` so a default install
 does not trip its own removal warning. `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS`
-was in the triage batch but is kept: `scripts/traffic_analysis/fast_canary_suite.py`
-sets it to `365` in the failure-matrix subprocess to suppress proactive
-refresh, a live consumer that constantizing would silently defeat.
+was in the triage batch but was deferred one change: it had a live consumer,
+and `constantize-token-refresh-interval` finished it (below).
+
+### Removed by `constantize-token-refresh-interval`
+
+`CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS` is the 28th and last field of the
+`MIGRATING` backlog. The proactive refresh window is now the fixed eight-day
+`TOKEN_REFRESH_INTERVAL_DAYS` in `app/core/auth/refresh.py`, its previous
+default. It was never a recovery lever: an account is refreshed on demand on
+any upstream 401 whatever the window says, so shortening it only adds
+exchanges and lengthening it only defers one.
+
+`constantize-core-tunables` kept the field because the traffic-parity canary
+was the one live consumer — it pinned the variable to `365` so a controlled
+run could not exchange its isolated, single-use refresh token against the real
+authorization host (`AUTH_BASE_URL` is a protocol constant, so redirecting
+`CODEX_LB_UPSTREAM_BASE_URL` at the local fixture does not cover OAuth). That
+pin is replaced by a repository-owned preflight in
+`scripts/traffic_analysis/fast_canary_suite.py`: the suite stamps the isolated
+`auth.json`'s `last_refresh` to the current instant before either runner
+starts, so the imported account is inside the fixed window for the whole run.
+The stamp is strictly stronger than the pin, which only ever reached the
+failure-matrix subprocess while the raw HTTP/2 runner relied on a host-local
+`CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS=365` line of its own; both host-local
+lines can now be deleted, and until they are, they only produce the removed
+setting WARN.
+
+With this removal the `MIGRATING` backlog in `app/core/config/tiers.py` is
+empty: every T3 field has a `dashboard_settings` column of the same name or a
+`DASHBOARD_HOMES` mapping. An empty registry is the intended terminal state,
+not a lint error.
 
 ## Example
 

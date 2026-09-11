@@ -123,6 +123,13 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     # three non-default ambiguous-continuation recovery modes were deleted and
     # the shipped ``fail_closed`` behaviour is now the only one.
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_AMBIGUOUS_CONTINUATION_RECOVERY_MODE",
+    # constantize-token-refresh-interval (first release after v1.25.0-beta.7):
+    # the proactive refresh window is the fixed eight-day
+    # ``TOKEN_REFRESH_INTERVAL_DAYS`` in ``app/core/auth/refresh.py``. Its only
+    # live consumer, the traffic-parity canary, now suppresses proactive
+    # refresh by stamping its isolated ``auth.json`` inside the window instead
+    # of widening the window for the whole process.
+    "CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS",
 )
 
 
@@ -327,7 +334,6 @@ class Settings(BaseSettings):
     auth_guardian_enabled: bool = True
     # T3 → dashboard (deprecated env alias, remove next minor)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
-    token_refresh_interval_days: int = 8
     # T1 (topology). Path to a JSON registry of additional usage quota keys
     # that replaces the bundled ``config/additional_quota_registry.json``.
     # Unset (or blank) keeps the bundled registry. The Alembic backfill

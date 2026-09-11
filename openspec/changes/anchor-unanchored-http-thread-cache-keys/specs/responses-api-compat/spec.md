@@ -206,7 +206,10 @@ sequence — expiry, eviction, or a later turn replacing that sequence — the
 service MUST drop the candidate references that sequence created, so a dead
 thread cannot occupy the bounded candidate capacity of a shared item and crowd
 a live thread out of it. The per-item ceiling MUST be enforced without first
-materialising the encoding of the item it refuses. Losing anchor state (eviction, expiry, restart, or a
+materialising the encoding of the item it refuses, and the canonical encoding
+the ceiling is measured against MUST NOT inflate non-ASCII text, so a
+transcript in a non-Latin script reaches that ceiling at the documented size
+rather than at a fraction of it. Losing anchor state (eviction, expiry, restart, or a
 blue/green swap serving both colors) MUST be safe: the next turn mints a new
 key.
 
@@ -251,6 +254,12 @@ drop that client's locality because its key text looked like a proxy shape.
 - **GIVEN** an unanchored thread each of whose input items reaches the per-turn total encoding ceiling on its own
 - **WHEN** the client sends ten consecutive appending turns
 - **THEN** those turns resolve to one key rather than to one key each
+
+#### Scenario: A non-ASCII item reaches the ceiling at its documented size
+
+- **GIVEN** an input item of non-ASCII text whose size is below the documented per-item ceiling
+- **WHEN** the turn is digested
+- **THEN** the item is digested rather than treated as past the ceiling
 
 #### Scenario: One oversized item does not strand the thread
 

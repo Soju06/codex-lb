@@ -20,6 +20,9 @@
   capped candidate slot on a shared digest.
 - [x] 1.6 Enforce the per-item ceiling with a structural pre-check, because
   `iterencode` yields a large string scalar as one already-materialised chunk.
+- [x] 1.7 Encode items with `ensure_ascii=False`. With it on, non-Latin text
+  expands ~6x, which both materialises megabytes for an item about to be
+  refused and trips the per-item ceiling at a sixth of its documented size.
 
 ## 2. Derivation
 
@@ -72,6 +75,8 @@
   clears the floor even after usage flips.
 - [x] 5.12 Eviction and re-register leave no reverse-index references, and an
   oversized item is never handed to the encoder.
+- [x] 5.13 A large non-ASCII item is digested, not refused, and its encoded
+  size tracks its raw size.
 
 ## 6. Validation
 

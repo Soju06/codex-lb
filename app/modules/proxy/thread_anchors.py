@@ -146,10 +146,22 @@ _MAX_INDEX_DIGESTS = _MAX_ANCHORS * _MAX_WINDOW_ITEMS
 # them is still verified item by item.
 _MAX_LOOKUP_PROBE_ITEMS = 8
 
-# Same canonical encoding as ``_fingerprint_input_items``
-# (app/modules/proxy/_service/response_create.py), applied per item so the
-# window can be bounded without materialising the whole list.
-_ITEM_ENCODER = json.JSONEncoder(ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+# Deterministic per-item encoding: sorted keys, no insignificant whitespace,
+# applied one item at a time so the window is bounded without materialising the
+# whole list. These digests are compared only against each other inside this
+# process, so the encoding has to be stable, not identical to any other
+# fingerprint in the codebase.
+#
+# ``ensure_ascii`` is deliberately **off**. With it on, every non-ASCII code
+# point becomes ``\uXXXX``: a Korean or Japanese transcript expands about
+# sixfold, which both materialises megabytes for an item the walk may be about
+# to refuse and trips ``_MAX_ITEM_ENCODED_CHARS`` at roughly a sixth of the
+# documented size. Off, the encoded length tracks the raw length closely, which
+# is also what makes the pre-check in ``_exceeds_item_ceiling`` tight. A str
+# holding an unpaired surrogate then fails to encode and is reported
+# ``UNENCODABLE`` (``UnicodeEncodeError`` is a ``ValueError``), which is the
+# conservative answer for a body that is not representable anyway.
+_ITEM_ENCODER = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +221,8 @@ def _exceeds_item_ceiling(item: JsonValue) -> bool:
     length (escaping and punctuation only add), so exceeding the ceiling here
     proves the encoding would exceed it, and the walk never materialises the
     encoding of an item it is going to refuse. Staying under is not a proof, so
-    the encode loop keeps its own exact check.
+    the encode loop keeps its own exact check -- but with ``ensure_ascii`` off
+    the two are close, rather than a factor of six apart on non-ASCII text.
     """
 
     pending: list[JsonValue] = [item]

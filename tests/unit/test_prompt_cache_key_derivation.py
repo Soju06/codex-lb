@@ -660,3 +660,33 @@ class TestPerItemCeilingIsEnforcedBeforeEncoding:
         assert window is not None
         assert window.item_count == 3
         assert len(encoded) == 3, "the oversized item was handed to the encoder anyway"
+
+
+class TestNonAsciiItemsAreNotExpandedSixfold:
+    """`ensure_ascii=True` renders every non-ASCII code point as `\\uXXXX`.
+
+    On a fleet whose transcripts are largely Korean and Japanese that both
+    materialises megabytes for an item the walk may be about to refuse, and
+    trips the per-item ceiling at roughly a sixth of its documented size --
+    turning ordinary items into window boundaries.
+    """
+
+    def test_a_large_non_ascii_item_is_digested_not_refused(self):
+        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        # Comfortably under the per-item ceiling as written, ~6x over it when
+        # every code point is escaped.
+        korean = "안녕하세요 " * 40_000
+        assert len(korean) < _MAX_ITEM_ENCODED_CHARS
+        window = build_thread_window(_json_value([_user(korean), _user("tail")]), domain=domain)
+        assert window is not None
+        assert window.item_count == 2
+
+    def test_encoded_size_tracks_the_raw_size_for_non_ascii_text(self):
+        from app.modules.proxy.thread_anchors import _bounded_item_digest
+
+        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        item = _json_value(_user("한" * 100_000))
+        digested = _bounded_item_digest(domain, item)
+        assert isinstance(digested, tuple)
+        _digest, encoded_size = digested
+        assert encoded_size < 2 * 100_000, f"non-ASCII text expanded to {encoded_size} chars"

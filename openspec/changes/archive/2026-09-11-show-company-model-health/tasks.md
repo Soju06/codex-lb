@@ -1,0 +1,5 @@
+- [x] Share probe classification between catalog filtering and dashboard projection.
+- [x] Expose per-model probe details and honest completed-check counts in the authenticated source-list API.
+- [x] Render a bilingual per-model health table with passive refresh and current source admission information.
+- [x] Verify API/catalog agreement, unknown/stale/slow/error states and frontend rendering.
+- [x] Validate OpenSpec, typecheck and capture an isolated browser preview without interrupting production.

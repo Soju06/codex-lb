@@ -26,6 +26,8 @@ from app.core.utils.shared_future import (
 from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import extract_sse_data
 from app.db.models import ModelSource
+from app.modules.model_sources import chat_protocol, codebase_llm, llmbox, trae
+from app.modules.model_sources.trae_protocol import TraeProtocolError, TraeResponsesDecoder, prepare_request
 
 logger = logging.getLogger(__name__)
 
@@ -303,11 +305,23 @@ async def forward_chat_completion(
             session.post(
                 _source_url(source, "/chat/completions"),
                 headers=_source_headers(source, encryptor=encryptor),
-                json=payload,
+                **(
+                    {"allow_redirects": False}
+                    if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
+                    else {}
+                ),
+                json=codebase_llm.upstream_payload(payload)
+                if source.kind == codebase_llm.CODEBASE_LLM_KIND
+                else payload,
                 timeout=_source_client_timeout(source),
             )
         )
         data = await _response_json(response)
+        if (
+            source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
+            and 300 <= response.status < 400
+        ):
+            raise _invalid_upstream_response_error(response.status)
         if response.status >= 400:
             raise _upstream_status_error(response, source, encryptor=encryptor, error_payload=_error_payload(data))
         if data is None:
@@ -387,6 +401,31 @@ async def forward_responses(
     encryptor: TokenEncryptor | None = None,
     recode_credential_failures: bool = True,
 ) -> SourceResponsesCompletion:
+    if source.kind == trae.TRAE_KIND or chat_protocol.uses_chat_backend(source, payload):
+        stream = await stream_responses(
+            source, payload, encryptor=encryptor, recode_credential_failures=recode_credential_failures
+        )
+        final: dict[str, JsonValue] | None = None
+        try:
+            async for chunk in stream.body:
+                for frame in chunk.decode().split("\n\n"):
+                    if not frame.startswith("data: "):
+                        continue
+                    event = json.loads(frame[6:])
+                    if event.get("type") in ("response.completed", "response.incomplete"):
+                        final = event["response"]
+                    elif event.get("type") == "response.failed":
+                        raise ModelSourceForwardingError(status_code=502, payload={"error": event["response"]["error"]})
+        finally:
+            await stream.aclose()
+        if final is None:
+            raise empty_stream_error(stream.upstream_status_code)
+        return SourceResponsesCompletion(
+            payload=final,
+            usage=stream.usage_holder.usage,
+            timings=None,
+            upstream_status_code=stream.upstream_status_code,
+        )
     try:
         async with lease_model_source_session() as session:
             # Non-stream generations legitimately spend minutes before the
@@ -395,9 +434,21 @@ async def forward_responses(
             async with session.post(
                 _source_url(source, "/responses"),
                 headers=_source_headers(source, encryptor=encryptor),
-                json=payload,
+                **(
+                    {"allow_redirects": False}
+                    if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
+                    else {}
+                ),
+                json=codebase_llm.upstream_payload(payload)
+                if source.kind == codebase_llm.CODEBASE_LLM_KIND
+                else payload,
                 timeout=_source_client_timeout(source),
             ) as response:
+                if (
+                    source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
+                    and 300 <= response.status < 400
+                ):
+                    raise _invalid_upstream_response_error(response.status)
                 if response.status >= 400:
                     if recode_credential_failures and response.status in _CREDENTIAL_REJECTION_STATUSES:
                         raise _credentials_rejected_error(response, source)
@@ -448,6 +499,11 @@ async def forward_audio_transcription(
             ) as response:
                 body = await response.read()
                 response_content_type = response.headers.get("Content-Type")
+                if (
+                    source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
+                    and 300 <= response.status < 400
+                ):
+                    raise _invalid_upstream_response_error(response.status)
                 if response.status >= 400:
                     raise _upstream_status_error(
                         response,
@@ -478,10 +534,22 @@ async def forward_embeddings(
             async with session.post(
                 _source_url(source, "/embeddings"),
                 headers=_source_headers(source, encryptor=encryptor),
-                json=payload,
+                **(
+                    {"allow_redirects": False}
+                    if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
+                    else {}
+                ),
+                json=codebase_llm.upstream_payload(payload)
+                if source.kind == codebase_llm.CODEBASE_LLM_KIND
+                else payload,
                 timeout=_source_client_timeout(source),
             ) as response:
                 data = await _response_json(response)
+                if (
+                    source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
+                    and 300 <= response.status < 400
+                ):
+                    raise _invalid_upstream_response_error(response.status)
                 if response.status >= 400:
                     raise _upstream_status_error(
                         response, source, encryptor=encryptor, error_payload=_error_payload(data)
@@ -509,9 +577,41 @@ async def stream_responses(
 ) -> SourceResponsesStream:
     usage_holder = SourceUsageHolder()
     usage_parser = SourceStreamUsageParser(usage_holder, response_shape="responses")
+    decoder: TraeResponsesDecoder | None = None
+    path = "/responses"
+    if source.kind == trae.TRAE_KIND:
+        try:
+            request = prepare_request(source, payload)
+        except (ValueError, TraeProtocolError) as exc:
+            raise ModelSourceForwardingError(
+                status_code=400,
+                payload={
+                    "error": {"message": str(exc), "type": "invalid_request_error", "code": "trae_unsupported_request"}
+                },
+            ) from None
+        decoder = TraeResponsesDecoder(request)
+        payload = request.body
+        path = "/llm_raw_chat"
+    elif chat_protocol.uses_chat_backend(source, payload):
+        try:
+            request = chat_protocol.prepare_request(source, payload)
+        except (ValueError, TraeProtocolError) as exc:
+            raise ModelSourceForwardingError(
+                status_code=400,
+                payload={
+                    "error": {
+                        "message": str(exc),
+                        "type": "invalid_request_error",
+                        "code": "native_chat_unsupported_request",
+                    }
+                },
+            ) from None
+        decoder = chat_protocol.ChatResponsesDecoder(request)
+        payload = request.body
+        path = "/chat/completions"
     stack, response, first_chunk = await _open_source_stream(
         source,
-        "/responses",
+        path,
         payload,
         encryptor=encryptor,
         recode_credential_failures=recode_credential_failures,
@@ -532,6 +632,7 @@ async def stream_responses(
         idle_seconds=source_stream_idle_seconds(),
         scheduler=scheduler,
         clock=clock,
+        decoder=decoder,
     )
     return SourceResponsesStream(
         body=body,
@@ -590,6 +691,7 @@ async def _source_stream_body(
     idle_seconds: float,
     scheduler: Scheduler,
     clock: Clock,
+    decoder: TraeResponsesDecoder | None = None,
 ) -> AsyncIterator[bytes]:
     """Relay source bytes chunk by chunk; the transport is released exactly once.
 
@@ -662,8 +764,17 @@ async def _source_stream_body(
                     raise _idle_timeout_error(idle_seconds) from exc
                 if chunk is None:
                     # EOF: an unterminated final record is still a frame.
-                    usage_parser.finish()
-                    break
+                    if decoder is not None:
+                        chunk = decoder.finish()
+                        decoder = None
+                        if not chunk:
+                            usage_parser.finish()
+                            break
+                    else:
+                        usage_parser.finish()
+                        break
+            if decoder is not None:
+                chunk = decoder.feed(chunk)
             usage_parser.feed(chunk)
             if withheld is None:
                 if usage_holder.first_content_seen:
@@ -686,6 +797,8 @@ async def _source_stream_body(
                 elif withheld_bytes > SOURCE_STREAM_WITHHELD_CAP_BYTES:
                     raise _withheld_cap_error(withheld_bytes)
             chunk = None
+            if decoder is not None and decoder.terminal:
+                break
         if withheld:
             if usage_holder.first_content_seen:
                 # The unterminated tail delivered content (I11: delivered => pinned).
@@ -737,6 +850,7 @@ async def _open_source_stream(
     chunk, which the body yields before reading further, or ``None`` when the
     body reads it.
     """
+    trae_config_name = payload.get("config_name")
     stack = AsyncExitStack()
     opened_at = clock.monotonic()
     try:
@@ -746,8 +860,20 @@ async def _open_source_stream(
                 response = await stack.enter_async_context(
                     session.post(
                         _source_url(source, path),
-                        headers=_source_headers(source, encryptor=encryptor, stream=True),
-                        json=payload,
+                        headers=_source_headers(
+                            source,
+                            encryptor=encryptor,
+                            stream=True,
+                            trae_config_name=trae_config_name if isinstance(trae_config_name, str) else None,
+                        ),
+                        **(
+                            {"allow_redirects": False}
+                            if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
+                            else {}
+                        ),
+                        json=codebase_llm.upstream_payload(payload)
+                        if source.kind == codebase_llm.CODEBASE_LLM_KIND
+                        else payload,
                         timeout=_source_client_timeout(source),
                     )
                 )
@@ -762,6 +888,11 @@ async def _open_source_stream(
                 # Only the source's total budget was armed: the pre-hardening verdict.
                 raise _unreachable_error(exc) from exc
             raise _timeout_error("header", source, elapsed=clock.monotonic() - opened_at) from exc
+        if (
+            source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
+            and 300 <= response.status < 400
+        ):
+            raise _invalid_upstream_response_error(response.status)
         if response.status >= 400:
             if recode_credential_failures and response.status in _CREDENTIAL_REJECTION_STATUSES:
                 raise _credentials_rejected_error(response, source)
@@ -987,12 +1118,66 @@ def _source_headers(
     stream: bool = False,
     accept: str | None = None,
     content_type: str | None = "application/json",
+    trae_config_name: str | None = None,
 ) -> dict[str, str]:
     headers = {
         "Accept": accept or ("text/event-stream" if stream else "application/json"),
     }
     if content_type is not None:
         headers["Content-Type"] = content_type
+    if source.kind == codebase_llm.CODEBASE_LLM_KIND:
+        try:
+            codebase_llm.validate_binding(
+                source.base_url,
+                source.api_key_encrypted,
+                source.supports_audio_transcriptions,
+                source.supports_embeddings,
+            )
+            headers.update(codebase_llm.request_headers())
+            return headers
+        except ValueError as exc:
+            raise ModelSourceForwardingError(
+                status_code=502,
+                payload={
+                    "error": {"message": str(exc), "type": "upstream_error", "code": "model_source_credentials_error"}
+                },
+            ) from None
+    if source.kind == trae.TRAE_KIND:
+        try:
+            trae.validate_binding(
+                source.base_url,
+                source.api_key_encrypted,
+                source.supports_audio_transcriptions,
+                source.supports_embeddings,
+            )
+            return trae.request_headers(trae_config_name)
+        except ValueError as exc:
+            raise ModelSourceForwardingError(
+                status_code=502,
+                payload={
+                    "error": {"message": str(exc), "type": "upstream_error", "code": "model_source_credentials_error"}
+                },
+            ) from None
+    if source.kind == llmbox.LLMBOX_KIND:
+        try:
+            llmbox.validate_binding(
+                source.base_url,
+                source.api_key_encrypted,
+                source.supports_audio_transcriptions,
+                source.supports_embeddings,
+            )
+            token = llmbox.read_access_token()
+        except ValueError as exc:
+            raise ModelSourceForwardingError(
+                status_code=502,
+                payload={
+                    "error": {"message": str(exc), "type": "upstream_error", "code": "model_source_credentials_error"}
+                },
+                upstream_status_code=None,
+            ) from None
+        headers["Authorization"] = f"Bearer {token}"
+        headers["x-source"] = "llmgw"
+        return headers
     if source.api_key_encrypted is not None:
         secret = _source_api_key_secret(source, encryptor=encryptor)
         headers["Authorization"] = f"Bearer {secret}"
@@ -1027,6 +1212,14 @@ def _redact_source_error_payload(
     *,
     encryptor: TokenEncryptor | None,
 ) -> dict[str, JsonValue]:
+    if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND):
+        return {
+            "error": {
+                "message": "Company model upstream request failed",
+                "type": "upstream_error",
+                "code": f"{source.kind}_upstream_error",
+            }
+        }
     if source.api_key_encrypted is None:
         return payload
     secret = _source_api_key_secret(source, encryptor=encryptor)

@@ -106,6 +106,7 @@ from app.modules.firewall import api as firewall_api
 from app.modules.fleet import api as fleet_api
 from app.modules.health import api as health_api
 from app.modules.model_sources import api as model_sources_api
+from app.modules.model_sources.health_checks import build_company_model_health_scheduler
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
@@ -682,6 +683,7 @@ async def lifespan(app: FastAPI):
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     api_key_last_used_flush_scheduler = build_api_key_last_used_flush_scheduler()
     model_scheduler = build_model_refresh_scheduler()
+    company_model_health_scheduler = build_company_model_health_scheduler()
     sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
     quota_planner_scheduler = build_quota_planner_scheduler()
     auth_guardian_scheduler = build_auth_guardian_scheduler()
@@ -700,6 +702,7 @@ async def lifespan(app: FastAPI):
     await api_key_limit_reset_scheduler.start()
     await api_key_last_used_flush_scheduler.start()
     await model_scheduler.start()
+    await company_model_health_scheduler.start()
     await sticky_session_cleanup_scheduler.start()
     await quota_planner_scheduler.start()
     await auth_guardian_scheduler.start()
@@ -918,6 +921,7 @@ async def lifespan(app: FastAPI):
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()
         await sticky_session_cleanup_scheduler.stop()
+        await company_model_health_scheduler.stop()
         await metadata_scheduler.stop()
         await model_scheduler.stop()
         # Stop the invalidation poller only after the model scheduler: a final

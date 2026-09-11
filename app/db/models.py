@@ -1817,6 +1817,7 @@ class ModelSource(Base):
     )
     timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_token_budget: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

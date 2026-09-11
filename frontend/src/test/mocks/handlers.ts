@@ -2677,6 +2677,7 @@ export const handlers = [
       supportsEmbeddings: payload?.supportsEmbeddings ?? false,
       models: (payload?.models ?? [{ model: `model-${sequence}` }]).map(
         (model, index) => ({
+          healthCheck: null,
           id: index + 1,
           sourceId,
           model: model.model,

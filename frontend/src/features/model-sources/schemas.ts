@@ -1,6 +1,18 @@
 import { z } from "zod";
 
 export const ModelSourceModelSchema = z.object({
+  healthCheck: z.object({
+    state: z.enum(["unknown", "healthy", "unhealthy", "slow", "stale"]),
+    checkedAt: z.iso.datetime({ offset: true }).nullable(),
+    expiresAt: z.iso.datetime({ offset: true }).nullable(),
+    nextDueAt: z.iso.datetime({ offset: true }).nullable(),
+    latencyMs: z.number().nullable(),
+    firstTokenMs: z.number().nullable(),
+    errorCode: z.string().nullable(),
+    inputTokens: z.number().nullable(),
+    outputTokens: z.number().nullable(),
+    catalogVisible: z.boolean(),
+  }).nullable().default(null),
   id: z.number(),
   sourceId: z.string(),
   model: z.string(),
@@ -21,12 +33,44 @@ export const ModelSourceModelSchema = z.object({
 });
 
 export const ModelSourceSchema = z.object({
+  localTokenBudget: z.number().nullable().default(null),
   id: z.string(),
   name: z.string(),
   kind: z.string(),
   baseUrl: z.string(),
   isEnabled: z.boolean(),
   healthStatus: z.string(),
+  companyStatus: z.object({
+    inFlight: z.number().default(0),
+    healthCheckSummary: z.object({
+      enabledModels: z.number(),
+      freshChecks: z.number(),
+      visibleModels: z.number(),
+      intervalSeconds: z.number(),
+      timeoutSeconds: z.number(),
+      freshnessSeconds: z.number(),
+    }).nullable().default(null),
+    health: z.enum(["unknown", "healthy", "degraded", "unavailable"]).default("unknown"),
+    cooldownUntil: z.iso.datetime({ offset: true }).nullable().default(null),
+    successes: z.number().default(0),
+    failures: z.number().default(0),
+    rateLimits: z.number().default(0),
+    serverErrors: z.number().default(0),
+    averageLatencyMs: z.number().nullable().default(null),
+    budgetUsed: z.number().default(0),
+    budgetExhausted: z.boolean().default(false),
+    credentialCache: z.enum(["present", "unavailable"]),
+    quotaStatus: z.literal("unknown"),
+    remaining: z.null(),
+    resetsAt: z.null(),
+    observedUsage: z.object({
+      since: z.iso.datetime({ offset: true }),
+      requests: z.number(),
+      requestsWithoutUsage: z.number(),
+      inputTokens: z.number().nullable(),
+      outputTokens: z.number().nullable(),
+    }).nullable(),
+  }).nullable().default(null),
   supportsChatCompletions: z.boolean(),
   supportsResponses: z.boolean(),
   supportsAudioTranscriptions: z.boolean().default(false),
@@ -59,6 +103,8 @@ export const ModelSourceModelInputSchema = z.object({
 });
 
 export const ModelSourceCreateRequestSchema = z.object({
+  localTokenBudget: z.number().int().positive().nullable().optional(),
+  kind: z.enum(["openai_compatible", "llmbox", "trae", "codebase_llm"]).optional(),
   name: z.string().min(1).max(128),
   baseUrl: z.string().min(1).max(2048),
   apiKey: z.string().min(1).nullable().optional(),
@@ -72,6 +118,7 @@ export const ModelSourceCreateRequestSchema = z.object({
 });
 
 export const ModelSourceUpdateRequestSchema = z.object({
+  localTokenBudget: z.number().int().positive().nullable().optional(),
   name: z.string().min(1).max(128).optional(),
   baseUrl: z.string().min(1).max(2048).optional(),
   apiKey: z.string().min(1).nullable().optional(),

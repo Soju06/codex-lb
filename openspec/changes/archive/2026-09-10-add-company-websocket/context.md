@@ -1,0 +1,20 @@
+# Implementation boundaries
+
+The bridge intercepts explicit company models before subscription WebSocket preparation/reservation, and invokes the same ASGI HTTP route inside the process. Original authorization and client context are preserved; a scope-only source identity guard prevents policy changes or structural exclusions from routing the bridged turn into subscription accounts. SSE parsing is bounded, emitted frames respect downstream backpressure, and only one pipelined client frame is retained. The WebSocket main loop continues to own the socket lifetime.
+
+The configured company model names are snapshotted when the WebSocket connection starts, so existing subscription connections avoid additional database waits on each turn. Company ownership and HTTP policy are rechecked for each intercepted company request. Newly added models require reconnecting.
+
+Only the latest successful source/model response is retained in memory on that connection. A reconnect or obsolete anchor returns previous_response_not_found so the client must resend full context. No cross-connection response cache or inference prewarm is implemented. Non-generating generate:false warmup gets an explicit unsupported_warmup error rather than spending tokens unexpectedly. Normal response.create and tool continuation were verified with the real Codex WebSocket client.
+
+## Verification and rollout status (2026-09-10)
+
+The focused backend regression suite passed 306 tests (one warning). Ruff, type checks and strict change validation passed. Independent release `~/.codex-lb/releases/20260910-company-websocket` on port 2473 completed actual Codex WebSocket shell-tool continuation for Codebase Kimi and TRAE GPT-5.6-Sol. LLMBox DeepSeek also completed tool execution, after transient upstream timeout/error retries; it did not obey exact-only final formatting. Request logs confirmed WebSocket transport. A bounded TRAE GPT-6-Astra probe produced no terminal response within 60 seconds and was cancelled; Astra is not verified healthy.
+
+The production cutover attempt at 20:10–20:14 did not restart the service: drain remained at one in-flight scope for the entire 240-second window. The script cancelled drain and restored normal admission on the original governance release. Subsequent inspection found live Codex client connections; the middleware counts an entire Responses WebSocket lifetime, so the count alone cannot establish whether an upstream inference is active or the connection is idle. Do not force-stop these connections or describe the rollout as complete. Production smoke tests and archive remain pending a coordinated reconnect window. Logs and the rollback-capable cutover script are in `/tmp/codex-company-websocket-validation/`.
+
+
+## Authorized production rollout completed
+
+After the user explicitly approved a short reconnect window, production switched successfully at 20:20:40 to `~/.codex-lb/releases/20260910-company-websocket`. Remaining client connections were closed after a bounded drain; this was a restart with a reconnect gap, not a seamless handoff. Backup: `~/.codex-lb/backups/company-websocket-20260910-201959`. Health and admission recovered, all 38 company model entries and four subscription accounts were preserved.
+
+Real production Codex clients completed shell-tool continuation for `codebase/kimi-k2.6`, `deepseek-v4-flash-0731`, and subscription `gpt-6-astra`; request logs confirmed successful WebSocket transport and correct company-source versus subscription-account ownership. Kimi and GPT returned the exact marker. LLMBox returned the marker with extra formatting. TRAE Sol production smoke was rejected by the existing source-wide maxConcurrency=1 bulkhead while another request occupied it; independent release verification passed, but production TRAE success is not claimed. An initial subscription gpt-5.4 test was rejected with no_plan_support_for_model; the supported gpt-6-astra regression passed. TRAE Astra remains unverified healthy. Cutover log and smoke artifacts are in `/tmp/codex-company-websocket-validation/`.

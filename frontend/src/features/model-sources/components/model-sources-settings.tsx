@@ -1,3 +1,7 @@
+import { useState } from "react";
+import { CompanyModelHealth } from "./company-model-health";
+import { CompanySourceStatus } from "@/features/model-sources/components/company-source-status";
+import { discoverTraeModels, getCodebaseModelPresets } from "@/features/model-sources/api";
 import { Database, Pencil, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -42,6 +46,8 @@ function protocolBadges(source: ModelSource) {
 
 export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsProps) {
   const { t } = useTranslation();
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const {
     modelSourcesQuery,
     createMutation,
@@ -54,11 +60,13 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
   const sources = modelSourcesQuery.data?.sources ?? [];
   const busy =
     disabled ||
+    discovering ||
     modelSourcesQuery.isFetching ||
     createMutation.isPending ||
     updateMutation.isPending ||
     deleteMutation.isPending;
   const error =
+    discoveryError ||
     getErrorMessageOrNull(modelSourcesQuery.error) ||
     getErrorMessageOrNull(createMutation.error) ||
     getErrorMessageOrNull(updateMutation.error) ||
@@ -72,8 +80,34 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
     await updateMutation.mutateAsync({ sourceId, payload });
   };
 
+  const addTrae = async () => {
+    setDiscovering(true);
+    setDiscoveryError(null);
+    try {
+      const models = await discoverTraeModels();
+      await createMutation.mutateAsync({kind: "trae", name: "TRAE", baseUrl: "https://copilot-cn.bytedance.net/api/ide/v2", supportsChatCompletions: false, supportsResponses: true, timeoutSeconds: 900, maxConcurrency: 1, models});
+    } catch (error) {
+      setDiscoveryError(getErrorMessageOrNull(error));
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const addCodebase = async () => {
+    setDiscovering(true);
+    setDiscoveryError(null);
+    try {
+      const models = await getCodebaseModelPresets();
+      await createMutation.mutateAsync({kind: "codebase_llm", name: "Codebase / Coco", baseUrl: "https://codebase-api.byted.org/v2/api/2022-06-01/LLMProxy/Model", supportsChatCompletions: false, supportsResponses: true, timeoutSeconds: 300, maxConcurrency: 1, models});
+    } catch (error) {
+      setDiscoveryError(getErrorMessageOrNull(error));
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
   return (
-    <section className="space-y-4 rounded-xl border bg-card p-5">
+    <section id="model-sources" className="min-w-0 space-y-4 rounded-xl border bg-card p-5">
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
@@ -84,6 +118,35 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
 	            <p className="text-xs text-muted-foreground">{t("modelSources.description")}</p>
           </div>
         </div>
+        <div className="flex flex-wrap justify-end gap-2">
+        <Button type="button" size="sm" variant="outline"
+          disabled={busy || sources.some((source) => source.kind === "codebase_llm")}
+          onClick={() => void addCodebase()}>
+          {t("modelSources.company.addCodebase")}
+        </Button>
+        <Button type="button" size="sm" variant="outline"
+          disabled={busy || sources.some((source) => source.kind === "trae")}
+          onClick={() => void addTrae()}>
+          {t("modelSources.company.addTrae")}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy || sources.some((source) => source.kind === "llmbox")}
+          onClick={() => void createMutation.mutateAsync({
+            kind: "llmbox",
+            name: "LLMBox",
+            baseUrl: "https://llmbox.bytedance.net/v1",
+            supportsChatCompletions: false,
+            supportsResponses: true,
+            maxConcurrency: 1,
+            models: [{ model: "deepseek-v4-flash-0731", displayName: "LLMBox DeepSeek V4 Flash",
+              supportsStreaming: true, supportsTools: true, isEnabled: false }],
+          })}
+        >
+          {t("modelSources.company.add")}
+        </Button>
         <Button
           type="button"
           size="sm"
@@ -94,6 +157,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
           <Plus className="h-3.5 w-3.5" />
 	          {t("modelSources.actions.addSource")}
         </Button>
+        </div>
       </div>
 
       {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
@@ -116,8 +180,25 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                     ))}
                   </div>
                   <div className="truncate text-xs text-muted-foreground">{source.baseUrl}</div>
+                  {source.companyStatus ? (
+                    <div className="space-y-1 rounded-md bg-muted/50 p-2 text-xs text-muted-foreground">
+                      <p>{t("modelSources.company.quotaUnknown")}</p>
+                      <CompanySourceStatus key={`${source.id}-${source.localTokenBudget}`} source={source} disabled={busy} onSave={(localTokenBudget) => updateMutation.mutateAsync({ sourceId: source.id, payload: { localTokenBudget } })} />
+                      <p>{t(source.companyStatus.credentialCache === "present"
+                        ? "modelSources.company.cachePresent" : "modelSources.company.cacheUnavailable")}</p>
+                      <p>{t(source.kind === "trae" ? "modelSources.company.traeDiscovery" : source.kind === "codebase_llm" ? "modelSources.company.codebaseNative" : "modelSources.company.dynamic")}</p>
+                      {source.companyStatus.observedUsage ? (
+                        <p>{t("modelSources.company.observed", {
+                          requests: source.companyStatus.observedUsage.requests,
+                          input: source.companyStatus.observedUsage.inputTokens ?? "—",
+                          output: source.companyStatus.observedUsage.outputTokens ?? "—",
+                          missing: source.companyStatus.observedUsage.requestsWithoutUsage,
+                        })}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-1 pt-1">
-                    {source.models.map((model) => (
+                    {!source.companyStatus && source.models.map((model) => (
                       <Badge key={model.id} variant={model.isEnabled ? "outline" : "secondary"}>
                         {model.model}
                       </Badge>
@@ -161,6 +242,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                   </Button>
                 </div>
               </div>
+              <CompanyModelHealth source={source} />
             </div>
           ))
         ) : (

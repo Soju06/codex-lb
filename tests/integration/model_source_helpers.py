@@ -8,6 +8,7 @@ dashboard helpers without importing a test module.
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -18,6 +19,60 @@ from typing import Any, TypeAlias
 from aiohttp import web
 
 _UpstreamHandler: TypeAlias = Callable[[web.Request], Awaitable[web.StreamResponse]]
+
+
+def _trae_frame(event: str, data: object) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+@dataclass(slots=True)
+class TraeRawChatHarness:
+    """Controllable TRAE raw-chat upstream for protocol and admission tests.
+
+    The harness emits a real first output frame before optionally blocking the
+    terminal frame. Tests can therefore distinguish response buffering from
+    live streaming and can hold several source slots concurrently.
+    """
+
+    response_text: str = "OK"
+    hold_after_output: bool = False
+    requests: list[dict[str, Any]] = field(default_factory=list)
+    active: int = 0
+    max_active: int = 0
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    _active_changed: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def handler(self, request: web.Request) -> web.StreamResponse:
+        assert request.path.endswith("/llm_raw_chat")
+        self.requests.append(await request.json())
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        self._active_changed.set()
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        try:
+            await response.prepare(request)
+            await response.write(_trae_frame("output", {"response": self.response_text}))
+            if self.hold_after_output:
+                await self.release.wait()
+            await response.write(_trae_frame("token_usage", {"prompt_tokens": 8, "completion_tokens": 2}))
+            await response.write(_trae_frame("done", {"finish_reason": "stop"}))
+            await response.write_eof()
+            return response
+        finally:
+            self.active -= 1
+            self._active_changed.set()
+
+    async def wait_for_active(self, expected: int, *, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + timeout
+        while self.active < expected:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"expected {expected} active TRAE requests, observed {self.active}")
+            self._active_changed.clear()
+            try:
+                await asyncio.wait_for(self._active_changed.wait(), timeout=remaining)
+            except TimeoutError:
+                raise AssertionError(f"expected {expected} active TRAE requests, observed {self.active}") from None
 
 
 def _free_port() -> int:

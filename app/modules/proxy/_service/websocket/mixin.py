@@ -110,6 +110,7 @@ from app.modules.model_sources.selection import (
     effective_model_for_api_key,
     responses_model_is_source_owned,
 )
+from app.modules.model_sources.websocket_bridge import CompanyWebSocketBridge
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -1498,6 +1499,8 @@ class _WebSocketMixin:
         )
         upstream_account_id: str | None = None
         downstream_activity = _DownstreamWebSocketActivity(clock=clock)
+        company_bridge = CompanyWebSocketBridge(websocket, client_send_lock)
+        await company_bridge.load_models()
         replay_request_state: _WebSocketRequestState | None = None
         request_state_to_fail: _WebSocketRequestState | None = None
         request_state_failure_task: asyncio.Task[None] | None = None
@@ -1715,7 +1718,7 @@ class _WebSocketMixin:
                     message: Any | None = None
                     try:
                         message = await scheduler_for(proxy).wait_for(
-                            websocket.receive(),
+                            company_bridge.receive(),
                             timeout=min(
                                 downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS
                             ),
@@ -1744,7 +1747,9 @@ class _WebSocketMixin:
                                 idle_timeout_seconds=downstream_idle_timeout_seconds,
                             ):
                                 try:
-                                    message = await scheduler_for(proxy).wait_for(websocket.receive(), timeout=0.05)
+                                    message = await scheduler_for(proxy).wait_for(
+                                        company_bridge.receive(), timeout=0.05
+                                    )
                                 except asyncio.TimeoutError:
                                     try:
                                         await websocket.close(
@@ -1803,6 +1808,12 @@ class _WebSocketMixin:
                                             )
                                         )
                                     )
+                                continue
+                            if not capability_header_values and await company_bridge.handle(payload):
+                                if company_bridge.disconnected:
+                                    downstream_activity.mark_disconnected()
+                                    break
+                                downstream_activity.mark()
                                 continue
                             try:
                                 prepared_request = await proxy._prepare_websocket_response_create_request(

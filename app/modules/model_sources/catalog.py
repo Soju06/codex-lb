@@ -24,7 +24,7 @@ def source_models_to_upstream_models(sources: list[ModelSource]) -> list[Upstrea
     for source in sources:
         if not source.is_enabled:
             continue
-        if source.kind != MODEL_SOURCE_KIND_OPENAI_COMPATIBLE:
+        if source.kind not in (MODEL_SOURCE_KIND_OPENAI_COMPATIBLE, "llmbox", "trae", "codebase_llm"):
             continue
         for source_model in source.models:
             if not source_model.is_enabled:
@@ -82,7 +82,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
         support_verbosity=False,
         default_verbosity=None,
         prefer_websockets=False,
-        supports_parallel_tool_calls=source_model.supports_tools,
+        supports_parallel_tool_calls=source_model.supports_tools and source.kind != "trae",
         supported_in_api=True,
         minimal_client_version=None,
         priority=0,

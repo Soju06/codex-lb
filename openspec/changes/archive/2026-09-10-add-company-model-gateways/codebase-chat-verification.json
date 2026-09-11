@@ -1,0 +1,162 @@
+{
+  "date": "2026-09-10",
+  "protocol": "Chat Completions via isolated codex-lb; not yet Codex Responses compatibility",
+  "models": {
+    "openrouter-2o": {
+      "status": "failed_first_turn",
+      "error": "upstream_error",
+      "finish": null,
+      "elapsed_seconds": 0.43
+    },
+    "openrouter-1o": {
+      "status": "failed_first_turn",
+      "error": "upstream_error",
+      "finish": null,
+      "elapsed_seconds": 0.09
+    },
+    "openrouter-1": {
+      "status": "failed_first_turn",
+      "error": "upstream_error",
+      "finish": null,
+      "elapsed_seconds": 0.15
+    },
+    "seed-code-preview": {
+      "status": "passed",
+      "error": null,
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 64,
+        "prompt_tokens": 470,
+        "total_tokens": 534,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 54
+        }
+      },
+      "elapsed_seconds": 5.95
+    },
+    "doubao-seed-2.0-code": {
+      "status": "passed",
+      "error": null,
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 68,
+        "prompt_tokens": 470,
+        "total_tokens": 538,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 58
+        }
+      },
+      "elapsed_seconds": 6.05
+    },
+    "doubao-seed-1.8": {
+      "status": "passed",
+      "error": null,
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 61,
+        "prompt_tokens": 470,
+        "total_tokens": 531,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 51
+        }
+      },
+      "elapsed_seconds": 5.83
+    },
+    "deepseek-v3.2": {
+      "status": "failed_first_turn",
+      "error": "http_404",
+      "finish": null,
+      "elapsed_seconds": 0.11
+    },
+    "deepseek-v3.1": {
+      "status": "passed",
+      "error": null,
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 10,
+        "prompt_tokens": 429,
+        "total_tokens": 439,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "elapsed_seconds": 3.56
+    },
+    "kimi-k2.6": {
+      "status": "passed",
+      "error": null,
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 62,
+        "prompt_tokens": 99,
+        "total_tokens": 161,
+        "completion_tokens_details": {
+          "reasoning_tokens": 53
+        }
+      },
+      "elapsed_seconds": 4.1
+    },
+    "kimi-k2.5": {
+      "status": "passed",
+      "error": null,
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 52,
+        "prompt_tokens": 99,
+        "total_tokens": 151,
+        "completion_tokens_details": {
+          "reasoning_tokens": 43
+        }
+      },
+      "elapsed_seconds": 3.81
+    },
+    "qwen3.6-plus": {
+      "status": "passed",
+      "error": null,
+      "finish": "stop",
+      "usage": {
+        "prompt_tokens": 317,
+        "completion_tokens": 195,
+        "total_tokens": 512,
+        "completion_tokens_details": {
+          "reasoning_tokens": 182,
+          "text_tokens": 195
+        },
+        "prompt_tokens_details": {
+          "text_tokens": 317
+        }
+      },
+      "elapsed_seconds": 6.54
+    },
+    "qwen3.5-plus": {
+      "status": "passed",
+      "error": null,
+      "finish": "stop",
+      "usage": {
+        "prompt_tokens": 317,
+        "completion_tokens": 273,
+        "total_tokens": 590,
+        "completion_tokens_details": {
+          "reasoning_tokens": 260,
+          "text_tokens": 273
+        },
+        "prompt_tokens_details": {
+          "text_tokens": 317
+        }
+      },
+      "elapsed_seconds": 8.28
+    }
+  }
+}

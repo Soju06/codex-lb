@@ -16,6 +16,7 @@ from app.core.utils.time import utcnow
 from app.dependencies import ModelSourcesContext, get_model_sources_context
 from app.modules.model_sources.schemas import (
     ModelSourceCreateRequest,
+    ModelSourceModelInput,
     ModelSourceResponse,
     ModelSourcesResponse,
     ModelSourceUpdateRequest,
@@ -36,6 +37,23 @@ async def list_model_sources(
     context: ModelSourcesContext = Depends(get_model_sources_context),
 ) -> ModelSourcesResponse:
     return ModelSourcesResponse(sources=await context.service.list_sources())
+
+
+@router.get("/company-catalog/trae", response_model=list[ModelSourceModelInput])
+async def discover_trae_models() -> list[ModelSourceModelInput]:
+    from app.modules.model_sources.trae_catalog import discover_models
+
+    try:
+        return await discover_models()
+    except (ValueError, TimeoutError) as exc:
+        raise DashboardBadRequestError(str(exc) or "TRAE discovery timed out", code="trae_discovery_failed") from None
+
+
+@router.get("/company-catalog/codebase", response_model=list[ModelSourceModelInput])
+async def codebase_model_presets() -> list[ModelSourceModelInput]:
+    from app.modules.model_sources.codebase_catalog import model_presets
+
+    return model_presets()
 
 
 @router.post("/", response_model=ModelSourceResponse)

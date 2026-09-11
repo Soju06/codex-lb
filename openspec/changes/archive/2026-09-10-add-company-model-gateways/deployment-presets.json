@@ -1,0 +1,415 @@
+{
+  "note": "Prepared source creation payloads. Creation defaults sources off; enable each source only after replacement readiness and operator-coordinated cutover. No GLM or dynamic aliases.",
+  "sources": [
+    {
+      "kind": "trae",
+      "name": "TRAE",
+      "baseUrl": "https://copilot-cn.bytedance.net/api/ide/v2",
+      "supportsResponses": true,
+      "supportsChatCompletions": false,
+      "timeoutSeconds": 900,
+      "maxConcurrency": 1,
+      "models": [
+        {
+          "model": "trae/Seed-Evolving",
+          "displayName": "TRAE Seed-Evolving",
+          "contextWindow": 1000000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"Doubao-Seed-Evolving\", \"trae_model_name\": \"Doubao-Seed-Evolving__dev\", \"supports_reasoning\": false, \"supported_reasoning_levels\": [], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/Seed-2.1-Pro",
+          "displayName": "TRAE Seed-2.1-Pro",
+          "contextWindow": 184000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"Doubao-Seed-2.1-Pro\", \"trae_model_name\": \"Doubao-Seed-2.1-Pro__dev\", \"supports_reasoning\": false, \"supported_reasoning_levels\": [], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/Seed-2.1-Turbo",
+          "displayName": "TRAE Seed-2.1-Turbo",
+          "contextWindow": 184000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"Doubao-Seed-2.1-Turbo\", \"trae_model_name\": \"Doubao-Seed-2.1-Turbo__dev\", \"supports_reasoning\": false, \"supported_reasoning_levels\": [], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/openrouter-3o",
+          "displayName": "TRAE openrouter-3o",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"openrouter-3o\", \"trae_model_name\": \"openrouter-3o__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}, {\"effort\": \"max\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"xhigh\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/openrouter-3o-max",
+          "displayName": "TRAE openrouter-3o-max",
+          "contextWindow": 1000000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"openrouter-3o\", \"trae_model_name\": \"openrouter-3o__max\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}, {\"effort\": \"max\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"xhigh\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/openrouter-2o",
+          "displayName": "TRAE openrouter-2o",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"openrouter-2o\", \"trae_model_name\": \"openrouter-2o__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}, {\"effort\": \"max\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"xhigh\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/openrouter-2o-max",
+          "displayName": "TRAE openrouter-2o-max",
+          "contextWindow": 1000000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"openrouter-2o\", \"trae_model_name\": \"openrouter-2o__max\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}, {\"effort\": \"max\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"xhigh\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-6-Astra",
+          "displayName": "TRAE GPT-6-Astra",
+          "contextWindow": 272000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-6-astra\", \"trae_model_name\": \"gpt-6-astra__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-6-Astra-max",
+          "displayName": "TRAE GPT-6-Astra-max",
+          "contextWindow": 1000000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-6-astra\", \"trae_model_name\": \"gpt-6-astra__max\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.6-Sol",
+          "displayName": "TRAE GPT-5.6-Sol",
+          "contextWindow": 272000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.6-sol\", \"trae_model_name\": \"gpt-5.6-sol__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.6-Sol-max",
+          "displayName": "TRAE GPT-5.6-Sol-max",
+          "contextWindow": 800000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.6-sol\", \"trae_model_name\": \"gpt-5.6-sol__max\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.6-Terra",
+          "displayName": "TRAE GPT-5.6-Terra",
+          "contextWindow": 272000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.6-terra\", \"trae_model_name\": \"gpt-5.6-terra__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.6-Terra-max",
+          "displayName": "TRAE GPT-5.6-Terra-max",
+          "contextWindow": 800000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.6-terra\", \"trae_model_name\": \"gpt-5.6-terra__max\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.6-Luna",
+          "displayName": "TRAE GPT-5.6-Luna",
+          "contextWindow": 272000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.6-luna\", \"trae_model_name\": \"gpt-5.6-luna__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.6-Luna-max",
+          "displayName": "TRAE GPT-5.6-Luna-max",
+          "contextWindow": 800000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.6-luna\", \"trae_model_name\": \"gpt-5.6-luna__max\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.5",
+          "displayName": "TRAE GPT-5.5",
+          "contextWindow": 272000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.5\", \"trae_model_name\": \"gpt-5.5__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.5-max",
+          "displayName": "TRAE GPT-5.5-max",
+          "contextWindow": 800000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.5\", \"trae_model_name\": \"gpt-5.5__max\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.4",
+          "displayName": "TRAE GPT-5.4",
+          "contextWindow": 272000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.4\", \"trae_model_name\": \"gpt-5.4__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/DeepSeek-V4-Pro",
+          "displayName": "TRAE DeepSeek-V4-Pro",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"DeepSeek-V4-Pro\", \"trae_model_name\": \"DeepSeek-V4-Pro__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/DeepSeek-V4-Flash",
+          "displayName": "TRAE DeepSeek-V4-Flash",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"DeepSeek-V4-Flash\", \"trae_model_name\": \"DeepSeek-V4-Flash__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/Seed-Dogfooding-2.0",
+          "displayName": "TRAE Seed-Dogfooding-2.0",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"Seed-Dogfooding-2.0\", \"trae_model_name\": \"Seed-Dogfooding-2.0__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/Seed-Code",
+          "displayName": "TRAE Seed-Code",
+          "contextWindow": 116000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"Doubao-Seed-Code\", \"trae_model_name\": \"Doubao-Seed-Code__dev\", \"supports_reasoning\": false, \"supported_reasoning_levels\": [], \"default_reasoning_level\": null, \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/openrouter-1o",
+          "displayName": "TRAE openrouter-1o",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"openrouter-1o\", \"trae_model_name\": \"openrouter-1o__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"max\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/openrouter-1",
+          "displayName": "TRAE openrouter-1",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"openrouter-1\", \"trae_model_name\": \"openrouter-1__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"max\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/GPT-5.2",
+          "displayName": "TRAE GPT-5.2",
+          "contextWindow": 272000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gpt-5.2\", \"trae_model_name\": \"gpt-5.2__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}, {\"effort\": \"xhigh\", \"description\": \"Maximum reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"medium\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/Gemini-3.1-Pro-Preview",
+          "displayName": "TRAE Gemini-3.1-Pro-Preview",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gemini-3.1-pro\", \"trae_model_name\": \"gemini-3.1-pro__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "trae/Gemini-3-Flash-Preview",
+          "displayName": "TRAE Gemini-3-Flash-Preview",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": true,
+          "rawMetadataJson": "{\"trae_config_name\": \"gemini-3-flash\", \"trae_model_name\": \"gemini-3-flash__dev\", \"supports_reasoning\": true, \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast responses with lighter reasoning.\"}, {\"effort\": \"medium\", \"description\": \"Balanced speed and reasoning depth.\"}, {\"effort\": \"high\", \"description\": \"Greater reasoning depth for complex tasks.\"}], \"default_reasoning_level\": \"high\", \"verification_status\": \"verified\"}",
+          "isEnabled": true
+        }
+      ]
+    },
+    {
+      "kind": "codebase_llm",
+      "name": "Codebase / Coco",
+      "baseUrl": "https://codebase-api.byted.org/v2/api/2022-06-01/LLMProxy/Model",
+      "supportsResponses": true,
+      "supportsChatCompletions": false,
+      "timeoutSeconds": 300,
+      "maxConcurrency": 1,
+      "models": [
+        {
+          "model": "codebase/gpt-5.4",
+          "displayName": "Codebase gpt-5.4",
+          "contextWindow": 272000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"responses\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "codebase/gpt-5.2",
+          "displayName": "Codebase gpt-5.2",
+          "contextWindow": 272000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"responses\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "codebase/seed-code-preview",
+          "displayName": "Codebase seed-code-preview",
+          "contextWindow": 256000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"chat\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "codebase/doubao-seed-2.0-code",
+          "displayName": "Codebase doubao-seed-2.0-code",
+          "contextWindow": 256000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"chat\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "codebase/doubao-seed-1.8",
+          "displayName": "Codebase doubao-seed-1.8",
+          "contextWindow": 256000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"chat\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "codebase/deepseek-v3.1",
+          "displayName": "Codebase deepseek-v3.1",
+          "contextWindow": 128000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"chat\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "codebase/kimi-k2.6",
+          "displayName": "Codebase kimi-k2.6",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"chat\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "codebase/kimi-k2.5",
+          "displayName": "Codebase kimi-k2.5",
+          "contextWindow": 200000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"chat\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "codebase/qwen3.6-plus",
+          "displayName": "Codebase qwen3.6-plus",
+          "contextWindow": 128000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"chat\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        },
+        {
+          "model": "codebase/qwen3.5-plus",
+          "displayName": "Codebase qwen3.5-plus",
+          "contextWindow": 128000,
+          "supportsStreaming": true,
+          "supportsTools": true,
+          "supportsVision": false,
+          "rawMetadataJson": "{\"native_backend\": \"chat\", \"verification_date\": \"2026-09-10\"}",
+          "isEnabled": true
+        }
+      ]
+    },
+    {
+      "kind": "llmbox",
+      "name": "LLMBox",
+      "baseUrl": "https://llmbox.bytedance.net/v1",
+      "supportsResponses": true,
+      "supportsChatCompletions": false,
+      "timeoutSeconds": 300,
+      "maxConcurrency": 1,
+      "models": [
+        {
+          "model": "deepseek-v4-flash-0731",
+          "displayName": "LLMBox DeepSeek V4 Flash",
+          "isEnabled": true,
+          "supportsTools": true,
+          "supportsStreaming": true
+        }
+      ]
+    }
+  ]
+}

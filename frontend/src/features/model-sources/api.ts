@@ -3,6 +3,7 @@ import { del, get, patch, post } from "@/lib/api-client";
 import {
   ModelSourceCreateRequestSchema,
   ModelSourceSchema,
+  ModelSourceModelInputSchema,
   ModelSourcesResponseSchema,
   ModelSourceUpdateRequestSchema,
 } from "@/features/model-sources/schemas";
@@ -29,4 +30,12 @@ export function updateModelSource(sourceId: string, payload: unknown) {
 
 export function deleteModelSource(sourceId: string) {
   return del(`${MODEL_SOURCES_PATH}/${encodeURIComponent(sourceId)}`);
+}
+
+export function discoverTraeModels() {
+  return get(`${MODEL_SOURCES_PATH}/company-catalog/trae`, ModelSourceModelInputSchema.array());
+}
+
+export function getCodebaseModelPresets() {
+  return get(`${MODEL_SOURCES_PATH}/company-catalog/codebase`, ModelSourceModelInputSchema.array());
 }

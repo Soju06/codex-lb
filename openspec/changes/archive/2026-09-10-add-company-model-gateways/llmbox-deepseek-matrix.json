@@ -1,0 +1,25 @@
+{
+  "started_at": 1789029547.3846521,
+  "models": {
+    "deepseek-v4-flash-0731": {
+      "status": "passed",
+      "started_at": 1789029547.6011672,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 343,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 11,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 354
+      },
+      "finished_at": 1789029558.705956
+    }
+  },
+  "finished_at": 1789029558.7071931
+}

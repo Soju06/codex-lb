@@ -758,13 +758,15 @@ class SourceDispatch:
                     output_tokens=usage.output_tokens if usage is not None else None,
                     cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
                     cost_usd=source_usage_cost_usd(self.source, self.model, usage),
-                    latency_ms=timings.latency_ms if timings is not None else None,
+                    latency_ms=timings.latency_ms
+                    if timings is not None
+                    else (max(0, int((self.clock.monotonic() - self.sent_at) * 1000)) if self.sent_at else None),
                     latency_first_token_ms=timings.latency_first_token_ms if timings is not None else None,
                     status=status,
                     error_code=error_code,
                     error_message=error_message,
                     upstream_status_code=upstream_status_code,
-                    transport="http",
+                    transport="websocket" if request.scope.get("company_websocket") else "http",
                     upstream_transport="openai_compatible_http",
                     source=self.request_log_source,
                     requested_service_tier=self.requested_service_tier,

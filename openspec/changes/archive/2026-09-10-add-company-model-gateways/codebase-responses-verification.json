@@ -1,0 +1,55 @@
+{
+  "started_at": 1789028836.0189838,
+  "models": {
+    "codebase/gpt-5.4": {
+      "status": "passed",
+      "started_at": 1789028836.191299,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 93,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 12,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 105
+      },
+      "finished_at": 1789028841.3394601
+    },
+    "codebase/gpt-5.2": {
+      "status": "passed",
+      "started_at": 1789028841.3411908,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 90,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 12,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 102
+      },
+      "finished_at": 1789028846.576807
+    },
+    "codebase/gpt-5.2-codex": {
+      "status": "failed_second_turn",
+      "started_at": 1789028846.579114,
+      "upstream_status": "http_error",
+      "marker_match": false,
+      "error": null,
+      "usage": null,
+      "finished_at": 1789028850.809273
+    }
+  },
+  "finished_at": 1789028850.811208
+}

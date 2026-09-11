@@ -1,0 +1,4 @@
+- [x] Implement persisted-outcome health and optional budget admission.
+- [x] Add dashboard controls and operational statistics.
+- [x] Verify public routes, cancellation classification, recovery, schema migration and UI.
+- [x] Validate independent replacement and coordinate active endpoint cutover.

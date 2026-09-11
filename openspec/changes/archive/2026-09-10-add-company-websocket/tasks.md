@@ -1,0 +1,4 @@
+- [x] Implement bounded WebSocket/HTTP bridge and continuation.
+- [x] Verify both routes, tools, policy denials, failures and disconnect cleanup.
+- [x] Validate standalone release with real WebSocket clients.
+- [x] Deploy with drain/rollback and verify production.

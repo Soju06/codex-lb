@@ -1,0 +1,4 @@
+- [x] Implement two-hour leader-only per-model health checks with bounded inference.
+- [x] Implement catalog eligibility from fresh probe results and source admission state.
+- [x] Verify both catalog formats, scheduling cadence, timeout cleanup, recovery, and source isolation.
+- [x] Validate release independently and deploy using safe cutover.

@@ -1,0 +1,146 @@
+{
+  "started_at": 1789029263.969936,
+  "models": {
+    "codebase/seed-code-preview": {
+      "status": "passed",
+      "started_at": 1789029264.199031,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 584,
+        "output_tokens": 61,
+        "total_tokens": 645,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 50
+        }
+      },
+      "finished_at": 1789029270.028434
+    },
+    "codebase/doubao-seed-2.0-code": {
+      "status": "passed",
+      "started_at": 1789029270.029238,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 536,
+        "output_tokens": 58,
+        "total_tokens": 594,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 47
+        }
+      },
+      "finished_at": 1789029275.9496582
+    },
+    "codebase/doubao-seed-1.8": {
+      "status": "passed",
+      "started_at": 1789029275.951259,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 557,
+        "output_tokens": 55,
+        "total_tokens": 612,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 44
+        }
+      },
+      "finished_at": 1789029281.723202
+    },
+    "codebase/deepseek-v3.1": {
+      "status": "passed",
+      "started_at": 1789029281.7240489,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 528,
+        "output_tokens": 11,
+        "total_tokens": 539,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789029284.7403278
+    },
+    "codebase/kimi-k2.6": {
+      "status": "passed",
+      "started_at": 1789029284.741479,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 128,
+        "output_tokens": 35,
+        "total_tokens": 163,
+        "output_tokens_details": {
+          "reasoning_tokens": 27
+        }
+      },
+      "finished_at": 1789029289.173741
+    },
+    "codebase/kimi-k2.5": {
+      "status": "passed",
+      "started_at": 1789029289.1746619,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 134,
+        "output_tokens": 27,
+        "total_tokens": 161,
+        "output_tokens_details": {
+          "reasoning_tokens": 19
+        }
+      },
+      "finished_at": 1789029292.9069839
+    },
+    "codebase/qwen3.6-plus": {
+      "status": "passed",
+      "started_at": 1789029292.9083588,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 429,
+        "output_tokens": 68,
+        "total_tokens": 497,
+        "output_tokens_details": {
+          "reasoning_tokens": 56
+        }
+      },
+      "finished_at": 1789029298.254873
+    },
+    "codebase/qwen3.5-plus": {
+      "status": "passed",
+      "started_at": 1789029298.255896,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 392,
+        "output_tokens": 40,
+        "total_tokens": 432,
+        "output_tokens_details": {
+          "reasoning_tokens": 28
+        }
+      },
+      "finished_at": 1789029302.1563892
+    }
+  },
+  "finished_at": 1789029302.157005
+}

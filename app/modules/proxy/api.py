@@ -192,6 +192,7 @@ from app.core.utils.sse import (
     inject_sse_keepalives,
     parse_sse_data_json,
 )
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ModelSource
 from app.db.session import detach_session_objects, get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
@@ -245,6 +246,7 @@ from app.modules.model_sources.forwarding import (
 from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
+from app.modules.model_sources.governance import COMPANY_KINDS, catalog_eligible_models, operational_status
 from app.modules.model_sources.projection import strip_source_telemetry
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.selection import (
@@ -1224,6 +1226,12 @@ async def responses(
         )
         if disabled_denial is not None:
             return disabled_denial
+    if source is None and request.scope.get("company_websocket"):
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_error("model_source_unavailable", "The requested company source cannot serve this request."),
+        )
     if source is None:
         apply_enforced_service_tier_model_fallback(
             responses_payload,
@@ -1469,6 +1477,12 @@ async def v1_responses(
         )
         if disabled_denial is not None:
             return disabled_denial
+    if source is None and request.scope.get("company_websocket"):
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_error("model_source_unavailable", "The requested company source cannot serve this request."),
+        )
     if source is None:
         apply_enforced_service_tier_model_fallback(
             responses_payload,
@@ -4133,6 +4147,7 @@ async def _list_enabled_source_catalog_models(
 ) -> list[UpstreamModel]:
     async with get_background_session() as session:
         sources = await ModelSourcesRepository(session).list_enabled_sources()
+        eligible_company_models = await catalog_eligible_models(session, sources)
         # ``close_session`` rolls back the read transaction, which would
         # expire the loaded rows; detach them so their attributes stay
         # readable after this session boundary.
@@ -4142,7 +4157,11 @@ async def _list_enabled_source_catalog_models(
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
     if assigned_source_ids is not None:
         sources = [source for source in sources if source.id in assigned_source_ids]
-    return source_models_to_upstream_models(sources)
+    return [
+        model
+        for model in source_models_to_upstream_models(sources)
+        if model.source_kind not in COMPANY_KINDS or (model.source_id, model.slug) in eligible_company_models
+    ]
 
 
 def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue]:
@@ -5234,6 +5253,39 @@ async def _overflow_source_response(
         overflow.claims.release_if_unowned()
 
 
+async def _company_admission_error(request: Request, source: ModelSource) -> Response | None:
+    if source.kind not in COMPANY_KINDS:
+        return None
+    async with get_background_session() as session:
+        state = await operational_status(session, source)
+    if state.cooldown_until is not None:
+        return _logged_error_json_response(
+            request,
+            503,
+            {
+                "error": {
+                    "code": "model_source_cooling_down",
+                    "type": "server_error",
+                    "message": "Company source is cooling down after upstream failures.",
+                },
+            },
+            headers={"Retry-After": str(max(1, math.ceil((state.cooldown_until - utcnow()).total_seconds())))},
+        )
+    if state.budget_exhausted:
+        return _logged_error_json_response(
+            request,
+            429,
+            {
+                "error": {
+                    "code": "model_source_budget_exhausted",
+                    "type": "rate_limit_error",
+                    "message": "Local rolling 24-hour observed-token budget is exhausted.",
+                },
+            },
+        )
+    return None
+
+
 async def _source_responses_response(
     request: Request,
     payload: ResponsesRequest,
@@ -5263,6 +5315,15 @@ async def _source_responses_response(
     shaped with ``service_tier`` stripped (source pricing has no tier).
     """
 
+    if request.scope.get("company_websocket") and request.scope.get("company_websocket_source_id") != source.id:
+        return _logged_error_json_response(
+            request,
+            409,
+            openai_error("model_source_changed", "Company source ownership changed; resend a fresh request."),
+        )
+    admission_error = await _company_admission_error(request, source)
+    if admission_error is not None:
+        return admission_error
     preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(request.headers)
     # This is the first point where the request is known to be served by a
     # model source rather than a subscription account, so it is the only place
@@ -5726,6 +5787,10 @@ async def _source_chat_completion_response(
     rate_limit_headers: Mapping[str, str],
     prohibit_fast_mode: bool = False,
 ) -> Response:
+    admission_error = await _company_admission_error(request, source)
+    if admission_error is not None:
+        await _release_reservation(reservation)
+        return admission_error
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["model"] = model
     source_payload["stream"] = bool(payload.stream)

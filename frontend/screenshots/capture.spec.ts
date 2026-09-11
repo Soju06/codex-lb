@@ -386,3 +386,64 @@ test("login", async ({ page }) => {
     waitFor: 'input[type="password"]',
   });
 });
+
+// Company-source quota intentionally stays unknown; values below are synthetic UI fixtures.
+test("llmbox company source", async ({ page }) => {
+  await interceptApi(page);
+  await page.route("**/api/model-sources/**", (route) => fulfill(route, { sources: [{
+    id: "src_company_preview", name: "LLMBox", kind: "llmbox",
+    baseUrl: "https://llmbox.bytedance.net/v1", isEnabled: false, healthStatus: "unknown",
+    supportsChatCompletions: false, supportsResponses: true, supportsAudioTranscriptions: false,
+    supportsEmbeddings: false, timeoutSeconds: 90, maxConcurrency: 1,
+    createdAt: "2026-09-10T00:00:00Z", updatedAt: "2026-09-10T00:00:00Z", models: [],
+    companyStatus: { credentialCache: "present", quotaStatus: "unknown", remaining: null, resetsAt: null,
+      observedUsage: { since: "2026-09-09T00:00:00Z", requests: 2, requestsWithoutUsage: 0,
+        inputTokens: 388, outputTokens: 77 } },
+  }] }));
+  await page.goto(`${BASE_URL}/settings`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Show advanced settings" }).click();
+  const section = page.locator("section").filter({ has: page.getByRole("heading", { name: /Model sources/i }) });
+  await expect(page.getByText(/Upstream quota: unknown/)).toBeVisible();
+  await section.screenshot({ path: path.join(SCREENSHOT_DIR, "llmbox-source-preview.png") });
+});
+
+// Company-source quota intentionally stays unknown; values below are synthetic UI fixtures.
+test("trae company source", async ({ page }) => {
+  await interceptApi(page);
+  await page.route("**/api/model-sources/**", (route) => fulfill(route, { sources: [{
+    id: "src_company_preview", name: "TRAE", kind: "trae",
+    baseUrl: "https://copilot-cn.bytedance.net/api/ide/v2", isEnabled: false, healthStatus: "unknown",
+    supportsChatCompletions: false, supportsResponses: true, supportsAudioTranscriptions: false,
+    supportsEmbeddings: false, timeoutSeconds: 90, maxConcurrency: 1,
+    createdAt: "2026-09-10T00:00:00Z", updatedAt: "2026-09-10T00:00:00Z", models: [],
+    companyStatus: { credentialCache: "present", quotaStatus: "unknown", remaining: null, resetsAt: null,
+      observedUsage: { since: "2026-09-09T00:00:00Z", requests: 2, requestsWithoutUsage: 0,
+        inputTokens: 388, outputTokens: 77 } },
+  }] }));
+  await page.goto(`${BASE_URL}/settings`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Show advanced settings" }).click();
+  const section = page.locator("section").filter({ has: page.getByRole("heading", { name: /Model sources/i }) });
+  await expect(page.getByText(/Upstream quota: unknown/)).toBeVisible();
+  await section.screenshot({ path: path.join(SCREENSHOT_DIR, "trae-source-preview.png") });
+});
+
+// Company-source quota intentionally stays unknown; values below are synthetic UI fixtures.
+test("native company source", async ({ page }) => {
+  await interceptApi(page);
+  await page.route("**/api/model-sources/**", (route) => fulfill(route, { sources: [{
+    id: "src_company_preview", name: "Codebase / Coco", kind: "codebase_llm",
+    baseUrl: "https://codebase-api.byted.org/v2/api/2022-06-01/LLMProxy/Model", isEnabled: false, healthStatus: "unknown",
+    supportsChatCompletions: false, supportsResponses: true, supportsAudioTranscriptions: false,
+    supportsEmbeddings: false, timeoutSeconds: 90, maxConcurrency: 1, localTokenBudget: 100000,
+    createdAt: "2026-09-10T00:00:00Z", updatedAt: "2026-09-10T00:00:00Z", models: [],
+    companyStatus: { credentialCache: "present", quotaStatus: "unknown", remaining: null, resetsAt: null,
+      health: "healthy", successes: 2, failures: 0, rateLimits: 0, serverErrors: 0, averageLatencyMs: 1250, budgetUsed: 465,
+      observedUsage: { since: "2026-09-09T00:00:00Z", requests: 2, requestsWithoutUsage: 0,
+        inputTokens: 388, outputTokens: 77 } },
+  }] }));
+  await page.goto(`${BASE_URL}/settings`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Show advanced settings" }).click();
+  const section = page.locator("section").filter({ has: page.getByRole("heading", { name: /Model sources/i }) });
+  await expect(page.getByText(/Upstream quota: unknown/)).toBeVisible();
+  await section.screenshot({ path: path.join(SCREENSHOT_DIR, "company-governance-preview.png") });
+});

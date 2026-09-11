@@ -1,0 +1,504 @@
+{
+  "date": "2026-09-10",
+  "scope": "Synthetic function-call and result-continuation tests; Astra additionally verified with real Codex CLI shell tool. Isolated services only; production port 2455 unchanged.",
+  "models": {
+    "trae/GPT-6-Astra": {
+      "status": "verified_separately",
+      "evidence": "live pytest and real Codex CLI tool roundtrip"
+    },
+    "trae/GPT-6-Astra-max": {
+      "status": "passed",
+      "started_at": 1789027641.3048189,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 12,
+        "total_tokens": 105,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027725.048363
+    },
+    "trae/GPT-5.6-Sol": {
+      "status": "passed",
+      "started_at": 1789027725.0500429,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 12,
+        "total_tokens": 105,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027731.757025
+    },
+    "trae/GPT-5.6-Sol-max": {
+      "status": "passed",
+      "started_at": 1789027731.758058,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 12,
+        "total_tokens": 105,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027739.652734
+    },
+    "trae/GPT-5.6-Terra": {
+      "status": "passed",
+      "started_at": 1789027739.653693,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 105,
+        "output_tokens": 12,
+        "total_tokens": 117,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027781.59218
+    },
+    "trae/GPT-5.6-Terra-max": {
+      "status": "passed",
+      "started_at": 1789027781.594244,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 12,
+        "total_tokens": 105,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027802.916227
+    },
+    "trae/GPT-5.6-Luna": {
+      "status": "passed",
+      "started_at": 1789027802.9175732,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 12,
+        "total_tokens": 105,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027810.2646148
+    },
+    "trae/GPT-5.6-Luna-max": {
+      "status": "passed",
+      "started_at": 1789027810.266167,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 12,
+        "total_tokens": 105,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027813.91928
+    },
+    "trae/GPT-5.5": {
+      "status": "passed",
+      "started_at": 1789027813.920426,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 12,
+        "total_tokens": 105,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027821.276973
+    },
+    "trae/GPT-5.5-max": {
+      "status": "passed",
+      "started_at": 1789027821.278914,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 12,
+        "total_tokens": 105,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027824.851765
+    },
+    "trae/GPT-5.4": {
+      "status": "passed",
+      "started_at": 1789027824.852918,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 106,
+        "output_tokens": 12,
+        "total_tokens": 118,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027828.389528
+    },
+    "trae/DeepSeek-V4-Flash": {
+      "status": "passed",
+      "started_at": 1789027830.321512,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 367,
+        "output_tokens": 36,
+        "total_tokens": 403,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 24
+        }
+      },
+      "finished_at": 1789027833.954276
+    },
+    "trae/GPT-5.2": {
+      "status": "passed",
+      "started_at": 1789027845.654848,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 187,
+        "output_tokens": 12,
+        "total_tokens": 199,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027851.3732128
+    },
+    "trae/Seed-Evolving": {
+      "status": "passed",
+      "started_at": 1789027802.5560699,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 559,
+        "output_tokens": 16,
+        "total_tokens": 575,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 5
+        }
+      },
+      "finished_at": 1789027807.758056
+    },
+    "trae/Seed-2.1-Pro": {
+      "status": "passed",
+      "started_at": 1789027807.760161,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 554,
+        "output_tokens": 17,
+        "total_tokens": 571,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 6
+        }
+      },
+      "finished_at": 1789027813.6451929
+    },
+    "trae/Seed-2.1-Turbo": {
+      "status": "passed",
+      "started_at": 1789027813.646132,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 550,
+        "output_tokens": 35,
+        "total_tokens": 585,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 24
+        }
+      },
+      "finished_at": 1789027817.1394382
+    },
+    "trae/openrouter-3o": {
+      "status": "passed",
+      "started_at": 1789027817.14097,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 434,
+        "output_tokens": 16,
+        "total_tokens": 450,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027823.487663
+    },
+    "trae/openrouter-3o-max": {
+      "status": "passed",
+      "started_at": 1789027823.488558,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 448,
+        "output_tokens": 16,
+        "total_tokens": 464,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027833.74617
+    },
+    "trae/openrouter-2o": {
+      "status": "passed",
+      "started_at": 1789027833.750575,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 848,
+        "output_tokens": 18,
+        "total_tokens": 866,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027841.072486
+    },
+    "trae/openrouter-2o-max": {
+      "status": "passed",
+      "started_at": 1789027841.077989,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 848,
+        "output_tokens": 18,
+        "total_tokens": 866,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027847.754326
+    },
+    "trae/DeepSeek-V4-Pro": {
+      "status": "passed",
+      "started_at": 1789027916.9457989,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 364,
+        "output_tokens": 40,
+        "total_tokens": 404,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 28
+        }
+      },
+      "finished_at": 1789027922.333297
+    },
+    "trae/Seed-Dogfooding-2.0": {
+      "status": "passed",
+      "started_at": 1789027922.3347719,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 441,
+        "output_tokens": 24,
+        "total_tokens": 465,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 12
+        }
+      },
+      "finished_at": 1789027932.455671
+    },
+    "trae/Seed-Code": {
+      "status": "passed",
+      "started_at": 1789027932.4565618,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 540,
+        "output_tokens": 38,
+        "total_tokens": 578,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 27
+        }
+      },
+      "finished_at": 1789027937.874534
+    },
+    "trae/openrouter-1o": {
+      "status": "passed",
+      "started_at": 1789027937.8753018,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 675,
+        "output_tokens": 12,
+        "total_tokens": 687,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027946.6147242
+    },
+    "trae/openrouter-1": {
+      "status": "passed",
+      "started_at": 1789027946.6160629,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 677,
+        "output_tokens": 12,
+        "total_tokens": 689,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finished_at": 1789027953.2889931
+    },
+    "trae/Gemini-3.1-Pro-Preview": {
+      "status": "passed",
+      "started_at": 1789028425.835978,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 174,
+        "output_tokens": 9,
+        "total_tokens": 183,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 29
+        }
+      },
+      "finished_at": 1789028432.674356
+    },
+    "trae/Gemini-3-Flash-Preview": {
+      "status": "passed",
+      "started_at": 1789028432.675881,
+      "upstream_status": "completed",
+      "marker_match": true,
+      "error": null,
+      "usage": {
+        "input_tokens": 153,
+        "output_tokens": 9,
+        "total_tokens": 162,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 29
+        }
+      },
+      "finished_at": 1789028439.283713
+    }
+  }
+}

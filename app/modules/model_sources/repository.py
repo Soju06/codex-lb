@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from sqlalchemy import ColumnElement, and_, delete, or_, select
+from datetime import datetime
+
+from sqlalchemy import ColumnElement, and_, case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import ModelSource, ModelSourceModel
+from app.db.models import ModelSource, ModelSourceModel, RequestLog
+from app.modules.model_sources.governance import latest_health_checks, operational_status
+from app.modules.model_sources.schemas import CompanySourceStatus, ObservedSourceUsage
 
 
 def _enablement_filter(only_disabled: bool) -> ColumnElement[bool]:
@@ -26,11 +30,46 @@ class ModelSourcesRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def operational_status(self, source: ModelSource) -> CompanySourceStatus:
+        return await operational_status(self._session, source)
+
+    async def latest_health_checks(self, source_ids: list[str]) -> dict[tuple[str, str], RequestLog]:
+        return await latest_health_checks(self._session, source_ids)
+
     async def list_sources(self) -> list[ModelSource]:
         result = await self._session.execute(
             select(ModelSource).options(selectinload(ModelSource.models)).order_by(ModelSource.name)
         )
         return list(result.scalars().unique().all())
+
+    async def observed_usage(self, source_ids: list[str], *, since: datetime) -> dict[str, ObservedSourceUsage]:
+        complete = and_(RequestLog.input_tokens.is_not(None), RequestLog.output_tokens.is_not(None))
+        rows = await self._session.execute(
+            select(
+                RequestLog.model_source_id,
+                func.count().label("requests"),
+                func.sum(case((complete, 0), else_=1)).label("missing"),
+                func.sum(RequestLog.input_tokens).label("input_tokens"),
+                func.sum(RequestLog.output_tokens).label("output_tokens"),
+            )
+            .where(RequestLog.model_source_id.in_(source_ids), RequestLog.requested_at >= since)
+            .group_by(RequestLog.model_source_id)
+        )
+        result = {
+            sid: ObservedSourceUsage(
+                since=since, requests=0, requests_without_usage=0, input_tokens=None, output_tokens=None
+            )
+            for sid in source_ids
+        }
+        for row in rows:
+            result[row.model_source_id] = ObservedSourceUsage(
+                since=since,
+                requests=row.requests,
+                requests_without_usage=row.missing,
+                input_tokens=row.input_tokens,
+                output_tokens=row.output_tokens,
+            )
+        return result
 
     async def list_enabled_sources(self) -> list[ModelSource]:
         result = await self._session.execute(
@@ -59,7 +98,7 @@ class ModelSourcesRepository:
             select(ModelSource)
             .options(selectinload(ModelSource.models))
             .join(ModelSourceModel, ModelSourceModel.source_id == ModelSource.id)
-            .where(ModelSource.kind == "openai_compatible")
+            .where(ModelSource.kind.in_(("openai_compatible", "llmbox", "trae", "codebase_llm")))
             .where(ModelSource.supports_chat_completions.is_(True))
             .where(ModelSourceModel.model == model)
             .where(_enablement_filter(only_disabled))
@@ -87,7 +126,7 @@ class ModelSourcesRepository:
             select(ModelSource)
             .options(selectinload(ModelSource.models))
             .join(ModelSourceModel, ModelSourceModel.source_id == ModelSource.id)
-            .where(ModelSource.kind == "openai_compatible")
+            .where(ModelSource.kind.in_(("openai_compatible", "llmbox", "trae", "codebase_llm")))
             .where(ModelSource.supports_responses.is_(True))
             .where(ModelSourceModel.model == model)
             .where(_enablement_filter(only_disabled))

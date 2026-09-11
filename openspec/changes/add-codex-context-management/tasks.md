@@ -43,3 +43,4 @@ Full CI runs in GitHub Actions. Local verification here is scoped to the affecte
 - [x] Keep file-reference detection safe for those same non-string types without losing content file pins.
 - [x] Remove the unused private-context control adapter while preserving Realtime handling.
 - [x] Run focused HTTP regressions, affected context/replay/Realtime tests and static/spec validation.
+- [x] Integrate upstream `789a2dd3`, retain the archived eventless-response requirement and validate the affected source-routing paths.

@@ -25,6 +25,8 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     OVERLOAD_MAX_LEVEL,
     OVERLOAD_TRIP_COUNT,
     OVERLOAD_WINDOW_SECONDS,
+    SOFT_OVERLOAD_TRIP_WEIGHT,
+    UPSTREAM_SOFT_OVERLOAD_CODES,
     OverloadIsolationPolicy,
     filter_overload_backoff_candidates,
     overload_backoff_active,
@@ -83,6 +85,94 @@ def test_window_trips_only_on_the_third_rejection_inside_the_window() -> None:
     assert runtime.overload_rejections == []
     assert overload_backoff_active(runtime, 1020.0 + OVERLOAD_BACKOFF_BASE_SECONDS - 1)
     assert not overload_backoff_active(runtime, 1020.0 + OVERLOAD_BACKOFF_BASE_SECONDS)
+
+
+def test_soft_rejections_alone_need_double_the_trip_count() -> None:
+    runtime = RuntimeState()
+    # Five soft observations sum to 2.5 -- still below the trip count of 3.
+    for i in range(5):
+        assert record_overload_rejection_locked(runtime, 1000.0 + i, soft=True) is None
+    assert not overload_backoff_active(runtime, 1005.0)
+    assert len(runtime.soft_overload_rejections or []) == 5
+    assert runtime.overload_rejections == []
+
+    deadline = record_overload_rejection_locked(runtime, 1006.0, soft=True)
+
+    assert deadline == pytest.approx(1006.0 + OVERLOAD_BACKOFF_BASE_SECONDS)
+    assert runtime.overload_backoff_level == 1
+    assert runtime.soft_overload_rejections == []
+
+
+def test_soft_and_hard_rejections_combine_toward_one_trip_threshold() -> None:
+    runtime = RuntimeState()
+    assert record_overload_rejection_locked(runtime, 1000.0) is None
+    assert record_overload_rejection_locked(runtime, 1001.0, soft=True) is None
+    assert record_overload_rejection_locked(runtime, 1002.0, soft=True) is None
+    # 1 hard + 2 soft = 2.0, below the threshold.
+    assert not overload_backoff_active(runtime, 1002.0)
+
+    deadline = record_overload_rejection_locked(runtime, 1003.0)
+
+    # 2 hard + 2 soft = 3.0 trips the shared window.
+    assert deadline == pytest.approx(1003.0 + OVERLOAD_BACKOFF_BASE_SECONDS)
+    assert runtime.overload_rejections == []
+    assert runtime.soft_overload_rejections == []
+
+
+def test_stale_soft_rejections_fall_out_of_the_window() -> None:
+    runtime = RuntimeState()
+    for i in range(5):
+        record_overload_rejection_locked(runtime, float(i), soft=True)
+    later = OVERLOAD_WINDOW_SECONDS + 5.0
+    assert record_overload_rejection_locked(runtime, later, soft=True) is None
+    assert runtime.soft_overload_rejections == [later]
+
+
+def test_soft_trip_weight_is_below_one_so_a_lone_fault_never_trips() -> None:
+    assert 0.0 < SOFT_OVERLOAD_TRIP_WEIGHT < 1.0
+    assert "server_error" in UPSTREAM_SOFT_OVERLOAD_CODES
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_feeds_server_error_terminal_into_the_soft_window() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-soft-overload")
+
+    # No HTTP status: this is the SSE stream terminal shape, not a 429.
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        account,
+        {"message": "An error occurred while processing your request."},
+        "server_error",
+    )
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.soft_overload_rejections == [clock.time()]
+    assert runtime.overload_rejections == []
+    # A single soft observation must not engage any cooldown on its own.
+    assert runtime.burst_backoff_until is None
+    assert not overload_backoff_active(runtime, clock.time())
+
+
+@pytest.mark.asyncio
+async def test_handle_stream_error_keeps_429_server_error_on_the_burst_branch() -> None:
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    proxy, balancer, record_error, mark_rate_limit = _burst_proxy(clock)
+    account = _make_account("acc-soft-429")
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        account,
+        {"message": "Rate limit exceeded"},
+        "server_error",
+        429,
+    )
+
+    runtime = balancer._runtime[account.id]
+    # The HTTP 429 burst path still owns this shape; the soft window stays empty.
+    assert runtime.burst_backoff_until == pytest.approx(clock.time() + BURST_BACKOFF_DEFAULT_SECONDS)
+    assert not runtime.soft_overload_rejections
 
 
 def test_rejections_outside_the_window_do_not_count() -> None:

@@ -73,6 +73,7 @@ from app.db.models import (
 )
 from app.modules.proxy._load_balancer.overload_backoff import (
     UPSTREAM_OVERLOAD_CODES,
+    UPSTREAM_SOFT_OVERLOAD_CODES,
     record_upstream_burst_rejection,
     record_upstream_overload,
 )
@@ -1158,14 +1159,23 @@ async def _handle_stream_error(
             get_request_id(),
             code,
         )
-        if code in UPSTREAM_OVERLOAD_CODES:
+        hard_overload = code in UPSTREAM_OVERLOAD_CODES
+        # A bare ``server_error`` *stream terminal* (no HTTP status) is the same
+        # observable condition as an explicit overload: upstream admitted the
+        # turn and then refused to run it. An HTTP 429 carrying the same code is
+        # a burst rejection instead and keeps its own cooldown branch below.
+        soft_overload = code in UPSTREAM_SOFT_OVERLOAD_CODES and http_status != 429
+        if hard_overload or soft_overload:
             # Overload is an admission rejection that successes on the same
             # account's warm sessions keep masking from ``error_count``; feed
             # the dedicated sliding window so fresh selection can deprioritize.
+            # Soft observations count at a fractional weight, so a sustained
+            # refusal still trips the window while a lone fault never does.
             await record_upstream_overload(
                 proxy._load_balancer,
                 account,
                 redact_account_id=privacy_policy.redacts_sensitive_details,
+                soft=not hard_overload,
             )
         elif http_status == 429 and not burst_cooldown_recorded:
             # A code-less HTTP 429 (rate_limit / quota classes returned above)

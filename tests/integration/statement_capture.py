@@ -1,7 +1,7 @@
-"""Task-scoped SQL capture for query-cost assertions.
+"""Caller-scoped SQL capture for query-cost assertions.
 
 ``before_cursor_execute`` on the process-wide engine sees every statement the
-process issues, not only the ones the request under test issues. Two ambient
+process issues, not only the ones the code under test issues. Two ambient
 background loops the suite deliberately leaves running write into the same
 engine while a test is measuring:
 
@@ -11,21 +11,34 @@ engine while a test is measuring:
   ``dashboard_settings`` load).
 
 Either one landing inside a capture window inflates an exact statement count
-by one (or three) and makes the assertion flake. Both run on their own asyncio
-tasks, while an ``ASGITransport`` request runs inline on the calling task, so
-dropping statements issued by another task excludes the ambient loops exactly
-without weakening what the count proves.
+by one (or three) and makes the assertion flake.
+
+The window therefore keeps a statement when the *caller's lineage* issued it --
+the calling task, or any task spawned inside the window -- and drops it
+otherwise. Lineage is carried by a ``ContextVar``: ``asyncio.create_task``
+copies the current context, so a task the measured code spawns inherits the
+window marker, while a loop that was already running when the window opened
+cannot, its context having been copied before the marker existed.
+
+Scoping on task *identity* instead would drop the ambient loops just as
+exactly, but it would also drop a statement the measured code moved -- or
+added -- inside a child task, which is precisely the cost regression these
+counts exist to catch. Filtering on statement *shape* would not work at all
+here: the ring heartbeat's ``dashboard_settings`` load is textually identical
+to the one an overview poll issues.
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+_CAPTURE_WINDOW: ContextVar[object | None] = ContextVar("statement_capture_window", default=None)
 
 
 def normalize_sql(statement: str) -> str:
@@ -35,10 +48,9 @@ def normalize_sql(statement: str) -> str:
 
 @asynccontextmanager
 async def capture_task_statements(async_engine: AsyncEngine) -> AsyncIterator[list[str]]:
-    """Collect the normalized SQL issued by the calling task inside the block."""
-    own_task = asyncio.current_task()
-    if own_task is None:  # pragma: no cover - the suite always runs inside a task
-        raise RuntimeError("capture_task_statements() must be used from inside a task")
+    """Collect the normalized SQL the calling task and its child tasks issue."""
+    window = object()
+    token = _CAPTURE_WINDOW.set(window)
     statements: list[str] = []
 
     def _capture(
@@ -49,10 +61,7 @@ async def capture_task_statements(async_engine: AsyncEngine) -> AsyncIterator[li
         context: Any,
         executemany: bool,
     ) -> None:
-        try:
-            if asyncio.current_task() is not own_task:
-                return
-        except RuntimeError:  # pragma: no cover - driver thread without a loop
+        if _CAPTURE_WINDOW.get() is not window:
             return
         statements.append(normalize_sql(statement))
 
@@ -61,3 +70,4 @@ async def capture_task_statements(async_engine: AsyncEngine) -> AsyncIterator[li
         yield statements
     finally:
         event.remove(async_engine.sync_engine, "before_cursor_execute", _capture)
+        _CAPTURE_WINDOW.reset(token)

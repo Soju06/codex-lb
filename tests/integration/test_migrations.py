@@ -2028,7 +2028,7 @@ async def test_http_bridge_overflow_merge_preserves_rows_from_each_branch(
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'branch-merge.sqlite'}"
     config = _build_alembic_config(db_url)
     branch_revision = parents[parent_index]
-    latest_head = "20260911_020000_merge_http_bridge_and_affinity_heads"
+    latest_head = _HEAD_REVISION
     assert ScriptDirectory.from_config(config).get_heads() == [latest_head]
     await to_thread.run_sync(lambda: run_upgrade(db_url, branch_revision, bootstrap_legacy=False))
     engine = create_async_engine(db_url)

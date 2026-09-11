@@ -19,7 +19,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260911_000000_dashboard_account_scoped_thread_identity"
-down_revision = "20260910_020000_add_dashboard_role_mappings"
+down_revision = "20260911_010000_merge_pin_index_and_affinity_heads"
 branch_labels = None
 depends_on = None
 

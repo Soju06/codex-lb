@@ -9892,6 +9892,67 @@ async def test_native_codex_stream_reraises_transport_failure_without_terminal_e
     assert _proxy_error_code(exc_info.value) == "upstream_request_timeout"
 
 
+@pytest.mark.asyncio
+async def test_native_codex_stream_surfaces_local_pre_dispatch_refusal_as_unmarked_terminal() -> None:
+    """A refusal the proxy raised before dispatch keeps its terminal event.
+
+    Regression for issue #2364: the denied-anchor fence reports the public code
+    ``stream_incomplete``, which is also how an upstream transport failure ends,
+    so without the provenance flag the native lifecycle aborted the committed
+    body and the client received nothing at all. The terminal must also stay
+    unmarked — ``_normalize_public_responses_stream`` turns a terminal marked as
+    a synthetic transport failure back into an abort for native clients.
+    """
+
+    def _refusal(*, local_pre_dispatch_refusal: bool) -> proxy_module.ProxyResponseError:
+        return proxy_module.ProxyResponseError(
+            502,
+            openai_error("stream_incomplete", "The previous response anchor was rejected upstream; retry the request."),
+            local_pre_dispatch_refusal=local_pre_dispatch_refusal,
+        )
+
+    async def refused_stream() -> AsyncIterator[str]:
+        raise _refusal(local_pre_dispatch_refusal=True)
+        yield ""  # pragma: no cover
+
+    events = [
+        parse_sse_data_json(event_block)
+        async for event_block in proxy_api._stream_response_error_events(
+            refused_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    assert len(events) == 1
+    assert events[0] is not None
+    assert events[0]["type"] == "response.failed"
+    response = cast(dict[str, JsonValue], events[0]["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error["code"] == "stream_incomplete"
+    assert "_codex_lb_synthetic_transport_failure" not in events[0]
+
+    async def unflagged_stream() -> AsyncIterator[str]:
+        raise _refusal(local_pre_dispatch_refusal=False)
+        yield ""  # pragma: no cover
+
+    # The same error without the provenance flag still ends the native stream
+    # without a terminal: the flag is the whole of the new behaviour.
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        _ = [
+            event
+            async for event in proxy_api._stream_response_error_events(
+                unflagged_stream(),
+                owns_reservation=False,
+                reservation=None,
+                preserve_native_failure_lifecycle=True,
+            )
+        ]
+
+    assert _proxy_error_code(exc_info.value) == "stream_incomplete"
+
+
 def test_stream_startup_error_response_preserves_exact_retry_after_header() -> None:
     request = Request({"type": "http", "method": "POST", "path": "/backend-api/codex/responses", "headers": []})
     error = proxy_module.ProxyResponseError(

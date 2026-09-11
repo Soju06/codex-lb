@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 96 settings. Every setting is an environment
+codex-lb currently exposes 95 settings. Every setting is an environment
 variable, normally with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process); aliased settings list every accepted name.
 All defaults work with zero configuration —
@@ -176,7 +176,6 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_AUTH_GUARDIAN_ENABLED` | T3 (dashboard) | `bool` | `True` |
-| `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS` | T3 | `int` | `8` |
 
 ## Usage
 
@@ -322,6 +321,7 @@ issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS`
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED`
 - `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_AMBIGUOUS_CONTINUATION_RECOVERY_MODE`
+- `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS`
 
 ---
 

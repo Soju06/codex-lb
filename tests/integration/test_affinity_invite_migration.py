@@ -96,7 +96,12 @@ def test_populated_invite_history_survives_merge_reversal(migration_url: str, st
             assert _INVITE_MERGE not in applied
             for table, rows in preserved.items():
                 assert sorted(_rows(connection, table), key=repr) == sorted(rows, key=repr)
-        assert check_schema_drift(url) == ()
+        # Drift is asserted only after walking back to head, as the sibling
+        # affinity merge-reversal tests do. Reaching the merge's parents also
+        # unwinds every revision layered above the merge since, so a drift
+        # assertion here is really an assertion that nothing newer than the
+        # merge has changed the schema — true only by accident, and false for
+        # the first descendant that adds a column.
         assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _current_head(url)
         with engine.connect() as connection:
             for table, rows in preserved.items():

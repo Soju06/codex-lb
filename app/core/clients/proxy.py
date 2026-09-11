@@ -590,6 +590,7 @@ class ProxyResponseError(Exception):
         retry_after_seconds: int | None = None,
         retry_after_header: str | None = None,
         reservation_released: bool = False,
+        local_pre_dispatch_refusal: bool = False,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -604,6 +605,14 @@ class ProxyResponseError(Exception):
         self.retry_after_seconds = retry_after_seconds
         self.retry_after_header = retry_after_header
         self.reservation_released = reservation_released
+        # True when the proxy refused the request itself before any upstream
+        # frame was sent, so the failure is not an observed upstream transport
+        # failure: the native Codex transport-failure lifecycle, which ends the
+        # body without a terminal event, must not be applied to it (issue
+        # #2364, where such a refusal reached the client as an empty 200). The
+        # refusing instance may be another replica: an internal bridge forward
+        # carries the provenance back so the origin reaches the same verdict.
+        self.local_pre_dispatch_refusal = local_pre_dispatch_refusal
 
 
 def _safe_retry_after_header(headers: Mapping[str, object] | None) -> str | None:

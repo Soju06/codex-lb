@@ -378,19 +378,28 @@ class _StreamingRetryMixin:
         upstream_stream_transport = upstream_stream_transport_override
         if upstream_stream_transport is None:
             configured_transport, explicit_transport = _resolved_configured_stream_transport(settings)
-            image_bypass = _facade()._responses_request_uses_image_generation(
-                payload
-            ) or _facade()._responses_request_contains_input_image(payload)
+            # ``has_image_generation_tool`` means exactly that: folding
+            # ``input_image`` into it pinned every image turn to upstream HTTP
+            # from inside _resolve_stream_transport, where no log or counter
+            # records the decision (#2363). An ``input_image`` request is pinned
+            # only by the narrow predicate below.
+            image_generation_bypass = _facade()._responses_request_uses_image_generation(payload)
+            payload_size_estimate = _payload_size_estimate_bytes(payload)
             resolved_base_transport = _resolve_stream_transport(
                 transport=configured_transport,
                 transport_override=None,
                 model=payload.model,
                 headers=headers,
-                has_image_generation_tool=image_bypass,
-                payload_size_estimate_bytes=_payload_size_estimate_bytes(payload),
+                has_image_generation_tool=image_generation_bypass,
+                payload_size_estimate_bytes=payload_size_estimate,
             )
             upstream_stream_transport = resolved_base_transport
-            if not explicit_transport and image_bypass:
+            if not explicit_transport and (
+                image_generation_bypass
+                or _facade()._input_image_request_requires_http_upstream(
+                    payload, payload_size_estimate_bytes=payload_size_estimate
+                )
+            ):
                 upstream_stream_transport = "http"
             if (
                 not explicit_transport

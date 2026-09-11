@@ -484,7 +484,6 @@ async def _persist_http_bridge_operation_event(
                                 )
                             ),
                             state=terminal_state,
-                            expected_recovery_dispatch_count=request_state.operation_attempt_generation,
                             response_id=response_id,
                         ),
                         None,
@@ -534,7 +533,6 @@ async def _persist_http_bridge_operation_event(
                             owner_epoch=owner_epoch,
                             state=terminal_state,
                             expected_response_id=expected_response_id,
-                            expected_recovery_dispatch_count=request_state.operation_attempt_generation,
                             alternate_expected_response_id=alternate_expected_response_id,
                             response_id=response_id,
                         )

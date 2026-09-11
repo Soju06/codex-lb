@@ -1540,7 +1540,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 operation, "rebound_from_parent_response_id", None
             )
             request_state.operation_persisted_response_id = getattr(operation, "response_id", None)
-            request_state.operation_attempt_generation = getattr(operation, "recovery_dispatch_count", 0)
 
         async def _cleanup_unsubmitted_recovery_claim() -> None:
             if (
@@ -2063,12 +2062,20 @@ class _HTTPBridgeRequestSubmitMixin:
                             session_id=request_state.session_id,
                             upstream_error_code="previous_response_not_found",
                         )
+                        # The fence sits above the pending-request enqueue and
+                        # the upstream send, so this refusal is proven to be
+                        # ours rather than an upstream transport failure. Say
+                        # so on the exception: without the flag the native
+                        # Codex lifecycle aborts the committed body with no
+                        # terminal event and the client sees an empty 200
+                        # (issue #2364).
                         raise ProxyResponseError(
                             502,
                             openai_error(
                                 "stream_incomplete",
                                 "The previous response anchor was rejected upstream; retry the request.",
                             ),
+                            local_pre_dispatch_refusal=True,
                         )
                     if (
                         request_state.verified_stale_anchor_replay

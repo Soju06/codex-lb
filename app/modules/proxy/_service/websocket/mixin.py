@@ -758,6 +758,7 @@ def _websocket_archive_request_state_for_payload(
         previous_response_id_hint=_facade()._previous_response_id_from_not_found_message(error_message),
         error_message=error_message,
         allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
+        event_type=event_type,
     )
 
 
@@ -5529,6 +5530,7 @@ class _WebSocketMixin:
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
                     allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
+                    event_type=event_type,
                 )
                 release_create_gate = False
             else:

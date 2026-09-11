@@ -55986,3 +55986,103 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_surfaces_wit
     assert excinfo.value.retry_after_seconds == 5
     assert stream_once_calls == 2
     assert scheduler.sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("draining", "event_type"),
+    [(False, "response.output_text.delta"), (True, "response.output_text.delta"), (False, "response.completed")],
+    ids=["visible", "draining", "anonymous-completion"],
+)
+async def test_process_upstream_websocket_text_routes_anonymous_output_to_created_response(
+    monkeypatch, draining, event_type
+):
+    """Archive and relay agree on output ownership without changing terminal ownership."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_pipelined_output")
+    active_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_active_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_ws_active_created",
+        awaiting_response_created=False,
+        archive_request_id="archive_ws_active_created",
+        draining_until_terminal=draining,
+    )
+    waiting_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_waiting_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id=None,
+        awaiting_response_created=True,
+        archive_request_id="archive_ws_waiting_created",
+    )
+    payload = {
+        "type": "response.output_text.delta",
+        "sequence_number": 3,
+        "item_id": "msg_ws_pipelined",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "Hello",
+    }
+    if event_type == "response.completed":
+        payload = {"type": event_type, "response": {"status": "completed", "output": []}}
+    pending_requests = deque([waiting_request, active_request])
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    archived: list[tuple[object, str | None]] = []
+
+    class _ArchivingUpstream:
+        def archive_received(self, message: object) -> None:
+            archived.append((message, get_request_id()))
+
+    send_downstream = AsyncMock()
+    monkeypatch.setattr(service, "_send_downstream_websocket_text", send_downstream)
+    text = json.dumps(payload, separators=(",", ":"))
+    message = SimpleNamespace(kind="text", text=text)
+    should_stop = await websocket_mixin_module._process_and_forward_upstream_websocket_text(
+        cast(Any, service),
+        cast(Any, SimpleNamespace()),
+        cast(Any, _ArchivingUpstream()),
+        message=message,
+        text=text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        continuity_state=proxy_service._WebSocketContinuityState(),
+        codex_session_affinity=False,
+    )
+
+    assert should_stop is False
+    if event_type == "response.completed":
+        assert list(pending_requests) == [active_request]
+        assert active_request.downstream_visible is False
+        assert active_request.response_event_count == 0
+        assert waiting_request.latency_first_upstream_event_ms is not None
+        finalize.assert_awaited_once()
+        assert finalize.await_args is not None
+        assert finalize.await_args.args[0] is waiting_request
+        assert finalize.await_args.kwargs["event_type"] == "response.completed"
+        assert archived == [(message, "archive_ws_waiting_created")]
+    else:
+        assert waiting_request.downstream_visible is False
+        assert waiting_request.response_event_count == 0
+        assert active_request.downstream_visible is True
+        assert active_request.response_event_count == 1
+        finalize.assert_not_awaited()
+        assert archived == [(message, "archive_ws_active_created")]
+    send_downstream.assert_awaited_once()
+    assert send_downstream.await_args is not None
+    assert send_downstream.await_args.kwargs["text"] == text

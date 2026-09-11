@@ -25,8 +25,8 @@ and the public configuration surface remains unchanged.
 ## Safety
 
 - A timed-out append is treated as having an uncertain commit acknowledgement.
-  Fallback settlement uses the existing response identity, recovery generation,
-  state, session, instance, and owner-epoch fences.
+  Fallback settlement uses the existing response identity, state, session,
+  instance, and owner-epoch fences.
 - A successful append inside the bound becomes replayable only through its
   attempt-fenced finalization.
 - A timeout never schedules finalization, so even a late append commit keeps the
@@ -67,8 +67,8 @@ hard-continuity eligibility fleet-wide.
   append; the row is final, so appends *and* finalization are refused.
 
 The phase fences one dispatch. Every path that starts a fresh transcript
-(recovery claim, server-owned ambiguous retry reset, rebind of a failed
-operation) resets it to `pending`, and a settlement back to `acknowledged`
+(the server-owned ambiguous retry reset, and the rebind of a failed operation)
+resets it to `pending`, and a settlement back to `acknowledged`
 (continuity failure after acknowledgement) leaves it `pending` because the
 operation is still live.
 

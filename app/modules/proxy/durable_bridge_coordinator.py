@@ -770,7 +770,6 @@ class DurableBridgeSessionCoordinator:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
         response_id: str | None = None,
         complete_spool: bool = True,
     ) -> bool:
@@ -783,7 +782,6 @@ class DurableBridgeSessionCoordinator:
                 event_text=event_text,
                 max_bytes=max_bytes,
                 state=state,
-                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 response_id=response_id,
                 complete_spool=complete_spool,
             )
@@ -822,7 +820,6 @@ class DurableBridgeSessionCoordinator:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
         response_id: str | None = None,
         complete_spool: bool = True,
     ) -> bool:
@@ -835,7 +832,6 @@ class DurableBridgeSessionCoordinator:
                 event_text=event_text,
                 max_bytes=max_bytes,
                 state=state,
-                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 response_id=response_id,
                 complete_spool=complete_spool,
             )
@@ -847,7 +843,6 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
-        expected_recovery_dispatch_count: int | None = None,
         expected_state: str | None = None,
     ) -> bool:
         async with self._session() as session:
@@ -856,7 +851,6 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
-                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 expected_state=expected_state,
             )
 
@@ -869,7 +863,6 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         state: str,
         expected_response_id: str | None,
-        expected_recovery_dispatch_count: int = 0,
         alternate_expected_response_id: str | None = None,
         response_id: str | None = None,
     ) -> bool:
@@ -881,7 +874,6 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
                 state=state,
                 expected_response_id=expected_response_id,
-                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 alternate_expected_response_id=alternate_expected_response_id,
                 response_id=response_id,
             )
@@ -926,24 +918,6 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
             )
 
-    async def claim_unknown_operation_for_recovery(
-        self,
-        *,
-        operation_id: str,
-        session_id: str,
-        instance_id: str,
-        owner_epoch: int,
-        max_recovery_dispatches: int | None = None,
-    ) -> bool:
-        async with self._session() as session:
-            return await DurableBridgeRepository(session).claim_unknown_operation_for_recovery(
-                operation_id=operation_id,
-                session_id=session_id,
-                instance_id=instance_id,
-                owner_epoch=owner_epoch,
-                max_recovery_dispatches=max_recovery_dispatches,
-            )
-
     async def mark_operation_unknown(
         self,
         *,
@@ -951,7 +925,6 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
-        restore_recovery_dispatch_claim: bool = False,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_operation_unknown(
@@ -959,7 +932,6 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
-                restore_recovery_dispatch_claim=restore_recovery_dispatch_claim,
             )
 
     async def rollback_operation_before_dispatch(

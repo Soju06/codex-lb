@@ -1177,9 +1177,6 @@ class _WebSocketRequestState:
     operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
-    # Immutable durable attempt generation. Recovery claims increment the
-    # operation's dispatch count before sending a replacement attempt.
-    operation_attempt_generation: int = 0
     # Last response identity successfully written to the durable operation.
     # Retry setup may clear the active response before a replacement is
     # acknowledged, but fallback settlement must still fence against this ID.

@@ -121,17 +121,46 @@ Since the WP-E fix in #2124 the HTTP Responses session bridge returns the pool's
 
 The designation is one fleet-wide settings row -- there is no per-replica flag -- so a canary that shares the production database would flip production. Run the canary as a **separate deployment with its own database**, designate a **low-limit, priced** source that serves a **standard-Responses** registry model (never a gpt-5.6 / Responses-Lite one), exhaust the canary's subscription pool, and complete this list before the production flip:
 
-| Drill | How | Expected |
-|---|---|---|
-| Disconnect | Press Esc in Codex while the source is still producing its first token. | One request-log row with status `cancelled`, no pin, source slot and API-key reservation released. |
-| Stall | Point the source at a black-holed address. | `504 model_source_timeout` within 60 s before any `200`; the breaker opens within three attempts (fresh requests fall back to today's `429`); ChatGPT traffic and its connector are unaffected. |
-| Silent headers | Source answers `200` and then nothing. | `504 model_source_timeout` at 30 s; nothing was sent to the client. |
-| Neutral release | Disable the source while a conversation without reasoning is pinned. | Its next turn is served by a subscription account and the pin is gone; a reasoning-bearing conversation gets `400 subscription_overflow_source_unavailable`. |
-| Clear-then-touch | Set the control to Off and keep using a pinned conversation daily. | The source serves it until day 7 and never a subscription account; the pin table is empty at the drain deadline. |
-| Kill switches | Off; then disable and delete the source. | Fresh overflow stops within the settings-cache window (≤ 5 s) and pinned conversations drain; disabling or deleting releases source-free conversations and ends the others with `400`. |
-| Anchor timing | Send an SDK request (`store` omitted) through the designated source and read its SSE stream. | The source emits `response.created` with an `id` **before** its first content-bearing frame; the anchor row exists and the turn is `200`. A source that mints its id later answers `subscription_overflow_pin_unavailable` and cannot serve SDK overflow turns. |
+| Drill | How | Expected | Rehearsal |
+|---|---|---|---|
+| Disconnect | Press Esc in Codex while the source is still producing its first token. | One request-log row with status `cancelled`, no pin, source slot and API-key reservation released. | `test_drill_disconnect_mid_dispatch_is_a_cancelled_attempt` |
+| Stall | Point the source at a black-holed address, in both senses: an address that drops the SYN, and one that accepts TCP and then says nothing. | A dropped SYN answers `502 model_source_unreachable` (the connect phase never reaches the header wait); a silent-but-connected source answers `504 model_source_timeout` at the 20 s header deadline. Either way before any `200`, and the breaker opens within three attempts -- fresh requests fall back to today's `429` without reaching the source, a pinned conversation gets `503 model_source_unavailable` with `Retry-After: 2`; ChatGPT traffic and its connector are unaffected. | `test_drill_stall_fails_closed_and_opens_the_breaker` |
+| Silent headers | Source answers `200` and then nothing. | `504 model_source_timeout` at 30 s; nothing was sent to the client. | `test_drill_silent_headers_send_nothing_and_leave_no_pin` |
+| Neutral release | Disable the source while a conversation without reasoning is pinned. | Its next turn is served by a subscription account and the pin is gone; a reasoning-bearing conversation gets `400 subscription_overflow_source_unavailable`. | `test_drill_neutral_release_frees_a_source_free_conversation` |
+| Clear-then-touch | Set the control to Off and keep using a pinned conversation daily. | The source serves it until day 7 and never a subscription account; the pin table is empty at the drain deadline. | `test_drill_clear_then_touch_expires_at_day_seven` |
+| Kill switches | Off; then disable and delete the source. | Fresh overflow stops within the settings-cache window (≤ 5 s) and pinned conversations drain; disabling or deleting releases source-free conversations and ends the others with `400`. | `test_drill_kill_switches_restore_subscription_behaviour` |
+| Anchor timing | Send an SDK request (`store` omitted) through the designated source and read its SSE stream. | The source emits `response.created` with an `id` **before** its first content-bearing frame; the anchor row exists and the turn is `200`. A source that mints its id later answers `subscription_overflow_pin_unavailable` and cannot serve SDK overflow turns. | `test_drill_anchor_timing_refuses_an_unanchorable_sdk_turn` |
 
 Also watch `codex_lb_subscription_overflow_total`, the request-log rows and the source cost over one usage-reset cycle; confirm a pinned conversation survives the pool's reset, `codex resume` and an API-key rotation, then tombstones after 7 idle days; and profile only with py-spy at 10-20 Hz in short bursts (higher rates stall a two-core host). Codex on the canary must be **0.99.0 or newer** for the WebSocket downgrade. Only after the drills pass, and once every production replica runs this release, designate the source in production.
+
+#### Rehearse before the canary
+
+```
+make test-overflow-drills
+```
+
+(without `uv`: `PYTHONPATH=. .venv/bin/python -m pytest -p no:cacheprovider -m overflow_drill tests/integration`)
+
+One command, marker-selected, about a minute. Every row of the table above has one `test_drill_*` rehearsal in `tests/integration/test_subscription_overflow_canary_drills.py` that asserts the whole union the row promises -- the wire answer and its exact message, the `request_logs` row, the API-key reservation, the `model_source_pins` rows, the source bulkhead, the breaker state and the `codex_lb_subscription_overflow_total{outcome}` label -- against the production route and forwarding stack. A regression in any one of them fails a test.
+
+**What it proves:** the contracts. **What it does not:** the deployment. The rehearsal runs one replica, a stub upstream and the test database; the deadlines are shortened so the wire text still names the production value (20 s / 30 s) while the test finishes in a fraction of a second, and the calendar drills construct a past clear time instead of waiting a week. So run it *before* standing the canary up -- it is the cheap gate -- and then use the canary to verify only the residue below.
+
+Two behaviours worth knowing, neither of them in the table:
+
+- **A mid-stream cut is a truncation, not an error document.** A source that goes silent *after* its first frame is cut by the idle cap (`min(stream_idle_timeout_seconds, 300)`); the `200` has already left, so the client sees a stream that simply ends with no terminal event, for native and SDK shaping alike. The row is `error` / `model_source_idle_timeout`, the pin stays (the conversation is still the source's) and the breaker counts one failure. Rehearsed by `test_mid_stream_idle_cut_truncates_the_stream_without_a_terminal`.
+- **Off restores the answer immediately, the zero-cost path at `drain_until`.** While the drain window is armed the request path still performs its bounded pin read on every thread-keyed and `previous_response_id` request -- the bytes are byte-identical to today's, the cost is not. The ship-dark fast path (no probe, no lookup, no selection, no portability walk, no claim) returns only once the drain deadline has passed, which is 29 days after the clear, not the moment the designation goes `NULL`. Rehearsed by `test_kill_switch_fast_path_returns_only_once_the_drain_deadline_elapses`.
+
+#### Manual-only observations
+
+What the canary is actually for, drill by drill:
+
+- **Disconnect.** Whether Codex re-dispatches after Esc, and whether the provider bills an aborted stream. `SELECT status, error_code, cost_usd, input_tokens FROM request_logs WHERE source LIKE 'subscription_overflow%' ORDER BY id DESC LIMIT 5;` must show exactly one `cancelled` row with null usage; cross-check the provider's usage page for that minute.
+- **Stall.** A real firewall `DROP` (not `REJECT`), the real 60 s bound, and "ChatGPT unaffected" with live accounts: watch `codex_lb_model_source_breaker_state{source_id}` reach `1` on `/metrics`, ChatGPT turns continuing through the stall window, and `model_source_breaker` in the logs.
+- **Silent headers.** Whether the real source ever needs more than 30 s to its first frame: watch `codex_lb_model_source_timeout_total{phase="first_frame"}` over one reset cycle. Non-zero on healthy traffic means the deadline is the problem, not the source.
+- **Neutral release.** One real Codex transcript: disable the source mid-conversation on the canary; the next turn must be served by an account, `outcome=pinned_released_neutral` must increment exactly once and the pin row must be gone.
+- **Clear-then-touch.** The 7-day calendar and the retention pass: daily `SELECT kind, expires_at, purge_at FROM model_source_pins;` -- `purge_at` must always sit below `subscription_overflow_drain_until` and `model_source_pins_drain_invariant_violated` must never appear; at day 8 the conversation must fail with `subscription_overflow_unsupported_input`; at `drain_until` the table must be empty.
+- **Kill switches.** The ≤ 5 s cross-replica settings-cache window, which needs at least two replicas: flip Off and confirm every replica stops dispatching inside one window (`outcome=~"dispatched_.*"` goes flat).
+- **Anchor timing.** Whether the real source mints `response.id` on `response.created` -- the whole SDK-overflow capability depends on it. Read one raw SSE stream from the source and check the first event.
 
 ---
 

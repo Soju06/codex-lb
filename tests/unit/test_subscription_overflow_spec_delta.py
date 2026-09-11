@@ -26,6 +26,7 @@ _OBSERVABILITY_DELTA = _CHANGE / "specs/proxy-runtime-observability/spec.md"
 _ACCOUNT_ROUTING_DELTA = _CHANGE / "specs/account-routing/spec.md"
 _TASKS = _CHANGE / "tasks.md"
 _ROUTING_DOC = REPO_ROOT / "docs/routing.md"
+_DRILL_SUITE = REPO_ROOT / "tests/integration/test_subscription_overflow_canary_drills.py"
 _FRONTEND_SRC = REPO_ROOT / "frontend/src"
 _LOCALES = _FRONTEND_SRC / "i18n/locales"
 _SETTINGS_COMPONENT = _FRONTEND_SRC / "features/settings/components/subscription-overflow-settings.tsx"
@@ -34,6 +35,20 @@ _BACKTICKED = re.compile(r"`([^`\n]+)`")
 # Every value of the closed ``outcome`` enum has one of these shapes; the
 # observability delta may not quote any such token that the enum lacks.
 _OUTCOME_SHAPE = re.compile(r"^(dispatched|bounced|declined|pinned|pin_commit|decision)_[a-z_]+$")
+# The seven canary drill rows and the rehearsals they must name. The row labels
+# are load-bearing (``test_routing_doc_states_shipped_status_canary_and_client_floor``
+# asserts each ``| <label> |`` prefix verbatim): add a column, never rename a row.
+_DRILL_ROWS = (
+    "Disconnect",
+    "Stall",
+    "Silent headers",
+    "Neutral release",
+    "Clear-then-touch",
+    "Kill switches",
+    "Anchor timing",
+)
+_DRILL_ROW = re.compile(r"^\|\s*(?:" + "|".join(re.escape(row) for row in _DRILL_ROWS) + r")\s*\|")
+_DRILL_TEST = re.compile(r"^async def (test_drill_[a-z0-9_]+)\(", re.MULTILINE)
 
 
 def _read(path: Path) -> str:
@@ -157,7 +172,7 @@ def test_tasks_mark_the_routing_extension_done_and_list_the_wiring_packages() ->
     text = _read(_TASKS)
 
     assert "- [x] 3.1 " in text
-    for task in ("3.22", "3.23", "3.24", "3.25", "3.26", "3.27", "3.28"):
+    for task in ("3.22", "3.23", "3.24", "3.25", "3.26", "3.27", "3.28", "3.36"):
         assert f" {task} " in text, task
 
 
@@ -174,6 +189,57 @@ def test_routing_doc_states_shipped_status_canary_and_client_floor() -> None:
     assert "no per-replica flag" in docs
     assert overflow.OVERFLOW_TOTAL_METRIC in docs
     assert overflow.BREAKER_STATE_METRIC in docs
+
+
+def test_every_drill_row_names_its_rehearsal_and_every_rehearsal_a_row() -> None:
+    """The drill table and the drill suite are a bijection.
+
+    A row whose ``Rehearsal`` cell names nothing is a drill that quietly went
+    back to being prose; a ``test_drill_*`` the table does not name is a
+    rehearsal an operator following the runbook would never run.
+    """
+
+    rows = [line for line in _read(_ROUTING_DOC).splitlines() if _DRILL_ROW.match(line)]
+    assert len(rows) == 7, rows
+
+    named: list[str] = []
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        assert len(cells) == 4, row
+        rehearsals = [token for token in _BACKTICKED.findall(cells[3]) if token.startswith("test_drill_")]
+        assert len(rehearsals) == 1, (cells[0], rehearsals)
+        named.append(rehearsals[0])
+
+    defined = _DRILL_TEST.findall(_read(_DRILL_SUITE))
+
+    assert sorted(named) == sorted(defined), {
+        "in_docs_only": sorted(set(named) - set(defined)),
+        "in_suite_only": sorted(set(defined) - set(named)),
+    }
+    assert len(set(named)) == len(named), named
+
+
+def test_the_drill_entry_point_is_documented_and_exists() -> None:
+    docs = _read(_ROUTING_DOC)
+    makefile = _read(REPO_ROOT / "Makefile")
+    pyproject = _read(REPO_ROOT / "pyproject.toml")
+
+    assert "make test-overflow-drills" in docs
+    assert "-m overflow_drill" in docs
+    assert "test-overflow-drills:" in makefile
+    assert "-m overflow_drill tests/integration" in makefile
+    # An unregistered marker selects nothing under ``--strict-markers`` and
+    # warns otherwise, so the runbook's one command must not depend on it.
+    assert '"overflow_drill: ' in pyproject
+
+
+def test_the_stall_drill_no_longer_promises_a_timeout_for_a_dropped_connection() -> None:
+    """A dropped SYN answers ``502 model_source_unreachable``; only a connected-but-silent source times out."""
+
+    for path in (_ROUTING_DOC, _ROUTING_DELTA):
+        text = _read(path)
+        assert "model_source_unreachable" in text, path
+        assert "model_source_timeout" in text, path
 
 
 def test_dashboard_staged_notice_is_gone_from_the_component_and_every_locale() -> None:

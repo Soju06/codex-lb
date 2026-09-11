@@ -1,0 +1,112 @@
+# responses-api-compat Delta
+
+## ADDED Requirements
+
+### Requirement: Usage-limit messages classify as account rate limits
+
+When an upstream error envelope carries a message asserting that the account's usage limit has been reached, and the envelope carries no error code or a code that is neither a rate-limit nor a quota code, the proxy MUST classify the failure `rate_limit`. Such a failure MUST NOT be classified `retryable_transient`, MUST NOT be treated as a burst rejection, and MUST NOT be answered with same-account backoff: the account is out of quota, so waiting on it cannot succeed.
+
+This requirement does not change the classification of an envelope that already carries a quota or rate-limit code; that case keeps the stronger classification it has today.
+
+Message matching MUST be punctuation-insensitive and MUST NOT depend on the HTTP status, because upstream delivers this message both as an HTTP body and as a serialized `response.failed` frame that carries no status.
+
+#### Scenario: Code-less usage-limit 429 rotates instead of backing off
+
+- **WHEN** upstream answers with HTTP `429` whose body carries no error code and whose message asserts the usage limit has been reached
+- **THEN** `classify_upstream_failure` returns `failure_class = "rate_limit"`
+- **AND** the failure is not a burst rejection
+- **AND** an unbound request excludes the account and continues the pool walk instead of waiting 1 s / 2 s / 4 s on it
+
+#### Scenario: Usage-limit message under a non-rate-limit code still rotates
+
+- **WHEN** upstream returns an envelope whose normalized error code is `invalid_request_error` and whose message asserts the usage limit has been reached
+- **THEN** `classify_upstream_failure` returns `failure_class = "rate_limit"`
+- **AND** the account's rate-limit health penalty is recorded as for any other rate-limit rejection
+
+#### Scenario: A coded rate-limit envelope is unaffected
+
+- **WHEN** upstream returns an envelope whose normalized error code is `rate_limit_exceeded` or `usage_limit_reached`
+- **THEN** the classification is exactly what it is today
+- **AND** this requirement adds no message-based reclassification on top of it
+
+### Requirement: Model-capacity rejections do not exclude the account from the pool walk
+
+A rejection whose message says the selected model is at capacity describes the requested model, not the selected account. When the proxy decides whether a pre-visible failure justifies excluding the selected account for the remainder of the request, a model-capacity rejection MUST NOT justify that exclusion, even when the envelope also carries a rate-limit or quota error code that keeps the stronger health classification required by "Model-capacity messages are retryable transient failures".
+
+The account-health write, the persisted status, the reset deadline and the model-capacity replay wait are unchanged by this requirement: it governs account selection only. A message that asserts the usage limit MUST take precedence over a model-capacity match when both appear in one envelope, because the usage limit is account-scoped.
+
+#### Scenario: Capacity rejection under a rate-limit code does not rotate the pool
+
+- **GIVEN** a pool of several selectable accounts and a request that is not owner-bound
+- **WHEN** the selected account returns an envelope whose code is `rate_limit_exceeded` and whose message says the selected model is at capacity
+- **THEN** the account keeps the rate-limit health classification it has today
+- **AND** the request does not exclude that account and walk the remaining pool for a condition no account can serve
+
+#### Scenario: Usage limit wins when both messages appear
+
+- **WHEN** an envelope's message asserts both the model capacity and that the usage limit has been reached
+- **THEN** the rejection is treated as account exhaustion
+- **AND** the account is excluded for the remainder of the request
+
+## MODIFIED Requirements
+
+### Requirement: Streaming Responses requests use a bounded retry budget
+
+When a streaming `/v1/responses` request encounters upstream instability, the proxy MUST enforce a configurable total request budget across selection, token refresh, account-capacity recovery waits, and upstream stream attempts. Each upstream stream attempt MUST clamp its connect timeout, idle timeout, and total request timeout to the remaining request budget.
+
+The number of accounts a request may attempt MUST NOT be a fixed per-transport constant. It MUST be bounded by the remaining request budget, by a fixed runaway ceiling on account attempts within one request, and by the monotone growth of the request-scoped excluded-account set, as required by "A single account's rejection is not the pool's rejection". The runaway ceiling MUST NOT be an operator setting.
+
+#### Scenario: Remaining budget constrains all stream attempt timeouts
+- **WHEN** account selection, account-capacity recovery, or token refresh leaves only part of the request budget available before a stream attempt starts
+- **THEN** the proxy limits the upstream connect timeout, SSE idle timeout, and upstream request total timeout to that same remaining budget
+- **AND** the client receives `response.failed` with `upstream_request_timeout` once that budget is exhausted instead of waiting through the full configured stream windows
+
+#### Scenario: Budget exhaustion during a walk ends the walk
+- **WHEN** a request has walked several accounts and the remaining request budget reaches zero before an account serves it
+- **THEN** the proxy stops attempting further accounts
+- **AND** the client receives `response.failed` with `upstream_request_timeout` rather than a usage-limit rejection
+
+#### Scenario: Forced refresh retry recomputes all attempt timeouts
+- **WHEN** a first stream attempt fails with an authentication error that triggers a forced token refresh and retry
+- **THEN** the proxy recomputes the remaining request budget after the refresh
+- **AND** the retry attempt reapplies connect, idle, and total timeout limits from that recomputed budget
+
+#### Scenario: Recoverable account-capacity wait is bounded by the request budget
+- **WHEN** account selection reports a recoverable retry hint such as temporary rate-limit or stream-capacity exhaustion
+- **AND** the streaming request still has remaining request budget
+- **THEN** the proxy may wait for at most the smaller of the recovery hint and the remaining request budget before retrying selection
+- **AND** if the budget is exhausted before an account becomes available, the request fails through the normal no-account or rate-limit error path instead of starting a fresh full-budget wait
+
+#### Scenario: Local balancer rate-limit exhaustion is not treated as recoverable capacity
+- **WHEN** account selection reports the local balancer message `Rate limit exceeded. Try again in Ns`
+- **AND** the selection result is a local no-account failure with `no_accounts` or no explicit error code
+- **THEN** the proxy does not enter an account-capacity recovery wait from that local retry hint
+- **AND** the request returns through the normal no-account or rate-limit error path instead of repeatedly retrying the same local selection failure
+
+#### Scenario: Local account cap selection waits instead of failing immediately
+- **WHEN** account selection for a streaming Responses request fails locally with `account_stream_cap` or `account_response_create_cap`
+- **THEN** the proxy treats the condition as a recoverable account-capacity wait within the request budget
+- **AND** it retries account selection after the bounded wait instead of returning an immediate 429
+- **AND** permanent `no_accounts` failures remain non-waitable unless they carry a distinct recoverable capacity or upstream quota signal
+
+#### Scenario: Post-selection response-create capacity preserves routing invariants
+- **WHEN** a selected account reaches `account_response_create_cap` before downstream output is visible
+- **THEN** an unpinned request MUST prefer an eligible alternate account before waiting
+- **AND** an owner-bound, file-pinned, or otherwise same-account retry MUST keep or reacquire its stream lease while waiting within the original request budget
+- **AND** the same behavior applies after a forced token refresh
+
+#### Scenario: SDK-contract propagated startup errors remain observable
+- **WHEN** a route requests HTTP error propagation, enforces the OpenAI SDK stream contract, and waits for local account capacity before startup
+- **THEN** the route MUST perform the bounded recovery wait instead of raising the first cap error immediately
+- **AND** it MUST NOT emit an account-capacity keepalive before startup succeeds, so a terminal startup error can still use the route's structured error path
+
+#### Scenario: Existing HTTP bridge session waits on submit capacity
+- **WHEN** HTTP bridge session submission reaches `account_response_create_cap`
+- **THEN** a hard-affinity or file-pinned request MUST wait and retry submission within the bridge request budget
+- **AND** a soft-affinity request MUST retain its existing alternate-session reroute behavior before waiting on the saturated session
+
+#### Scenario: WebSocket account selection waits on local caps
+- **WHEN** downstream WebSocket account selection returns `account_stream_cap` or `account_response_create_cap`
+- **THEN** the proxy MUST emit a `codex.keepalive` with status `waiting_for_account_capacity`
+- **AND** retry selection within the original WebSocket request budget
+- **AND** return the original local-cap error if that budget is already exhausted

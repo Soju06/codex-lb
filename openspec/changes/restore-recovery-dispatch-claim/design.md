@@ -28,24 +28,29 @@ undone again. They stay deleted.
 
 ## Why restoring the CAS parameters without the plumbing is safe
 
-The parameters default to `0` on every restored signature, and no caller
-passes anything else on this branch, so each restored predicate reduces to
-`recovery_dispatch_count == 0`. Since `claim_unknown_operation_for_recovery`
-still has no production caller, no row's counter can leave `0` either, and the
-predicate is satisfied by every row the release can reach — the same
-tautology #2366 correctly identified, now dormant instead of deleted. Request
-and response behaviour is therefore byte-identical to `main` at the shipped
-default, exactly as #2366's own removal was.
+The restored expectation is **opt-in**: every signature takes
+`expected_recovery_dispatch_count: int | None = None` and applies the predicate
+only when a value is supplied, which is the shape
+`_lock_operation_for_chunk_append` already had before #2366. No caller supplies
+one on this branch, so no restored predicate is added to any statement and
+request/response behaviour is byte-identical to `main` at the shipped default,
+exactly as #2366's own removal was.
 
-Legacy rows carried over from before #2336 with a non-zero counter are the one
-case where the restored predicate is *not* a tautology at the
-`append_terminal_operation_event` and `_lock_operation_for_chunk_append`
-sites, because those sites now pass the default `0` rather than a value seeded
-from the row. That is the pre-#2336 behaviour restored, not a new hazard: the
-column has been unwritten since #2336 shipped, and `_lock_operation_for_chunk_append`'s
-other caller already passed no expected count. #2374's tasks include wiring
-the expectation from the claim, which is what makes these sites discriminate
-again.
+The `int = 0` default the pre-#2366 code used is deliberately *not* restored.
+Before #2366 the request path always passed a value seeded from the row
+(`request_state.operation_attempt_generation`), so a legacy row carried across
+an upgrade with `recovery_dispatch_count > 0` compared equal. With that seed
+deleted, a literal `0` default would make both terminal append and fallback
+settlement reject such a row: it would stay `acknowledged` with an incomplete
+spool, and every later retry would fail closed as an in-flight or unknown
+operation. `None` keeps the fence dormant instead of wrong, and
+`test_legacy_nonzero_recovery_dispatch_count_still_settles` pins both halves —
+a carried-over row settles with no expectation supplied, and a stale explicit
+`0` is still refused.
+
+When #2374 wires the expectation from its own claim site, where the
+post-claim generation is known, the predicate engages for exactly the callers
+that claimed.
 
 ## Interaction with the still-pending `retire-recovery-dispatch-storage`
 

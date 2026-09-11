@@ -12,7 +12,9 @@
       and the `restore_recovery_dispatch_claim` pass-through on
       `mark_operation_unknown`.
 - [x] 1.4 Restore the `expected_recovery_dispatch_count` parameter and its
-      `where` predicate on `append_terminal_operation_event`,
+      `where` predicate — opt-in as `int | None = None`, never a literal `0`
+      default, so a row carried across an upgrade with a non-zero counter is
+      not locked out of settlement — on `append_terminal_operation_event`,
       `append_terminal_operation_chunk`, `_lock_operation_for_chunk_append` and
       `settle_terminal_append_failure`, their coordinator pass-throughs, and
       the two `HttpBridgeOperationEventBatcher` methods; restore
@@ -44,6 +46,10 @@
       retired ORM mapping; only its surviving claim (fallback settlement is
       fenced by operation state plus persisted response identity, because no
       caller supplies a generation today) stays.
-- [x] 1.10 Confirm the restored requirement text is byte-identical to the base
+- [x] 1.10 Add `test_legacy_nonzero_recovery_dispatch_count_still_settles`:
+      a carried-over operation with `recovery_dispatch_count == 1` settles
+      through both terminal append and fallback settlement when no expectation
+      is supplied, and is still refused when a stale explicit `0` is.
+- [x] 1.11 Confirm the restored requirement text is byte-identical to the base
       that `relocate-anchored-turns-across-accounts` (#2374) MODIFIES, so that
       delta still applies on top.

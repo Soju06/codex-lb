@@ -23,7 +23,8 @@ has a caller stay deleted.
   `max_recovery_dispatches` bound and the `restore_recovery_dispatch_claim`
   refund branches on `mark_operation_unknown`, byte-identical to their
   pre-#2366 form, plus the `DurableBridgeSessionCoordinator` pass-throughs.
-- **Restore the `expected_recovery_dispatch_count` CAS parameter surface** on
+- **Restore the `expected_recovery_dispatch_count` CAS parameter surface**, as
+  an opt-in `int | None = None` rather than the pre-#2366 `int = 0`, on
   `append_terminal_operation_event`, `append_terminal_operation_chunk`,
   `_lock_operation_for_chunk_append` and `settle_terminal_append_failure`
   (repository), their coordinator pass-throughs, and
@@ -68,11 +69,11 @@ has a caller stay deleted.
   `app/modules/proxy/durable_bridge_repository.py`,
   `app/modules/proxy/durable_bridge_coordinator.py`,
   `app/modules/proxy/http_bridge_event_batcher.py` and their tests.
-- **No behaviour change on this branch.** The claim still has no production
-  caller until #2374 lands, so `recovery_dispatch_count` still never advances
-  and every restored CAS predicate still compares a row's `0` with the
-  parameter default `0`. What changes is that the primitive, its tests and its
-  requirement exist for #2374 to wire up.
+- **No behaviour change on this branch.** The restored expectation is opt-in
+  (`int | None = None`, predicate applied only when supplied) and no caller
+  supplies it until #2374 lands, so no restored predicate is added to any
+  statement. What changes is that the primitive, its tests and its requirement
+  exist for #2374 to wire up.
 - No Alembic revision: #2366 kept the physical column, and this change keeps
   it too.
 - No new setting, no new default.

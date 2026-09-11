@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.core.clients.proxy import override_stream_timeouts
+from app.core.conversation_archive import suppress_conversation_archive
 from app.core.openai.model_registry import get_model_registry
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import is_degraded
@@ -93,9 +94,12 @@ VERDICT_CROSS_ACCOUNT_SHARING = "cross_account_sharing"
 VERDICT_NO_CROSS_ACCOUNT_HIT = "no_cross_account_hit"
 VERDICT_INCONCLUSIVE = "inconclusive"
 
-#: One run at a time per replica: the calls are sequential by design (the seed
-#: must warm the prefix before a sibling asks for it) and two concurrent runs
-#: would double the spend for no extra signal.
+#: One run at a time on this replica. Replica-local on purpose: the endpoint's
+#: rate limiter is database-backed on a fixed key, so the *spend* is already
+#: bounded across replicas, and two runs cannot contaminate each other's
+#: measurement because each generates its own nonce and therefore its own
+#: prefix. What is left is concurrent load, which this keeps off any one
+#: replica without a distributed lock held open for minutes.
 _run_lock = asyncio.Lock()
 
 
@@ -132,7 +136,11 @@ class ProbePlan:
 
     model: str | None
     seed_account: ProbeAccount | None
-    other_accounts: tuple[ProbeAccount, ...]
+    #: Every sibling the pool can offer, capped at ``MAX_OTHER_ACCOUNTS`` -- not
+    #: the requested slice. The dashboard recomputes the cost as the operator
+    #: changes the count, which it can only do correctly if it knows how many
+    #: accounts actually exist.
+    available_other_accounts: tuple[ProbeAccount, ...]
     seed_repetitions: int
     total_calls: int
     estimated_input_tokens_per_call: int
@@ -296,14 +304,14 @@ class CacheIsolationProbeService:
         target_prefix_tokens: int = DEFAULT_TARGET_PREFIX_TOKENS,
     ) -> ProbePlan:
         accounts = await self._list_accounts()
-        seed, others = self._choose_accounts(accounts, other_account_count)
+        seed, available = self._choose_accounts(accounts, MAX_OTHER_ACCOUNTS)
         pressure = assess_pool_pressure(accounts)
         per_call = estimate_prefix_tokens(target_prefix_tokens)
-        total_calls = seed_repetitions + len(others)
+        total_calls = seed_repetitions + min(other_account_count, len(available))
         return ProbePlan(
             model=default_probe_model(),
             seed_account=(ProbeAccount(seed.id, _account_label(seed)) if seed is not None else None),
-            other_accounts=tuple(ProbeAccount(account.id, _account_label(account)) for account in others),
+            available_other_accounts=tuple(ProbeAccount(account.id, _account_label(account)) for account in available),
             seed_repetitions=seed_repetitions,
             total_calls=total_calls,
             estimated_input_tokens_per_call=per_call,
@@ -383,10 +391,17 @@ class CacheIsolationProbeService:
         # Sequential by design: the seed must finish warming the prefix before a
         # sibling asks for it, and one upstream call in flight is also the
         # gentlest possible load on a pool that is serving real traffic.
-        with override_stream_timeouts(
-            connect_timeout_seconds=_PROBE_CONNECT_TIMEOUT_SECONDS,
-            idle_timeout_seconds=_PROBE_IDLE_TIMEOUT_SECONDS,
-            total_timeout_seconds=_PROBE_TOTAL_TIMEOUT_SECONDS,
+        with (
+            override_stream_timeouts(
+                connect_timeout_seconds=_PROBE_CONNECT_TIMEOUT_SECONDS,
+                idle_timeout_seconds=_PROBE_IDLE_TIMEOUT_SECONDS,
+                total_timeout_seconds=_PROBE_TOTAL_TIMEOUT_SECONDS,
+            ),
+            # The corpus is generated filler, not a record of anything Codex
+            # said, and ten 28k-token calls would bury the real traffic around
+            # them. Keep it out of the archive even when the operator has
+            # archiving on.
+            suppress_conversation_archive(),
         ):
             for _ in range(seed_repetitions):
                 sequence += 1
@@ -441,7 +456,21 @@ class CacheIsolationProbeService:
         model: str,
         prefix: str,
     ) -> ProbeCall:
-        send_result = await self._sender.send(account.id, model=model, prefix=prefix)
+        # One account failing must not abort the run: the rows already
+        # collected are the measurement and the remaining accounts still carry
+        # signal. The sender classifies the failures it understands; anything
+        # else becomes an untyped failed row here, reported by exception type
+        # only because its message has not been proved credential-safe.
+        try:
+            send_result = await self._sender.send(account.id, model=model, prefix=prefix)
+        except Exception as exc:
+            logger.warning("Cache isolation probe call failed for account %s", account.id, exc_info=True)
+            send_result = ProbeSendResult(
+                ok=False,
+                latency_ms=0,
+                error_code="probe_call_failed",
+                error_message=type(exc).__name__,
+            )
         status, hit = _classify(send_result)
         return ProbeCall(
             sequence=sequence,

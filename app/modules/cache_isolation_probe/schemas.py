@@ -42,7 +42,9 @@ class CacheProbePressureResponse(DashboardModel):
 class CacheProbePlanResponse(DashboardModel):
     model: str | None = None
     seed_account: CacheProbeAccountResponse | None = None
-    other_accounts: list[CacheProbeAccountResponse] = Field(default_factory=list)
+    #: Every sibling the pool can offer, capped; the client picks how many of
+    #: them a run should use.
+    available_other_accounts: list[CacheProbeAccountResponse] = Field(default_factory=list)
     seed_repetitions: int
     total_calls: int
     estimated_input_tokens_per_call: int

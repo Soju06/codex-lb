@@ -57,6 +57,20 @@ because it measures input caching.
 - **THEN** that call is reported with status `error` and its error code
 - **AND** the remaining calls still ran
 
+#### Scenario: An unclassified transport failure is reported, not raised
+
+- **GIVEN** a run in which one account's call raises an unclassified transport error
+- **WHEN** the run completes
+- **THEN** that call is reported with status `error` and a generic failure code
+- **AND** the reported detail is the failure's type rather than its message
+- **AND** the rows collected before it are still returned
+
+#### Scenario: The upstream stream is closed before the next call starts
+
+- **GIVEN** a probe call that returns as soon as the completion event arrives
+- **WHEN** the call returns
+- **THEN** the upstream stream has already been closed
+
 ### Requirement: Running the probe requires explicit confirmation and stays capped
 
 The system SHALL expose the planned accounts, the planned call count and the
@@ -66,10 +80,13 @@ issuing any upstream call and without consuming the run budget. Seed
 repetitions and other-account count MUST each be capped, and the other-account
 count MUST be treated as an upper bound so a pool with fewer accounts still
 runs rather than being refused. The run endpoint MUST be rate-limited on a
-budget shared across operators, because the protected resource is the pool's
-quota rather than any one caller, and MUST be gated by the same authorization
-as other operational write actions. At most one run MUST be in flight at a
-time.
+budget shared across operators and across replicas, because the protected
+resource is the pool's quota rather than any one caller, and MUST be gated by
+the same authorization as other operational write actions. At most one run
+MUST be in flight per replica. Cross-replica serialization is deliberately not
+required: the shared budget already bounds total spend, and two runs cannot
+contaminate each other's measurement because each generates its own nonce and
+therefore its own prefix.
 
 #### Scenario: An unconfirmed run spends nothing
 
@@ -177,10 +194,20 @@ surface MUST say so.
 The system SHALL keep the run nonce, the generated prefix and every byte of
 upstream response content in memory only. Nothing but numeric results,
 account identifiers, statuses and the run identifier MAY be written to the
-database, logs or the audit trail.
+database, logs or the audit trail. When the conversation archive is enabled,
+the probe's own upstream calls MUST be excluded from it for the duration of
+the run, and the exclusion MUST NOT change the stored setting or affect
+concurrent real traffic.
 
 #### Scenario: The audit record carries only numbers
 
 - **WHEN** a run completes and is audited
 - **THEN** the audit details carry the run identifier, model, verdict, account identifier and token counts
 - **AND** they carry neither the nonce nor any generated or returned text
+
+#### Scenario: An enabled conversation archive does not record the probe
+
+- **GIVEN** the conversation archive is enabled
+- **WHEN** a run issues its upstream calls
+- **THEN** no archive record is written for them
+- **AND** the archive is active again for ordinary traffic once the run finishes

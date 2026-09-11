@@ -15,6 +15,10 @@
 - [x] 2.2 Run the calls sequentially, seed first, so the seed has warmed the
   prefix before any sibling asks for it.
 - [x] 2.3 Return token counts, a latency and a sanitized error code only.
+- [x] 2.4 Close each upstream stream before the next call starts, and turn a
+  failing call into a row rather than an aborted run.
+- [x] 2.5 Keep the generated corpus out of the conversation archive for the
+  duration of the run without changing the operator's setting.
 
 ## 3. Spend gates
 
@@ -24,7 +28,8 @@
 - [x] 3.3 Rate-limit runs on a budget shared by all operators.
 - [x] 3.4 Refuse while the proxy is degraded, while every account breaker is
   open, while a quarter or more of the routable pool is throttled, while fewer
-  than two accounts are active, or while another run is in flight.
+  than two accounts are active, or while another run is in flight on this
+  replica.
 
 ## 4. Reporting
 
@@ -46,5 +51,6 @@
 - [x] 6.1 Prefix determinism within a run and difference across runs.
 - [x] 6.2 Result table shape, verdicts and cap enforcement.
 - [x] 6.3 Confirmation gate, shared rate limit and the unhealthy-pool refusal.
-- [x] 6.4 Ruff, the dashboard route permission matrix, and strict OpenSpec
+- [x] 6.4 Archive suppression, partial failure and stream close.
+- [x] 6.5 Ruff, the dashboard route permission matrix, and strict OpenSpec
   validation.

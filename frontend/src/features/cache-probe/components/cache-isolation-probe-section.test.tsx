@@ -16,7 +16,7 @@ function plan(overrides: Partial<CacheProbePlan> = {}): CacheProbePlan {
   return {
     model: "gpt-probe",
     seedAccount: { accountId: "a-0", label: "Seed" },
-    otherAccounts: [
+    availableOtherAccounts: [
       { accountId: "a-1", label: "Two" },
       { accountId: "a-2", label: "Three" },
       { accountId: "a-3", label: "Four" },

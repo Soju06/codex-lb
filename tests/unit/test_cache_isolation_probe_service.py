@@ -12,6 +12,8 @@ from dataclasses import replace
 
 import pytest
 
+from app.core import conversation_archive
+from app.core.conversation_archive import archive_enabled
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -331,9 +333,71 @@ async def test_plan_prices_the_run_before_the_operator_confirms(monkeypatch) -> 
 
     assert plan.seed_account is not None
     assert plan.seed_account.account_id == "a-0"
-    assert [account.account_id for account in plan.other_accounts] == ["a-1", "a-2", "a-3", "a-4"]
+    # Every candidate the pool offers, so the dashboard can reprice a different
+    # selection without another round trip.
+    assert [account.account_id for account in plan.available_other_accounts] == ["a-1", "a-2", "a-3", "a-4", "a-5"]
     assert plan.total_calls == 7
     assert plan.estimated_total_input_tokens == plan.estimated_input_tokens_per_call * 7
     assert plan.estimated_input_tokens_per_call > 20_000
     assert plan.pressure.under_pressure is False
     assert sender.calls == []
+
+
+async def test_plan_prices_only_the_siblings_a_small_pool_can_offer(monkeypatch) -> None:
+    accounts = [_account(f"a-{index}") for index in range(3)]
+    sender = _StubSender({})
+    service = _build(monkeypatch, accounts, sender)
+
+    plan = await service.plan(seed_repetitions=2, other_account_count=MAX_OTHER_ACCOUNTS)
+
+    assert [account.account_id for account in plan.available_other_accounts] == ["a-1", "a-2"]
+    assert plan.total_calls == 4
+
+
+# --- privacy and partial failure ---------------------------------------------
+
+
+async def test_the_generated_corpus_never_reaches_the_conversation_archive(monkeypatch) -> None:
+    """The archive records what Codex and the upstream said; a locally
+    generated 28k-token filler corpus is neither, and would bury the real
+    traffic around it."""
+
+    observed: list[bool] = []
+
+    class _ArchiveObservingSender(_StubSender):
+        async def send(self, account_id: str, *, model: str, prefix: str) -> ProbeSendResult:
+            observed.append(archive_enabled())
+            return await super().send(account_id, model=model, prefix=prefix)
+
+    monkeypatch.setattr(conversation_archive, "resolve_archive_enabled", lambda *args, **kwargs: True)
+    accounts = [_account("a-seed"), _account("b-two")]
+    sender = _ArchiveObservingSender({})
+    service = _build(monkeypatch, accounts, sender)
+
+    assert archive_enabled() is True
+    await service.run(seed_repetitions=1, other_account_count=1)
+
+    assert observed == [False, False]
+    # The suppression is scoped to the run, not a global switch.
+    assert archive_enabled() is True
+
+
+async def test_a_transport_failure_on_one_account_does_not_abort_the_run(monkeypatch) -> None:
+    class _ExplodingSender(_StubSender):
+        async def send(self, account_id: str, *, model: str, prefix: str) -> ProbeSendResult:
+            if account_id == "b-two":
+                raise RuntimeError("upstream socket died")
+            return await super().send(account_id, model=model, prefix=prefix)
+
+    accounts = [_account("a-seed"), _account("b-two"), _account("c-three")]
+    sender = _ExplodingSender({"a-seed": [_hit()], "c-three": [_hit()]})
+    service = _build(monkeypatch, accounts, sender)
+
+    result = await service.run(seed_repetitions=1, other_account_count=2)
+
+    assert [call.status for call in result.calls] == ["hit", "error", "hit"]
+    assert result.calls[1].error_code == "probe_call_failed"
+    # The message is the exception type, never its text: an unclassified
+    # failure has not been proved credential-safe.
+    assert result.calls[1].account_id == "b-two"
+    assert result.verdict == VERDICT_CROSS_ACCOUNT_SHARING

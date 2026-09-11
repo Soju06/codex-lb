@@ -70,7 +70,7 @@ def _plan_response(plan: ProbePlan) -> CacheProbePlanResponse:
     return CacheProbePlanResponse(
         model=plan.model,
         seed_account=_account_response(plan.seed_account) if plan.seed_account is not None else None,
-        other_accounts=[_account_response(account) for account in plan.other_accounts],
+        available_other_accounts=[_account_response(account) for account in plan.available_other_accounts],
         seed_repetitions=plan.seed_repetitions,
         total_calls=plan.total_calls,
         estimated_input_tokens_per_call=plan.estimated_input_tokens_per_call,

@@ -91,12 +91,16 @@ async def test_plan_prices_the_run_and_reports_pool_health(async_client, stub_se
     assert response.status_code == 200
     body = response.json()
     assert body["seedAccount"]["accountId"] == "probe-00"
-    assert [account["accountId"] for account in body["otherAccounts"]] == [
+    # Every candidate, capped at five, so the dashboard can reprice a different
+    # sibling count without another round trip.
+    assert [account["accountId"] for account in body["availableOtherAccounts"]] == [
         "probe-01",
         "probe-02",
         "probe-03",
         "probe-04",
+        "probe-05",
     ]
+    # The totals still describe the default selection of four siblings.
     assert body["totalCalls"] == 7
     assert body["estimatedTotalInputTokens"] == body["estimatedInputTokensPerCall"] * 7
     assert body["maxSeedRepetitions"] == 5

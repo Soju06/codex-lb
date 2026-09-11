@@ -36,7 +36,11 @@ to be re-runnable on demand, by the operator, with the same construction, or
 - Reuse the existing routed upstream client, credential refresh and upstream
   proxy resolution rather than opening a transport of its own.
 - Persist nothing but numbers: the generated prefix, the run nonce and every
-  byte of upstream response content stay in memory.
+  byte of upstream response content stay in memory, including when the
+  conversation archive is enabled.
+- Add a scoped suppression seam at the archive's single `archive_enabled()`
+  gate so locally generated diagnostic traffic is excluded without touching
+  the operator's setting or a concurrent real request.
 
 ## Capabilities
 
@@ -47,12 +51,14 @@ to be re-runnable on demand, by the operator, with the same construction, or
 
 ### Modified Capabilities
 
-None.
+- `proxy-runtime-observability`: exclude locally generated operator-diagnostic
+  traffic from the conversation archive at its existing single gate.
 
 ## Impact
 
 - Affected code: new `app/modules/cache_isolation_probe/` package, its router
-  registration in `app/main.py`, and a new dashboard settings section.
+  registration in `app/main.py`, a scoped suppression seam in
+  `app/core/conversation_archive.py`, and a new dashboard settings section.
 - Affected tests: new prefix, service and API tests; the dashboard route
   permission matrix gains the two new routes.
 - New API surface: `GET /api/diagnostics/cache-isolation-probe` and

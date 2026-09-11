@@ -78,7 +78,7 @@ export function CacheIsolationProbeSection({ disabled = false }: CacheIsolationP
     [planQuery.error, runMutation.error],
   );
 
-  const plannedOtherCount = Math.min(otherAccountCount, plan?.otherAccounts.length ?? 0);
+  const plannedOtherCount = Math.min(otherAccountCount, plan?.availableOtherAccounts.length ?? 0);
   const plannedCalls = seedRepetitions + plannedOtherCount;
   const estimatedTokens = (plan?.estimatedInputTokensPerCall ?? 0) * plannedCalls;
   const underPressure = plan?.pressure.underPressure ?? false;

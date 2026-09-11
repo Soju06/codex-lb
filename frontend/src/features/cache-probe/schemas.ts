@@ -29,7 +29,7 @@ export const CacheProbePressureSchema = z.object({
 export const CacheProbePlanSchema = z.object({
   model: z.string().nullish(),
   seedAccount: CacheProbeAccountSchema.nullish(),
-  otherAccounts: z.array(CacheProbeAccountSchema).default([]),
+  availableOtherAccounts: z.array(CacheProbeAccountSchema).default([]),
   seedRepetitions: z.number().int().positive(),
   totalCalls: z.number().int().nonnegative(),
   estimatedInputTokensPerCall: z.number().int().nonnegative(),

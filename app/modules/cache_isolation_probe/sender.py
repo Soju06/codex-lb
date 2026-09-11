@@ -13,6 +13,7 @@ this module are token counts, a latency, and a sanitized error code.
 
 from __future__ import annotations
 
+import contextlib
 import time
 import uuid
 from contextlib import AbstractAsyncContextManager
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from app.core.auth.refresh import RefreshError
+from app.core.clients.codex import CodexTransportError
 from app.core.clients.proxy import UpstreamProxyRouteTrace, stream_responses
 from app.core.crypto import TokenEncryptor
 from app.core.openai.models import ResponseUsage
@@ -124,41 +126,59 @@ class CacheProbeSender:
         }
 
         usage: ResponseUsage | None = None
-        async for event_block in stream_responses(
-            payload,
-            headers,
-            access_token,
-            account.chatgpt_account_id,
-            upstream_stream_transport_override="http",
-            route=route,
-            route_trace=UpstreamProxyRouteTrace(),
-            allow_direct_egress=route is None,
-            codex_lb_account_id=account.id,
-        ):
-            event = parse_sse_event(event_block)
-            if event is None:
-                continue
-            if event.response is not None and event.response.usage is not None:
-                usage = event.response.usage
-            if event.type == "response.completed":
-                input_tokens, cached_tokens = _usage_tokens(usage)
-                return ProbeSendResult(
-                    ok=True,
-                    latency_ms=_elapsed_ms(started),
-                    input_tokens=input_tokens,
-                    cached_tokens=cached_tokens,
-                )
-            if event.type in _TERMINAL_ERROR_EVENTS:
-                error = event.error or (event.response.error if event.response is not None else None)
-                input_tokens, cached_tokens = _usage_tokens(usage)
-                return ProbeSendResult(
-                    ok=False,
-                    latency_ms=_elapsed_ms(started),
-                    input_tokens=input_tokens,
-                    cached_tokens=cached_tokens,
-                    error_code=(error.code if error is not None else None) or event.type,
-                    error_message=(error.message if error is not None else None) or event.type,
-                )
+        try:
+            # aclosing(), not a bare `async for`: returning mid-stream on
+            # `response.completed` would otherwise leave the upstream response
+            # and its session to async-generator finalization, overlapping the
+            # next sequential call's connection.
+            stream = stream_responses(
+                payload,
+                headers,
+                access_token,
+                account.chatgpt_account_id,
+                upstream_stream_transport_override="http",
+                route=route,
+                route_trace=UpstreamProxyRouteTrace(),
+                allow_direct_egress=route is None,
+                codex_lb_account_id=account.id,
+            )
+            async with contextlib.aclosing(stream):
+                async for event_block in stream:
+                    event = parse_sse_event(event_block)
+                    if event is None:
+                        continue
+                    if event.response is not None and event.response.usage is not None:
+                        usage = event.response.usage
+                    if event.type == "response.completed":
+                        input_tokens, cached_tokens = _usage_tokens(usage)
+                        return ProbeSendResult(
+                            ok=True,
+                            latency_ms=_elapsed_ms(started),
+                            input_tokens=input_tokens,
+                            cached_tokens=cached_tokens,
+                        )
+                    if event.type in _TERMINAL_ERROR_EVENTS:
+                        error = event.error or (event.response.error if event.response is not None else None)
+                        input_tokens, cached_tokens = _usage_tokens(usage)
+                        return ProbeSendResult(
+                            ok=False,
+                            latency_ms=_elapsed_ms(started),
+                            input_tokens=input_tokens,
+                            cached_tokens=cached_tokens,
+                            error_code=(error.code if error is not None else None) or event.type,
+                            error_message=(error.message if error is not None else None) or event.type,
+                        )
+        except CodexTransportError as exc:
+            # Routed-transport failures carry a classified code and a message
+            # that is credential-safe by construction, so they become a typed
+            # failed row rather than an exception the orchestrator has to
+            # sanitize blindly.
+            return ProbeSendResult(
+                ok=False,
+                latency_ms=_elapsed_ms(started),
+                error_code=exc.error_code or "upstream_transport_error",
+                error_message=str(exc),
+            )
 
         input_tokens, cached_tokens = _usage_tokens(usage)
         return ProbeSendResult(

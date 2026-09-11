@@ -240,7 +240,8 @@ plus `other`.
 Day discovery and aggregation reuse the reports normal-traffic predicate: source `limit_warmup`
 and request kinds `warmup` / `limit_warmup` are excluded, as in the heartbeat. Upstream transport
 uses the producer spellings `websocket` → `ws`, `openai_compatible_http` → `http`, and `http` →
-`http`; unknown values remain `other`.
+`http`; unknown values remain `other`. Request transport maps `websocket` to `ws`, `http` to
+`http_bridge`, and automation or other producer values to `other`.
 
 Histograms use sparse bucket indexes with `sample_count` equal to the sum of counts. Latency and
 TTFT upper boundaries are `[0, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200,

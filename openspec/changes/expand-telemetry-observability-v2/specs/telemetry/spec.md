@@ -231,6 +231,9 @@ allowlist, independent of operator configuration or upstream catalog discovery. 
 transport `websocket` MUST map to `ws`; `openai_compatible_http` and `http` MUST map to `http`.
 Unmatched upstream transport values MUST map to `other`.
 
+Persisted request transport `websocket` MUST map to `ws`, `http` MUST map to `http_bridge`,
+and all other values MUST map to `other`.
+
 Day discovery and aggregation MUST use the reports normal-traffic predicate, excluding rows with
 source `limit_warmup` or request kind `warmup` or `limit_warmup`.
 

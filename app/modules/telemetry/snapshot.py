@@ -562,6 +562,30 @@ def _histogram(values: list[float], edges: tuple[float, ...]) -> Histogram:
     return Histogram(sample_count=len(values), buckets=dict(counts))
 
 
+class _DayAccumulator:
+    def __init__(self) -> None:
+        self.requests = 0
+        self.latency: defaultdict[str, int] = defaultdict(int)
+        self.ttft: defaultdict[str, int] = defaultdict(int)
+        self.tps: defaultdict[str, int] = defaultdict(int)
+
+    def add(self, row: RequestLog) -> None:
+        self.requests += 1
+        if row.latency_ms is not None and row.latency_ms >= 0:
+            self.latency[str(_bucket_index(float(row.latency_ms), LATENCY_BUCKET_EDGES))] += 1
+        if row.latency_first_token_ms is not None and row.latency_first_token_ms >= 0:
+            self.ttft[str(_bucket_index(float(row.latency_first_token_ms), LATENCY_BUCKET_EDGES))] += 1
+        numerator = (row.output_tokens or 0) - (row.reasoning_tokens or 0)
+        if row.latency_ms is not None and row.latency_first_token_ms is not None:
+            denominator = row.latency_ms - row.latency_first_token_ms
+            if numerator > 0 and denominator > 0:
+                value = numerator * 1000.0 / denominator
+                self.tps[str(_bucket_index(value, TPS_BUCKET_EDGES))] += 1
+
+    def histogram(self, values: defaultdict[str, int]) -> Histogram:
+        return Histogram(sample_count=sum(values.values()), buckets=dict(values))
+
+
 def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog]) -> TelemetryDay:
     catalog = BOOTSTRAP_MODEL_SLUGS
     upstream_transport_map = {
@@ -585,70 +609,84 @@ def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog
     }
     upstream_codes = _SAFE_UPSTREAM_ERROR_CODES
     phases = {"connect", "response_create", "bridge_queue", "stream", "settle", "other"}
-    # Producer locations and the phase translations are documented in
-    # openspec/specs/telemetry/context.md; raw failure details are never used.
     phase_map = {"usage_settlement": "settle", "upstream": "stream", "bridge": "bridge_queue"}
-    dims: dict[str, dict[str, list[RequestLog]]] = {
-        key: defaultdict(list) for key in ("models", "clients", "transport", "upstream_transport", "service_tier")
+    dimensions: dict[str, dict[str, _DayAccumulator]] = {
+        key: defaultdict(_DayAccumulator)
+        for key in ("models", "clients", "transport", "upstream_transport", "service_tier")
     }
-    global_rows: list[RequestLog] = rows
+    global_accumulator = _DayAccumulator()
+    upstream_errors: defaultdict[str, int] = defaultdict(int)
+    failure_phases: defaultdict[str, int] = defaultdict(int)
+    http_statuses: defaultdict[str, int] = defaultdict(int)
+    statuses = {"success": 0, "error": 0, "cancelled": 0}
     for row in rows:
+        global_accumulator.add(row)
         model = catalog_model_name(row.model, catalog)
-        dims["models"][model].append(row)
-        dims["clients"][
-            client_family(row.useragent_group) if client_family(row.useragent_group) in families else "other"
-        ].append(row)
-        dims["transport"][transport_map.get(row.transport or "", "other")].append(row)
-        dims["upstream_transport"][upstream_transport_map.get(row.upstream_transport or "", "other")].append(row)
+        client = client_family(row.useragent_group)
+        client = client if client in families else "other"
+        transport = transport_map.get(row.transport or "", "other")
+        upstream_transport = upstream_transport_map.get(row.upstream_transport or "", "other")
         tier = row.actual_service_tier or row.service_tier or "default"
-        dims["service_tier"][tier if tier in tiers else "other"].append(row)
+        tier = tier if tier in tiers else "other"
+        for key, name in (
+            ("models", model),
+            ("clients", client),
+            ("transport", transport),
+            ("upstream_transport", upstream_transport),
+            ("service_tier", tier),
+        ):
+            dimensions[key][name].add(row)
+        if row.status in NON_ERROR_STATUSES and row.status != CANCELLED_STATUS:
+            statuses["success"] += 1
+        elif row.status == CANCELLED_STATUS:
+            statuses["cancelled"] += 1
+        else:
+            statuses["error"] += 1
+            error_name = row.upstream_error_code if row.upstream_error_code in upstream_codes else "other"
+            upstream_errors[error_name] += 1
+            phase = phase_map.get(row.failure_phase or "", row.failure_phase)
+            failure_phases[phase if phase in phases else "other"] += 1
+        status_class = (
+            "429"
+            if row.upstream_status_code == 429
+            else f"{int(row.upstream_status_code) // 100}xx"
+            if row.upstream_status_code
+            else "other"
+        )
+        http_statuses[status_class if status_class in {"2xx", "4xx", "429", "5xx"} else "other"] += 1
 
-    def entry(name: str, subset: list[RequestLog]) -> DimensionEntry:
-        latency = [float(r.latency_ms) for r in subset if r.latency_ms is not None and r.latency_ms >= 0]
-        ttft = [
-            float(r.latency_first_token_ms)
-            for r in subset
-            if r.latency_first_token_ms is not None and r.latency_first_token_ms >= 0
-        ]
-        tps: list[float] = []
-        for r in subset:
-            numerator = (r.output_tokens or 0) - (r.reasoning_tokens or 0)
-            if r.latency_ms is None or r.latency_first_token_ms is None:
-                continue
-            denominator = r.latency_ms - r.latency_first_token_ms
-            if numerator > 0 and denominator > 0:
-                tps.append(numerator * 1000.0 / denominator)
+    def entry(name: str, accumulator: _DayAccumulator) -> DimensionEntry:
         return DimensionEntry(
             name=name,
-            requests=len(subset),
-            latency_ms=_histogram(latency, LATENCY_BUCKET_EDGES),
-            ttft_ms=_histogram(ttft, LATENCY_BUCKET_EDGES),
-            tps=_histogram(tps, TPS_BUCKET_EDGES),
+            requests=accumulator.requests,
+            latency_ms=accumulator.histogram(accumulator.latency),
+            ttft_ms=accumulator.histogram(accumulator.ttft),
+            tps=accumulator.histogram(accumulator.tps),
         )
 
     def entries(key: str) -> list[DimensionEntry]:
-        values = list(dims[key].items())
+        values = list(dimensions[key].items())
         if key == "models":
-            named = [(name, subset) for name, subset in values if name != "other"]
-            existing_other = [r for name, subset in values if name == "other" for r in subset]
+            named = [(name, accumulator) for name, accumulator in values if name != "other"]
+            existing_other = dimensions[key].get("other")
             if len(named) > 10:
-                named.sort(key=lambda item: (-len(item[1]), item[0]))
-                values = named[:10] + [("other", existing_other + [r for _, subset in named[10:] for r in subset])]
+                named.sort(key=lambda item: (-item[1].requests, item[0]))
+                overflow = named[10:]
+                if existing_other is None:
+                    existing_other = _DayAccumulator()
+                for _, accumulator in overflow:
+                    existing_other.requests += accumulator.requests
+                    for target, source in (
+                        (existing_other.latency, accumulator.latency),
+                        (existing_other.ttft, accumulator.ttft),
+                        (existing_other.tps, accumulator.tps),
+                    ):
+                        for index, count in source.items():
+                            target[index] += count
+                values = named[:10] + [("other", existing_other)]
             else:
-                values = named + ([("other", existing_other)] if existing_other else [])
-        return [entry(name, subset) for name, subset in sorted(values)]
-
-    statuses = {
-        "success": sum(r.status in NON_ERROR_STATUSES and r.status != CANCELLED_STATUS for r in rows),
-        "error": sum(r.status not in NON_ERROR_STATUSES for r in rows),
-        "cancelled": sum(r.status == CANCELLED_STATUS for r in rows),
-    }
-
-    def count_map(values: list[str | None], allowed: set[str]) -> dict[str, int]:
-        out: defaultdict[str, int] = defaultdict(int)
-        for value in values:
-            out[value if value in allowed else "other"] += 1
-        return dict(out)
+                values = named + ([("other", existing_other)] if existing_other is not None else [])
+        return [entry(name, accumulator) for name, accumulator in sorted(values)]
 
     return TelemetryDay(
         instance_id=instance_id,
@@ -659,32 +697,13 @@ def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog
             transport=entries("transport"),
             upstream_transport=entries("upstream_transport"),
             service_tier=entries("service_tier"),
-            request_kinds=RequestKindsSnapshot(responses=0, chat=0, images=0, unknown=len(rows)),
-            global_=entry("global", global_rows),
+            request_kinds=RequestKindsSnapshot(responses=0, chat=0, images=0, unknown=global_accumulator.requests),
+            global_=entry("global", global_accumulator),
         ),
         errors=DayErrors(
-            upstream_error_class=count_map(
-                [r.upstream_error_code for r in rows if r.status not in NON_ERROR_STATUSES], set(upstream_codes)
-            ),
-            failure_phase=count_map(
-                [
-                    phase_map.get(r.failure_phase or "", r.failure_phase)
-                    for r in rows
-                    if r.status not in NON_ERROR_STATUSES
-                ],
-                phases,
-            ),
-            http_status_class=count_map(
-                [
-                    "429"
-                    if r.upstream_status_code == 429
-                    else f"{int(r.upstream_status_code) // 100}xx"
-                    if r.upstream_status_code
-                    else "other"
-                    for r in rows
-                ],
-                {"2xx", "4xx", "429", "5xx"},
-            ),
+            upstream_error_class=dict(upstream_errors),
+            failure_phase=dict(failure_phases),
+            http_status_class=dict(http_statuses),
             outcomes=Outcomes(**statuses),
         ),
     )

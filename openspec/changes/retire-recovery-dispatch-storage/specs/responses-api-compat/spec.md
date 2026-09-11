@@ -1,18 +1,10 @@
 # responses-api-compat Delta
 
-## REMOVED Requirements
-
-### Requirement: Fenced one-shot recovery dispatch
-
-**Reason**: The requirement MUSTs a durable one-shot replay budget that is "consumed atomically when a replay is claimed for dispatch". `drop-bridge-recovery-modes` deleted the only claimant; the primitive that implemented the claim (`DurableBridgeRepository.claim_unknown_operation_for_recovery`, its `max_recovery_dispatches` bound and the `restore_recovery_dispatch_claim` refund on `mark_operation_unknown`) has had zero production callers since, so nothing can consume, restore or settle the budget. All three of its scenarios drive that deleted claim path, and its own title states the deleted dispatch, so a MODIFIED block cannot express the removal.
-
-**Migration**: None. No supported configuration could claim a replay after `drop-bridge-recovery-modes`: an `unknown` operation already returns the `upstream_operation_status_unknown` 503 with a cooldown `Retry-After` unconditionally. The `http_bridge_operations.recovery_dispatch_count` column is retained for one release for rolling-upgrade safety and its ORM mapping is retired; the Alembic drop is queued in `openspec/specs/deployment-installation/context.md`.
-
 ## MODIFIED Requirements
 
 ### Requirement: Terminal append failure preserves authoritative settlement
 
-When durable append of a terminal HTTP-bridge event raises after the operation was acknowledged, the proxy MUST attempt to persist the intended terminal operation state through the same operation, session, instance, and owner-epoch fence. Cancellation MUST be deferred through the append and any required fallback settlement. The event spool MUST remain incomplete, and the persistence failure MUST NOT replace or block the terminal event and end-of-stream marker already selected for downstream delivery. A rejected or failed fallback settlement MUST be logged and MUST NOT bypass the owner fence or overwrite a newer operation attempt admitted under the same owner epoch. That newer-attempt rejection MUST rest on the operation's own state and persisted upstream-response identity; no durable per-attempt dispatch counter is kept for it. The durable operation model MUST NOT map a retired recovery-dispatch counter column. Such a column MAY remain in the physical schema, allow-listed by the schema-drift gate, until the release after the last release whose ORM mapped it, because a supported previous-release replica still writes it while the migration Job runs ahead of the workload roll.
+When durable append of a terminal HTTP-bridge event raises after the operation was acknowledged, the proxy MUST attempt to persist the intended terminal operation state through the same operation, session, instance, and owner-epoch fence. Cancellation MUST be deferred through the append and any required fallback settlement. The event spool MUST remain incomplete, and the persistence failure MUST NOT replace or block the terminal event and end-of-stream marker already selected for downstream delivery. A rejected or failed fallback settlement MUST be logged and MUST NOT bypass the owner fence or overwrite a newer operation attempt admitted under the same owner epoch. That newer-attempt rejection MUST rest on the operation's own state and persisted upstream-response identity whenever no caller supplies a durable per-attempt dispatch generation to compare.
 
 #### Scenario: Terminal append exception settles the current owner operation
 
@@ -70,11 +62,3 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 - **WHEN** durable terminal-event append succeeds
 - **THEN** the terminal event and intended operation state are persisted atomically
 - **AND** the completed event spool remains eligible for replay
-
-#### Scenario: Retired recovery-dispatch column stays insertable during the rolling upgrade
-
-- **GIVEN** a database at the current Alembic head
-- **WHEN** a replica running the previous release inserts a durable operation row with an explicit recovery-dispatch counter value
-- **THEN** the insert succeeds because the physical column still exists
-- **AND** the current release's operation model does not map that column, so its own inserts take the column default
-- **AND** the schema-drift check reports no drift for the retained column

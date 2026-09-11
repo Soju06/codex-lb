@@ -150,7 +150,11 @@ this policy too; their User-Agent alone does not indicate a WebSocket failure.
 
 Real recent upstream WS failures temporarily keep requests on HTTP (the existing
 60-second cooldown). Explicit HTTP policy, image-capable requests and oversized
-payloads also bypass the bridge. Source-routed Chat requests keep their source.
+payloads also bypass the bridge. Bypassing the bridge does not force upstream
+HTTP: an `input_image` request keeps upstream HTTP only when its payload exceeds
+the WebSocket frame budget or still carries an external image URL, and otherwise
+follows the ordinary transport precedence. Source-routed Chat requests keep
+their source.
 
 Clients resending full history need not retain response headers to reuse a
 connection. Inferred locality uses complete initial user input and instructions,

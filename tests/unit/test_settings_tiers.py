@@ -52,6 +52,27 @@ def test_live_dashboard_homes_are_not_duplicated_in_migrating() -> None:
     assert all(SETTING_TIERS.get(name) == "T3" for name in live_homes)
 
 
+def test_migration_backlog_is_empty_and_still_passes_the_checker() -> None:
+    """Every T3 field has a database home, so ``MIGRATING`` is empty.
+
+    ``constantize-token-refresh-interval`` removed the last backlog entry. An
+    empty mapping is the intended terminal state: the checker must keep
+    passing, and a new env-only T3 field must still be rejected.
+    """
+    assert MIGRATING == {}
+    report = checker.check_t3_dashboard_home(
+        Settings.model_fields, SETTING_TIERS, MIGRATING, _dashboard_columns(), DASHBOARD_HOMES, _table_columns()
+    )
+    assert report.errors == []
+    assert report.warnings == []
+
+    homeless = checker.check_t3_dashboard_home(("beta",), {"beta": "T3"}, {}, [], {}, {})
+    assert homeless.errors == [
+        "Settings.beta is T3 but has neither a dashboard_settings column of the same name, a "
+        "DASHBOARD_HOMES mapping, nor a MIGRATING entry in app/core/config/tiers.py"
+    ]
+
+
 def test_live_tree_passes_all_checks() -> None:
     reports, summary = checker.run_all()
     assert [message for report in reports for message in report.errors] == []

@@ -225,6 +225,7 @@ class DurableBridgeOperationSnapshot:
     parent_response_id: str | None
     state: str
     response_id: str | None
+    recovery_dispatch_count: int = 0
     request_text: str | None = None
     event_spool_complete: bool = True
     created: bool = False
@@ -330,6 +331,7 @@ class DurableBridgeRepository:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_recovery_dispatch_count: int | None = None,
     ) -> tuple[HttpBridgeOperationRecord, bool] | None:
         owner_exists = await self._session.scalar(
             select(HttpBridgeSessionRecord.id)
@@ -344,6 +346,10 @@ class DurableBridgeRepository:
             HttpBridgeOperationRecord.operation_id == operation_id,
             HttpBridgeOperationRecord.session_id == session_id,
         )
+        if expected_recovery_dispatch_count is not None:
+            operation_statement = operation_statement.where(
+                HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+            )
         operation = await self._session.scalar(operation_statement.with_for_update())
         # ``abandoned`` is a terminal duplicate-suppression fence that the
         # maintenance sweep applies without clearing session ownership, so the
@@ -2174,6 +2180,59 @@ class DurableBridgeRepository:
             await self._session.commit()
         return True
 
+    async def claim_unknown_operation_for_recovery(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        max_recovery_dispatches: int | None = None,
+    ) -> bool:
+        """Atomically claim an UNKNOWN operation for one recovery attempt.
+
+        Recovery admission can be reached by multiple reconnects at once. A
+        reset followed by a later state transition leaves a window where each
+        reconnect can observe UNKNOWN and submit the same operation. Keep the
+        owner fence, state transition, and transcript reset in one serialized
+        write so exactly one caller can move UNKNOWN back to SUBMITTED.
+        """
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state == "unknown",
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None or operation.state == "abandoned":
+                await self._session.rollback()
+                return False
+            if max_recovery_dispatches is not None and operation.recovery_dispatch_count >= max_recovery_dispatches:
+                await self._session.rollback()
+                return False
+            await self._delete_operation_spool_material((operation_id,))
+            operation.state = "submitted"
+            operation.response_id = None
+            operation.recovery_dispatch_count += 1
+            operation.event_bytes = 0
+            operation.event_spool_complete = False
+            operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
+            operation.updated_at = utcnow()
+            await self._session.commit()
+        return True
+
     async def mark_operation_unknown(
         self,
         *,
@@ -2181,6 +2240,7 @@ class DurableBridgeRepository:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        restore_recovery_dispatch_claim: bool = False,
     ) -> bool:
         """Fence an ambiguously dispatched SUBMITTED operation as UNKNOWN.
 
@@ -2212,6 +2272,18 @@ class DurableBridgeRepository:
                 return False
             if operation.state == "submitted":
                 operation.state = "unknown"
+                if restore_recovery_dispatch_claim and operation.recovery_dispatch_count > 0:
+                    operation.recovery_dispatch_count -= 1
+                operation.updated_at = utcnow()
+            elif (
+                restore_recovery_dispatch_claim
+                and operation.state == "unknown"
+                and operation.recovery_dispatch_count > 0
+            ):
+                # A concurrent cleanup may have fenced the row first. The
+                # caller still owns a proven pre-dispatch recovery claim, so
+                # refund exactly that claim while retaining UNKNOWN.
+                operation.recovery_dispatch_count -= 1
                 operation.updated_at = utcnow()
             await self._session.commit()
         return True
@@ -2580,6 +2652,7 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
         complete_spool: bool = True,
     ) -> bool:
@@ -2608,6 +2681,7 @@ class DurableBridgeRepository:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
             )
             if locked_operation is None:
                 return False
@@ -2737,6 +2811,7 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
         complete_spool: bool = True,
     ) -> bool:
@@ -2751,15 +2826,21 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
-            operation = await self._session.scalar(
-                select(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
-                )
-                .with_for_update()
+            # ``expected_recovery_dispatch_count`` is opt-in: a caller that
+            # claimed a recovery dispatch pins the generation it observed, and
+            # a caller that never claimed one passes nothing rather than a
+            # literal 0, so an operation retained from an older release with a
+            # non-zero counter still settles.
+            terminal_event_statement = select(HttpBridgeOperationRecord).where(
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
             )
+            if expected_recovery_dispatch_count is not None:
+                terminal_event_statement = terminal_event_statement.where(
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+                )
+            operation = await self._session.scalar(terminal_event_statement.with_for_update())
             if owner_exists is None or operation is None or operation.state == "abandoned":
                 await self._session.rollback()
                 return False
@@ -2999,6 +3080,7 @@ class DurableBridgeRepository:
         owner_epoch: int,
         state: str,
         expected_response_id: str | None,
+        expected_recovery_dispatch_count: int | None = None,
         alternate_expected_response_id: str | None = None,
         response_id: str | None = None,
     ) -> bool:
@@ -3049,26 +3131,28 @@ class DurableBridgeRepository:
                 values["terminal_append_phase"] = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED
             if response_id is not None:
                 values["response_id"] = response_id
-            result = await self._session.execute(
-                update(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state != "abandoned",
-                    # The state fence is what rejects a newer attempt: a retry
-                    # that reset the row to ``submitted`` matches neither
-                    # ``acknowledged`` nor the terminal state being settled, so
-                    # the update affects no row and the caller sees a rejection.
-                    or_(
-                        and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
-                        and_(
-                            HttpBridgeOperationRecord.state == state,
-                            or_(acknowledged_response_matches, terminal_response_matches),
-                        ),
+            # Opt-in recovery-dispatch fence, as in
+            # ``append_terminal_operation_event``. The newer-attempt rejection
+            # below does not depend on it: a retry that reset the row to
+            # ``submitted`` matches neither ``acknowledged`` nor the terminal
+            # state being settled, so the update touches no row.
+            settlement_statement = update(HttpBridgeOperationRecord).where(
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.state != "abandoned",
+                or_(
+                    and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
+                    and_(
+                        HttpBridgeOperationRecord.state == state,
+                        or_(acknowledged_response_matches, terminal_response_matches),
                     ),
-                )
-                .values(**values)
+                ),
             )
+            if expected_recovery_dispatch_count is not None:
+                settlement_statement = settlement_statement.where(
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+                )
+            result = await self._session.execute(settlement_statement.values(**values))
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 
@@ -4187,6 +4271,7 @@ def _to_operation_snapshot(
         parent_response_id=row.parent_response_id,
         state=row.state,
         response_id=row.response_id,
+        recovery_dispatch_count=row.recovery_dispatch_count,
         request_text=row.request_text,
         event_spool_complete=bool(row.event_spool_complete),
         created=created,

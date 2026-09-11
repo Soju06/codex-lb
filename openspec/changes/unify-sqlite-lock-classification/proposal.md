@@ -26,7 +26,9 @@ retry budget is beside the point).
 
 - Route all three remaining sites through the shared predicate and delete the
   duplicated helpers; the predicate now matches the union of what the sites
-  matched, and matches the driver exception rather than the rendered SQL.
+  matched, and matches the driver exception rather than the rendered SQL — a
+  wrapper carrying no driver exception is not contention either, since the only
+  text left to match there is the statement and parameters just excluded.
 - Report `sqlite_errorname` wherever a lock failure is retried, swallowed, or
   given up on, so the next occurrence classifies itself.
 - Change no control flow: leader election's two best-effort shutdown lease
@@ -44,6 +46,24 @@ retry budget is beside the point).
 - scheduler-coordination: the best-effort shutdown lease writes classify
   contention with the shared predicate, keep failing fast by design, and name
   the driver result code in their debug report.
+
+### Unchanged Capabilities
+
+- api-keys: *Requirement: API Key update* already requires that "a transient
+  SQLite lock or snapshot conflict during the update MUST roll back and retry
+  the complete read/build/write transaction, including rereading existing
+  limits, before returning an error", with the scenario *Retry API-key PATCH
+  after a transient SQLite snapshot conflict*. `update_key` is one of the sites
+  rewired here, and the one whose haystack this change narrows most, so that
+  requirement was re-read against the rewiring. The promise does not move and
+  needs no delta: the rollback, the reread of existing limits, the recursive
+  whole-transaction retry, the four-attempt budget and the eventual error are
+  all untouched. Only which driver failures enter that branch changes, and both
+  directions move the code toward the requirement rather than away from it —
+  `database is busy` is a transient SQLite lock the old local predicate refused
+  to retry (the requirement already demanded it), and a non-lock failure whose
+  lock text lived only in the rendered statement or a bound parameter is not "a
+  transient SQLite lock or snapshot conflict" and was never owed a retry.
 
 ## Impact
 

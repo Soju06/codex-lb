@@ -95,6 +95,27 @@ def sqlite_error_name(exc: BaseException) -> str | None:
     return getattr(driver_exc, "sqlite_errorname", None)
 
 
+def _report_lock_attempt(exc: BaseException, *, what: str, giving_up: bool, **extra: object) -> None:
+    """Emit the one report format both retry helpers share.
+
+    Each helper reports the same two facts — which write contended and which
+    mechanism the driver named — and differs only in the attempt/timing fields
+    it can supply, which are appended as trailing ``key=value`` pairs. Emitting
+    from here gives that format a single owner, so a field added for one helper
+    cannot silently drift from the other's. The helpers keep their own budgets;
+    only the report is shared.
+    """
+    trailer = "".join(f" {name}={value}" for name, value in extra.items())
+    logger.log(
+        logging.WARNING if giving_up else logging.DEBUG,
+        "%s what=%s sqlite_errorname=%s%s",
+        "sqlite lock retry budget exhausted" if giving_up else "retrying sqlite lock failure",
+        what,
+        sqlite_error_name(exc),
+        trailer,
+    )
+
+
 async def should_retry_after_sqlite_lock(
     exc: BaseException,
     *,
@@ -115,19 +136,9 @@ async def should_retry_after_sqlite_lock(
     if not is_sqlite_lock_error(exc):
         return False
     if attempt >= max_attempts - 1:
-        logger.warning(
-            "sqlite lock retry budget exhausted what=%s sqlite_errorname=%s attempts=%d",
-            what,
-            sqlite_error_name(exc),
-            max_attempts,
-        )
+        _report_lock_attempt(exc, what=what, giving_up=True, attempts=max_attempts)
         return False
-    logger.debug(
-        "retrying sqlite lock failure what=%s sqlite_errorname=%s attempt=%d",
-        what,
-        sqlite_error_name(exc),
-        attempt,
-    )
+    _report_lock_attempt(exc, what=what, giving_up=False, attempt=attempt)
     await asyncio.sleep(base_delay_seconds * (2**attempt))
     return True
 
@@ -157,23 +168,21 @@ async def retry_on_sqlite_lock(
             attempt_seconds = time.monotonic() - attempt_started_at
             total_seconds = time.monotonic() - started_at
             if delay_seconds is None:
-                logger.warning(
-                    "sqlite lock retry budget exhausted what=%s sqlite_errorname=%s "
-                    "attempt_seconds=%.3f total_seconds=%.3f",
-                    what,
-                    sqlite_error_name(exc),
-                    attempt_seconds,
-                    total_seconds,
+                _report_lock_attempt(
+                    exc,
+                    what=what,
+                    giving_up=True,
+                    attempt_seconds=f"{attempt_seconds:.3f}",
+                    total_seconds=f"{total_seconds:.3f}",
                 )
                 raise
-            logger.debug(
-                "retrying sqlite lock failure what=%s sqlite_errorname=%s "
-                "attempt_seconds=%.3f total_seconds=%.3f next_delay_seconds=%.3f",
-                what,
-                sqlite_error_name(exc),
-                attempt_seconds,
-                total_seconds,
-                delay_seconds,
+            _report_lock_attempt(
+                exc,
+                what=what,
+                giving_up=False,
+                attempt_seconds=f"{attempt_seconds:.3f}",
+                total_seconds=f"{total_seconds:.3f}",
+                next_delay_seconds=f"{delay_seconds:.3f}",
             )
             if before_retry is not None:
                 await before_retry()

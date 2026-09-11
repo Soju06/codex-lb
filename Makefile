@@ -73,6 +73,7 @@ help:
 	  '  make test-dashboard-browser-smoke  built dashboard against the real local API' \
 	  '  make test-unit               unit pytest slice, same as CI' \
 	  '  make test-integration-core   integration-core pytest slice' \
+	  '  make test-overflow-drills    subscription-overflow canary drill rehearsals' \
 	  '  make package                 build and verify sdist/wheel' \
 	  '  make ci-fast                 lint/type/frontend/unit/package/rust-check' \
 	  '  make ci                      full local CI gate'
@@ -139,7 +140,7 @@ rust-audit:
 
 .PHONY: test-unit test-integration-core test-integration-core-shard \
 	test-integration-core-1 test-integration-core-2 test-integration-core-3 \
-	test-integration-bridge test-e2e test-postgres
+	test-integration-bridge test-overflow-drills test-e2e test-postgres
 test-unit: frontend-build
 	uv sync --dev --frozen
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/simulation tests/test_request_logs_options_api.py
@@ -173,6 +174,15 @@ test-integration-bridge: frontend-build
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -vv \
 	  tests/integration/test_http_responses_bridge.py \
 	  tests/integration/test_proxy_websocket_responses.py
+
+# The pre-flip canary drill rehearsals (docs/routing.md "Canary and drills").
+# Marker-selected rather than path-selected so a drill can move modules without
+# staling the runbook; ``tests/integration`` only bounds collection. Already
+# covered by test-integration-core -- this target exists so an operator can run
+# exactly the drill list before standing a canary up.
+test-overflow-drills:
+	uv sync --dev --frozen
+	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -m overflow_drill tests/integration
 
 test-e2e: frontend-build
 	uv sync --dev --frozen

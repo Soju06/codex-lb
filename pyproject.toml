@@ -102,6 +102,7 @@ asyncio_default_test_loop_scope = "session"
 markers = [
     "e2e: end-to-end flow tests",
     "integration: tests that exercise multiple layers together",
+    "overflow_drill: subscription-overflow canary drill rehearsals (see docs/routing.md)",
     "unit: fast isolated tests",
     "usage_refresh_request_path: keep UsageUpdater request-path refreshes live (see tests/conftest.py)",
 ]

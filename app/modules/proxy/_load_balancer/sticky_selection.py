@@ -1402,7 +1402,11 @@ async def _select_with_stickiness(
     # True when that release is request-local: the substitute serves this turn
     # and the sticky row keeps pointing at the isolated owner, so the thread
     # returns home when isolation lifts instead of accumulating one permanent
-    # new owner per isolation episode it touches.
+    # new owner per isolation episode it touches. Never true when the caller
+    # asked for reallocation: ``reallocate_sticky`` is an explicit instruction
+    # to retire the mapping and the isolation reroute reuses the same local
+    # further down, so the caller's intent is captured before that happens.
+    caller_requested_reallocation = reallocate_sticky
     overload_reroute_request_local = False
 
     def _choose_from(candidates: list[AccountState]) -> SelectionResult:
@@ -1584,7 +1588,7 @@ async def _select_with_stickiness(
                     candidate = _choose_from(overload_reroute_pool)
                 if candidate.account is not None and candidate.account.account_id != pinned.account_id:
                     overload_reroute = candidate
-                    overload_reroute_request_local = True
+                    overload_reroute_request_local = not caller_requested_reallocation
                     # Account identifiers are deliberately omitted: this path
                     # has no privacy flag and private realtime diagnostics
                     # must not expose them. The isolation-engaged warning
@@ -1595,9 +1599,10 @@ async def _select_with_stickiness(
                     # to a sibling *without* adding an owner to the thread.
                     logger.info(
                         "sticky_owner_overload_isolation_reroute sticky_kind=%s overload_free_candidates=%d "
-                        "mapping=retained substitute=%s",
+                        "mapping=%s substitute=%s",
                         sticky_kind.value,
                         len(overload_reroute_pool),
+                        "retained" if overload_reroute_request_local else "rebound",
                         "deterministic" if substitute_is_stable else "weighted",
                     )
                 else:

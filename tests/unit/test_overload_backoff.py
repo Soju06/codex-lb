@@ -540,6 +540,7 @@ async def _select_sticky_outcome(
     kind: StickySessionKind = StickySessionKind.PROMPT_CACHE,
     initial_preferred_account_id: str | None = None,
     sticky_key: str = "owned-key",
+    reallocate_sticky: bool = False,
 ):
     account_map = {state.account_id: cast(Account, AsyncMock()) for state in states}
     return await balancer._select_with_stickiness(
@@ -547,7 +548,7 @@ async def _select_sticky_outcome(
         account_map=account_map,
         sticky_key=sticky_key,
         sticky_kind=kind,
-        reallocate_sticky=False,
+        reallocate_sticky=reallocate_sticky,
         sticky_max_age_seconds=600 if kind == StickySessionKind.PROMPT_CACHE else None,
         prefer_earlier_reset_accounts=False,
         prefer_earlier_reset_window="secondary",
@@ -859,6 +860,29 @@ async def test_isolated_and_capped_bare_session_owner_keeps_its_request_local_sp
     assert sticky_repo.upserts == []
     for lease in [*saturated, retained.lease]:
         await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_explicit_reallocation_still_retires_an_isolated_owner(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``reallocate_sticky`` is an explicit instruction to retire the mapping.
+    Isolation retention must not silently override it."""
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = _isolated_runtime(clock.time())
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.load_balancer")
+    outcome = await _select_sticky_outcome(
+        balancer,
+        [_state("hot"), _state("clean")],
+        _sticky_repo("hot"),
+        reallocate_sticky=True,
+    )
+    assert outcome.selection.account is not None
+    assert outcome.selection.account.account_id == "clean"
+    assert outcome.mutation is not None and outcome.mutation.account_id == "clean"
+    assert "mapping=rebound" in caplog.text
 
 
 @pytest.mark.asyncio

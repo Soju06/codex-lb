@@ -3107,6 +3107,35 @@ async def test_select_account_forwards_exclusions_to_sticky_selection_request(
 
 
 @pytest.mark.asyncio
+async def test_isolated_and_excluded_prompt_cache_owner_keeps_its_mapping() -> None:
+    """Isolation must not convert a request-local spillover into a rebind: an
+    owner excluded by this request's own retry loop keeps its mapping whether
+    or not it is also isolated for overload."""
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-isolated-excluded")
+    assert alternate is not None
+    thread_key = "thread-isolated-excluded-key"
+    sticky_repo.account_ids_by_key = {thread_key: owner.id}
+    now = balancer._clock.time()
+    balancer._runtime[owner.id] = RuntimeState(
+        overload_backoff_until=now + 900.0,
+        overload_isolated_until=now + 900.0,
+        overload_backoff_level=3,
+        overload_last_trip_at=now,
+    )
+
+    selected = await balancer.select_account(
+        **_thread_row_kwargs(thread_key),
+        exclude_account_ids={owner.id},
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == alternate.id
+    assert sticky_repo.upserts == []
+    assert sticky_repo.deleted == []
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
 async def test_security_work_excluded_prompt_cache_owner_is_rebound() -> None:
     balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-security-excluded")
     assert alternate is not None

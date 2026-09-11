@@ -607,7 +607,10 @@ async def test_role_mappings_migration_upgrades_and_downgrades(tmp_path) -> None
             tables = {row[0] for row in await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
         assert "dashboard_role_mappings" not in tables
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-        assert result.current_revision == _HEAD_REVISION == _TARGET_REVISION
+        # The graph head moves whenever a later migration lands; compare against the live head,
+        # not this revision, so descendants do not break this test.
+        assert result.current_revision == _HEAD_REVISION
+        assert result.current_revision == inspect_migration_state(db_url).head_revision
     finally:
         await engine.dispose()
 

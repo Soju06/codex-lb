@@ -4,7 +4,7 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
 import App from "@/App";
-import { createTelemetryConsent } from "@/test/mocks/factories";
+import { createTelemetryConsent, createTelemetryPreview } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
@@ -29,12 +29,50 @@ describe("telemetry consent flow integration", () => {
     // The dialog renders the full transmitted envelope, not just the metrics.
     expect(dialog).toHaveTextContent('"instance_id": "00000000-0000-4000-8000-000000000000"');
     expect(dialog).toHaveTextContent('"timestamp": "2026-08-06T00:00:00Z"');
-    expect(dialog).toHaveTextContent('"schema_version": 1');
+    expect(dialog).toHaveTextContent('"schema_version": 2');
 
     await user.click(screen.getByRole("button", { name: "Disable telemetry" }));
 
     await waitFor(() => expect(putBody).toEqual({ enabled: false }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("re-informs a decided operator once without resetting the persisted decision", async () => {
+    const user = userEvent.setup({ delay: null });
+    let putCalled = false;
+    // The backend attaches the preview to a persisted decision only while the
+    // acknowledged notice version is behind, and acknowledges it by building
+    // the preview, so this response is what the operator sees exactly once.
+    server.use(
+      http.get("/api/settings/telemetry", () =>
+        HttpResponse.json(
+          createTelemetryConsent({
+            state: "enabled",
+            source: "persisted",
+            active: true,
+            preview: createTelemetryPreview(),
+          }),
+        ),
+      ),
+      http.put("/api/settings/telemetry", () => {
+        putCalled = true;
+        return HttpResponse.json(createTelemetryConsent());
+      }),
+    );
+
+    window.history.pushState({}, "", "/dashboard");
+    renderWithProviders(<App />);
+
+    const dialog = await screen.findByRole("dialog", { name: "Telemetry payload updated" });
+    expect(dialog).toHaveTextContent('"schema_version": 2');
+    expect(dialog).toHaveTextContent('"utc_date": "2026-08-05"');
+    expect(screen.queryByRole("button", { name: "Disable telemetry" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Keep enabled" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Got it" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(putCalled).toBe(false);
   });
 
   it("does not show the consent dialog when consent is already decided", async () => {

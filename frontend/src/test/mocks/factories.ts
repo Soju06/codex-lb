@@ -61,6 +61,8 @@ import type {
 	ModelContextWindowOverrides,
 	SubscriptionOverflowPreflight,
 	TelemetryConsent,
+	TelemetryDay,
+	TelemetryPreview,
 	TelemetrySnapshotEnvelope,
 	UpstreamProxyAdmin,
 } from "@/features/settings/schemas";
@@ -69,6 +71,8 @@ import {
 	ModelContextWindowOverridesSchema,
 	SubscriptionOverflowPreflightSchema,
 	TelemetryConsentSchema,
+	TelemetryDaySchema,
+	TelemetryPreviewSchema,
 	TelemetrySnapshotEnvelopeSchema,
 	UpstreamProxyAdminSchema,
 } from "@/features/settings/schemas";
@@ -932,7 +936,7 @@ export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
 		instance_id: "00000000-0000-4000-8000-000000000000",
 		timestamp: "2026-08-06T00:00:00Z",
 		metrics: {
-			schema_version: 1,
+			schema_version: 2,
 			consent: "undecided",
 			instance_id: "00000000-0000-4000-8000-000000000000",
 			version: "1.23.0",
@@ -948,8 +952,9 @@ export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
 				reverse_proxy: true,
 			},
 			accounts: {
-				pool_bucket: "2-5",
-				plan_mix: { plus: "2-5", pro: "0", team: "0", free: "0" },
+				total: 2,
+				per_plan: { plus: 2, pro: 0, team: 0, free: 0 },
+				per_status: { active: 2 },
 				workspace_accounts: false,
 				routing_policy: "usage_weighted",
 				limit_warmup_enabled: false,
@@ -962,7 +967,7 @@ export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
 				tokens_output: 50000,
 				tokens_cached_ratio: 0.8,
 				cost_usd_bucket: "<10",
-				request_kinds: { responses: 0.97, chat: 0.02, images: 0.01, unknown: 0.0 },
+				request_kinds: { responses: 0, chat: 0, images: 0, unknown: 1 },
 				transport_mix: { ws: 0.6, http_bridge: 0.4 },
 				service_tier_mix: { default: 1.0, flex: 0.0, priority: 0.0 },
 				clients: { "codex-cli": 0.9, other: 0.1 },
@@ -1000,6 +1005,57 @@ export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
 	});
 }
 
+// Sparse fixed-edge histogram whose sample_count equals the bucket sum, as the
+// backend wire-schema test requires.
+function telemetryHistogram(buckets: Record<string, number>) {
+	return {
+		sample_count: Object.values(buckets).reduce((sum, count) => sum + count, 0),
+		buckets,
+	};
+}
+
+function telemetryDimensionEntry(name: string, requests: number) {
+	return {
+		name,
+		requests,
+		latency_ms: telemetryHistogram({ "6": requests }),
+		ttft_ms: telemetryHistogram({ "4": requests }),
+		tps: telemetryHistogram({ "3": requests }),
+	};
+}
+
+export function createTelemetryDay(): TelemetryDay {
+	return TelemetryDaySchema.parse({
+		schema_version: 2,
+		instance_id: "00000000-0000-4000-8000-000000000000",
+		utc_date: "2026-08-05",
+		dimensions: {
+			models: [telemetryDimensionEntry("gpt-5.4-codex", 3)],
+			clients: [telemetryDimensionEntry("codex-cli", 3)],
+			transport: [telemetryDimensionEntry("ws", 2), telemetryDimensionEntry("http_bridge", 1)],
+			upstream_transport: [telemetryDimensionEntry("ws", 3)],
+			service_tier: [telemetryDimensionEntry("default", 3)],
+			request_kinds: { responses: 0, chat: 0, images: 0, unknown: 3 },
+			global: telemetryDimensionEntry("global", 3),
+		},
+		errors: {
+			upstream_error_class: { server_overloaded: 1 },
+			failure_phase: { stream: 1 },
+			http_status_class: { "2xx": 2, "5xx": 1 },
+			outcomes: { success: 2, error: 1, cancelled: 0 },
+		},
+	});
+}
+
+// Both bodies the backend attaches as `preview`: the heartbeat envelope and
+// the most recent completed UTC day.
+export function createTelemetryPreview(): TelemetryPreview {
+	return TelemetryPreviewSchema.parse({
+		heartbeat: createTelemetrySnapshotEnvelope(),
+		day: createTelemetryDay(),
+	});
+}
+
 export function createTelemetryConsent(
 	overrides: Partial<TelemetryConsent> = {},
 ): TelemetryConsent {
@@ -1007,15 +1063,16 @@ export function createTelemetryConsent(
 		state: "enabled",
 		source: "persisted",
 		active: true,
+		notice_version: 2,
 		...overrides,
 	};
-	// Mirror the backend: the base GET attaches a preview envelope only for
+	// Mirror the backend: the base GET attaches the preview bodies only for
 	// the undecided/default (consent dialog) case; explicit overrides win.
 	const preview =
 		"preview" in overrides
 			? overrides.preview
 			: base.state === "undecided" && base.source === "default"
-				? createTelemetrySnapshotEnvelope()
+				? createTelemetryPreview()
 				: null;
 	return TelemetryConsentSchema.parse({ ...base, preview });
 }

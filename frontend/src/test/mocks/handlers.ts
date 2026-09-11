@@ -50,8 +50,8 @@ import {
   createQuotaPlannerWarmupActionResponse,
   createRequestLogFilterOptions,
   createTelemetryConsent,
-  createTelemetrySnapshotEnvelope,
   createModelContextWindowOverrides,
+  createTelemetryPreview,
   createUpstreamProxyAdmin,
   createRequestLogsResponse,
   type DashboardAuthSession,
@@ -1292,12 +1292,12 @@ export const handlers = [
   }),
 
   http.get("/api/settings/telemetry", ({ request }) => {
-    // include_preview=true is the on-demand path: the envelope is attached
-    // regardless of consent state.
+    // include_preview=true is the on-demand path: both preview bodies are
+    // attached regardless of consent state.
     if (new URL(request.url).searchParams.get("include_preview") === "true") {
       return HttpResponse.json({
         ...state.telemetryConsent,
-        preview: createTelemetrySnapshotEnvelope(),
+        preview: createTelemetryPreview(),
       });
     }
     return HttpResponse.json(state.telemetryConsent);
@@ -1312,6 +1312,19 @@ export const handlers = [
       state: payload.enabled ? "enabled" : "disabled",
       source: "persisted",
       active: payload.enabled,
+      preview: null,
+    });
+    return HttpResponse.json(state.telemetryConsent);
+  }),
+
+  http.post("/api/settings/telemetry/notice-ack", async ({ request }) => {
+    const payload = await parseJsonBody(request, z.object({ notice_version: z.number().int() }));
+    if (!payload) {
+      return HttpResponse.json(state.telemetryConsent);
+    }
+    state.telemetryConsent = createTelemetryConsent({
+      ...state.telemetryConsent,
+      notice_version: Math.min(payload.notice_version, state.telemetryConsent.notice_version),
       preview: null,
     });
     return HttpResponse.json(state.telemetryConsent);

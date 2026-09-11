@@ -204,16 +204,21 @@ async def test_rotation_preserves_independent_status_and_quota_state(db_setup, s
 
 
 @pytest.mark.asyncio
-async def test_rotation_without_new_access_ciphertext_does_not_clear_rejection(db_setup):
+@pytest.mark.parametrize("reencrypt", [False, True])
+async def test_rotation_without_new_access_material_does_not_clear_rejection(db_setup, reencrypt):
     stale = await _create_account(status=AccountStatus.REAUTH_REQUIRED, reason=_REJECTED_REASON)
     routing_cache = account_cache.get_routing_availability_cache()
     await routing_cache.refresh_from_db()
+    encryptor = TokenEncryptor()
+    access = encryptor.encrypt("old-access") if reencrypt else stale.access_token_encrypted
+    if reencrypt:
+        assert access != stale.access_token_encrypted
     async with SessionLocal() as session:
         assert await AccountsRepository(session).rotate_tokens(
             stale.id,
-            stale.access_token_encrypted,
-            stale.refresh_token_encrypted,
-            stale.id_token_encrypted,
+            access,
+            encryptor.encrypt("new-refresh"),
+            encryptor.encrypt("new-id"),
             utcnow(),
             expected_refresh_token_encrypted=stale.refresh_token_encrypted,
         )
@@ -223,3 +228,37 @@ async def test_rotation_without_new_access_ciphertext_does_not_clear_rejection(d
         assert row.status == AccountStatus.REAUTH_REQUIRED
         assert row.deactivation_reason == _REJECTED_REASON
     assert routing_cache.is_unavailable(stale.id)
+    await routing_cache.refresh_from_db()
+    assert routing_cache.is_unavailable(stale.id)
+
+
+@pytest.mark.asyncio
+async def test_refresh_with_unchanged_rejected_access_material_keeps_account_unavailable(async_client, monkeypatch):
+    stale = await _create_account()
+
+    async def refresh_tokens(self, token, *, account):
+        async with SessionLocal() as session:
+            assert await AccountsRepository(session).update_status(
+                account.id, AccountStatus.REAUTH_REQUIRED, _REJECTED_REASON
+            )
+        account_cache.mark_account_routing_unavailable(account.id)
+        return TokenRefreshResult(
+            access_token="old-access",
+            refresh_token="new-refresh",
+            id_token="new-id",
+            account_id=None,
+            plan_type="plus",
+            email=None,
+        )
+
+    monkeypatch.setattr(AuthManager, "_refresh_tokens", refresh_tokens)
+
+    async with SessionLocal() as session:
+        refreshed = await AuthManager(AccountsRepository(session)).refresh_account(clone_row(stale))
+
+    assert refreshed.access_token_encrypted != stale.access_token_encrypted
+    assert TokenEncryptor().decrypt(refreshed.access_token_encrypted) == "old-access"
+    assert refreshed.status == AccountStatus.REAUTH_REQUIRED
+    assert refreshed.deactivation_reason == _REJECTED_REASON
+    balancer = get_proxy_service_for_app(async_client._transport.app)._load_balancer
+    assert (await balancer.select_account()).account is None

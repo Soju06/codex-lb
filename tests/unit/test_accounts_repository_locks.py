@@ -208,7 +208,12 @@ async def test_account_rotate_tokens_uses_sqlite_writer_section(monkeypatch):
     async def commit_with_order():
         order.append("commit")
 
+    async def scalar_with_order(*args, **kwargs):
+        order.append("scalar")
+        return b"access"
+
     monkeypatch.setattr(repository_module, "sqlite_writer_section", fake_writer_section)
+    session.scalar = AsyncMock(side_effect=scalar_with_order)
     session.execute.side_effect = execute_with_order
     session.commit.side_effect = commit_with_order
 
@@ -221,7 +226,7 @@ async def test_account_rotate_tokens_uses_sqlite_writer_section(monkeypatch):
         expected_refresh_token_encrypted=b"refresh",
     )
 
-    assert order == ["lock-enter", "execute", "commit", "lock-exit"]
+    assert order == ["lock-enter", "scalar", "execute", "commit", "lock-exit"]
 
 
 @pytest.mark.asyncio
@@ -402,6 +407,7 @@ async def test_local_identity_membership_raises_typed_error_after_second_change(
 @pytest.mark.asyncio
 async def test_local_identity_writers_lock_old_and_incoming_membership(monkeypatch):
     repo, _recorded = _make_postgres_repo(monkeypatch)
+    repo.session.scalar = AsyncMock(return_value=b"access")
     existing = _stub_account("acc_writer", "writer@example.com", chatgpt_id="chatgpt_old")
     membership_locks: list[tuple[str, str | None]] = []
     cast(Any, repo.session.execute).return_value = _make_result("acc_writer")

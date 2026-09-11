@@ -1738,12 +1738,21 @@ class LoadBalancer:
                 # AuthManager CAS-persists refresh-only failures and may update this object. This fallback also
                 # covers other failures and singleflight joiners without overwriting repaired credentials.
                 # Proven access rejection additionally guards the access token even when status already matches.
+                rejected_snapshot = _clone_account(account)
                 downgraded = await self._persist_state_if_current(
                     repos.accounts,
                     account,
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
+                if not downgraded and error_code == "account_auth_invalidated":
+                    rejected = await repos.accounts.persist_access_rejection(rejected_snapshot)
+                    downgraded = rejected is not None
+                    if rejected is not None:
+                        account.status, account.deactivation_reason = rejected.status, rejected.deactivation_reason
+                        account.reset_at, account.blocked_at = rejected.reset_at, rejected.blocked_at
+                        state.reset_at, state.blocked_at = rejected.reset_at, rejected.blocked_at
+                        self._sync_runtime_state(account, state)
             if downgraded and (
                 state.status == AccountStatus.DEACTIVATED or reauth_reason_blocks_routing(state.deactivation_reason)
             ):

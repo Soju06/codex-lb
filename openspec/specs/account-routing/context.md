@@ -195,6 +195,23 @@ Status writes compare both credential ciphertexts so stale failures cannot disab
 a repaired account. For example, after A rejects access and refresh, a subsequent
 independent request can select B even when A's JWT expiry is unknown.
 
+Encryption is not a credential identity test: Fernet can produce different
+ciphertext for the same access token. Guarded rotation compares decrypted access
+material and fences the write against the observed access and refresh ciphertexts.
+For example, rotating refresh token R1 to R2 while re-encrypting rejected access
+token A leaves A unavailable; replacing A with B can clear the rejection. If the
+comparison cannot decrypt either value, rotation does not claim the rejection is
+repaired. Warmup, including force mode, and manual or scheduled automations use
+the same reason-and-expiry eligibility gate as ordinary routing. Force warmup
+bypasses usage checks, not known credential rejection.
+
+If a concurrent health update wins the initial rejection CAS, the repository
+re-reads the account and writes only the rejection status and reason under current
+credential and operator-state guards. Cooldown timestamps remain untouched by the
+retry, so rate-limit activity cannot prevent rejection from becoming durable.
+Same-value re-encryption is compared by material with bounded retries; actual
+credential replacement, pause, deactivation, or deletion vetoes stale rejection.
+
 Local unavailable marks are fenced against repair clears and snapshot refreshes
 observed during the guarded write. A newer cache observation wins over the stale
 mark. The successful write still queues a routing invalidation, even if its mark

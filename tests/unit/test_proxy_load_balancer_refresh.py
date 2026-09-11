@@ -95,6 +95,15 @@ class StubAccountsRepository(AccountsRepository):
     async def get_by_id(self, account_id: str) -> Account | None:
         return self._find_account(account_id)
 
+    async def persist_access_rejection(self, rejected: Account) -> Account | None:
+        current = self._find_account(rejected.id)
+        if current is None or (
+            current.access_token_encrypted != rejected.access_token_encrypted
+            or current.refresh_token_encrypted != rejected.refresh_token_encrypted
+        ):
+            return None
+        raise AssertionError("Noncredential rejection races require a real repository test")
+
     async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
         del refresh_existing
         return list(self._accounts)

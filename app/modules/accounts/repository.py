@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, case, delete, func, or_, select, text, update
+from cryptography.fernet import InvalidToken
+from sqlalchemy import and_, case, delete, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
@@ -840,6 +841,55 @@ class AccountsRepository:
             await self._session.commit()
             return updated_id is not None
 
+    async def persist_access_rejection(self, rejected: Account) -> Account | None:
+        """Persist proven rejection without competing with unrelated health writes."""
+        encryptor = TokenEncryptor()
+        access = rejected.access_token_encrypted
+        refresh = rejected.refresh_token_encrypted
+        for _ in range(3):
+            current = await self.get_by_id_fresh(rejected.id)
+            if (
+                current is None
+                or current.delete_requested_at is not None
+                or current.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED)
+            ):
+                return None
+            try:
+                if (
+                    current.access_token_encrypted != access
+                    and encryptor.decrypt(current.access_token_encrypted) != encryptor.decrypt(access)
+                ) or (
+                    current.refresh_token_encrypted != refresh
+                    and encryptor.decrypt(current.refresh_token_encrypted) != encryptor.decrypt(refresh)
+                ):
+                    return None
+            except (InvalidToken, UnicodeDecodeError):
+                return None
+            async with sqlite_writer_section():
+                # Status, reason and cooldown may change independently of the rejected tokens.
+                # Only credential changes and operator terminal states may veto this write.
+                result = await self._session.execute(
+                    update(Account)
+                    .where(
+                        Account.id == rejected.id,
+                        Account.delete_requested_at.is_(None),
+                        Account.status.not_in((AccountStatus.PAUSED, AccountStatus.DEACTIVATED)),
+                        Account.access_token_encrypted == current.access_token_encrypted,
+                        Account.refresh_token_encrypted == current.refresh_token_encrypted,
+                    )
+                    .values(
+                        status=AccountStatus.REAUTH_REQUIRED,
+                        deactivation_reason=PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+                    )
+                    .returning(Account)
+                    .execution_options(populate_existing=True)
+                )
+                updated = result.scalar_one_or_none()
+                await self._session.commit()
+            if updated is not None:
+                return updated
+        return None
+
     @staticmethod
     def _hard_sticky_outage_started(
         previous_status: AccountStatus | None,
@@ -1250,6 +1300,25 @@ class AccountsRepository:
         async with sqlite_writer_section():
             if self._dialect_name() == "postgresql":
                 await self._lock_postgresql_account_identity_membership(account_id, chatgpt_account_id)
+            current_access = await self._session.scalar(
+                select(Account.access_token_encrypted).where(
+                    Account.id == account_id,
+                    Account.refresh_token_encrypted == expected_refresh_token_encrypted,
+                )
+            )
+            if current_access is None:
+                await self._session.commit()
+                return False
+            access_material_changed = False
+            if current_access != access_token_encrypted:
+                encryptor = TokenEncryptor()
+                try:
+                    access_material_changed = encryptor.decrypt(current_access) != encryptor.decrypt(
+                        access_token_encrypted
+                    )
+                except (InvalidToken, UnicodeDecodeError):
+                    # Unverifiable material must not restore a rejected account.
+                    pass
             values: dict[str, bytes | datetime | str] = {
                 "access_token_encrypted": access_token_encrypted,
                 "refresh_token_encrypted": refresh_token_encrypted,
@@ -1273,7 +1342,7 @@ class AccountsRepository:
             repaired_rejection = and_(
                 Account.status == AccountStatus.REAUTH_REQUIRED,
                 Account.deactivation_reason == PERMANENT_FAILURE_CODES["account_auth_invalidated"],
-                Account.access_token_encrypted != access_token_encrypted,
+                literal(access_material_changed),
             )
             stmt = (
                 update(Account)
@@ -1282,6 +1351,7 @@ class AccountsRepository:
                 # the upstream exchange, so a concurrent rotation is never
                 # clobbered by a slower writer.
                 .where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
+                .where(Account.access_token_encrypted == current_access)
                 .values(
                     **values,
                     # Authentication rejection belongs to the replaced access

@@ -25,9 +25,87 @@ export const DashboardAuthModeSchema = z.enum(["standard", "trusted_header", "di
 export const DashboardRoleSchema = z.enum(["admin", "guest"]);
 export const DashboardPermissionSchema = z.enum(["read", "write"]);
 
+// Fine-grained permissions (`<resource>:<action>`); mirrors `Permission` in
+// `app/core/auth/dashboard_access.py`. The session lists each grant as
+// `<permission>:<scope>` after the coarse aliases.
+export const PermissionSchema = z.enum([
+  "dashboard:read",
+  "accounts:read",
+  "accounts:write",
+  "accounts:export",
+  "api_keys:read",
+  "api_keys:write",
+  "api_keys:assign",
+  "ops:write",
+  "security:write",
+  "users:manage",
+  "roles:manage",
+  "conversations:read",
+  "audit:read",
+]);
+export const PermissionScopeSchema = z.enum(["all", "own"]);
+
+export const AuthSessionUserSchema = z.object({
+  id: z.string(),
+  username: z.string(),
+  displayName: z.string().nullable().default(null),
+  role: z.object({
+    id: z.string(),
+    slug: z.string(),
+    name: z.string(),
+    kind: z.string(),
+  }),
+});
+
+export const LoginProviderSchema = z.object({
+  kind: z.string(),
+  providerKey: z.string().default("default"),
+  label: z.string(),
+  loginUrl: z.string().nullable().default(null),
+});
+
+export const LoginHintSchema = z.object({
+  usernameField: z.enum(["hidden", "shown"]).default("hidden"),
+  providers: z
+    .array(LoginProviderSchema)
+    .default([{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }]),
+  localLogin: z.string().default("enabled"),
+  // The request carried a provider identity that has no account here yet.
+  pendingIdentity: z.boolean().default(false),
+});
+
+// Team-size facts served only to `users:manage` holders; `null` for everyone
+// else. Consumed exclusively by `resolveDisclosureTier`.
+export const AccessSummarySchema = z.object({
+  usersTotal: z.number().int().default(0),
+  usersActive: z.number().int().default(0),
+  usersInvited: z.number().int().default(0),
+  usersDisabled: z.number().int().default(0),
+  pendingInvites: z.number().int().default(0),
+  nonAdminUsers: z.number().int().default(0),
+  customRoles: z.number().int().default(0),
+  providersEnabled: z.array(z.string()).default([]),
+  roleMappings: z.number().int().default(0),
+  scimTokens: z.number().int().default(0),
+  auditSinks: z.number().int().default(0),
+  localLoginPolicy: z.string().default("enabled"),
+});
+
+// Step-up (re-verification for sensitive changes): when the account last
+// re-verified, and which factors `/step-up` will ask for. Empty `methods`
+// means the account must enrol two-factor or set a password first.
+export const StepUpMethodSchema = z.enum(["password", "totp"]);
+export const StepUpStateSchema = z.object({
+  verifiedAt: z.number().int().nullable().default(null),
+  expiresAt: z.number().int().nullable().default(null),
+  methods: z.array(StepUpMethodSchema).default([]),
+});
+
 export const AuthSessionSchema = z.object({
   authenticated: z.boolean(),
   passwordRequired: z.boolean(),
+  // An active account holds a password (proxy-created accounts do not count).
+  localPasswordConfigured: z.boolean().default(false),
   totpRequiredOnLogin: z.boolean(),
   totpConfigured: z.boolean(),
   bootstrapRequired: z.boolean().optional().default(false),
@@ -35,14 +113,54 @@ export const AuthSessionSchema = z.object({
   authMode: DashboardAuthModeSchema.default("standard"),
   passwordManagementEnabled: z.boolean().default(true),
   passwordSessionActive: z.boolean().default(false),
-  role: DashboardRoleSchema.default("admin"),
-  permissions: z.array(DashboardPermissionSchema).default(["read", "write"]),
+  // Least-privilege defaults: a response that omits these fields must never
+  // be treated as an admin. `permissions` accepts any string so that future
+  // fine-grained values (e.g. `accounts:export`) do not reject the session.
+  role: DashboardRoleSchema.default("guest"),
+  permissions: z.array(z.string()).default([]),
   guestAccessEnabled: z.boolean().default(false),
   guestPasswordRequired: z.boolean().default(false),
+  // Account fields (user-login-and-session-v2). Every default is the
+  // "no account / individual install" shape so older payloads parse unchanged.
+  user: AuthSessionUserSchema.nullable().default(null),
+  authMethod: z.string().nullable().default(null),
+  mustChangePassword: z.boolean().default(false),
+  totpEnrollmentRequired: z.boolean().default(false),
+  login: LoginHintSchema.nullable()
+    .default(null)
+    .transform((value) => value ?? LoginHintSchema.parse({})),
+  accessSummary: AccessSummarySchema.nullable().default(null),
+  assignableRoleIds: z.array(z.string()).default([]),
+  stepUp: StepUpStateSchema.nullable().default(null),
 });
 
+// Mirrors the backend username rule (case-folded on the server).
+const USERNAME_PATTERN = /^[a-z0-9._-]{1,64}$/i;
+const usernameSchema = z
+  .string()
+  .trim()
+  .min(1, { message: "auth.invite.validation.usernameRequired" })
+  .max(64, { message: "auth.invite.validation.usernameTooLong" })
+  .regex(USERNAME_PATTERN, { message: "auth.invite.validation.usernameFormat" });
+
 export const LoginRequestSchema = z.object({
+  username: z.string().trim().max(64, { message: "auth.invite.validation.usernameTooLong" }).optional(),
   password: z.string().min(1),
+});
+
+export const InviteDescriptionSchema = z.object({
+  roleName: z.string(),
+  inviterDisplayName: z.string().nullable().default(null),
+  suggestedUsername: z.string(),
+  usernameLocked: z.boolean(),
+  expiresAt: z.string(),
+});
+
+export const InviteAcceptRequestSchema = z.object({
+  token: z.string().min(1),
+  username: usernameSchema,
+  password: dashboardPasswordSchema,
+  displayName: z.string().trim().max(128).optional(),
 });
 
 export const GuestLoginRequestSchema = z.object({
@@ -86,7 +204,25 @@ export const StatusResponseSchema = z.object({
   status: z.string(),
 });
 
+export const StepUpRequestSchema = z.object({
+  password: z.string().min(1).optional(),
+  code: z.string().length(6, "settings.totp.validation.codeLength").optional(),
+});
+
+export const StepUpResponseSchema = z.object({
+  verifiedAt: z.number().int(),
+  expiresAt: z.number().int(),
+});
+
 export type AuthSession = z.infer<typeof AuthSessionSchema>;
+export type AuthSessionUser = z.infer<typeof AuthSessionUserSchema>;
+export type LoginHint = z.infer<typeof LoginHintSchema>;
+export type LoginProvider = z.infer<typeof LoginProviderSchema>;
+export type AccessSummary = z.infer<typeof AccessSummarySchema>;
+export type Permission = z.infer<typeof PermissionSchema>;
+export type PermissionScope = z.infer<typeof PermissionScopeSchema>;
+export type InviteDescription = z.infer<typeof InviteDescriptionSchema>;
+export type InviteAcceptRequest = z.infer<typeof InviteAcceptRequestSchema>;
 export type DashboardAuthMode = z.infer<typeof DashboardAuthModeSchema>;
 export type DashboardRole = z.infer<typeof DashboardRoleSchema>;
 export type DashboardPermission = z.infer<typeof DashboardPermissionSchema>;
@@ -100,6 +236,8 @@ export type TotpVerifyRequest = z.infer<typeof TotpVerifyRequestSchema>;
 export type TotpSetupConfirmRequest = z.infer<typeof TotpSetupConfirmRequestSchema>;
 export type TotpSetupStartResponse = z.infer<typeof TotpSetupStartResponseSchema>;
 export type StatusResponse = z.infer<typeof StatusResponseSchema>;
+export type StepUpState = z.infer<typeof StepUpStateSchema>;
+export type StepUpRequest = z.infer<typeof StepUpRequestSchema>;
 
 export function getFirstZodIssueMessage(error: unknown): string | null {
   if (!(error instanceof z.ZodError)) {

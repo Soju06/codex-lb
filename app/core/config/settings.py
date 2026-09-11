@@ -119,6 +119,17 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS",
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_LEDGER_ENABLED",
     # end K2 bridge
+    # drop-bridge-recovery-modes (first release after v1.25.0-beta.7): the
+    # three non-default ambiguous-continuation recovery modes were deleted and
+    # the shipped ``fail_closed`` behaviour is now the only one.
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_AMBIGUOUS_CONTINUATION_RECOVERY_MODE",
+    # constantize-token-refresh-interval (first release after v1.25.0-beta.7):
+    # the proactive refresh window is the fixed eight-day
+    # ``TOKEN_REFRESH_INTERVAL_DAYS`` in ``app/core/auth/refresh.py``. Its only
+    # live consumer, the traffic-parity canary, now suppresses proactive
+    # refresh by stamping its isolated ``auth.json`` inside the window instead
+    # of widening the window for the whole process.
+    "CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS",
 )
 
 
@@ -323,7 +334,6 @@ class Settings(BaseSettings):
     auth_guardian_enabled: bool = True
     # T3 → dashboard (deprecated env alias, remove next minor)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
-    token_refresh_interval_days: int = 8
     # T1 (topology). Path to a JSON registry of additional usage quota keys
     # that replaces the bundled ``config/additional_quota_registry.json``.
     # Unset (or blank) keeps the bundled registry. The Alembic backfill
@@ -359,19 +369,11 @@ class Settings(BaseSettings):
     )
     # Keep durable transcript material short-lived by default. The transcript
     # is sensitive prompt/output data and is only a recovery aid.
+    # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_session_bridge_operation_spool_retention_seconds: float = Field(
         default=7 * 24 * 60 * 60,
         gt=0,
     )
-    # Recovery-first mode can either ask the client to drop an ambiguous anchor
-    # or let the bridge retry that anchored request once on a fresh upstream
-    # socket. Both are at-least-once strategies; fail-closed remains default.
-    http_responses_session_bridge_ambiguous_continuation_recovery_mode: Literal[
-        "fail_closed",
-        "client_full_history_once",
-        "server_anchored_replay_once",
-        "server_indefinite_recovery",
-    ] = "fail_closed"
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None
@@ -457,6 +459,11 @@ class Settings(BaseSettings):
         return _effective_environ()
 
     dashboard_auth_proxy_header: str = "Remote-User"
+    # T1 (topology). The header the reverse proxy puts the caller's groups in;
+    # it must match that proxy's configuration, so it cannot live in the
+    # dashboard (policy D2). Optional: an install whose proxy sends no such
+    # header simply has no groups and matches no group rule.
+    dashboard_auth_proxy_groups_header: str = "Remote-Groups"
 
     # --- Multi-replica & production settings ---
     # Prometheus metrics
@@ -627,6 +634,13 @@ class Settings(BaseSettings):
             raise TypeError("dashboard_auth_proxy_header must be a string")
         return normalize_dashboard_auth_proxy_header(value)
 
+    @field_validator("dashboard_auth_proxy_groups_header", mode="before")
+    @classmethod
+    def _normalize_dashboard_auth_proxy_groups_header(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise TypeError("dashboard_auth_proxy_groups_header must be a string")
+        return normalize_dashboard_auth_proxy_header(value, "dashboard_auth_proxy_groups_header")
+
     @field_validator("http_responses_session_bridge_instance_ring", mode="before")
     @classmethod
     def _normalize_http_bridge_instance_ring(cls, value: StringListInput) -> list[str]:
@@ -738,6 +752,17 @@ class Settings(BaseSettings):
             return self
         if not self.firewall_trust_proxy_headers:
             raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dashboard_auth_proxy_headers_differ(self) -> "Settings":
+        # One header cannot be both the identity and the group claim: that
+        # would turn the username into a group and hand out roles by name.
+        if self.dashboard_auth_proxy_groups_header.lower() == self.dashboard_auth_proxy_header.lower():
+            raise ValueError(
+                "dashboard_auth_proxy_groups_header must not equal dashboard_auth_proxy_header "
+                f"('{self.dashboard_auth_proxy_header}')"
+            )
         return self
 
     @model_validator(mode="after")

@@ -88,6 +88,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
     _websocket_continuity_key_from_headers,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.helpers import (
@@ -381,19 +382,28 @@ class _StreamingRetryMixin:
         upstream_stream_transport = upstream_stream_transport_override
         if upstream_stream_transport is None:
             configured_transport, explicit_transport = _resolved_configured_stream_transport(settings)
-            image_bypass = _facade()._responses_request_uses_image_generation(
-                payload
-            ) or _facade()._responses_request_contains_input_image(payload)
+            # ``has_image_generation_tool`` means exactly that: folding
+            # ``input_image`` into it pinned every image turn to upstream HTTP
+            # from inside _resolve_stream_transport, where no log or counter
+            # records the decision (#2363). An ``input_image`` request is pinned
+            # only by the narrow predicate below.
+            image_generation_bypass = _facade()._responses_request_uses_image_generation(payload)
+            payload_size_estimate = _payload_size_estimate_bytes(payload)
             resolved_base_transport = _resolve_stream_transport(
                 transport=configured_transport,
                 transport_override=None,
                 model=payload.model,
                 headers=headers,
-                has_image_generation_tool=image_bypass,
-                payload_size_estimate_bytes=_payload_size_estimate_bytes(payload),
+                has_image_generation_tool=image_generation_bypass,
+                payload_size_estimate_bytes=payload_size_estimate,
             )
             upstream_stream_transport = resolved_base_transport
-            if not explicit_transport and image_bypass:
+            if not explicit_transport and (
+                image_generation_bypass
+                or _facade()._input_image_request_requires_http_upstream(
+                    payload, payload_size_estimate_bytes=payload_size_estimate
+                )
+            ):
                 upstream_stream_transport = "http"
             if (
                 not explicit_transport
@@ -463,6 +473,7 @@ class _StreamingRetryMixin:
             sticky_key_source = "session_header"
         elif affinity.key:
             sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
         _maybe_log_proxy_request_shape(
             "stream",
             payload,
@@ -797,7 +808,16 @@ class _StreamingRetryMixin:
             account: Account,
             *,
             settlement_order_required: bool = False,
+            upstream_http_status: int | None = None,
         ) -> None:
+            """Settle usage then write account health after the client went away.
+
+            ``_StreamSettlement`` has no HTTP-status field, so a caller that
+            reached here from an HTTP-coded failure must pass
+            ``upstream_http_status`` for the soft-overload window to see that
+            the settlement's ``error_code`` was HTTP-derived rather than a
+            status-less stream terminal.
+            """
             nonlocal settled
 
             async def _finalize() -> None:
@@ -814,6 +834,7 @@ class _StreamingRetryMixin:
                         account,
                         _stream_settlement_error_payload(current_settlement),
                         current_settlement.error_code or "upstream_error",
+                        upstream_http_status=upstream_http_status,
                     )
                 elif current_settlement.record_success:
                     await proxy._load_balancer.record_success(account)
@@ -851,6 +872,7 @@ class _StreamingRetryMixin:
             settlement.error_message = "Proxy request budget exhausted"
             settlement.error = {"message": "Proxy request budget exhausted"}
             await proxy._write_stream_preflight_error(
+                affinity_observation=affinity_observation,
                 account_id=account.id,
                 api_key=api_key,
                 request_id=request_id,
@@ -987,6 +1009,7 @@ class _StreamingRetryMixin:
                     request_id,
                     False,
                     request_started_at=start,
+                    affinity_observation=affinity_observation,
                     allow_transient_retry=True,
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
@@ -1245,6 +1268,7 @@ class _StreamingRetryMixin:
             _apply_error_metadata(event["response"]["error"], error)
             if not any_attempt_logged:
                 await proxy._write_request_log(
+                    affinity_observation=affinity_observation,
                     account_id=account_id,
                     api_key=api_key,
                     request_id=request_id,
@@ -1361,6 +1385,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1401,6 +1426,7 @@ class _StreamingRetryMixin:
                         attempt + 1,
                     )
                     await proxy._write_stream_preflight_error(
+                        affinity_observation=affinity_observation,
                         account_id=None,
                         api_key=api_key,
                         request_id=request_id,
@@ -1460,6 +1486,7 @@ class _StreamingRetryMixin:
                         error_message = error.message if error else None
                         if _facade()._is_proxy_budget_exhausted_error(exc):
                             await proxy._write_stream_preflight_error(
+                                affinity_observation=affinity_observation,
                                 account_id=None,
                                 api_key=api_key,
                                 request_id=request_id,
@@ -1657,6 +1684,7 @@ class _StreamingRetryMixin:
                         no_accounts_msg = selection.error_message or "Usage limit reached"
                         status_code, error_payload = selection_failure_response(selection)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1697,6 +1725,7 @@ class _StreamingRetryMixin:
                             response_id=request_id,
                         )
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1757,6 +1786,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1803,6 +1833,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=preferred_account_id,
                             api_key=api_key,
                             request_id=request_id,
@@ -1839,6 +1870,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1870,6 +1902,7 @@ class _StreamingRetryMixin:
                     )
                     yield format_sse_event(event)
                     await proxy._write_request_log(
+                        affinity_observation=affinity_observation,
                         account_id=None,
                         api_key=api_key,
                         request_id=request_id,
@@ -1956,6 +1989,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=preferred_account_id,
                             api_key=api_key,
                             request_id=request_id,
@@ -1986,6 +2020,7 @@ class _StreamingRetryMixin:
                             account.id,
                         )
                         await proxy._write_stream_preflight_error(
+                            affinity_observation=affinity_observation,
                             account_id=account.id,
                             api_key=api_key,
                             request_id=request_id,
@@ -2011,6 +2046,7 @@ class _StreamingRetryMixin:
                     except UpstreamProxyRouteError as exc:
                         message = f"Upstream proxy route unavailable: {exc.reason}"
                         await proxy._write_stream_preflight_error(
+                            affinity_observation=affinity_observation,
                             account_id=account.id,
                             api_key=api_key,
                             request_id=request_id,
@@ -2112,6 +2148,7 @@ class _StreamingRetryMixin:
                                     {"message": message},
                                 )
                                 await proxy._write_stream_preflight_error(
+                                    affinity_observation=affinity_observation,
                                     account_id=account.id,
                                     api_key=api_key,
                                     request_id=request_id,
@@ -2209,6 +2246,7 @@ class _StreamingRetryMixin:
                             excluded_account_ids.add(account.id)
                             continue
                         await proxy._write_stream_preflight_error(
+                            affinity_observation=affinity_observation,
                             account_id=account.id,
                             api_key=api_key,
                             request_id=request_id,
@@ -2245,6 +2283,7 @@ class _StreamingRetryMixin:
                             account.id,
                         )
                         await proxy._write_stream_preflight_error(
+                            affinity_observation=affinity_observation,
                             account_id=account.id,
                             api_key=api_key,
                             request_id=request_id,
@@ -2282,6 +2321,7 @@ class _StreamingRetryMixin:
                                 request_id,
                                 allow_retry_flag,
                                 request_started_at=start,
+                                affinity_observation=affinity_observation,
                                 allow_transient_retry=(
                                     transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1
                                     or allow_retry_flag
@@ -2424,6 +2464,9 @@ class _StreamingRetryMixin:
                                 else:
                                     settlement.error = tex.error
                                 settlement.account_health_error = _facade()._should_penalize_stream_error(error_code)
+                                transient_upstream_http_status = (
+                                    tex.status_code if isinstance(tex, ProxyResponseError) else None
+                                )
                                 if not (
                                     preserve_native_failure_lifecycle
                                     and error_code in SYNTHETIC_TRANSPORT_FAILURE_CODES
@@ -2431,7 +2474,11 @@ class _StreamingRetryMixin:
                                     try:
                                         yield format_sse_event(event)
                                     except (asyncio.CancelledError, GeneratorExit):
-                                        await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                                        await _finalize_terminal_settlement_after_downstream_close(
+                                            settlement,
+                                            account,
+                                            upstream_http_status=transient_upstream_http_status,
+                                        )
                                         raise
                                 settled = await _settle_stream_usage_before_pending_penalty(settlement)
                                 if settled and settlement.account_health_error:
@@ -2439,6 +2486,11 @@ class _StreamingRetryMixin:
                                         account,
                                         _stream_settlement_error_payload(settlement),
                                         settlement.error_code or "upstream_error",
+                                        # Evidence only. ``_TransientStreamError``
+                                        # carries no status, which is correct:
+                                        # those are the genuinely status-less
+                                        # transients.
+                                        upstream_http_status=transient_upstream_http_status,
                                     )
                                 return
                             if isinstance(tex, ProxyResponseError) and tex.status_code != 500:
@@ -2927,6 +2979,7 @@ class _StreamingRetryMixin:
                                 account.id,
                             )
                             await proxy._write_stream_preflight_error(
+                                affinity_observation=affinity_observation,
                                 account_id=account.id,
                                 api_key=api_key,
                                 request_id=request_id,
@@ -3019,6 +3072,7 @@ class _StreamingRetryMixin:
                                         {"message": message},
                                     )
                                     await proxy._write_stream_preflight_error(
+                                        affinity_observation=affinity_observation,
                                         account_id=account.id,
                                         api_key=api_key,
                                         request_id=request_id,
@@ -3091,6 +3145,7 @@ class _StreamingRetryMixin:
                                 excluded_account_ids.add(account.id)
                                 continue
                             await proxy._write_stream_preflight_error(
+                                affinity_observation=affinity_observation,
                                 account_id=account.id,
                                 api_key=api_key,
                                 request_id=request_id,
@@ -3125,6 +3180,7 @@ class _StreamingRetryMixin:
                                 account.id,
                             )
                             await proxy._write_stream_preflight_error(
+                                affinity_observation=affinity_observation,
                                 account_id=account.id,
                                 api_key=api_key,
                                 request_id=request_id,
@@ -3531,6 +3587,12 @@ class _StreamingRetryMixin:
                             account,
                             _upstream_error_from_openai(error),
                             error_code,
+                            # Evidence only: this failure carries an upstream
+                            # HTTP status, so it is not a status-less terminal
+                            # and must stay out of the soft-overload window.
+                            # Passing it positionally would change the neutral
+                            # rejection predicates and the 429 branch too.
+                            upstream_http_status=exc.status_code,
                         )
                     if propagate_http_errors:
                         raise
@@ -3604,6 +3666,7 @@ class _StreamingRetryMixin:
                     yield format_sse_event(event)
                 if not any_attempt_logged:
                     await proxy._write_request_log(
+                        affinity_observation=affinity_observation,
                         account_id=None,
                         api_key=api_key,
                         request_id=request_id,
@@ -3659,6 +3722,7 @@ class _StreamingRetryMixin:
             yield format_sse_event(event)
             if not any_attempt_logged:
                 await proxy._write_request_log(
+                    affinity_observation=affinity_observation,
                     account_id=None,
                     api_key=api_key,
                     request_id=request_id,

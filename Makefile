@@ -2,6 +2,8 @@ PYTEST_ARGS := -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeou
 POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
 INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
+	tests/integration/test_affinity_invite_migration.py \
+	tests/integration/test_affinity_identity_migration.py \
 	tests/integration/test_cost_backfill.py \
 	tests/integration/test_atomic_quota_warmup_claims.py \
 	tests/integration/test_report_rollup.py \
@@ -9,6 +11,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
+	tests/integration/test_auth_provider_abstraction.py \
 	tests/integration/test_migration_serialization.py::test_concurrent_upgrades_on_fresh_postgresql_database_apply_head_exactly_once \
 	tests/integration/test_migration_serialization.py::test_postgresql_run_upgrade_times_out_when_advisory_lock_is_held \
 	tests/integration/test_usage_repository.py::test_latest_by_account_primary_query_plan_uses_normalized_window_index_postgresql \
@@ -53,6 +56,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql \
 	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql \
+	tests/integration/test_migrations.py::test_model_source_pins_kind_expires_index_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql
 SHELL := bash
 

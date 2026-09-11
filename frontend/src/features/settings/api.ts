@@ -54,7 +54,7 @@ export function updateTelemetryConsent(payload: unknown) {
 }
 
 export function acknowledgeTelemetryNotice(noticeVersion: number) {
-  return post(`${TELEMETRY_PATH}/notice-ack`, null, {
+  return post(`${TELEMETRY_PATH}/notice-ack`, TelemetryConsentSchema, {
     body: { notice_version: noticeVersion },
   });
 }

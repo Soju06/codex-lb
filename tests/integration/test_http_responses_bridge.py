@@ -16876,6 +16876,9 @@ async def test_native_codex_http_bridge_denied_anchor_refusal_returns_502_before
     _assert_denied_anchor_fence_refused_before_dispatch(caplog)
     assert second.status_code == 502, f"native client received {second.status_code} with body {second.text!r}"
     assert second.json()["error"]["code"] == "stream_incomplete"
+    # The retry instruction is the actionable half: a terminal that kept the
+    # code and dropped the message leaves the client where #2364 left it.
+    assert second.json()["error"]["message"] == "The previous response anchor was rejected upstream; retry the request."
     assert len(_anchored_bridge_frames(upstream)) == 1, "the denied anchor was sent upstream a second time"
 
 
@@ -16940,6 +16943,10 @@ async def test_native_codex_http_bridge_denied_anchor_refusal_emits_terminal_aft
     failed = [event for event in events if event.get("type") == "response.failed"]
     assert len(failed) == 1, f"expected one terminal failure, got {[event.get('type') for event in events]}"
     assert failed[0]["response"]["error"]["code"] == "stream_incomplete"
+    assert (
+        failed[0]["response"]["error"]["message"]
+        == "The previous response anchor was rejected upstream; retry the request."
+    )
     assert "_codex_lb_synthetic_transport_failure" not in second.text
     assert second.text.rstrip().endswith("data: [DONE]")
     assert not [

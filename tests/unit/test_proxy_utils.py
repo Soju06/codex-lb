@@ -9931,6 +9931,10 @@ async def test_native_codex_stream_surfaces_local_pre_dispatch_refusal_as_unmark
     response = cast(dict[str, JsonValue], events[0]["response"])
     error = cast(dict[str, JsonValue], response["error"])
     assert error["code"] == "stream_incomplete"
+    # The actionable half of the fix is the message, not the code: a regression
+    # that kept the terminal but dropped the retry instruction would leave the
+    # client with the same dead end #2364 reported.
+    assert error["message"] == "The previous response anchor was rejected upstream; retry the request."
     assert "_codex_lb_synthetic_transport_failure" not in events[0]
 
     async def unflagged_stream() -> AsyncIterator[str]:

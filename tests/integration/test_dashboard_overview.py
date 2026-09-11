@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import event, update
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ModelSourcePin, RequestLog
@@ -18,6 +21,7 @@ from app.modules.dashboard.weekly_pace import _weekly_timing
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.repository import UsageRepository
+from tests.integration.statement_capture import capture_task_statements
 
 pytestmark = pytest.mark.integration
 
@@ -1829,7 +1833,7 @@ async def test_dashboard_overview_overflow_slice_excludes_soft_deleted_rows(asyn
 
 
 @pytest.mark.asyncio
-async def test_dashboard_overview_issues_no_overflow_statement_on_a_clean_install(async_client, db_setup):
+async def test_dashboard_overview_issues_no_overflow_statement_on_a_clean_install(async_client, db_setup, monkeypatch):
     """Query-count neutrality: a ship-dark poll costs exactly what it cost before the tile existed.
 
     The tile's read is three bounded statements (the windowed aggregate, the
@@ -1839,53 +1843,65 @@ async def test_dashboard_overview_issues_no_overflow_statement_on_a_clean_instal
     unrendered. The gate itself must also be free: it reads the settings row
     ``get_overview`` already loads, so the poll's ``dashboard_settings``
     lookup count may not grow either.
-    """
-    statements: list[str] = []
 
-    def capture(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001, ANN202
-        statements.append(statement)
+    The baseline is a control measured in this run, and the claim is the
+    *delta* between two polls of the same install: designating a source adds
+    exactly the tile's three statements and changes nothing else. Two things
+    would otherwise make the measurement depend on timing rather than on the
+    gate, and both are neutralised here instead of asserted around:
+
+    * statements another task issues into the same engine while a window is
+      open (see ``capture_task_statements``: the 0.5 s cache-invalidation
+      poll and the 10 s bridge ring heartbeat), and
+    * the two 5 s TTL caches the poll's own auth middleware reads, which
+      re-issue four statements (three ``dashboard_users`` /
+      ``dashboard_identities`` reads and one ``dashboard_settings`` load) on
+      the first poll after they expire. Held warm for the whole test, so a
+      stall between a warm-up poll and the measured poll cannot land them in
+      one window only.
+    """
+    monkeypatch.setattr(get_dashboard_users_cache(), "_ttl_seconds", 3600.0)
+    monkeypatch.setattr(get_settings_cache(), "_ttl_seconds", 3600.0)
 
     # Warm the poll once so the settings row exists and every cache is primed:
     # what is measured below is the steady state, not first-boot.
     assert (await async_client.get("/api/dashboard/overview")).status_code == 200
 
-    event.listen(engine.sync_engine, "before_cursor_execute", capture)
-    try:
+    async with capture_task_statements(engine) as clean_sql:
         clean = await async_client.get("/api/dashboard/overview")
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", capture)
 
     assert clean.status_code == 200
     assert clean.json()["summary"]["subscriptionOverflow"] is None
-    clean_sql = [statement.lower() for statement in statements]
     assert not [statement for statement in clean_sql if "model_source_pins" in statement]
     assert not [statement for statement in clean_sql if "request_logs.source in" in statement]
     # One settings lookup, as before the gate existed: the second caller in
     # ``get_overview`` is served from the session identity map.
     assert len([statement for statement in clean_sql if "from dashboard_settings" in statement]) == 1
-    clean_count = len(statements)
+    clean_statements = Counter(clean_sql)
 
     async with SessionLocal() as session:
         await _designate_overflow(session)
 
-    # Same steady state, one designation later: the delta is exactly the three
-    # statements the tile costs, which is what makes the clean count above the
-    # pre-tile baseline.
     assert (await async_client.get("/api/dashboard/overview")).status_code == 200
-    statements.clear()
-    event.listen(engine.sync_engine, "before_cursor_execute", capture)
-    try:
+    async with capture_task_statements(engine) as designated_sql:
         designated = await async_client.get("/api/dashboard/overview")
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", capture)
 
     assert designated.status_code == 200
     # Still nothing to render -- but now the poll has to *ask*, and the three
     # statements it asks with are exactly the cost the clean install above no
     # longer pays. This is the residual the gate closes, measured end to end.
     assert designated.json()["summary"]["subscriptionOverflow"] is None
-    designated_sql = [statement.lower() for statement in statements]
     assert len([statement for statement in designated_sql if "model_source_pins" in statement]) == 1
     assert len([statement for statement in designated_sql if "request_logs.source in" in statement]) == 2
     assert len([statement for statement in designated_sql if "from dashboard_settings" in statement]) == 1
-    assert len(statements) == clean_count + 3
+
+    # Same steady state, one designation later. Naming the added statements is
+    # what the bare ``+ 3`` used to imply; ``dropped`` keeps the other
+    # direction honest -- a statement the clean poll issues may not disappear
+    # to pay for the tile.
+    added = Counter(designated_sql) - clean_statements
+    dropped = clean_statements - Counter(designated_sql)
+    assert dropped == Counter(), dropped
+    assert sum(added.values()) == 3, added
+    assert len([statement for statement in added.elements() if "model_source_pins" in statement]) == 1
+    assert len([statement for statement in added.elements() if "request_logs.source in" in statement]) == 2

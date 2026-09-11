@@ -17170,6 +17170,7 @@ async def test_stream_with_retry_keyed_refresh_connect_settles_before_account_he
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -17274,6 +17275,7 @@ async def test_stream_with_retry_keyed_queued_penalty_flushes_on_cancel(monkeypa
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -17376,6 +17378,7 @@ async def test_stream_with_retry_cancel_cleanup_flushes_queued_health_after_back
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -17508,6 +17511,7 @@ async def test_stream_with_retry_cancelled_multi_penalty_flush_survives_backoff_
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         if account is account_a:
@@ -17637,6 +17641,7 @@ async def test_stream_with_retry_keyed_cancel_during_deferred_health_flush_still
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         flush_started.set()
@@ -17752,6 +17757,7 @@ async def test_stream_with_retry_keyed_cancel_mid_deferred_health_flush_does_not
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         nonlocal health_apply_count
         del error, http_status
@@ -17862,6 +17868,7 @@ async def test_stream_unkeyed_owner_rewrite_records_health_before_terminal_deliv
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del http_status
         assert failed_account is account
@@ -17969,6 +17976,7 @@ async def test_stream_responses_route_keyed_owner_rewrite_settles_before_origina
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         assert failed_account is account
@@ -18083,6 +18091,7 @@ async def test_stream_responses_route_keyed_owner_rewrite_preserves_health_after
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         assert failed_account is account
@@ -18229,6 +18238,7 @@ async def test_stream_with_retry_keyed_empty_terminal_queue_settles_before_termi
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         assert failed_account is account
@@ -18355,6 +18365,7 @@ async def test_stream_responses_route_keyed_refresh_connect_settles_before_accou
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -18526,6 +18537,7 @@ async def test_stream_with_retry_keyed_penalty_flush_keeps_later_entries_after_f
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, code, http_status
         health_accounts.append(account.id)
@@ -18624,6 +18636,7 @@ async def test_stream_with_retry_cancel_safe_health_flush_is_drained_at_shutdown
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, code, http_status
         if account.id == account_a.id:
@@ -18755,6 +18768,7 @@ async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_accou
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -26432,6 +26446,88 @@ async def test_prepare_websocket_response_create_request_injects_anchor_for_code
 
 
 @pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_retires_injected_anchor_remembered_stale(monkeypatch):
+    """Resend full client context and clear continuity when the injected anchor is stale."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_stale_anchor",
+        name="ws-stale-anchor",
+        key_prefix="sk-ws-stale",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        trace_channels = frozenset()
+        openai_prompt_cache_key_derivation_enabled = True
+
+    historical_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {"type": "function_call", "name": "shell_command", "call_id": "call_old", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_old", "output": "old output"},
+    ]
+    new_input: JsonValue = {"role": "user", "content": [{"type": "input_text", "text": "next question"}]}
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(historical_input),
+        last_completed_response_id="resp_denied_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+        last_pending_function_call_ids=["call_old"],
+        last_pending_tool_call_types={"call_old": "function_call"},
+    )
+    # Upstream already denied this anchor on the previous attempt: the
+    # fail-closed path remembered it, so the client's retry must not carry
+    # the same proxy-injected ``previous_response_id`` again (#1921).
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    websocket_helpers_module._remember_websocket_stale_previous_response(
+        previous_response_id="resp_denied_anchor",
+        api_key_id=api_key.id,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [*historical_input, new_input],
+            },
+        ),
+        headers={"session_id": "turn_ws_stale_anchor"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert "previous_response_id" not in upstream_payload
+    assert upstream_payload["input"] == [*historical_input, new_input]
+    assert prepared.request_state.previous_response_id is None
+    assert prepared.request_state.proxy_injected_previous_response_id is False
+    # The denied anchor is retired from session continuity so it cannot be
+    # re-injected once the negative cache entry expires.
+    assert continuity_state.last_completed_response_id is None
+    assert continuity_state.last_completed_input_count == 0
+    assert continuity_state.last_completed_input_prefix_fingerprint is None
+    assert continuity_state.last_pending_function_call_ids == []
+    assert continuity_state.last_pending_tool_call_types == {}
+
+
+@pytest.mark.asyncio
 async def test_prepare_websocket_goal_restart_keeps_full_resend_without_injected_anchor(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -33080,7 +33176,7 @@ async def test_proxy_responses_websocket_transparent_replay_strips_socket_turn_s
             return _make_account("acc_ws_sticky_1"), first_upstream
         return _make_account("acc_ws_sticky_2"), second_upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -54669,7 +54765,9 @@ async def test_process_upstream_websocket_text_defers_accepted_replay_health_unt
         calls.append("settle")
         return True
 
-    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+    async def handle_stream_error(
+        account: Account, _error: object, code: str, http_status: int | None = None, **_kwargs
+    ) -> None:
         del http_status
         calls.append(f"health:{account.id}:{code}")
 
@@ -54902,7 +55000,9 @@ async def test_process_upstream_websocket_text_defers_owner_bound_accepted_repla
         calls.append("settle")
         return True
 
-    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+    async def handle_stream_error(
+        account: Account, _error: object, code: str, http_status: int | None = None, **_kwargs
+    ) -> None:
         del http_status
         calls.append(f"health:{account.id}:{code}")
 
@@ -55886,3 +55986,103 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_surfaces_wit
     assert excinfo.value.retry_after_seconds == 5
     assert stream_once_calls == 2
     assert scheduler.sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("draining", "event_type"),
+    [(False, "response.output_text.delta"), (True, "response.output_text.delta"), (False, "response.completed")],
+    ids=["visible", "draining", "anonymous-completion"],
+)
+async def test_process_upstream_websocket_text_routes_anonymous_output_to_created_response(
+    monkeypatch, draining, event_type
+):
+    """Archive and relay agree on output ownership without changing terminal ownership."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_pipelined_output")
+    active_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_active_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_ws_active_created",
+        awaiting_response_created=False,
+        archive_request_id="archive_ws_active_created",
+        draining_until_terminal=draining,
+    )
+    waiting_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_waiting_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id=None,
+        awaiting_response_created=True,
+        archive_request_id="archive_ws_waiting_created",
+    )
+    payload = {
+        "type": "response.output_text.delta",
+        "sequence_number": 3,
+        "item_id": "msg_ws_pipelined",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "Hello",
+    }
+    if event_type == "response.completed":
+        payload = {"type": event_type, "response": {"status": "completed", "output": []}}
+    pending_requests = deque([waiting_request, active_request])
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    archived: list[tuple[object, str | None]] = []
+
+    class _ArchivingUpstream:
+        def archive_received(self, message: object) -> None:
+            archived.append((message, get_request_id()))
+
+    send_downstream = AsyncMock()
+    monkeypatch.setattr(service, "_send_downstream_websocket_text", send_downstream)
+    text = json.dumps(payload, separators=(",", ":"))
+    message = SimpleNamespace(kind="text", text=text)
+    should_stop = await websocket_mixin_module._process_and_forward_upstream_websocket_text(
+        cast(Any, service),
+        cast(Any, SimpleNamespace()),
+        cast(Any, _ArchivingUpstream()),
+        message=message,
+        text=text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        continuity_state=proxy_service._WebSocketContinuityState(),
+        codex_session_affinity=False,
+    )
+
+    assert should_stop is False
+    if event_type == "response.completed":
+        assert list(pending_requests) == [active_request]
+        assert active_request.downstream_visible is False
+        assert active_request.response_event_count == 0
+        assert waiting_request.latency_first_upstream_event_ms is not None
+        finalize.assert_awaited_once()
+        assert finalize.await_args is not None
+        assert finalize.await_args.args[0] is waiting_request
+        assert finalize.await_args.kwargs["event_type"] == "response.completed"
+        assert archived == [(message, "archive_ws_waiting_created")]
+    else:
+        assert waiting_request.downstream_visible is False
+        assert waiting_request.response_event_count == 0
+        assert active_request.downstream_visible is True
+        assert active_request.response_event_count == 1
+        finalize.assert_not_awaited()
+        assert archived == [(message, "archive_ws_active_created")]
+    send_downstream.assert_awaited_once()
+    assert send_downstream.await_args is not None
+    assert send_downstream.await_args.kwargs["text"] == text

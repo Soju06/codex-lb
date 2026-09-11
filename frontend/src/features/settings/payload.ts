@@ -34,6 +34,7 @@ export function buildSettingsUpdateRequest(
     additionalQuotaRoutingPolicies: settings.additionalQuotaRoutingPolicies ?? {},
     importWithoutOverwrite: settings.importWithoutOverwrite,
     totpRequiredOnLogin: settings.totpRequiredOnLogin,
+    totpRequiredForAdminRole: settings.totpRequiredForAdminRole,
     apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
     limitWarmupEnabled: settings.limitWarmupEnabled,
     limitWarmupWindows: settings.limitWarmupWindows,

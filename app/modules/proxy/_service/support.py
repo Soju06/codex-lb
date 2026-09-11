@@ -41,6 +41,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy.affinity import _AffinityPolicy
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountLease,
@@ -705,6 +706,7 @@ class _RefreshFailoverProxy(Protocol):
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
         retry_after_seconds: float | None = None,
         burst_cooldown_recorded: bool = False,
+        upstream_http_status: int | None = None,
     ) -> Any: ...
 
 
@@ -1175,9 +1177,6 @@ class _WebSocketRequestState:
     operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
-    # Immutable durable attempt generation. Recovery claims increment the
-    # operation's dispatch count before sending a replacement attempt.
-    operation_attempt_generation: int = 0
     # Last response identity successfully written to the durable operation.
     # Retry setup may clear the active response before a replacement is
     # acknowledged, but fallback settlement must still fence against this ID.
@@ -1232,6 +1231,7 @@ class _WebSocketRequestState:
     account_response_create_release: Callable[[AccountLease | None], Coroutine[Any, Any, None]] | None = None
     websocket_stream_lease: AccountLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
+    affinity_observation: AffinityObservation | None = None
     thread_affinity_last_touch_at: float = field(default_factory=time.monotonic)
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)

@@ -1,0 +1,34 @@
+## Why
+
+`auth-provider-abstraction` made every reverse-proxy identity a real account, but the only role it can hand out is the provider's `unknown_identity_role_id` — one role for everyone the proxy vouches for. A company that already sorts its people into groups (`platform`, `support`, contractors) has to re-sort them by hand inside the dashboard, and the two knobs 2c-1 stored for this purpose, `no_match_role_id` and `skip_role_sync`, are written but never read. PLAN.md §4.6 closes that gap with one small table of rules — "this group gets this role" — evaluated by the resolver that already exists, and PLAN.md §4.11 gives those rules their first home in the UI: the collapsed **Organisation** group at the bottom of Settings, which every later enterprise card (OIDC, SCIM, audit export) will move into.
+
+## What Changes
+
+- **Rules table**: `dashboard_role_mappings` (`id`, `provider`, `provider_key`, `claim_name` ∈ {`groups`, `email_domain`}, `claim_value`, `role_id` FK → `dashboard_roles` ON DELETE RESTRICT, `priority NOT NULL`, `UNIQUE(provider, provider_key, priority)`) with a SQLite-batch-mode Alembic migration. Several matches never tie: the greatest `priority` wins, single winner.
+- **Groups reach the resolver**: the trusted-header provider reads a second, comma-separated header whose name is the new optional `CODEX_LB_DASHBOARD_AUTH_PROXY_GROUPS_HEADER` (default `Remote-Groups`), validated by the same `normalize_dashboard_auth_proxy_header`; the group set travels on `DashboardRequestAuth` into `ExternalIdentity.groups` and is snapshotted on the identity row. **P2 justification (one line): it is a deployment-topology value that must match the reverse-proxy configuration, so putting it in the dashboard would split one setting across two layers** — exactly the argument that already keeps `CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER` in the environment. `.env.example` 46 → 47 lines, `[settings_fields]` 95 → 96.
+- **The knobs start behaving**: JIT consults the rules before `unknown_identity_role_id`; an existing `role_source=mapping` account whose provider has at least one rule is re-evaluated on the first request per identity-cache TTL and written only when something changed; no rule matches → `no_match_role_id` (`NULL` disables the account) with `role_demoted_no_mapping`; `skip_role_sync=true` stops re-evaluation for the whole provider; a provider with zero rules still touches nothing (D10); `role_source=manual` — every break-glass account included — is never re-evaluated; re-evaluation obeys the last-admin invariant and pins the account to `manual` instead of locking the install out.
+- **Manual take-over**: `PATCH /api/dashboard-users/{id}` answers `409 role_managed_externally` for a `role_source=mapping` account unless the body carries `force: true`, which flips `role_source` to `manual` and audits `role_source_overridden`.
+- **API**: `GET/POST/PATCH/DELETE /api/role-mappings` and `PUT /api/role-mappings/order` under `security:write` (so step-up applies automatically), each role handed out through `resolve_assignable_role` + `assert_can_delegate`, every write auditing `role_mapping_changed` and invalidating the provider registry on every replica. `access_summary.role_mappings` stops being hardcoded `0`.
+- **Frontend**: the collapsed **Organisation** group appears for the first time (`AdvancedSettingsGroup` reused with parameterised labels, children unmounted while collapsed → zero enterprise queries), gated on `security:write`, one line while nothing is configured — *"Organisation — company login, automatic account management, audit export"*, which must not contain the words user, role, SSO, SCIM, IdP or RBAC — and a status summary once something is. Children: the reverse-proxy card (header names read-only with a "set via `CODEX_LB_DASHBOARD_AUTH_PROXY_*`" note; neutral wording, never implying misconfiguration) and the group-to-role rules card (priority list with keyboard and pointer reordering, empty state, quick-add "everyone at `<domain>` as `<role>`", and a refused-sign-ins line). A shared role picker lists presets first with a lock icon and shows custom roles only when one exists; the People tab gains an "Managed by company login" badge and the take-over action behind `force`.
+- **Header names become visible**: `GET /api/auth-providers` returns the two header names the trusted-header provider reads (`config.identityHeader`, `config.groupsHeader`) so the card can show the values it cannot edit; `PATCH` still refuses them (`extra="forbid"`).
+- **Audit**: `role_mapping_changed`, `role_source_overridden`, `role_demoted_no_mapping`.
+
+Not in this change: `local_login_policy`, the break-glass predicate, the CLI and `docs/sso.md` (PR-2d); OIDC and its wizard (Phase 3a); SCIM (3b); audit sinks (Phase 4); the custom role editor; a full audit-log page (the refused-sign-ins list is a sheet inside the rules card — see design.md).
+
+## Capabilities
+
+### Modified Capabilities
+
+- `identity-providers`: role mapping rows, migration and evaluation; the re-evaluation table; the groups header; the mapping API; groups on the trusted-header identity.
+- `dashboard-users`: `force` on the role PATCH, `409 role_managed_externally`, `role_source_overridden`.
+- `frontend-architecture`: the Organisation settings group, the reverse-proxy card, the group-to-role rules card, the shared role picker, externally managed roles in the People tab.
+
+## Impact
+
+- `app/db/models.py`, `app/db/alembic/versions/<new>_add_dashboard_role_mappings.py`
+- `app/modules/role_mappings/{__init__,api,repository,schemas,service}.py` (new), `app/dependencies.py`, `app/main.py`
+- `app/modules/dashboard_users/{identity_resolver,service,schemas,api}.py`, `app/modules/dashboard_auth/{service,repository}.py`, `app/modules/auth_providers/api.py`
+- `app/core/auth/{dashboard_mode,external_identity,providers/__init__}.py`, `app/core/config/{settings,tiers}.py`, `.env.example`, `.github/simplicity-budgets.toml`, `docs/reference/settings.md`
+- `frontend/src/features/settings/components/{advanced-settings-group,settings-page}.tsx`, `frontend/src/features/settings/components/organisation/*` (new), `frontend/src/features/settings/advanced-settings-deeplink.ts`, `frontend/src/features/organisation/{api,hooks,rules}.ts` (new), `frontend/src/features/access/{api,hooks}.ts`, `frontend/src/features/settings/components/access/role-picker.tsx` (new), `frontend/src/features/settings/components/access/{access-people-tab,people-row-actions}.tsx`, `frontend/src/i18n/locales/{en,ko,zh-CN}.json`, `frontend/src/test/mocks/{handlers,factories}.ts`
+- Tests under `tests/unit`, `tests/integration` (including the route permission matrix) and `frontend/src/**/*.test.ts(x)`
+- One new `CODEX_LB_*` setting (`dashboard_auth_proxy_groups_header`, T1, justified above); one new table and one migration; no new nav item.

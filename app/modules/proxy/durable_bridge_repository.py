@@ -2626,7 +2626,7 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
     ) -> bool:
         """Append a terminal v2 chunk and expose its outcome atomically."""
@@ -2773,7 +2773,7 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
     ) -> bool:
         """Append a terminal event and expose its operation state atomically."""
@@ -2787,16 +2787,21 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
-            operation = await self._session.scalar(
-                select(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
-                    HttpBridgeOperationRecord.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
-                )
-                .with_for_update()
+            # ``expected_recovery_dispatch_count`` is opt-in: a caller that
+            # claimed a recovery dispatch pins the generation it observed, and
+            # a caller that never claimed one passes nothing rather than a
+            # literal 0, so an operation retained from an older release with a
+            # non-zero counter still settles.
+            terminal_event_statement = select(HttpBridgeOperationRecord).where(
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
             )
+            if expected_recovery_dispatch_count is not None:
+                terminal_event_statement = terminal_event_statement.where(
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+                )
+            operation = await self._session.scalar(terminal_event_statement.with_for_update())
             if owner_exists is None or operation is None or operation.state == "abandoned":
                 await self._session.rollback()
                 return False
@@ -3012,7 +3017,7 @@ class DurableBridgeRepository:
         owner_epoch: int,
         state: str,
         expected_response_id: str | None,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         alternate_expected_response_id: str | None = None,
         response_id: str | None = None,
     ) -> bool:
@@ -3052,23 +3057,28 @@ class DurableBridgeRepository:
             }
             if response_id is not None:
                 values["response_id"] = response_id
-            result = await self._session.execute(
-                update(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state != "abandoned",
-                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
-                    or_(
-                        and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
-                        and_(
-                            HttpBridgeOperationRecord.state == state,
-                            or_(acknowledged_response_matches, terminal_response_matches),
-                        ),
+            # Opt-in recovery-dispatch fence, as in
+            # ``append_terminal_operation_event``. The newer-attempt rejection
+            # below does not depend on it: a retry that reset the row to
+            # ``submitted`` matches neither ``acknowledged`` nor the terminal
+            # state being settled, so the update touches no row.
+            settlement_statement = update(HttpBridgeOperationRecord).where(
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.state != "abandoned",
+                or_(
+                    and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
+                    and_(
+                        HttpBridgeOperationRecord.state == state,
+                        or_(acknowledged_response_matches, terminal_response_matches),
                     ),
-                )
-                .values(**values)
+                ),
             )
+            if expected_recovery_dispatch_count is not None:
+                settlement_statement = settlement_statement.where(
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+                )
+            result = await self._session.execute(settlement_statement.values(**values))
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 

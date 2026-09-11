@@ -2283,6 +2283,126 @@ async def test_terminal_failure_exposes_state_when_spool_overflows(
 
 
 @pytest.mark.asyncio
+async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    """An operation carried across an upgrade with a consumed claim must settle.
+
+    The recovery-dispatch fence is opt-in: only a caller that claimed a
+    dispatch pins the generation it observed. A caller that never claimed one
+    passes no expectation, so a row whose counter was advanced by an earlier
+    release is not locked out of terminal append or fallback settlement.
+    """
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-legacy-generation",
+            session_key_value="sid-legacy-generation",
+        )
+
+        async def _operation_with_consumed_claim(label: str, response_id: str) -> str:
+            fingerprint = durable_bridge_hash(label)
+            operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+            assert await repository.record_operation(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-legacy-generation",
+                owner_epoch=claim.owner_epoch,
+                request_fingerprint=fingerprint,
+                account_id="account-legacy-generation",
+                model="gpt-5.6",
+                parent_response_id="resp-parent",
+            )
+            assert await repository.update_operation(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-legacy-generation",
+                owner_epoch=claim.owner_epoch,
+                state="unknown",
+            )
+            assert await repository.claim_unknown_operation_for_recovery(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-legacy-generation",
+                owner_epoch=claim.owner_epoch,
+            )
+            assert await repository.update_operation(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-legacy-generation",
+                owner_epoch=claim.owner_epoch,
+                state="acknowledged",
+                response_id=response_id,
+            )
+            carried_over = await repository.get_operation(operation_id=operation_id)
+            assert carried_over is not None
+            assert carried_over.recovery_dispatch_count == 1
+            return operation_id
+
+        appended_operation_id = await _operation_with_consumed_claim("legacy-generation-append", "resp-legacy-append")
+        assert await repository.append_terminal_operation_event(
+            operation_id=appended_operation_id,
+            session_id=claim.id,
+            instance_id="inst-legacy-generation",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+            response_id="resp-legacy-append",
+        )
+        appended = await repository.get_operation(operation_id=appended_operation_id)
+        assert appended is not None
+        assert appended.state == "failed"
+        assert appended.event_spool_complete is True
+        assert appended.recovery_dispatch_count == 1
+
+        settled_operation_id = await _operation_with_consumed_claim("legacy-generation-settle", "resp-legacy-settle")
+        assert await repository.settle_terminal_append_failure(
+            operation_id=settled_operation_id,
+            session_id=claim.id,
+            instance_id="inst-legacy-generation",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-legacy-settle",
+            response_id="resp-legacy-settle",
+        )
+        settled = await repository.get_operation(operation_id=settled_operation_id)
+        assert settled is not None
+        assert settled.state == "failed"
+        assert settled.recovery_dispatch_count == 1
+
+        fenced_operation_id = await _operation_with_consumed_claim("legacy-generation-fenced", "resp-legacy-fenced")
+        assert not await repository.append_terminal_operation_event(
+            operation_id=fenced_operation_id,
+            session_id=claim.id,
+            instance_id="inst-legacy-generation",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-legacy-fenced",
+        )
+        assert not await repository.settle_terminal_append_failure(
+            operation_id=fenced_operation_id,
+            session_id=claim.id,
+            instance_id="inst-legacy-generation",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-legacy-fenced",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-legacy-fenced",
+        )
+        still_acknowledged = await repository.get_operation(operation_id=fenced_operation_id)
+        assert still_acknowledged is not None
+        assert still_acknowledged.state == "acknowledged"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_append_failure_settlement_is_visible_to_recovery(
     async_session_factory: Callable[[], AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

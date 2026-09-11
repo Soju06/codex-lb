@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 
 from sqlalchemy import func, select
@@ -14,7 +14,8 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.db.models import DashboardSettings, ModelContextWindowOverride
+from app.db.models import DashboardSettings, DashboardUser, ModelContextWindowOverride
+from app.modules.dashboard_users.repository import DashboardUsersRepository
 
 _SETTINGS_ID = 1
 
@@ -22,6 +23,11 @@ _SETTINGS_ID = 1
 class SettingsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_active_password_users(self) -> Sequence[DashboardUser]:
+        """Accounts the TOTP requirements bind (roles loaded for the admin-level check)."""
+
+        return await DashboardUsersRepository(self._session).list_active_local_password_users()
 
     async def get_or_create(self) -> DashboardSettings:
         existing = await self._session.get(DashboardSettings, _SETTINGS_ID)
@@ -64,6 +70,7 @@ class SettingsRepository:
             dashboard_session_ttl_seconds=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
             import_without_overwrite=True,
             totp_required_on_login=False,
+            totp_required_for_admin_role=False,
             password_hash=None,
             guest_access_enabled=False,
             guest_password_hash=None,
@@ -101,6 +108,8 @@ class SettingsRepository:
             rate_limit_reset_credits_refresh_enabled=None,
             # M5 conversation archive: NULL = inherit the env alias / default.
             conversation_archive_enabled=None,
+            # R2 spool retention: NULL = inherit the env alias / default (7d).
+            http_responses_session_bridge_operation_spool_retention_seconds=None,
         )
         self._session.add(row)
         try:
@@ -167,6 +176,7 @@ class SettingsRepository:
         warmup_model: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
+        totp_required_for_admin_role: bool | None = None,
         api_key_auth_enabled: bool | None = None,
         hide_upstream_quota_from_api_keys: bool | None = None,
         limit_warmup_enabled: bool | None = None,
@@ -203,6 +213,10 @@ class SettingsRepository:
         conversation_archive_enabled: bool | None = None,
         clear_conversation_archive_enabled: bool = False,
         # end M5 conversation archive
+        # R2 spool retention (tri-state like the C2-1 timeouts)
+        http_responses_session_bridge_operation_spool_retention_seconds: float | None = None,
+        clear_http_responses_session_bridge_operation_spool_retention_seconds: bool = False,
+        # end R2 spool retention
         # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
         # inherit, neither = untouched).
         upstream_connect_timeout_seconds: float | None = None,
@@ -358,6 +372,8 @@ class SettingsRepository:
             settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:
             settings.totp_required_on_login = totp_required_on_login
+        if totp_required_for_admin_role is not None:
+            settings.totp_required_for_admin_role = totp_required_for_admin_role
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
         if hide_upstream_quota_from_api_keys is not None:
@@ -383,6 +399,10 @@ class SettingsRepository:
         if weekly_pace_smoothing_minutes is not None:
             settings.weekly_pace_smoothing_minutes = weekly_pace_smoothing_minutes
         if guest_access_enabled is not None:
+            if settings.guest_access_enabled and not guest_access_enabled:
+                # Disabling guest access must not leave already-issued guest
+                # cookies valid for when it is re-enabled later.
+                settings.guest_session_generation += 1
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
@@ -434,6 +454,15 @@ class SettingsRepository:
         elif conversation_archive_enabled is not None:
             settings.conversation_archive_enabled = conversation_archive_enabled
         # end M5 conversation archive
+        # R2 spool retention: clear flag resets to NULL (inherit the env alias
+        # / code default); a non-None value is dashboard-owned.
+        if clear_http_responses_session_bridge_operation_spool_retention_seconds:
+            settings.http_responses_session_bridge_operation_spool_retention_seconds = None
+        elif http_responses_session_bridge_operation_spool_retention_seconds is not None:
+            settings.http_responses_session_bridge_operation_spool_retention_seconds = (
+                http_responses_session_bridge_operation_spool_retention_seconds
+            )
+        # end R2 spool retention
         # C2-1 timeouts
         for column_name, value, clear in (
             (

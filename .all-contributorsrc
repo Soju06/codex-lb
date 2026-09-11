@@ -1478,6 +1478,27 @@
       ]
     },
     {
+      "login": "Abaddollyon",
+      "name": "Abaddollyon",
+      "avatar_url": "https://avatars.githubusercontent.com/u/31712865?v=4",
+      "profile": "https://github.com/Abaddollyon",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "mjakl",
+      "name": "Markus Jakl",
+      "avatar_url": "https://avatars.githubusercontent.com/u/40384?v=4",
+      "profile": "https://github.com/mjakl",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
       "login": "uniskela",
       "name": "Uniskela",
       "avatar_url": "https://avatars.githubusercontent.com/u/104075208?v=4",

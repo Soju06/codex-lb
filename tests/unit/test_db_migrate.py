@@ -1973,7 +1973,17 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
         settings_merge,
         "20260908_000000_add_guest_session_generation",
     )
-    assert script_directory.get_heads() == [index_merge]
+    pin_affinity_merge = "20260911_010000_merge_pin_index_and_affinity_heads"
+    assert script_directory.get_revision(pin_affinity_merge).down_revision == (
+        "20260911_000000_model_source_pins_kind_expires_index",
+        "20260910_220000_merge_affinity_invite_heads",
+    )
+    bridge_affinity_merge = "20260911_020000_merge_http_bridge_and_affinity_heads"
+    assert script_directory.get_revision(bridge_affinity_merge).down_revision == (
+        index_merge,
+        pin_affinity_merge,
+    )
+    assert script_directory.get_heads() == [bridge_affinity_merge]
 
 
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:

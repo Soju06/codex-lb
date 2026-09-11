@@ -90,6 +90,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
+    _http_bridge_local_failure_fence,
     _http_bridge_quarantine_clear_fence,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
@@ -2681,6 +2682,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             event=event,
         )
 
+        completion_local_failure_fence = _http_bridge_local_failure_fence(self)
         completed_event_queue: asyncio.Queue[str | None] | None = None
         completed_event_queue_claimed = False
         async with session.pending_lock:
@@ -3752,7 +3754,19 @@ class _HTTPBridgeUpstreamEventsMixin:
             # suppressed for the TTL because the clear cannot match), and a
             # failed registration would find no pre-settle poison detail to
             # re-seed.
-            completion_pre_settle_load_succeeded = await self._load_http_bridge_retry_circuit(session)
+            if (
+                terminal_request_state.verified_stale_anchor_retry_circuit_key == session.key
+                and terminal_request_state.verified_stale_anchor_quarantine_local_failure_fence is not None
+            ):
+                # A same-key replay carries older authority than this terminal
+                # event. Its load must not revoke post-origin local evidence.
+                completion_local_failure_fence = min(
+                    completion_local_failure_fence,
+                    terminal_request_state.verified_stale_anchor_quarantine_local_failure_fence,
+                )
+            completion_pre_settle_load_succeeded = await self._load_http_bridge_retry_circuit(
+                session, local_failure_fence=completion_local_failure_fence
+            )
             completion_quarantine_clear_fence = _http_bridge_quarantine_clear_fence(self, session.key)
             async with self._http_bridge_retry_circuit_lock:
                 pre_settle_state = self._http_bridge_retry_circuits.get(session.key)
@@ -3797,6 +3811,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # anchor commits.
                 circuit_settled = await self._clear_http_bridge_retry_circuit(
                     session,
+                    local_failure_fence=completion_local_failure_fence,
                     settled_detail=(
                         _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
                         if completion_settles_onto_tombstone
@@ -3943,8 +3958,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 self,
                 session,
                 key_generation=completion_quarantine_clear_fence,
+                local_failure_fence=completion_local_failure_fence,
                 additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
                 additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
+                additional_local_failure_fence=terminal_request_state.verified_stale_anchor_quarantine_local_failure_fence,
             )
 
         operation_state = _http_bridge_operation_state_for_event(event_type)

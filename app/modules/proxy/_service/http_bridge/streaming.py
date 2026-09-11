@@ -126,6 +126,7 @@ from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
+    _http_bridge_local_failure_fence,
     _http_bridge_quarantine_clear_fence,
     _http_bridge_session_key_poison_quarantined,
     _http_bridge_session_key_quarantined,
@@ -1983,6 +1984,7 @@ class _HTTPBridgeStreamingMixin:
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
         verified_stale_anchor_generation: tuple[int, float, int, float, int, float, float] | None = None
         verified_stale_anchor_quarantine_generation: int | None = None
+        verified_stale_anchor_quarantine_local_failure_fence: int | None = None
 
         def durable_full_resend_retains_required_context() -> bool:
             nonlocal durable_full_resend_retains_required_context_cache
@@ -3206,6 +3208,8 @@ class _HTTPBridgeStreamingMixin:
                 recovery_session: "_HTTPBridgeSession",
             ) -> None:
                 nonlocal verified_stale_anchor_quarantine_generation
+                nonlocal verified_stale_anchor_quarantine_local_failure_fence
+                verified_stale_anchor_quarantine_local_failure_fence = _http_bridge_local_failure_fence(self)
 
                 # Provenance-aware capture: the completion's clear fences a
                 # poison entry on its poison provenance, so capturing the raw
@@ -3865,6 +3869,9 @@ class _HTTPBridgeStreamingMixin:
                     )
                     retry_request_state.verified_stale_anchor_quarantine_generation = (
                         verified_stale_anchor_quarantine_generation
+                    )
+                    retry_request_state.verified_stale_anchor_quarantine_local_failure_fence = (
+                        verified_stale_anchor_quarantine_local_failure_fence
                     )
                 # Keep the durable operation identity attached to the
                 # server-owned recovery attempt. Re-registering the same

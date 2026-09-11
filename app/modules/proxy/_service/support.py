@@ -1129,6 +1129,7 @@ class _WebSocketRequestState:
     verified_stale_anchor_retry_circuit_key: _HTTPBridgeSessionKey | None = None
     verified_stale_anchor_retry_circuit_generation: tuple[int, float, int, float, int, float, float] | None = None
     verified_stale_anchor_quarantine_generation: int | None = None
+    verified_stale_anchor_quarantine_local_failure_fence: int | None = None
     # The exact half-open lease this request's admission claimed (0.0 when
     # it claimed none); released by the submit finalizer whenever the probe
     # was never dispatched, so no pre-dispatch exit can strand the lease.
@@ -1319,7 +1320,7 @@ class _HTTPBridgeOwnerForward:
     key: _HTTPBridgeSessionKey
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, weakref_slot=True)
 class _HTTPBridgeSession:
     key: _HTTPBridgeSessionKey
     headers: dict[str, str]

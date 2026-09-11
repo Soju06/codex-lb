@@ -297,3 +297,11 @@ stream. Predispatch failures and cancellation release origin-owned reservations;
 accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
+
+## Local quarantine cleanup and durable adoption
+
+The [cleanup requirements](spec.md#requirement-completion-cleanup-distinguishes-local-failures-from-durable-adoption) distinguish a response's local failure cutoff from the durable evidence it later adopts. A cutoff captured only after loading can erase a concurrent first strike; moving every fence earlier instead delays durable-only cleanup. Keeping both authorities preserves the existing settlement and registration timing.
+
+For example, a local poison arm at time 100 with deadline 700 keeps deadline 700 after a longer durable poison contribution is settled. A first strike recorded during the same completion remains count 1, so the next timeout can reach the existing threshold. A verified replay retains the origin's older cutoff, including when a same-key completion load revokes durable poison before final cleanup.
+
+This change retains the poison-preserving soft cap and TTL behavior. It does not classify unrelated keys as poisoned when the registry fills; broader overflow and unconditional memory-bound choices remain separate.

@@ -35847,8 +35847,8 @@ def test_http_bridge_session_reusable_for_lookup_rejects_fresh_session_under_qua
 
     assert reusable() is False
 
-    # A completed response on the key clears the quarantine and the
-    # replacement becomes reusable.
+    # A completed response on the current replacement clears the quarantine.
+    service._http_bridge_sessions = {replacement.key: replacement}
     http_bridge_quarantine_module._clear_http_bridge_quarantine(
         service,
         replacement,

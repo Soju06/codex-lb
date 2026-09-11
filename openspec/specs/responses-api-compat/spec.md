@@ -6254,6 +6254,39 @@ ordinary selection, and MUST NOT reclassify local capacity or overload codes
 - **THEN** the proxy keeps the existing continuity-owner failure semantics
 - **AND** it does not report pool-wide `usage_limit_reached`
 
+### Requirement: Completion cleanup distinguishes local failures from durable adoption
+
+A completed HTTP bridge response MUST preserve local quarantine failures recorded after completion processing begins, including the first eventless strike and replacement-session evidence. Successful settlement and fresh-anchor registration MUST retain existing immediate cleanup of durable-only poison adopted for that settlement. Removing that evidence MUST NOT extend or discard an intervening local failure's own deadline or count. Failed settlement or registration MUST retain existing poison protection. Quarantine capacity, TTL and unknown-key behavior MUST remain unchanged.
+
+#### Scenario: Local failure during completion
+- **WHEN** a local failure is recorded while completion waits for its pending lock, loads durable state or registers continuity
+- **THEN** cleanup preserves that failure's quarantine or strike behavior
+
+#### Scenario: Retry adopts durable-only poison
+- **WHEN** the initial load fails and settlement's retry adopts durable-only poison
+- **AND** settlement and fresh-anchor registration succeed
+- **THEN** the adopted poison is cleared immediately and intervening local evidence retains its own deadline and count
+
+#### Scenario: Replacement owns the key
+- **WHEN** a predecessor completes after another session records evidence under the same key
+- **THEN** predecessor cleanup does not modify replacement evidence or its quarantine marker, even after entry eviction and recreation
+
+#### Scenario: Settlement or registration fails
+- **WHEN** completion adopts durable poison but settlement or fresh-anchor registration fails
+- **THEN** existing protection against the old anchor remains
+
+### Requirement: Verified replay cleanup retains origin authority
+
+A verified stale-anchor replay MUST preserve local failures recorded after it captures its origin's quarantine evidence. When the replay completes under its origin key, durable loading and revocation MUST use that same authority before final cleanup.
+
+#### Scenario: First strike during replay
+- **WHEN** a first strike is recorded after origin capture and before replay completion
+- **THEN** replay cleanup retains the strike, including when the origin capture observed absence or poison
+
+#### Scenario: Same-key replay adopts durable disproof
+- **WHEN** a same-key replay's completion load disproves durable poison after a local failure was recorded during replay
+- **THEN** loading and final cleanup preserve the intervening local failure's own deadline and count
+
 ### Requirement: Silent HTTP bridge sessions are quarantined from re-attach and reuse
 
 When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its session key for a bounded window so later requests stop attaching to it. A session proves silent/wedged when either (a) a pending request being failed or retired carried a proxy-injected `previous_response_id`, had sent `response.create`, observed upstream response events, and never had `response.created` assigned, (b) the session key hits two consecutive eventless `missing_response_created_timeout` retires, or (c) the hard-affinity retry circuit for the key opens on an eventless poison-class failure (`stream_incomplete` or `stream_idle_timeout`), in which case the quarantine reason MUST be `retry_circuit_poisoned_anchor`. This holds for every path that fails or retires the request — partial stale-holder cleanup, the reader-failure funnel, and direct all-stale session retirement alike. The quarantine MUST be evaluated only when a request is already being failed or its session retired — never against a live owned turn — so a stream whose `response.created` was observed (including deferred-reasoning streams with long event gaps) MUST NOT be quarantined, and mere event silence during an owned live turn MUST NOT trigger quarantine by itself.

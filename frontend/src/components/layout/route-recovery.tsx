@@ -84,7 +84,7 @@ export function NotFoundPage() {
   );
 }
 
-export function RouteLoadError() {
+export function RouteLoadError({ onRetry }: { onRetry?: () => void } = {}) {
   const { t } = useTranslation();
   const { pathname } = useLocation();
   const isDashboardPath =
@@ -103,7 +103,7 @@ export function RouteLoadError() {
           <Button
             className="press-scale"
             data-testid="route-retry"
-            onClick={() => window.location.reload()}
+            onClick={onRetry ?? (() => window.location.reload())}
             type="button"
           >
             <RefreshCw aria-hidden="true" />

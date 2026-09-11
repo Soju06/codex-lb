@@ -1224,9 +1224,7 @@ async def test_steering_size_limit_rejects_before_forwarding_or_reservation(monk
     steer = {"type": "response.steer", "previous_response_id": "r1", "input": "x" * 256}
     socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
     upstream = ScriptedUpstream([[response("response.created", "r1")]])
-    monkeypatch.setattr(
-        steering_module, "get_settings", lambda: SimpleNamespace(upstream_response_create_max_bytes=128)
-    )
+    monkeypatch.setattr(steering_module, "UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 128)
     _, reservations, _, _, _ = await run_socket(monkeypatch, socket, upstream)
     assert len(upstream.sent) == len(reservations) == 1
     assert socket.sent[-1]["type"] == "response.steer.failed"

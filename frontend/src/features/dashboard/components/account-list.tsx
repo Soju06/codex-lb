@@ -29,7 +29,7 @@ import {
 
 const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
-const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 6.5rem";
+const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 8rem";
 
 type AccountListProps = {
   accounts: AccountSummary[];
@@ -419,7 +419,7 @@ export function AccountList({
 	                </p>
                 <p className="truncate text-[11px] text-muted-foreground">{warmupDetail}</p>
               </div>
-              <div className="flex justify-end gap-1">
+              <div className="flex flex-wrap justify-end gap-1">
                 <Button
                   type="button"
                   size="sm"
@@ -472,7 +472,7 @@ export function AccountList({
                 >
                   <Zap className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
-                {status === "paused" ? (
+                {status === "paused" || status === "deactivated" ? (
                   <Button
                     type="button"
                     size="sm"

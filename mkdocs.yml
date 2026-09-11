@@ -63,6 +63,7 @@ nav:
   - Configuration: configuration.md
   - Anonymous Telemetry: telemetry.md
   - Authentication: authentication.md
+  - Company Sign-In: sso.md
   - API Keys: api-keys.md
   - Routing: routing.md
   - Database: database.md

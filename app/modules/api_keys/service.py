@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import secrets
 import time
@@ -24,6 +23,7 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, ModelSource, UsageHistory
 from app.db.session import sqlite_writer_section
+from app.db.sqlite_lock_retry import should_retry_after_sqlite_lock
 from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer, get_api_key_last_used_coalescer
 from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
@@ -757,10 +757,14 @@ class ApiKeysService:
             await self._repository.commit()
         except Exception as exc:
             await self._repository.rollback()
-            if isinstance(exc, OperationalError) and _is_sqlite_database_locked(exc):
-                if _retry_attempt < _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
-                    await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**_retry_attempt))
-                    return await self.update_key(key_id, payload, _retry_attempt=_retry_attempt + 1)
+            if await should_retry_after_sqlite_lock(
+                exc,
+                what="update_key",
+                attempt=_retry_attempt,
+                max_attempts=_SQLITE_BUSY_RETRY_ATTEMPTS,
+                base_delay_seconds=_SQLITE_BUSY_RETRY_BASE_SECONDS,
+            ):
+                return await self.update_key(key_id, payload, _retry_attempt=_retry_attempt + 1)
             if isinstance(exc, IntegrityError) and _is_reasoning_policy_constraint_error(exc):
                 raise ApiKeyValidationError(
                     "enforced_reasoning_effort and allowed_reasoning_efforts cannot be configured together"
@@ -889,9 +893,14 @@ class ApiKeysService:
                 )
             except OperationalError as exc:
                 await self._repository.rollback()
-                if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                if not await should_retry_after_sqlite_lock(
+                    exc,
+                    what="enforce_limits_for_request",
+                    attempt=attempt,
+                    max_attempts=_SQLITE_BUSY_RETRY_ATTEMPTS,
+                    base_delay_seconds=_SQLITE_BUSY_RETRY_BASE_SECONDS,
+                ):
                     raise
-                await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
 
         raise RuntimeError("unreachable")
 
@@ -1146,9 +1155,14 @@ class ApiKeysService:
                 return
             except OperationalError as exc:
                 await self._repository.rollback()
-                if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                if not await should_retry_after_sqlite_lock(
+                    exc,
+                    what="finalize_usage_reservation",
+                    attempt=attempt,
+                    max_attempts=_SQLITE_BUSY_RETRY_ATTEMPTS,
+                    base_delay_seconds=_SQLITE_BUSY_RETRY_BASE_SECONDS,
+                ):
                     raise
-                await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
 
         raise RuntimeError("unreachable")
 
@@ -1176,9 +1190,14 @@ class ApiKeysService:
                 return
             except OperationalError as exc:
                 await self._repository.rollback()
-                if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                if not await should_retry_after_sqlite_lock(
+                    exc,
+                    what="fail_usage_reservation",
+                    attempt=attempt,
+                    max_attempts=_SQLITE_BUSY_RETRY_ATTEMPTS,
+                    base_delay_seconds=_SQLITE_BUSY_RETRY_BASE_SECONDS,
+                ):
                     raise
-                await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
 
         raise RuntimeError("unreachable")
 
@@ -1279,9 +1298,14 @@ class ApiKeysService:
                     return touched
             except OperationalError as exc:
                 await self._repository.rollback()
-                if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                if not await should_retry_after_sqlite_lock(
+                    exc,
+                    what="touch_usage_reservation",
+                    attempt=attempt,
+                    max_attempts=_SQLITE_BUSY_RETRY_ATTEMPTS,
+                    base_delay_seconds=_SQLITE_BUSY_RETRY_BASE_SECONDS,
+                ):
                     raise
-                await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
 
         raise RuntimeError("unreachable")
 
@@ -1292,9 +1316,14 @@ class ApiKeysService:
                 return
             except OperationalError as exc:
                 await self._repository.rollback()
-                if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                if not await should_retry_after_sqlite_lock(
+                    exc,
+                    what="release_usage_reservation",
+                    attempt=attempt,
+                    max_attempts=_SQLITE_BUSY_RETRY_ATTEMPTS,
+                    base_delay_seconds=_SQLITE_BUSY_RETRY_BASE_SECONDS,
+                ):
                     raise
-                await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
 
         raise RuntimeError("unreachable")
 
@@ -2171,17 +2200,6 @@ def _calculate_cost_microdollars(
     if cost_usd is None:
         return 0
     return int(cost_usd * 1_000_000)
-
-
-def _is_sqlite_database_locked(exc: OperationalError) -> bool:
-    message = str(exc).lower()
-    return (
-        "database is locked" in message
-        or "database table is locked" in message
-        or "database schema is locked" in message
-        or "sqlite_busy_snapshot" in message
-        or "busy_snapshot" in message
-    )
 
 
 def _build_api_key_trends(

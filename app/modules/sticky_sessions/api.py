@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends, Query
 
+from app.core.auth.dashboard_access import Permission
 from app.core.auth.dependencies import (
+    require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
-from app.core.exceptions import DashboardNotFoundError
 from app.db.models import StickySessionKind
 from app.dependencies import StickySessionsContext, get_sticky_sessions_context
 from app.modules.sticky_sessions.schemas import (
     StickySessionDeleteFailure,
-    StickySessionDeleteResponse,
     StickySessionEntryResponse,
     StickySessionIdentifier,
     StickySessionsDeleteFilteredRequest,
@@ -33,7 +33,11 @@ router = APIRouter(
 )
 
 
-@router.get("", response_model=StickySessionsListResponse)
+@router.get(
+    "",
+    response_model=StickySessionsListResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def list_sticky_sessions(
     kind: StickySessionKind | None = Query(default=None),
     stale_only: bool = Query(default=False, alias="staleOnly"),
@@ -112,16 +116,3 @@ async def delete_filtered_sticky_sessions(
         key_query=payload.key_query,
     )
     return StickySessionsDeleteFilteredResponse(deleted_count=deleted_count)
-
-
-@router.delete("/{kind}/{key:path}", response_model=StickySessionDeleteResponse)
-async def delete_sticky_session(
-    kind: StickySessionKind,
-    key: str,
-    _write_access=Depends(require_dashboard_write_access),
-    context: StickySessionsContext = Depends(get_sticky_sessions_context),
-) -> StickySessionDeleteResponse:
-    deleted = await context.service.delete_entry(key, kind=kind)
-    if not deleted:
-        raise DashboardNotFoundError("Sticky session not found", code="sticky_session_not_found")
-    return StickySessionDeleteResponse(status="deleted")

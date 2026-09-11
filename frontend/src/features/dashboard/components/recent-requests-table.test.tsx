@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { usePrivacyStore } from "@/hooks/use-privacy";
+import { ADMIN_PERMISSIONS, OPERATOR_PERMISSIONS } from "@/test/mocks/factories";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 import {
   ALL_REQUEST_LOG_COLUMNS,
@@ -101,7 +103,7 @@ describe("RecentRequestsTable", () => {
     toastError.mockReset();
     useAuthStore.setState({
       role: "admin",
-      permissions: ["read", "write"],
+      permissions: ADMIN_PERMISSIONS,
       canWrite: true,
     });
   });
@@ -616,12 +618,11 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 
-  it("hides identifying metadata and archive controls from guests", () => {
-    useAuthStore.setState({
-      role: "guest",
-      permissions: ["read"],
-      canWrite: false,
-    });
+  it.each([
+    ["guests", { role: "guest" as const, permissions: ["read"], canWrite: false }],
+    ["operators without conversations:read", { role: "admin" as const, permissions: OPERATOR_PERMISSIONS, canWrite: true }],
+  ])("hides identifying metadata and archive controls from %s", (_label, auth) => {
+    useAuthStore.setState(auth);
 
     render(
       <RecentRequestsTable
@@ -1581,5 +1582,141 @@ describe("RecentRequestsTable", () => {
     expect(textEl.tagName).toBe("P");
     expect(textEl).toHaveClass("truncate");
     expect(textEl).toHaveAttribute("title", longId);
+  });
+});
+
+describe("RecentRequestsTable subscription-overflow attribution", () => {
+  const OVERFLOW_REQUEST = {
+    ...LAYOUT_REQUEST,
+    requestId: "req-overflow-fresh",
+    accountId: null,
+    apiKeyName: null,
+    apiKeyId: null,
+    planType: null,
+    source: "subscription_overflow",
+    modelSourceId: "src_overflow",
+    modelSourceKind: "openai_compatible",
+  } satisfies RequestLog;
+  const PINNED_REQUEST = {
+    ...OVERFLOW_REQUEST,
+    requestId: "req-overflow-pinned",
+    source: "subscription_overflow_pinned",
+  } satisfies RequestLog;
+
+  beforeEach(() => {
+    useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true });
+  });
+
+  it("renders distinct chips for fresh and pinned overflow rows", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={2}
+        accounts={[]}
+        requests={[OVERFLOW_REQUEST, PINNED_REQUEST]}
+      />,
+    );
+
+    const chips = screen.getAllByTestId("request-log-source-chip");
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent("Overflow");
+    expect(chips[1]).toHaveTextContent("Overflow · pinned");
+    expect(chips[0]?.className).not.toEqual(chips[1]?.className);
+    expect(chips[0]).toHaveAttribute(
+      "title",
+      "Dispatched to a model source because all subscription accounts were exhausted",
+    );
+    expect(chips[1]).toHaveAttribute("title", "Pinned conversation served by its overflow model source");
+    // The chip replaces the uninformative "Unassigned" placeholder, not a label.
+    expect(screen.queryByText("Unassigned")).not.toBeInTheDocument();
+  });
+
+  it("leaves rows without an overflow source untouched", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[{ accountId: "acc-layout", email: "layout@example.com" } as never]}
+        requests={[LAYOUT_REQUEST]}
+      />,
+    );
+
+    expect(screen.queryByTestId("request-log-source-chip")).not.toBeInTheDocument();
+    expect(screen.getByText("layout@example.com")).toBeInTheDocument();
+  });
+
+  it("keeps the privacy blur on email account labels", () => {
+    usePrivacyStore.setState({ blurred: true });
+    try {
+      render(
+        <RecentRequestsTable
+          {...PAGINATION_PROPS}
+          accounts={[{ accountId: "acc-layout", email: "layout@example.com" } as never]}
+          requests={[LAYOUT_REQUEST]}
+        />,
+      );
+
+      expect(screen.getByText("layout@example.com")).toHaveClass("privacy-blur");
+    } finally {
+      usePrivacyStore.setState({ blurred: false });
+    }
+  });
+
+  it("still shows Unassigned for an accountless row whose source is not overflow", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[{ ...OVERFLOW_REQUEST, source: "limit_warmup" }]}
+      />,
+    );
+
+    expect(screen.queryByTestId("request-log-source-chip")).not.toBeInTheDocument();
+    expect(screen.getByText("Unassigned")).toBeInTheDocument();
+  });
+
+  it("shows the source, model source id and kind in the detail dialog for overflow rows", () => {
+    render(
+      <RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[PINNED_REQUEST]} />,
+    );
+
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("Source")).toBeInTheDocument();
+    expect(within(dialog).getByText("Overflow · pinned")).toBeInTheDocument();
+    expect(within(dialog).getByText("Model source")).toBeInTheDocument();
+    expect(within(dialog).getByText("src_overflow")).toBeInTheDocument();
+    expect(within(dialog).getByText("Model source kind")).toBeInTheDocument();
+    expect(within(dialog).getByText("openai_compatible")).toBeInTheDocument();
+  });
+
+  it("hides the chip with the account column but keeps the detail-dialog attribution", () => {
+    // The chip rides the account cell rather than a column of its own, so an
+    // operator who hides Account loses it from the table. The detail dialog is
+    // the surface the spec guarantees, so it must still name the source.
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[PINNED_REQUEST]}
+        visibleColumns={ALL_REQUEST_LOG_COLUMNS.filter((column) => column !== "account")}
+      />,
+    );
+
+    expect(screen.queryByTestId("request-log-source-chip")).not.toBeInTheDocument();
+
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("Source")).toBeInTheDocument();
+    expect(within(dialog).getByText("Overflow · pinned")).toBeInTheDocument();
+    expect(within(dialog).getByText("src_overflow")).toBeInTheDocument();
+  });
+
+  it("omits the source block in the detail dialog for non-overflow rows", () => {
+    render(
+      <RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[LAYOUT_REQUEST]} />,
+    );
+
+    const dialog = openRequestDetails();
+    expect(within(dialog).queryByText("Source")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Model source")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Model source kind")).not.toBeInTheDocument();
   });
 });

@@ -146,6 +146,11 @@ class AccountState:
     leased_tokens: float = 0.0
     routing_policy: str = ROUTING_POLICY_NORMAL
     ignore_standard_quota: bool = False
+    # Multiplier applied to this candidate's draw weight by the weighted
+    # strategies (``capacity_weighted``, ``relative_availability``); ``1.0`` is
+    # neutral. The balancer derives it from the account's recent upstream
+    # error rate. Deterministic strategies ignore it.
+    selection_weight_multiplier: float = 1.0
 
 
 @dataclass
@@ -852,11 +857,6 @@ def _priority_secondary_used(state: AccountState, primary_used: float | None = N
     return primary_used if primary_used is not None else _priority_primary_used(state)
 
 
-def _capacity_probe_sort_key(state: AccountState) -> tuple[float, float, float, float, str]:
-    secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
-    return (-_remaining_secondary_credits(state), secondary_used, primary_used, last_selected, account_id)
-
-
 def _relative_availability_divisor_seconds(state: AccountState, current: float) -> float:
     reset_at = state.priority_reset_at if state.priority_reset_at is not None else state.secondary_reset_at
     if reset_at is None:
@@ -1012,7 +1012,9 @@ def _select_relative_availability(
         _log_relative_availability_winner(winner, current=current, weight=weight, raw_score=raw_score)
         return winner
     states = [state for state, _, _ in weighted_candidates]
-    weights = [weight for _, weight, _ in weighted_candidates]
+    # Top-k membership is decided by availability alone (above); the recent
+    # error rate only discounts the draw so a penalized account still competes.
+    weights = [weight * _selection_weight_multiplier(state) for state, weight, _ in weighted_candidates]
     total = sum(weights)
     if total <= 0.0:
         winner = min(available, key=_usage_sort_key)
@@ -1172,12 +1174,21 @@ def _lowest_planner_cost_candidates(
 
 def _select_capacity_weighted(available: list[AccountState]) -> AccountState:
     """Select an account with probability proportional to remaining secondary credits."""
-    weights = [_remaining_secondary_credits(s) for s in available]
+    weights = [_remaining_secondary_credits(s) * _selection_weight_multiplier(s) for s in available]
     total = sum(weights)
     if total <= 0.0:
         # All accounts exhausted — fall back to deterministic usage-weighted
         return min(available, key=_usage_sort_key)
     return random.choices(available, weights=weights, k=1)[0]
+
+
+def _selection_weight_multiplier(state: AccountState) -> float:
+    """Clamp the balancer-supplied draw multiplier so a bad value can never
+    negate or unbound a weight."""
+    multiplier = state.selection_weight_multiplier
+    if multiplier != multiplier or multiplier < 0.0:  # NaN or negative
+        return 1.0
+    return min(multiplier, 1.0)
 
 
 def _fill_first_sort_key(state: AccountState) -> tuple[float, float, str]:
@@ -1258,7 +1269,7 @@ QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0
 # protects clients from waiting the worst-case persisted ``reset_at`` after
 # OpenAI-side reset events that propagate lazily through ``/wham/usage`` (see
 # https://github.com/Soju06/codex-lb/issues/676). codex-lb's background usage
-# refresh runs every ``usage_refresh_interval_seconds`` (default 60s) and the
+# refresh runs every ``USAGE_REFRESH_INTERVAL_SECONDS`` (60 s) and the
 # per-status cooldowns are 120s, so a 300s ceiling lets clients reattempt
 # inside the auto-recovery window. The underlying ``AccountState.reset_at``
 # and ``AccountState.cooldown_until`` fields are not clamped.
@@ -1299,7 +1310,33 @@ def account_status_for_permanent_failure(error_code: str) -> AccountStatus:
     return AccountStatus.DEACTIVATED
 
 
-FailoverAction = Literal["failover_next", "surface"]
+FailoverAction = Literal["failover_next", "retry_same_account", "surface"]
+
+# Owner-bound burst 429 (a code-less upstream HTTP 429 burst/concurrency
+# rejection on a request that cannot move to another account): bounded
+# same-account backoff before the original rejection is surfaced. Module
+# constants on purpose -- the Settings ratchet is full and this is a transport
+# invariant, not an operator knob. Waits are 1 s, 2 s, 4 s (upstream
+# ``Retry-After`` is a floor), never above ``BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS``.
+BURST_SAME_ACCOUNT_MAX_RETRIES = 3
+BURST_SAME_ACCOUNT_BASE_SECONDS = 1.0
+BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS = 10.0
+# ``Retry-After`` stamped on a surfaced burst 429 that carried none upstream;
+# matches ``app.core.resilience.overload.LOCAL_OVERLOAD_RETRY_AFTER_SECONDS``.
+BURST_SURFACE_RETRY_AFTER_SECONDS = 5
+
+
+def burst_same_account_backoff_seconds(retry_index: int, *, retry_after_seconds: float | None) -> float:
+    """Deterministic wait before same-account burst retry ``retry_index`` (1-based).
+
+    ``min(MAX_WAIT, max(retry_after_seconds or 0, BASE * 2 ** (retry_index - 1)))``:
+    exponential from ``BURST_SAME_ACCOUNT_BASE_SECONDS`` with the upstream
+    ``Retry-After`` (when present and positive) acting as a floor. No jitter, so
+    the caller's timing seam (``scheduler.sleep``) fully owns the wait.
+    """
+    exponential = BURST_SAME_ACCOUNT_BASE_SECONDS * (2 ** (max(retry_index, 1) - 1))
+    floor = float(retry_after_seconds) if retry_after_seconds is not None and retry_after_seconds > 0 else 0.0
+    return min(BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS, max(floor, exponential))
 
 
 def failover_decision(
@@ -1307,9 +1344,21 @@ def failover_decision(
     failure_class: FailureClass,
     downstream_visible: bool,
     candidates_remaining: int,
+    owner_bound: bool = False,
+    same_account_retry_available: bool = False,
 ) -> FailoverAction:
+    """Decide how a pre-visible upstream failure is handled.
+
+    ``owner_bound`` means the request cannot move to another account (dispatched
+    account-bound payload, required previous-response / turn-state / file
+    owner). Such a request never fails over -- ``failover_next`` would be a
+    lie -- so it either retries the same account (when the caller reports a
+    bounded same-account retry is still available) or surfaces the failure.
+    """
     if downstream_visible:
         return "surface"
+    if owner_bound:
+        return "retry_same_account" if same_account_retry_available else "surface"
     if candidates_remaining <= 0:
         return "surface"
     if failure_class in ("rate_limit", "quota", "retryable_transient"):

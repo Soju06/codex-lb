@@ -10,10 +10,9 @@ from typing import cast
 
 import anyio
 
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import UPSTREAM_RESPONSE_CREATE_MAX_BYTES, ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.clock import clock_for, scheduler_for
-from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.exceptions import (
     AppError,
@@ -412,7 +411,7 @@ async def submit_websocket_steering(
     parent_id, input_items = validate_steering_input(payload)
     wire_text = json.dumps({**payload, "previous_response_id": parent_id}, ensure_ascii=True, separators=(",", ":"))
     wire_bytes = len(wire_text.encode("utf-8"))
-    max_input_bytes = get_settings().upstream_response_create_max_bytes
+    max_input_bytes = UPSTREAM_RESPONSE_CREATE_MAX_BYTES
     if wire_bytes > max_input_bytes:
         raise steering_error("payload_too_large", "Steering input exceeds the WebSocket payload limit.")
     async with pending_lock:

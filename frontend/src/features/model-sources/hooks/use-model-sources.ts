@@ -44,6 +44,11 @@ export function useModelSources() {
       void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["models"] });
+      // The subscription-overflow preflight reports this source's model
+      // entries and Responses support; the Routing card keeps it mounted while
+      // the operator edits the source on the same page, so refetch it here
+      // rather than only on a settings save.
+      void queryClient.invalidateQueries({ queryKey: ["settings", "subscription-overflow-preflight"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || t("modelSources.toasts.updateFailed"));
@@ -55,6 +60,11 @@ export function useModelSources() {
     onSuccess: () => {
       toast.success(t("modelSources.toasts.deleted"));
       void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
+      // Deleting the designated subscription-overflow source clears that
+      // setting server-side; refetch so the routing card reflects it, and drop
+      // any preflight report that still names the deleted source.
+      void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
+      void queryClient.invalidateQueries({ queryKey: ["settings", "subscription-overflow-preflight"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["models"] });
     },

@@ -96,23 +96,31 @@ fn sse_request(
         url,
         headers: vec![("accept".to_owned(), "text/event-stream".to_owned())],
         body: None,
-        timeout_ms: 2_000,
+        timeout_ms: Some(2_000),
         connect_timeout_ms: Some(2_000),
         proxy_url: None,
         sse: Some(NativeSseOptions {
             idle_timeout_ms,
             max_event_bytes,
+            content_type_aware: false,
+            collect_compact: false,
+            interpret_responses: false,
         }),
     })
 }
 
-async fn stop_helper(mut helper: Child, stdin: ChildStdin) {
+async fn stop_helper(mut helper: Child, stdin: ChildStdin, mut lines: HelperLines) {
     drop(stdin);
     let exit = tokio::time::timeout(Duration::from_secs(2), helper.wait())
         .await
         .expect("helper exit timeout")
         .expect("wait for helper");
     assert!(exit.success(), "native helper must exit cleanly");
+    let extra = lines.next_line().await.expect("drain helper output");
+    assert!(
+        extra.is_none(),
+        "duplicate terminal after stdin EOF: {extra:?}"
+    );
 }
 
 fn header_values(request: &str, expected_name: &str) -> Vec<String> {
@@ -164,7 +172,7 @@ async fn gzip_response_relay_crosses_native_helper_boundary() {
             url: format!("http://{address}/response"),
             headers: vec![("accept-encoding".to_owned(), "br, zstd, gzip".to_owned())],
             body: None,
-            timeout_ms: 2_000,
+            timeout_ms: Some(2_000),
             connect_timeout_ms: Some(2_000),
             proxy_url: None,
             sse: None,
@@ -272,7 +280,7 @@ async fn request_without_accept_encoding_reaches_origin_without_accept_encoding(
             url: format!("http://{address}/response"),
             headers: vec![("accept".to_owned(), "application/json".to_owned())],
             body: None,
-            timeout_ms: 2_000,
+            timeout_ms: Some(2_000),
             connect_timeout_ms: Some(2_000),
             proxy_url: None,
             sse: None,
@@ -385,7 +393,7 @@ async fn successful_sse_response_emits_utf8_safe_fragments_and_end() {
     assert!(fragment_count > 1);
     assert_eq!(reconstructed.as_bytes(), expected_body);
     server.await.expect("origin task");
-    stop_helper(helper, stdin).await;
+    stop_helper(helper, stdin, lines).await;
 }
 
 #[tokio::test]
@@ -449,14 +457,7 @@ async fn oversized_sse_event_is_typed_terminal_after_valid_prefix() {
     ));
 
     server.await.expect("origin task");
-    stop_helper(helper, stdin).await;
-    assert!(
-        lines
-            .next_line()
-            .await
-            .expect("drain helper output")
-            .is_none()
-    );
+    stop_helper(helper, stdin, lines).await;
 }
 
 #[tokio::test]
@@ -496,15 +497,8 @@ async fn sse_body_idle_timeout_has_distinct_failure_phase() {
         } if request_id == "idle-sse" && failure_phase == "stream_idle_timeout"
     ));
 
+    stop_helper(helper, stdin, lines).await;
     server.await.expect("origin task");
-    stop_helper(helper, stdin).await;
-    assert!(
-        lines
-            .next_line()
-            .await
-            .expect("drain helper output")
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -558,5 +552,5 @@ async fn http_error_with_sse_options_preserves_raw_body_chunks() {
     assert_eq!(received, body);
 
     server.await.expect("origin task");
-    stop_helper(helper, stdin).await;
+    stop_helper(helper, stdin, lines).await;
 }

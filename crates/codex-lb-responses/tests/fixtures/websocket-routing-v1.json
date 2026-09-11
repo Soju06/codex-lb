@@ -1,0 +1,290 @@
+[
+  {
+    "name": "sequence_zero",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":0}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": "0"
+  },
+  {
+    "name": "sequence_negative_zero",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":-0}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": "-0"
+  },
+  {
+    "name": "sequence_negative",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":-17}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": "-17"
+  },
+  {
+    "name": "sequence_huge",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":-9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": "-9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"
+  },
+  {
+    "name": "sequence_boolean",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":true}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": null
+  },
+  {
+    "name": "sequence_false",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":false}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": null
+  },
+  {
+    "name": "sequence_float",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":17.0}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": null
+  },
+  {
+    "name": "sequence_exponent",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":1e2}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": null
+  },
+  {
+    "name": "sequence_null",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":null}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": null
+  },
+  {
+    "name": "sequence_string",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":\"17\"}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "r2",
+    "response_id": "r2",
+    "sequence_token": null
+  },
+  {
+    "name": "duplicate_sequence",
+    "text": "{\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"sequence_number\":29}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": null,
+    "response_id": null,
+    "sequence_token": "29"
+  },
+  {
+    "name": "escaped_sequence_override",
+    "text": "{\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"sequence_\\u006eumber\":false}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": null,
+    "response_id": null,
+    "sequence_token": null
+  },
+  {
+    "name": "direct_id_precedence",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\" direct \",\"response\":{\"id\":\" nested \"}}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "direct",
+    "response_id": "direct",
+    "sequence_token": null
+  },
+  {
+    "name": "python_whitespace",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"\\u001c\\u001d\\u001e\\u001f\\u0085\\u2007 direct \\u202f\\u3000\"}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "direct",
+    "response_id": "direct",
+    "sequence_token": null
+  },
+  {
+    "name": "blank_direct_nested_id",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"\\u001c\\u2007\",\"response\":{\"id\":\" nested \"}}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "nested",
+    "response_id": "nested",
+    "sequence_token": null
+  },
+  {
+    "name": "nonstring_direct_nested_id",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":3,\"response\":{\"id\":\" nested \"}}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "nested",
+    "response_id": "nested",
+    "sequence_token": null
+  },
+  {
+    "name": "nonstring_nested_id",
+    "text": "{\"type\":\"response.output_text.delta\",\"response\":{\"id\":3}}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": null,
+    "response_id": null,
+    "sequence_token": null
+  },
+  {
+    "name": "nonobject_response",
+    "text": "{\"type\":\"response.output_text.delta\",\"response\":[\"r2\"]}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": null,
+    "response_id": null,
+    "sequence_token": null
+  },
+  {
+    "name": "duplicate_id",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"first\",\"response_\\u0069d\":\"last\"}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "last",
+    "response_id": "last",
+    "sequence_token": null
+  },
+  {
+    "name": "duplicate_nested_id",
+    "text": "{\"type\":\"response.output_text.delta\",\"response\":{\"id\":\"first\",\"id\":\"last\"}}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "last",
+    "response_id": "last",
+    "sequence_token": null
+  },
+  {
+    "name": "lifecycle_response.created",
+    "text": "{\"type\":\"response.created\",\"response_id\":\"direct\",\"response\":{\"id\":\" nested \",\"status\":\"completed\"}}",
+    "interpreted": true,
+    "event_type": "response.created",
+    "payload_response_id": "direct",
+    "response_id": " nested ",
+    "sequence_token": null
+  },
+  {
+    "name": "lifecycle_response.completed",
+    "text": "{\"type\":\"response.completed\",\"response_id\":\"direct\",\"response\":{\"id\":\" nested \",\"status\":\"completed\"}}",
+    "interpreted": true,
+    "event_type": "response.completed",
+    "payload_response_id": "direct",
+    "response_id": " nested ",
+    "sequence_token": null
+  },
+  {
+    "name": "lifecycle_response.failed",
+    "text": "{\"type\":\"response.failed\",\"response_id\":\"direct\",\"response\":{\"id\":\" nested \",\"status\":\"completed\"}}",
+    "interpreted": true,
+    "event_type": "response.failed",
+    "payload_response_id": "direct",
+    "response_id": " nested ",
+    "sequence_token": null
+  },
+  {
+    "name": "lifecycle_response.incomplete",
+    "text": "{\"type\":\"response.incomplete\",\"response_id\":\"direct\",\"response\":{\"id\":\" nested \",\"status\":\"completed\"}}",
+    "interpreted": true,
+    "event_type": "response.incomplete",
+    "payload_response_id": "direct",
+    "response_id": " nested ",
+    "sequence_token": null
+  },
+  {
+    "name": "lifecycle_error",
+    "text": "{\"type\":\"error\",\"response_id\":\"direct\",\"response\":{\"id\":\" nested \",\"status\":\"completed\"}}",
+    "interpreted": true,
+    "event_type": "error",
+    "payload_response_id": "direct",
+    "response_id": " nested ",
+    "sequence_token": null
+  },
+  {
+    "name": "invalid_lifecycle_status",
+    "text": "{\"type\":\"response.completed\",\"response_id\":\" direct \",\"response\":{\"id\":\" nested \",\"status\":3}}",
+    "interpreted": true,
+    "event_type": "response.completed",
+    "payload_response_id": "direct",
+    "response_id": "direct",
+    "sequence_token": null
+  },
+  {
+    "name": "blank_lifecycle_id",
+    "text": "{\"type\":\"response.completed\",\"response_id\":\" direct \",\"response\":{\"id\":\" \"}}",
+    "interpreted": true,
+    "event_type": "response.completed",
+    "payload_response_id": "direct",
+    "response_id": " ",
+    "sequence_token": null
+  },
+  {
+    "name": "empty_lifecycle_id",
+    "text": "{\"type\":\"response.completed\",\"response_id\":\" direct \",\"response\":{\"id\":\"\"}}",
+    "interpreted": true,
+    "event_type": "response.completed",
+    "payload_response_id": "direct",
+    "response_id": "direct",
+    "sequence_token": null
+  },
+  {
+    "name": "surrogate_direct_id",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"\\ud800\"}",
+    "interpreted": false,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "\ud800",
+    "response_id": "\ud800",
+    "sequence_token": null
+  },
+  {
+    "name": "surrogate_nested_id",
+    "text": "{\"type\":\"response.output_text.delta\",\"response\":{\"id\":\"\\ud800\"}}",
+    "interpreted": false,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "\ud800",
+    "response_id": "\ud800",
+    "sequence_token": null
+  },
+  {
+    "name": "ignored_surrogate_nested_id",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"direct\",\"response\":{\"id\":\"\\ud800\"}}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "direct",
+    "response_id": "direct",
+    "sequence_token": null
+  },
+  {
+    "name": "surrogate_nested_key",
+    "text": "{\"type\":\"response.output_text.delta\",\"response\":{\"id\":\"nested\",\"\\ud800\":1}}",
+    "interpreted": false,
+    "event_type": "response.output_text.delta",
+    "payload_response_id": "nested",
+    "response_id": "nested",
+    "sequence_token": null
+  }
+]

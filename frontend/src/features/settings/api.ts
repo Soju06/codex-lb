@@ -1,9 +1,12 @@
-import { get, post, put } from "@/lib/api-client";
+import { del, get, post, put } from "@/lib/api-client";
 import {
   AccountProxyBindingRequestSchema,
   AccountProxyBindingSchema,
   DashboardSettingsSchema,
+  ModelContextWindowOverrideUpsertRequestSchema,
+  ModelContextWindowOverridesSchema,
   SettingsUpdateRequestSchema,
+  SubscriptionOverflowPreflightSchema,
   TelemetryConsentSchema,
   TelemetryConsentUpdateRequestSchema,
   UpstreamProxyAdminSchema,
@@ -18,6 +21,7 @@ import {
 const SETTINGS_PATH = "/api/settings";
 const UPSTREAM_PROXY_PATH = `${SETTINGS_PATH}/upstream-proxy`;
 const TELEMETRY_PATH = `${SETTINGS_PATH}/telemetry`;
+const MODEL_CONTEXT_WINDOW_OVERRIDES_PATH = `${SETTINGS_PATH}/model-context-window-overrides`;
 
 export function getSettings() {
   return get(SETTINGS_PATH, DashboardSettingsSchema);
@@ -28,6 +32,13 @@ export function updateSettings(payload: unknown) {
   return put(SETTINGS_PATH, DashboardSettingsSchema, {
     body: validated,
   });
+}
+
+export function getSubscriptionOverflowPreflight(sourceId: string) {
+  return get(
+    `${SETTINGS_PATH}/subscription-overflow/preflight?source_id=${encodeURIComponent(sourceId)}`,
+    SubscriptionOverflowPreflightSchema,
+  );
 }
 
 export function getTelemetryConsent(options: { includePreview?: boolean } = {}) {
@@ -79,4 +90,20 @@ export function putAccountProxyBinding(accountId: string, payload: unknown) {
   return put(`${UPSTREAM_PROXY_PATH}/accounts/${encodeURIComponent(accountId)}/binding`, AccountProxyBindingSchema, {
     body: validated,
   });
+}
+
+// M4 model catalogue: per-model context window overrides (one dashboard row per slug).
+export function getModelContextWindowOverrides() {
+  return get(MODEL_CONTEXT_WINDOW_OVERRIDES_PATH, ModelContextWindowOverridesSchema);
+}
+
+export function putModelContextWindowOverride(slug: string, payload: unknown) {
+  const validated = ModelContextWindowOverrideUpsertRequestSchema.parse(payload);
+  return put(`${MODEL_CONTEXT_WINDOW_OVERRIDES_PATH}/${encodeURIComponent(slug)}`, ModelContextWindowOverridesSchema, {
+    body: validated,
+  });
+}
+
+export function deleteModelContextWindowOverride(slug: string) {
+  return del(`${MODEL_CONTEXT_WINDOW_OVERRIDES_PATH}/${encodeURIComponent(slug)}`, ModelContextWindowOverridesSchema);
 }

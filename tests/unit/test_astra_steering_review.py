@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from collections import deque
 from contextlib import nullcontext
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -83,11 +82,7 @@ async def test_failed_submission_releases_its_aggregate_steering_bytes(monkeypat
     wire_bytes = len(json.dumps(first, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
     assert len(json.dumps(second, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) == wire_bytes
     assert len(json.dumps(third, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) == wire_bytes
-    monkeypatch.setattr(
-        steering_module,
-        "get_settings",
-        lambda: SimpleNamespace(upstream_response_create_max_bytes=wire_bytes * 2),
-    )
+    monkeypatch.setattr(steering_module, "UPSTREAM_RESPONSE_CREATE_MAX_BYTES", wire_bytes * 2)
     socket = ScriptedSocket(
         [
             (create(), lambda _: True),

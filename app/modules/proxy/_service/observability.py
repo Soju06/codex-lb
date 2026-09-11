@@ -12,6 +12,7 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    http_bridge_routing_total,
     upstream_reasoning_replay_400_total,
     upstream_transport_decisions_total,
 )
@@ -37,6 +38,17 @@ def _service_global(name: str, fallback: Any) -> Any:
 
 def _service_get_settings() -> Any:
     return cast(Callable[[], Any], _service_global("get_settings", get_settings))()
+
+
+def record_http_bridge_routing(*, stage: str, reason: str) -> None:
+    if http_bridge_routing_total is not None:
+        http_bridge_routing_total.labels(stage=stage, reason=reason).inc()
+    logger.info(
+        "http_bridge_routing stage=%s reason=%s request_id=%s",
+        stage,
+        reason,
+        get_request_id(),
+    )
 
 
 def _record_upstream_transport_decision(

@@ -5,6 +5,12 @@ deltas quote the closed enums, error codes, hint texts and request-log labels
 that ``app/modules/proxy/overflow.py`` defines; these tests fail when either
 side drifts, the way ``tests/unit/test_metrics.py`` does for the
 ``codex_lb_model_source_*`` metric names.
+
+The closed enums -- the request-log ``source`` values, the metric ``route``
+labels and the dispatch kinds -- are discovered from ``overflow.py`` by import
+(``tests/unit/_overflow_constants.py``) rather than spelled here, so a value
+added to the authority grows the expected set instead of slipping past guards
+that only knew the values which existed when they were written.
 """
 
 from __future__ import annotations
@@ -17,6 +23,14 @@ from typing import get_args
 import pytest
 
 from app.modules.proxy import overflow
+from tests.unit._overflow_constants import (
+    BACKEND_MODULE,
+    DISPATCH_KIND_PREFIX,
+    ROUTE_PREFIX,
+    SOURCE_PREFIX,
+    discovery_error,
+    overflow_constants,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHANGE = REPO_ROOT / "openspec/changes/add-subscription-overflow-model-source"
@@ -35,13 +49,35 @@ _BACKTICKED = re.compile(r"`([^`\n]+)`")
 # observability delta may not quote any such token that the enum lacks.
 _OUTCOME_SHAPE = re.compile(r"^(dispatched|bounced|declined|pinned|pin_commit|decision)_[a-z_]+$")
 
+# The closed enums the deltas and the docs must keep naming, read off the authority.
+SOURCE_LITERALS = overflow_constants(SOURCE_PREFIX)
+ROUTE_LABELS = overflow_constants(ROUTE_PREFIX)
+DISPATCH_KINDS = overflow_constants(DISPATCH_KIND_PREFIX)
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _rel(path: Path) -> str:
+    return path.relative_to(REPO_ROOT).as_posix()
+
+
 def _backticked(path: Path) -> set[str]:
     return set(_BACKTICKED.findall(_read(path)))
+
+
+@pytest.mark.parametrize("prefix", [SOURCE_PREFIX, ROUTE_PREFIX, DISPATCH_KIND_PREFIX])
+def test_discovered_enums_are_trustworthy(prefix: str) -> None:
+    """Sanity-check the authority before comparing the deltas against it.
+
+    Every enum expectation below is discovered by name prefix, so an empty,
+    duplicated or unexported set would make those comparisons pass vacuously
+    instead of failing.
+    """
+    error = discovery_error(prefix, overflow_constants(prefix))
+
+    assert error is None, error
 
 
 def test_observability_delta_names_exactly_the_closed_outcome_enum() -> None:
@@ -69,24 +105,29 @@ def test_observability_delta_names_the_routes_and_metrics() -> None:
     quoted = _backticked(_OBSERVABILITY_DELTA)
     text = _read(_OBSERVABILITY_DELTA)
 
-    for route in (
-        overflow.ROUTE_CODEX_RESPONSES,
-        overflow.ROUTE_V1_RESPONSES,
-        overflow.ROUTE_WEBSOCKET_HANDSHAKE,
-        overflow.ROUTE_WEBSOCKET,
-        overflow.ROUTE_COMPACT,
-    ):
+    for route in sorted(ROUTE_LABELS.values()):
         assert route in quoted, route
     assert overflow.OVERFLOW_TOTAL_METRIC in text
     assert overflow.BREAKER_STATE_METRIC in text
-    for kind in (overflow.DISPATCH_KIND_FRESH, overflow.DISPATCH_KIND_PINNED, overflow.DISPATCH_KIND_ANCHOR):
+    for kind in sorted(DISPATCH_KINDS.values()):
         assert kind in quoted, kind
-    assert overflow.REQUEST_LOG_SOURCE_FRESH in quoted
-    assert overflow.REQUEST_LOG_SOURCE_PINNED in quoted
     # The design's separate overflow result counter was folded into the dispatch
     # counter; naming it would also trip the model-source metric drift guard's
     # successor regex once it covers the overflow prefix.
     assert "codex_lb_subscription_overflow_source_result_total" not in text
+
+
+def test_request_log_source_values_are_quoted_in_every_normative_surface() -> None:
+    """Both normative deltas and the operator docs name every attributable ``source`` value."""
+    for path in (_ROUTING_DELTA, _OBSERVABILITY_DELTA, _ROUTING_DOC):
+        quoted = _backticked(path)
+        missing = sorted(value for value in SOURCE_LITERALS.values() if value not in quoted)
+
+        assert missing == [], (
+            f"{_rel(path)} does not quote the request-log `source` value(s) {missing} that "
+            f"{BACKEND_MODULE} defines; every attributable source value must be named in the "
+            f"normative deltas and the operator docs"
+        )
 
 
 @pytest.mark.parametrize(
@@ -105,7 +146,7 @@ def test_compat_delta_quotes_every_overflow_error_code(code: str) -> None:
     assert code in _backticked(_COMPAT_DELTA), code
 
 
-def test_routing_delta_quotes_the_row_and_pin_failure_codes() -> None:
+def test_routing_delta_quotes_the_pin_failure_codes_and_the_job_headers() -> None:
     quoted = _backticked(_ROUTING_DELTA)
 
     for token in (
@@ -115,8 +156,6 @@ def test_routing_delta_quotes_the_row_and_pin_failure_codes() -> None:
         overflow.UNSUPPORTED_INPUT_CODE,
         overflow.MODEL_SOURCE_UNAVAILABLE_CODE,
         overflow.MODEL_SOURCE_BUSY_CODE,
-        overflow.REQUEST_LOG_SOURCE_FRESH,
-        overflow.REQUEST_LOG_SOURCE_PINNED,
         overflow.SUBAGENT_HEADER,
         overflow.MEMGEN_HEADER,
         *sorted(overflow.BACKGROUND_ALLOWLIST),

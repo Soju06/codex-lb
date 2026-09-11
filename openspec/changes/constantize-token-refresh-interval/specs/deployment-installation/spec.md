@@ -91,8 +91,20 @@ environment) whose
 deprecated alias that applies only while the column is NULL and that joins the
 removed-settings warning list in the next minor release. The bridge MUST
 resolve the switch before it takes a session's prewarm lock, from the dashboard
-overrides the request entry point already bound, and MUST NOT add a settings
-read under that lock.
+overrides the request entry point already bound. The prewarm's own helpers
+MUST NOT read the dashboard row for themselves while that lock is held: the
+values the response-create admission gate needs (account concurrency caps and
+routing tunables) and the row the reconnect on the prewarm timeout path
+resolves MUST come from one snapshot taken before the lock and passed in, and
+that snapshot MUST be resolved only when a warm-up will actually be sent. If
+that snapshot cannot be loaded, the bridge MUST fall back to the last
+dashboard row the replica loaded, exactly as the request entry point does, and
+where no row has ever been loaded it MUST skip the prewarm rather than serve
+it without a snapshot; a prewarm MUST NOT fail a request the bridge can
+otherwise serve. Work the recovery path reaches beyond those two helpers --
+account selection, token refresh, and upstream route resolution, each with its
+own settings read or database session -- is out of scope for this requirement
+and keeps its existing behaviour.
 `database_pool_size` and `database_max_overflow` MUST remain
 operator-configurable settings, and `soft_drain_enabled` and
 `deterministic_failover_enabled` MUST remain the failover subsystem's only
@@ -227,6 +239,34 @@ warning list in the next minor release.
   not been prewarmed
 - **THEN** the session prewarm is attempted for that request
 - **AND** no request is excluded by canary sampling or an allow/deny cohort
+
+#### Scenario: A prewarm's own helpers read no settings under its lock
+
+- **GIVEN** the Codex session prewarm switch is on in the dashboard
+- **WHEN** a session prewarm runs its body under the prewarm lock -- the
+  warm-up request built, response-create admission taken for it, and the
+  warm-up sent upstream to a stream that completes
+- **THEN** the dashboard settings row is read once, before the lock is taken
+- **AND** the admission gate takes no settings read of its own while the lock
+  is held, and that path opens no database session
+
+#### Scenario: An unreadable settings row does not fail the request
+
+- **GIVEN** the Codex session prewarm switch is on and the settings row cannot
+  be loaded when a first-turn Codex bridge request arrives
+- **WHEN** the bridge resolves its pre-lock snapshot
+- **THEN** the last dashboard row this replica loaded is used and the prewarm
+  proceeds
+- **AND** where no row has ever been loaded, the prewarm records
+  `prewarm_status=skipped` and the request is still served
+
+#### Scenario: A payload with no warm-up resolves no snapshot
+
+- **GIVEN** the Codex session prewarm switch is on and a first-turn Codex
+  bridge request whose payload yields no warm-up to send
+- **WHEN** the bridge evaluates the prewarm
+- **THEN** it records `prewarm_status=skipped` without reading the dashboard
+  settings row at all
 
 #### Scenario: Prewarm env alias applies only until the dashboard sets a value
 

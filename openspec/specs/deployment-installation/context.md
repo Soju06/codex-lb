@@ -436,8 +436,10 @@ authorization host (`AUTH_BASE_URL` is a protocol constant, so redirecting
 `CODEX_LB_UPSTREAM_BASE_URL` at the local fixture does not cover OAuth). That
 pin is replaced by a repository-owned preflight in
 `scripts/traffic_analysis/fast_canary_suite.py`: the suite stamps the isolated
-`auth.json`'s `last_refresh` to the current instant before either runner
-starts, so the imported account is inside the fixed window for the whole run.
+`auth.json`'s recorded refresh time — every key the account importer accepts
+for it (`lastRefreshAt`, `last_refresh`), so no stale alias outranks the stamp
+— to the current instant before either runner starts, so the imported account
+is inside the fixed window for the whole run.
 The stamp is strictly stronger than the pin, which only ever reached the
 failure-matrix subprocess while the raw HTTP/2 runner relied on a host-local
 `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS=365` line of its own; both host-local

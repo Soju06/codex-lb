@@ -436,7 +436,7 @@ or invalid result leaves the previous success unchanged.
 
 Before either runner starts, the suite stamps the isolated `auth.json`'s
 recorded refresh time to the current instant — every key the account importer
-accepts (`last_refresh`, `lastRefreshAt`), so no stale alias outranks the stamp
+accepts (`lastRefreshAt`, `last_refresh`), so no stale alias outranks the stamp
 — with mode 600 preserved and tokens untouched. An imported
 account inherits that timestamp, and codex-lb proactively exchanges a refresh
 token once the account is older than the fixed eight-day

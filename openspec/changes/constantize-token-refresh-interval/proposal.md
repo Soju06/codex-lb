@@ -36,10 +36,11 @@ certain, not merely possible.
 
 - The canary's suppression seam moves from "widen the window for the whole
   process" to "the credential was just refreshed".
-  `fast_canary_suite.stamp_isolated_auth_refresh` rewrites only the
-  `last_refresh` field of the validated isolated `auth.json` to the current
-  instant (atomic, mode 600 preserved, tokens neither read nor logged) before
-  either runner starts. A run lasts minutes and the window is days, so the
+  `fast_canary_suite.stamp_isolated_auth_refresh` rewrites only the recorded
+  refresh time of the validated isolated `auth.json` — every key the account
+  importer accepts for it (`lastRefreshAt`, `last_refresh`), so no stale alias
+  outranks the stamp — to the current instant (atomic, mode 600 preserved,
+  tokens neither read nor logged) before either runner starts. A run lasts minutes and the window is days, so the
   whole run is inside it whatever the constant's value is. The env injection
   and its test assertion are deleted.
   - This is strictly stronger than the pin it replaces: the pin only ever

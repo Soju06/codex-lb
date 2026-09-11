@@ -21,6 +21,34 @@ resends its whole history. The gap is the ordinary case — a **delta resend**,
 where the client sends only the new turn and the anchor, and the proxy has no
 client-supplied history to verify.
 
+## How much this is worth
+
+Measured on the production fleet (beta.7), 7 days, requests that died with no
+response event while carrying a conversation:
+
+| evidence class | dead turns | distinct conversations | per day |
+|---|---|---|---|
+| ambiguous (`stream_incomplete`, `upstream_request_timeout`, `stream_idle_timeout`) | 2,352 | 993 | 336 |
+| definitive (`previous_response_owner_unavailable`) | 1,883 | 367 | 269 |
+
+Two things follow. The ambiguous class is not a tail case — it touches roughly
+three times more distinct conversations than the definitive one, so covering
+only definitive evidence would leave most of the problem in place. And the
+definitive class concentrates 1,883 turns onto 367 conversations, about five
+each: a client that keeps retrying a dead anchor collects a fresh 502 every
+time, which is what a conversation "dying" actually looks like from the client
+side.
+
+Upper-bound caveat: some eventless `stream_incomplete` rows are probably
+confirmed pre-dispatch failures, which belong to the definitive class and need
+no fence. The request log cannot separate them, so 2,352 is a ceiling — not one
+that changes the ordering.
+
+Separately worth recording: `upstream_operation_status_unknown` fired **zero**
+times in that window. The bounded 503 that is nominally the fail-closed terminal
+for an ambiguous operation is not what production reaches; these turns surface
+to the client as a broken `stream_incomplete` stream.
+
 The owner decided (2026-09-11) to close that gap and to cover both evidence
 classes:
 

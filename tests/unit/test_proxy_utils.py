@@ -17170,6 +17170,7 @@ async def test_stream_with_retry_keyed_refresh_connect_settles_before_account_he
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -17274,6 +17275,7 @@ async def test_stream_with_retry_keyed_queued_penalty_flushes_on_cancel(monkeypa
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -17376,6 +17378,7 @@ async def test_stream_with_retry_cancel_cleanup_flushes_queued_health_after_back
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -17508,6 +17511,7 @@ async def test_stream_with_retry_cancelled_multi_penalty_flush_survives_backoff_
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         if account is account_a:
@@ -17637,6 +17641,7 @@ async def test_stream_with_retry_keyed_cancel_during_deferred_health_flush_still
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         flush_started.set()
@@ -17752,6 +17757,7 @@ async def test_stream_with_retry_keyed_cancel_mid_deferred_health_flush_does_not
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         nonlocal health_apply_count
         del error, http_status
@@ -17862,6 +17868,7 @@ async def test_stream_unkeyed_owner_rewrite_records_health_before_terminal_deliv
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del http_status
         assert failed_account is account
@@ -17969,6 +17976,7 @@ async def test_stream_responses_route_keyed_owner_rewrite_settles_before_origina
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         assert failed_account is account
@@ -18083,6 +18091,7 @@ async def test_stream_responses_route_keyed_owner_rewrite_preserves_health_after
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         assert failed_account is account
@@ -18229,6 +18238,7 @@ async def test_stream_with_retry_keyed_empty_terminal_queue_settles_before_termi
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         assert failed_account is account
@@ -18355,6 +18365,7 @@ async def test_stream_responses_route_keyed_refresh_connect_settles_before_accou
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -18526,6 +18537,7 @@ async def test_stream_with_retry_keyed_penalty_flush_keeps_later_entries_after_f
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, code, http_status
         health_accounts.append(account.id)
@@ -18624,6 +18636,7 @@ async def test_stream_with_retry_cancel_safe_health_flush_is_drained_at_shutdown
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, code, http_status
         if account.id == account_a.id:
@@ -18755,6 +18768,7 @@ async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_accou
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -33080,7 +33094,7 @@ async def test_proxy_responses_websocket_transparent_replay_strips_socket_turn_s
             return _make_account("acc_ws_sticky_1"), first_upstream
         return _make_account("acc_ws_sticky_2"), second_upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -54669,7 +54683,9 @@ async def test_process_upstream_websocket_text_defers_accepted_replay_health_unt
         calls.append("settle")
         return True
 
-    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+    async def handle_stream_error(
+        account: Account, _error: object, code: str, http_status: int | None = None, **_kwargs
+    ) -> None:
         del http_status
         calls.append(f"health:{account.id}:{code}")
 
@@ -54902,7 +54918,9 @@ async def test_process_upstream_websocket_text_defers_owner_bound_accepted_repla
         calls.append("settle")
         return True
 
-    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+    async def handle_stream_error(
+        account: Account, _error: object, code: str, http_status: int | None = None, **_kwargs
+    ) -> None:
         del http_status
         calls.append(f"health:{account.id}:{code}")
 

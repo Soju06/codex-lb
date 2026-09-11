@@ -8,16 +8,21 @@ routing without becoming permanently invisible behind healthier accounts.
 
 ## Reauthentication warning state
 
-`reauth_required` means refresh-token exchange needs operator repair; it does not
-prove that the stored access token is unusable. Such accounts remain eligible
+`reauth_required` alone means refresh-token exchange needs operator repair; it does not
+prove that the stored access token is unusable. Refresh-only warning accounts remain eligible
 for ordinary requests and retain sticky, bridge, file, response, and realtime
 ownership while the access token remains unexpired. Proactive refresh is skipped.
 At known access-token expiry, selection and bridge reuse reject the account
 locally: movable soft affinity may fail over, while hard account-owned continuity
 remains fail-closed. Before expiry, an upstream rejection plus permanent forced-
-refresh failure excludes the account only from that request's remaining movable
-retries. Paused, deactivated, deleted, and security-ineligible accounts retain
-their hard exclusions.
+refresh failure, or a second 401 after refresh, persists the stronger
+`account_auth_invalidated` reason for the rejected credential generation. That
+reason excludes later independent requests and bridge reuse across replicas
+until credential repair; it is not limited to the current request's retries.
+Paused, deactivated, deleted, and security-ineligible accounts retain their hard
+exclusions. New operator routing assignments still omit warning accounts until
+repair, independently of their eligibility for ordinary requests and existing
+ownership.
 
 ## Replica-local soft health
 
@@ -178,3 +183,38 @@ short windows, or evaluated for a quota the plan does not have.
 Settlement is discarded if newer replica-local runtime activity arrives while
 that snapshot is loading, preventing an older probe success from clearing a
 later failure.
+
+## Rejected Access Credentials
+
+`reauth_required` alone is a refresh warning, not proof of access-token failure.
+The existing `account_auth_invalidated` reason records the stronger evidence of
+an HTTP 401 followed by permanent refresh failure or another post-refresh 401.
+Selection and bridge reuse honor that reason across replicas. Later refresh-only
+failures preserve it; repaired credentials clear it through reauthentication.
+Status writes compare both credential ciphertexts so stale failures cannot disable
+a repaired account. For example, after A rejects access and refresh, a subsequent
+independent request can select B even when A's JWT expiry is unknown.
+
+Encryption is not a credential identity test: Fernet can produce different
+ciphertext for the same access token. Guarded rotation compares decrypted access
+material and fences the write against the observed access and refresh ciphertexts.
+For example, rotating refresh token R1 to R2 while re-encrypting rejected access
+token A leaves A unavailable; replacing A with B can clear the rejection. If the
+comparison cannot decrypt either value, rotation does not claim the rejection is
+repaired. Warmup, including force mode, and manual or scheduled automations use
+the same reason-and-expiry eligibility gate as ordinary routing. Force warmup
+bypasses usage checks, not known credential rejection.
+
+If a concurrent health update wins the initial rejection CAS, the repository
+re-reads the account and writes only the rejection status and reason under current
+credential and operator-state guards. Cooldown timestamps remain untouched by the
+retry, so rate-limit activity cannot prevent rejection from becoming durable.
+Same-value re-encryption is compared by material with bounded retries; actual
+credential replacement, pause, deactivation, or deletion vetoes stale rejection.
+
+Local unavailable marks are fenced against repair clears and snapshot refreshes
+observed during the guarded write. A newer cache observation wins over the stale
+mark. The successful write still queues a routing invalidation, even if its mark
+is suppressed, so a snapshot read before the write cannot hide the committed
+rejection beyond the normal bus convergence bound. A missed guarded write adds
+no speculative mark and clears no newer routing state.

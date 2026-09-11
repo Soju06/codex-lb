@@ -27,6 +27,7 @@ from app.core.auth.refresh import (
     should_refresh,
 )
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
+from app.core.balancer.logic import reauth_reason_blocks_routing
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
@@ -672,6 +673,12 @@ class AuthManager:
         if adopted is not None:
             return adopted
 
+        latest = await self._repo.get_by_id_fresh(account.id)
+        if latest is not None:
+            # Rotation can reconcile a concurrent access rejection or preserve
+            # a newer operator status; detached callers must adopt that state.
+            return _adopt_account_row(account, latest)
+
         account.access_token_encrypted = new_access_token_encrypted
         account.refresh_token_encrypted = new_refresh_token_encrypted
         account.id_token_encrypted = new_id_token_encrypted
@@ -1038,7 +1045,6 @@ class AuthManager:
             != attempted_fingerprint
         ):
             return _adopt_account_row(account, latest)
-        reason = PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
         status = account_status_for_permanent_failure(exc.code)
         for attempt in range(_TOKEN_CAS_MAX_ATTEMPTS):
             # The FIRST status CAS always runs so a genuine permanent failure is
@@ -1068,6 +1074,11 @@ class AuthManager:
                     False,
                     transport_error=True,
                 ) from exc
+            reason = (
+                latest.deactivation_reason
+                if status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(latest.deactivation_reason)
+                else PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
+            )
             applied = await self._repo.update_status_if_current(
                 account.id,
                 status,

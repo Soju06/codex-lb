@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import anyio
 from sqlalchemy import select
 
+from app.core.balancer.logic import reauth_reason_blocks_routing
 from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_ROUTING,
     NAMESPACE_ACCOUNT_SELECTION,
@@ -96,12 +97,21 @@ _ROUTING_UNAVAILABLE_STATUSES = frozenset(
 )
 
 
+def _routing_entry_unavailable(entry: tuple[AccountStatus, str | None] | None) -> bool:
+    if entry is None:
+        return True
+    status, reason = entry
+    return status in _ROUTING_UNAVAILABLE_STATUSES or (
+        status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(reason)
+    )
+
+
 class RoutingAvailabilityCache:
     """Cluster-coherent view of which accounts are unavailable for routing.
 
-    The cache keeps a snapshot of committed account statuses (``{account_id: status}``)
+    The cache keeps committed account statuses and authentication-failure reasons
     seeded at poller start and rebuilt on every ``account_routing`` bump. An account is
-    routing-unavailable when its committed status is PAUSED / DEACTIVATED, or the id
+    routing-unavailable when paused, deactivated, or proven authentication-invalidated, or the id
     is absent from the snapshot (deleted), or a local mark
     overlay entry exists (covering the same-replica window between a mark and the
     snapshot rebuild). RATE_LIMITED and QUOTA_EXCEEDED deliberately do NOT map to
@@ -113,21 +123,30 @@ class RoutingAvailabilityCache:
 
     def __init__(self, session_factory: Callable[[], AsyncSession] | None = None) -> None:
         self._session_factory = session_factory
-        self._snapshot: dict[str, AccountStatus] | None = None
+        self._snapshot: dict[str, tuple[AccountStatus, str | None]] | None = None
         self._local_marks: set[str] = set()
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        return self._generation
 
     @property
     def seeded(self) -> bool:
         return self._snapshot is not None
 
-    def mark_unavailable(self, account_id: str) -> None:
-        self._local_marks.add(account_id)
+    def mark_unavailable(self, account_id: str, *, generation: int | None = None) -> None:
+        # A snapshot or repair observed during a guarded write takes precedence
+        # over its stale local mark. Always queue a post-write reconciliation.
+        if generation is None or generation == self._generation:
+            self._local_marks.add(account_id)
         _request_account_routing_bump()
 
     def clear_unavailable(self, account_id: str) -> None:
+        self._generation += 1
         self._local_marks.discard(account_id)
         if self._snapshot is not None:
-            self._snapshot[account_id] = AccountStatus.ACTIVE
+            self._snapshot[account_id] = (AccountStatus.ACTIVE, None)
         _request_account_routing_bump()
 
     def is_unavailable(self, account_id: str) -> bool:
@@ -136,8 +155,7 @@ class RoutingAvailabilityCache:
         snapshot = self._snapshot
         if snapshot is None:
             return False
-        status = snapshot.get(account_id)
-        return status is None or status in _ROUTING_UNAVAILABLE_STATUSES
+        return _routing_entry_unavailable(snapshot.get(account_id))
 
     async def refresh_from_db(self) -> None:
         """Rebuild the snapshot from committed account statuses.
@@ -161,21 +179,21 @@ class RoutingAvailabilityCache:
         factory = self._session_factory or SessionLocal
         session = factory()
         try:
-            result = await session.execute(select(Account.id, Account.status))
-            snapshot: dict[str, AccountStatus] = {account_id: status for account_id, status in result.all()}
+            result = await session.execute(select(Account.id, Account.status, Account.deactivation_reason))
+            snapshot = {account_id: (status, reason) for account_id, status, reason in result.all()}
         finally:
             await close_session(session)
         self._snapshot = snapshot
+        self._generation += 1
         self._local_marks = {
             account_id
             for account_id in self._local_marks
-            if account_id not in marks_before_refresh
-            or (status := snapshot.get(account_id)) is None
-            or status in _ROUTING_UNAVAILABLE_STATUSES
+            if account_id not in marks_before_refresh or _routing_entry_unavailable(snapshot.get(account_id))
         }
 
     def reset(self) -> None:
         """Drop all state (snapshot back to unseeded). Test isolation helper."""
+        self._generation += 1
         self._snapshot = None
         self._local_marks.clear()
 
@@ -198,8 +216,8 @@ def _request_account_routing_bump() -> None:
         poller.request_bump(NAMESPACE_ACCOUNT_ROUTING)
 
 
-def mark_account_routing_unavailable(account_id: str) -> None:
-    _routing_availability_cache.mark_unavailable(account_id)
+def mark_account_routing_unavailable(account_id: str, *, generation: int | None = None) -> None:
+    _routing_availability_cache.mark_unavailable(account_id, generation=generation)
 
 
 def clear_account_routing_unavailable(account_id: str) -> None:

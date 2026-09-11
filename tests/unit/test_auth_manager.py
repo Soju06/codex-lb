@@ -125,6 +125,23 @@ class _DummyRepo:
             "seat_type": seat_type,
             "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
         }
+        latest = self.accounts_by_id.get(account_id)
+        if latest is not None:
+            latest.access_token_encrypted = access_token_encrypted
+            latest.refresh_token_encrypted = refresh_token_encrypted
+            latest.id_token_encrypted = id_token_encrypted
+            latest.last_refresh = last_refresh
+            for field, value in (
+                ("plan_type", plan_type),
+                ("email", email),
+                ("chatgpt_account_id", chatgpt_account_id),
+                ("chatgpt_user_id", chatgpt_user_id),
+                ("workspace_id", workspace_id),
+                ("workspace_label", workspace_label),
+                ("seat_type", seat_type),
+            ):
+                if value is not None:
+                    setattr(latest, field, value)
         return True
 
     async def update_account_metadata(
@@ -1124,6 +1141,33 @@ async def test_ensure_fresh_does_not_reuse_failure_after_refresh_token_changes(m
 
     assert exc_info.value.message == "refresh failed for refresh-new"
     assert refresh_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_permanent_refresh_failure_preserves_proven_access_rejection():
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_auth_rejected",
+        status=AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason=auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+        access_token_encrypted=encryptor.encrypt("rejected-access"),
+        refresh_token_encrypted=encryptor.encrypt("rejected-refresh"),
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+    await manager._handle_permanent_refresh_failure(
+        account,
+        RefreshError("invalid_grant", "Rejected refresh", True),
+        auth_manager_module._refresh_token_material_fingerprint(encryptor, account.refresh_token_encrypted),
+    )
+    assert repo.status_payload is not None
+    assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED
+    assert (
+        repo.status_payload["deactivation_reason"]
+        == auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+    )
+    assert account.deactivation_reason == auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,7 @@ class BackgroundAccountsRepository:
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_access_token_encrypted: bytes | None = None,
     ) -> bool:
         async with get_background_session() as session:
             repo = AccountsRepository(session)
@@ -72,6 +73,7 @@ class BackgroundAccountsRepository:
                     status,
                     deactivation_reason,
                     reset_at,
+                    expected_access_token_encrypted=expected_access_token_encrypted,
                     **kwargs,
                 )
             return await repo.update_status_if_current(
@@ -80,6 +82,7 @@ class BackgroundAccountsRepository:
                 deactivation_reason,
                 reset_at,
                 blocked_at,
+                expected_access_token_encrypted=expected_access_token_encrypted,
                 **kwargs,
             )
 

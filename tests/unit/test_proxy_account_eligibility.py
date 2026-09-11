@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from app.core.balancer import AccountState, select_account
+from app.core.balancer.logic import PERMANENT_FAILURE_CODES, handle_permanent_failure
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 from app.modules.proxy._service.http_bridge.helpers import _http_bridge_session_account_active
@@ -35,6 +37,14 @@ def test_stored_access_token_expiry_is_derived_from_encrypted_jwt() -> None:
     )
 
     assert expires_at == 1_700_000_123.0
+
+
+def test_refresh_warning_cannot_clear_proven_access_rejection() -> None:
+    state = AccountState("rejected", AccountStatus.REAUTH_REQUIRED)
+    handle_permanent_failure(state, "account_auth_invalidated")
+    handle_permanent_failure(state, "refresh_token_invalidated")
+    assert state.deactivation_reason == PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+    assert select_account([state]).account is None
 
 
 def test_build_states_carries_reauth_access_token_expiry() -> None:
@@ -107,8 +117,30 @@ def test_http_bridge_rejects_expired_reauth_session() -> None:
         account=SimpleNamespace(
             id="expired-bridge-owner",
             status=AccountStatus.REAUTH_REQUIRED,
+            deactivation_reason=None,
         ),
         access_token_expires_at=0.0,
     )
 
     assert not _http_bridge_session_account_active(cast(Any, session))
+
+
+@pytest.mark.parametrize("expiry_known", [False, True])
+@pytest.mark.parametrize("rejected", [False, True])
+def test_reauth_access_rejection_controls_selection_and_bridge(expiry_known: bool, rejected: bool) -> None:
+    now = time.time()
+    expires_at = now + 3600 if expiry_known else None
+    reason = PERMANENT_FAILURE_CODES["account_auth_invalidated" if rejected else "invalid_grant"]
+    state = AccountState(
+        "reauth-owner",
+        AccountStatus.REAUTH_REQUIRED,
+        access_token_expires_at=expires_at,
+        deactivation_reason=reason,
+    )
+    result = select_account([state], now=now)
+    assert (result.account is None) == rejected
+    session = SimpleNamespace(
+        account=Account(id=state.account_id, status=state.status, deactivation_reason=reason),
+        access_token_expires_at=expires_at,
+    )
+    assert _http_bridge_session_account_active(cast(Any, session)) != rejected

@@ -34,7 +34,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _http_bridge_session_supports_service_tier
-from app.modules.proxy.account_cache import is_account_routing_unavailable
+from app.modules.proxy.account_cache import clear_account_routing_unavailable, is_account_routing_unavailable
 from app.modules.proxy.load_balancer import (
     ADDITIONAL_QUOTA_DATA_UNAVAILABLE,
     ADDITIONAL_QUOTA_EXHAUSTED,
@@ -95,6 +95,15 @@ class StubAccountsRepository(AccountsRepository):
     async def get_by_id(self, account_id: str) -> Account | None:
         return self._find_account(account_id)
 
+    async def persist_access_rejection(self, rejected: Account) -> Account | None:
+        current = self._find_account(rejected.id)
+        if current is None or (
+            current.access_token_encrypted != rejected.access_token_encrypted
+            or current.refresh_token_encrypted != rejected.refresh_token_encrypted
+        ):
+            return None
+        raise AssertionError("Noncredential rejection races require a real repository test")
+
     async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
         del refresh_existing
         return list(self._accounts)
@@ -142,6 +151,7 @@ class StubAccountsRepository(AccountsRepository):
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_access_token_encrypted: bytes | None = None,
     ) -> bool:
         account = self._find_account(account_id)
         if account is None:
@@ -154,6 +164,10 @@ class StubAccountsRepository(AccountsRepository):
             or (
                 expected_refresh_token_encrypted is not None
                 and account.refresh_token_encrypted != expected_refresh_token_encrypted
+            )
+            or (
+                expected_access_token_encrypted is not None
+                and account.access_token_encrypted != expected_access_token_encrypted
             )
         ):
             return False
@@ -4109,6 +4123,48 @@ async def test_mark_deactivation_failure_excludes_routing() -> None:
     assert downgraded is True
     assert account.status == AccountStatus.DEACTIVATED
     assert is_account_routing_unavailable(account.id) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_before_write", [False, True])
+@pytest.mark.parametrize("error_code", ["account_auth_invalidated", "account_suspended"])
+async def test_permanent_failure_does_not_remark_concurrently_repaired_account(
+    monkeypatch: pytest.MonkeyPatch, repair_before_write: bool, error_code: str
+) -> None:
+    db_account = _make_account("acc-repaired-during-failure")
+    stale_account = load_balancer_module._clone_account(db_account)
+    accounts_repo = StubAccountsRepository([db_account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    original_update = accounts_repo.update_status_if_current
+
+    def repair() -> None:
+        db_account.status = AccountStatus.ACTIVE
+        db_account.deactivation_reason = None
+        db_account.access_token_encrypted = TokenEncryptor().encrypt("repaired-access")
+        db_account.refresh_token_encrypted = TokenEncryptor().encrypt("repaired-refresh")
+        clear_account_routing_unavailable(db_account.id)
+
+    async def update_with_repair(*args, **kwargs):
+        if repair_before_write:
+            repair()
+        updated = await original_update(*args, **kwargs)
+        if not repair_before_write:
+            repair()
+        return updated
+
+    monkeypatch.setattr(accounts_repo, "update_status_if_current", update_with_repair)
+
+    downgraded = await balancer.mark_permanent_failure(stale_account, error_code)
+
+    assert downgraded is not repair_before_write
+    assert db_account.status == AccountStatus.ACTIVE
+    assert db_account.deactivation_reason is None
+    assert not is_account_routing_unavailable(db_account.id)
+    selected = await balancer.select_account()
+    assert selected.account is not None
+    assert selected.account.id == db_account.id
 
 
 def _authoritative_snapshot(

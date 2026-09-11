@@ -18841,6 +18841,119 @@ async def test_stream_with_retry_cancel_safe_health_flush_is_drained_at_shutdown
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", ["success", "failure", "missing", "cancel"])
+async def test_stream_auth_recovery_settles_before_health_and_releases_lease(monkeypatch, replacement):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_auth_settle_a")
+    account_b = _make_account("acc_auth_settle_b")
+    rejected_credentials = (account_a.access_token_encrypted, account_a.refresh_token_encrypted)
+    lease = AccountLease("lease-auth-a", account_a.id, "stream", time.monotonic())
+    order = []
+    api_key = _make_api_key_data("key_auth_settle")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_auth_settle",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    replacement_started = asyncio.Event()
+    block_replacement = asyncio.Event()
+
+    async def settle(_key, _reservation, settlement, *_args, **kwargs):
+        assert kwargs.get("wait_for_settlement") is True
+        settlement.usage_settlement_transferred = True
+        order.append("settle")
+        return True
+
+    async def health(account, error, code, **kwargs):
+        assert "settle" in order
+        if code == "account_auth_invalidated":
+            assert (account.access_token_encrypted, account.refresh_token_encrypted) == rejected_credentials
+        order.append(code)
+
+    async def release(released):
+        assert released is lease
+        order.append("release")
+
+    async def select(_deadline, **kwargs):
+        if account_a.id not in kwargs["exclude_account_ids"]:
+            return AccountSelection(account=account_a, error_message=None, lease=lease)
+        assert order == ["release"]
+        assert kwargs["preferred_account_id"] is None
+        if replacement == "missing":
+            return AccountSelection(account=None, error_code="no_accounts", error_message="No accounts")
+        return AccountSelection(account=account_b, error_message=None)
+
+    async def refresh(account, *, force=False, **kwargs):
+        if force:
+            account.access_token_encrypted = b"concurrent-access-repair"
+            account.refresh_token_encrypted = b"concurrent-refresh-repair"
+            raise proxy_service.RefreshError("invalid_grant", "Rejected refresh", True)
+        return account
+
+    async def stream(account, *_args, **kwargs):
+        if account.id == account_a.id:
+            raise proxy_service.ProxyResponseError(
+                401, {"error": {"code": "token_expired", "message": "Expired token"}}
+            )
+        replacement_started.set()
+        if replacement == "cancel":
+            await block_replacement.wait()
+        if replacement == "failure":
+            raise proxy_service.ProxyResponseError(
+                400, {"error": {"code": "context_length_exceeded", "message": "Too long"}}
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_auth_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_handle_stream_error", health)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", refresh)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select)
+    monkeypatch.setattr(service, "_stream_once", stream)
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    async def consume():
+        return [
+            chunk
+            async for chunk in service._stream_with_retry(
+                payload,
+                {},
+                codex_session_affinity=False,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=api_key,
+                api_key_reservation=reservation,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
+
+    if replacement == "cancel":
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(replacement_started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await service.drain_persistence_tasks(timeout_seconds=1)
+    else:
+        chunks = await consume()
+        terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+        if replacement == "success":
+            assert terminal["type"] == "response.completed"
+        else:
+            assert terminal["response"]["error"]["code"] == (
+                "token_expired" if replacement == "missing" else "context_length_exceeded"
+            )
+    assert order == ["release", "settle", "account_auth_invalidated"] + (
+        ["context_length_exceeded"] if replacement == "failure" else []
+    )
+
+
+@pytest.mark.asyncio
 async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_account_health(
     monkeypatch,
 ):
@@ -56044,8 +56157,8 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_retries_same
     assert "phase=post_refresh retry=1/3 delay=1.00s" in caplog.text
     assert scheduler.sleeps == [1.0]
     assert service._load_balancer._runtime[account.id].burst_backoff_until is not None
-    # Only the 401 wrote health; the burst retry engaged the cooldown alone.
-    assert [call.kwargs.get("http_status") for call in handle_stream_error.await_args_list] == [401]
+    # Successful refresh needs no auth penalty; the burst retry only engaged cooldown.
+    handle_stream_error.assert_not_awaited()
     cast(AsyncMock, service._load_balancer.record_success).assert_awaited_once_with(account)
 
 

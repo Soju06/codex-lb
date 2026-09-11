@@ -210,6 +210,62 @@ def project_responses_input_for_account_neutral_fresh_replay(
     )
 
 
+def project_responses_input_for_auth_recovery(input_items: list[JsonValue]) -> list[JsonValue] | None:
+    """Project known bookkeeping after a pre-visible authentication rejection.
+
+    Unlike durable-prefix recovery, this cannot omit hosted-tool results or
+    unknown reasoning fields. Every omitted reasoning block needs a retained
+    answer in the same turn. The caller must validate the entire replacement.
+    """
+    reasoning_needs_answer = False
+    pending_tool_count = 0
+    for item in input_items:
+        if not isinstance(item, dict):
+            return None
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            if not set(item) <= {"type", "id", "encrypted_content", "summary", "status"}:
+                return None
+            if item.get("status") not in (None, "completed"):
+                return None
+            if any(item.get(key) is not None and not isinstance(item[key], str) for key in ("id", "encrypted_content")):
+                return None
+            summary = item.get("summary", [])
+            if not isinstance(summary, list) or any(
+                not isinstance(part, dict)
+                or set(part) != {"type", "text"}
+                or part.get("type") != "summary_text"
+                or not isinstance(part.get("text"), str)
+                for part in summary
+            ):
+                return None
+            reasoning_needs_answer = True
+        elif item_type is not None and not isinstance(item_type, str):
+            return None
+        elif not _input_item_has_only_known_fields(item, item_type):
+            return None
+        elif item_type in _TOOL_CALL_TYPES:
+            pending_tool_count += 1
+        elif item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE:
+            pending_tool_count -= 1
+        elif item_type in (None, "message") and item.get("role") == "assistant":
+            if reasoning_needs_answer:
+                if pending_tool_count or not _is_retained_response_message(item):
+                    return None
+                if item.get("phase") != "commentary":
+                    reasoning_needs_answer = False
+        elif reasoning_needs_answer:
+            return None
+    if reasoning_needs_answer:
+        return None
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=len(input_items))
+    # The count guards answer boundaries; the canonical matcher also proves
+    # call identity, type, uniqueness, and settlement across the entire input.
+    if projection is None or not responses_input_items_are_self_contained_fresh_replay(projection.input_items):
+        return None
+    return projection.input_items
+
+
 def strip_input_item_ids(input_items: list[JsonValue]) -> list[JsonValue]:
     """Copy ``input_items`` with the top-level ``id`` of every object item removed; nothing else changes.
 

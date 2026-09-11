@@ -12,14 +12,16 @@ from sqlalchemy import select, update
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
+from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.time import utcnow
-from app.db.models import ApiKeyLimit, RequestLog
+from app.db.models import Account, AccountStatus, ApiKeyLimit, RequestLog
 from app.db.session import SessionLocal
 from app.modules.usage.repository import UsageRepository
 
@@ -127,6 +129,49 @@ def _install_successful_warmup_stub(monkeypatch: pytest.MonkeyPatch, captured_mo
 
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
     monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["normal", "strict", "force"])
+async def test_warmup_excludes_unavailable_reauth_credentials(async_client, monkeypatch, mode):
+    await _enable_api_key_auth(async_client)
+    encryptor = TokenEncryptor()
+    account_ids: dict[str, str] = {}
+    for name, reason, expires_at in (
+        ("rejected", "account_auth_invalidated", 4102444800),
+        ("expired", "refresh_token_expired", 1),
+        ("warning", "refresh_token_expired", 4102444800),
+    ):
+        account_id = await _import_account(async_client, f"warmup-{name}", f"{name}@example.com")
+        account_ids[name] = account_id
+        await _add_primary_usage(account_id, used_percent=0.0, window_minutes=300)
+        async with SessionLocal() as session:
+            await session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(
+                    status=AccountStatus.REAUTH_REQUIRED,
+                    deactivation_reason=PERMANENT_FAILURE_CODES[reason],
+                    access_token_encrypted=encryptor.encrypt(_encode_jwt({"exp": expires_at})),
+                )
+            )
+            await session.commit()
+
+    _, key = await _create_api_key(async_client, name="reauth-warmup")
+    captured_models: list[str] = []
+    _install_successful_warmup_stub(monkeypatch, captured_models)
+    response = await async_client.post("/v1/warmup", headers={"Authorization": f"Bearer {key}"}, json={"mode": mode})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_accounts"] == 1
+    assert [entry["account_id"] for entry in payload["submitted"]] == [account_ids["warning"]]
+    assert payload["skipped"] == []
+    assert payload["failed"] == []
+    assert len(captured_models) == 1
+    async with SessionLocal() as session:
+        logged_account_ids = (await session.execute(select(RequestLog.account_id))).scalars().all()
+    assert logged_account_ids == [account_ids["warning"]]
 
 
 @pytest.mark.asyncio

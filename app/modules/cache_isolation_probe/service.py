@@ -32,6 +32,7 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from app.core.clients.proxy import override_stream_timeouts
 from app.core.conversation_archive import suppress_conversation_archive
@@ -49,7 +50,7 @@ from app.modules.cache_isolation_probe.prefix import (
     estimate_prefix_tokens,
     new_probe_nonce,
 )
-from app.modules.cache_isolation_probe.sender import CacheProbeSender, ProbeSendResult
+from app.modules.cache_isolation_probe.sender import CacheProbeSender, CacheProbeSenderPort, ProbeSendResult
 
 logger = logging.getLogger(__name__)
 
@@ -83,16 +84,22 @@ _PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
 _PROBE_IDLE_TIMEOUT_SECONDS = 60.0
 _PROBE_TOTAL_TIMEOUT_SECONDS = 180.0
 
-SEED_ROLE = "seed"
-OTHER_ROLE = "other"
+#: Wire vocabulary, declared once here so the schemas and the dataclasses
+#: cannot drift apart.
+ProbeCallRole = Literal["seed", "other"]
+ProbeCallStatus = Literal["hit", "miss", "error"]
+ProbeVerdict = Literal["cross_account_sharing", "no_cross_account_hit", "inconclusive"]
 
-CALL_STATUS_HIT = "hit"
-CALL_STATUS_MISS = "miss"
-CALL_STATUS_ERROR = "error"
+SEED_ROLE: ProbeCallRole = "seed"
+OTHER_ROLE: ProbeCallRole = "other"
 
-VERDICT_CROSS_ACCOUNT_SHARING = "cross_account_sharing"
-VERDICT_NO_CROSS_ACCOUNT_HIT = "no_cross_account_hit"
-VERDICT_INCONCLUSIVE = "inconclusive"
+CALL_STATUS_HIT: ProbeCallStatus = "hit"
+CALL_STATUS_MISS: ProbeCallStatus = "miss"
+CALL_STATUS_ERROR: ProbeCallStatus = "error"
+
+VERDICT_CROSS_ACCOUNT_SHARING: ProbeVerdict = "cross_account_sharing"
+VERDICT_NO_CROSS_ACCOUNT_HIT: ProbeVerdict = "no_cross_account_hit"
+VERDICT_INCONCLUSIVE: ProbeVerdict = "inconclusive"
 
 #: One run at a time on this replica. Replica-local on purpose: the endpoint's
 #: rate limiter is database-backed on a fixed key, so the *spend* is already
@@ -157,8 +164,8 @@ class ProbeCall:
     sequence: int
     account_id: str
     account_label: str
-    role: str
-    status: str
+    role: ProbeCallRole
+    status: ProbeCallStatus
     cache_hit: bool
     input_tokens: int | None
     cached_tokens: int | None
@@ -180,7 +187,7 @@ class ProbeResult:
     other_hit_count: int
     other_call_count: int
     cross_account_hit: bool
-    verdict: str
+    verdict: ProbeVerdict
 
 
 def default_probe_model() -> str | None:
@@ -266,7 +273,7 @@ def assess_pool_pressure(accounts: Sequence[Account]) -> PoolPressure:
     return _verdict(None, None)
 
 
-def _classify(result: ProbeSendResult) -> tuple[str, bool]:
+def _classify(result: ProbeSendResult) -> tuple[ProbeCallStatus, bool]:
     if not result.ok:
         return CALL_STATUS_ERROR, False
     cached = result.cached_tokens or 0
@@ -275,7 +282,7 @@ def _classify(result: ProbeSendResult) -> tuple[str, bool]:
     return (CALL_STATUS_HIT if hit else CALL_STATUS_MISS), hit
 
 
-def _verdict_for(*, cross_account_hit: bool, seed_hit_count: int, other_call_count: int) -> str:
+def _verdict_for(*, cross_account_hit: bool, seed_hit_count: int, other_call_count: int) -> ProbeVerdict:
     if cross_account_hit:
         return VERDICT_CROSS_ACCOUNT_SHARING
     if seed_hit_count == 0 or other_call_count == 0:
@@ -289,7 +296,7 @@ def _verdict_for(*, cross_account_hit: bool, seed_hit_count: int, other_call_cou
 class CacheIsolationProbeService:
     """Plans and runs the cross-account prompt cache isolation probe."""
 
-    def __init__(self, sender: CacheProbeSender | None = None) -> None:
+    def __init__(self, sender: CacheProbeSenderPort | None = None) -> None:
         self._sender = sender or CacheProbeSender(_accounts_repo)
 
     async def _list_accounts(self) -> list[Account]:
@@ -451,7 +458,7 @@ class CacheIsolationProbeService:
         self,
         sequence: int,
         account: Account,
-        role: str,
+        role: ProbeCallRole,
         *,
         model: str,
         prefix: str,

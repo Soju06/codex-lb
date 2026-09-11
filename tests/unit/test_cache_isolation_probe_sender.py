@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -17,6 +18,7 @@ from app.core.clients.codex import CodexTransportError
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.cache_isolation_probe import sender as sender_module
 from app.modules.cache_isolation_probe.sender import CacheProbeSender
 
@@ -56,8 +58,16 @@ def _completed_event(*, input_tokens: int, cached_tokens: int) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+@asynccontextmanager
+async def _unused_accounts_repo() -> AsyncIterator[AccountsRepository]:
+    """Every test below patches the two methods that would open a repository."""
+
+    raise AssertionError("the probe sender must not open an accounts repository here")
+    yield  # pragma: no cover - unreachable, keeps this an async generator
+
+
 def _build(monkeypatch, stream_factory) -> CacheProbeSender:
-    probe_sender = CacheProbeSender(lambda: None)  # type: ignore[arg-type]
+    probe_sender = CacheProbeSender(_unused_accounts_repo)
     account = _account()
 
     async def _refreshed(_account_id: str) -> Account:

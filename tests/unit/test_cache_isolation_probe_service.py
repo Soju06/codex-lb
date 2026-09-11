@@ -87,7 +87,7 @@ def _error() -> ProbeSendResult:
 
 
 def _build(monkeypatch, accounts: list[Account], sender: _StubSender) -> CacheIsolationProbeService:
-    service = CacheIsolationProbeService(sender=sender)  # type: ignore[arg-type]
+    service = CacheIsolationProbeService(sender=sender)
 
     async def _list_accounts() -> list[Account]:
         return accounts

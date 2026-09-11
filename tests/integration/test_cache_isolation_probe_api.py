@@ -8,6 +8,8 @@ nothing here talks to an upstream.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 
 from app.core.crypto import TokenEncryptor
@@ -62,9 +64,9 @@ class _StubSender:
 
 
 @pytest.fixture
-def stub_sender(app_instance, monkeypatch) -> _StubSender:
+def stub_sender(app_instance, monkeypatch) -> Iterator[_StubSender]:
     sender = _StubSender()
-    service = CacheIsolationProbeService(sender=sender)  # type: ignore[arg-type]
+    service = CacheIsolationProbeService(sender=sender)
     monkeypatch.setattr(probe_service, "default_probe_model", lambda: "gpt-probe")
     app_instance.dependency_overrides[probe_api.get_cache_isolation_probe_service] = lambda: service
     yield sender

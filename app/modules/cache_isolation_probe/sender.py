@@ -16,9 +16,10 @@ from __future__ import annotations
 import contextlib
 import time
 import uuid
+from collections.abc import AsyncGenerator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.clients.codex import CodexTransportError
@@ -41,6 +42,12 @@ CACHE_PROBE_MAX_OUTPUT_TOKENS = 16
 _TERMINAL_ERROR_EVENTS = frozenset({"response.failed", "response.incomplete", "error"})
 
 AccountsRepoFactory = Callable[[], AbstractAsyncContextManager[AccountsRepository]]
+
+
+class CacheProbeSenderPort(Protocol):
+    """What the orchestrator needs from a sender, so a test can substitute one."""
+
+    async def send(self, account_id: str, *, model: str, prefix: str) -> ProbeSendResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +149,10 @@ class CacheProbeSender:
                 allow_direct_egress=route is None,
                 codex_lb_account_id=account.id,
             )
-            async with contextlib.aclosing(stream):
+            # ``stream_responses`` is an async generator function; its
+            # annotation widens to ``AsyncIterator``, which does not
+            # advertise ``aclose``.
+            async with contextlib.aclosing(cast("AsyncGenerator[str, None]", stream)):
                 async for event_block in stream:
                     event = parse_sse_event(event_block)
                     if event is None:

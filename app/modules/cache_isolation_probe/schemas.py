@@ -8,7 +8,6 @@ stay inside the service.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 
 from pydantic import Field
 
@@ -17,12 +16,11 @@ from app.modules.cache_isolation_probe.service import (
     DEFAULT_SEED_REPETITIONS,
     MAX_OTHER_ACCOUNTS,
     MAX_SEED_REPETITIONS,
+    ProbeCallRole,
+    ProbeCallStatus,
+    ProbeVerdict,
 )
 from app.modules.shared.schemas import DashboardModel
-
-ProbeCallRole = Literal["seed", "other"]
-ProbeCallStatus = Literal["hit", "miss", "error"]
-ProbeVerdict = Literal["cross_account_sharing", "no_cross_account_hit", "inconclusive"]
 
 
 class CacheProbeAccountResponse(DashboardModel):

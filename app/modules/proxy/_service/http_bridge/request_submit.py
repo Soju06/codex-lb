@@ -46,7 +46,7 @@ from app.core.clients.proxy_websocket import (
     is_account_neutral_websocket_error_code,
 )
 from app.core.clock import REAL_CLOCK, Clock, clock_for, scheduler_for
-from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.errors import openai_error
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
@@ -62,7 +62,7 @@ from app.core.utils.request_id import (
     set_request_id,
 )
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import StickySessionKind
+from app.db.models import DashboardSettings, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
@@ -306,30 +306,6 @@ def _http_bridge_cooldown_suppression_is_replay_safe(request_state: _WebSocketRe
     )
 
 
-def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketRequestState) -> bool:
-    """Return whether an ambiguous send failure may ask the client to replay."""
-    settings = _service_get_settings()
-    return (
-        request_state.propagate_http_errors
-        and getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
-        == "client_full_history_once"
-        and request_state.previous_response_id is not None
-        and request_state.response_id is None
-        and request_state.response_event_count == 0
-    )
-
-
-def _http_bridge_operation_fence_for_hard_continuity_enabled(request_state: _WebSocketRequestState) -> bool:
-    """Return whether a hard turn-state request may use the durable replay fence."""
-    if not request_state.hard_continuity_anchor:
-        return False
-    return getattr(
-        _service_get_settings(),
-        "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
-        "fail_closed",
-    ) in {"server_anchored_replay_once", "server_indefinite_recovery"}
-
-
 def _http_bridge_operation_fingerprint(
     *,
     session_id: str,
@@ -338,13 +314,6 @@ def _http_bridge_operation_fingerprint(
     text_data: str,
 ) -> str:
     fingerprint_text = _text_without_account_installation_id(text_data)
-    if request_state.previous_response_id is None and _http_bridge_operation_fence_for_hard_continuity_enabled(
-        request_state
-    ):
-        # Hard turn-state requests do not carry previous_response_id. Scope
-        # their operation identity to the durable session so identical prompts
-        # in two conversations cannot collide in the global fingerprint fence.
-        fingerprint_text = f"session:{session_id}\n{fingerprint_text}"
     return durable_bridge_operation_fingerprint(
         api_key_scope=api_key_scope,
         request_text=fingerprint_text,
@@ -381,15 +350,6 @@ def _http_bridge_terminal_hard_turn_response_id(
         return None
     response_id = getattr(operation, "response_id", None)
     return response_id if isinstance(response_id, str) and response_id else None
-
-
-def _http_bridge_hard_continuity_full_history_recovery_error() -> OpenAIErrorEnvelope:
-    """Ask Codex to discard a hard turn-state anchor and resend full history."""
-    return openai_error(
-        "previous_response_not_found",
-        "Continuity state was not found; retry with full history.",
-        error_type="invalid_request_error",
-    )
 
 
 async def _rollback_http_bridge_recovery_turn_state_registration(
@@ -1033,51 +993,6 @@ class _HTTPBridgeRequestSubmitMixin:
             ):
                 await self._retire_http_bridge_after_drain_if_ready(session)
 
-    async def _http_bridge_operation_fenced_continuity_replay_allowed(
-        self: Any,
-        session: "_HTTPBridgeSession",
-        *,
-        request_state: _WebSocketRequestState,
-        text_data: str,
-    ) -> bool:
-        """Allow a cooldown bypass only for an already-fenced hard turn."""
-        if (
-            not _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
-            or request_state.previous_response_id is not None
-            or session.durable_session_id is None
-            or session.durable_owner_epoch is None
-        ):
-            return False
-        get_operation_by_fingerprint = getattr(self._durable_bridge, "get_operation_by_fingerprint", None)
-        if not callable(get_operation_by_fingerprint):
-            return False
-        api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
-        request_fingerprint = _http_bridge_operation_fingerprint(
-            session_id=session.durable_session_id,
-            api_key_scope=api_key_scope,
-            request_state=request_state,
-            text_data=text_data,
-        )
-        try:
-            operation = await _call_with_supported_optional_kwargs(
-                get_operation_by_fingerprint,
-                optional_kwargs={"api_key_scope": api_key_scope},
-                request_fingerprint=request_fingerprint,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to inspect hard-continuity operation fence before retry request_id=%s",
-                request_state.request_id,
-                exc_info=True,
-            )
-            return False
-        if operation is None or operation.session_id != session.durable_session_id:
-            return False
-        operation_state = getattr(operation.state, "value", operation.state)
-        return operation_state == "unknown" or (
-            operation_state in {"completed", "incomplete"} and bool(getattr(operation, "event_spool_complete", False))
-        )
-
     async def _submit_http_bridge_request_with_handoff(
         self: Any,
         session: "_HTTPBridgeSession",
@@ -1100,17 +1015,6 @@ class _HTTPBridgeRequestSubmitMixin:
             session.admission_waiter_count += 1
         request_state.admission_waiter_preregistered = True
         recovery_attempt_consumed = False
-        allow_operation_fenced_continuity_replay = False
-        if _http_bridge_operation_fence_for_hard_continuity_enabled(request_state):
-            retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
-            if retry_cooldown_seconds > 0:
-                allow_operation_fenced_continuity_replay = (
-                    await self._http_bridge_operation_fenced_continuity_replay_allowed(
-                        session,
-                        request_state=request_state,
-                        text_data=text_data,
-                    )
-                )
         # Eventless upstream timeouts retire the current socket.  A client
         # reconnect can otherwise create a fresh socket for the same hard key
         # and submit the identical request repeatedly while the retry circuit
@@ -1130,7 +1034,6 @@ class _HTTPBridgeRequestSubmitMixin:
         retry_allowed = await self._http_bridge_precreated_retry_allowed(
             session,
             allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay,
-            allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
             claimed_lease_out=admission_claimed_leases,
         )
         # The exact lease this admission claimed, handed out by the claim
@@ -1327,13 +1230,11 @@ class _HTTPBridgeRequestSubmitMixin:
         # Apply and size-check it before recording the operation so a local
         # payload-too-large rejection cannot leave a submitted retry fence.
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
-        operation_ledger_for_hard_continuity = _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
         record_operation = getattr(self._durable_bridge, "record_operation", None)
         if (
             callable(record_operation)
             and (
                 request_state.previous_response_id is not None
-                or operation_ledger_for_hard_continuity
                 or request_state.operation_rebind_required
                 or recovery_attempt_consumed
             )
@@ -1554,17 +1455,9 @@ class _HTTPBridgeRequestSubmitMixin:
                     ),
                 )
             if not operation.created and operation.state == "abandoned":
-                hard_continuity_recovery = (
-                    request_state.previous_response_id is None
-                    and _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
-                )
                 _record_continuity_fail_closed(
                     surface="http_bridge",
-                    reason=(
-                        "abandoned_hard_continuity_full_history_recovery"
-                        if hard_continuity_recovery
-                        else "abandoned_operation_full_history_recovery"
-                    ),
+                    reason="abandoned_operation_full_history_recovery",
                     previous_response_id=request_state.previous_response_id,
                     session_id=request_state.session_id,
                     upstream_error_code="previous_response_not_found",
@@ -1582,11 +1475,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
                 raise ProxyResponseError(
                     400,
-                    (
-                        _http_bridge_hard_continuity_full_history_recovery_error()
-                        if hard_continuity_recovery
-                        else _http_bridge_client_full_history_recovery_error()
-                    ),
+                    _http_bridge_client_full_history_recovery_error(),
                 )
             if not operation.created and not getattr(operation, "rebound", False):
                 if operation.state in {"completed", "incomplete"}:
@@ -1614,95 +1503,28 @@ class _HTTPBridgeRequestSubmitMixin:
                             "The recovery checkpoint was already consumed; retry the request.",
                         ),
                     )
-                recovery_mode = getattr(
-                    _service_get_settings(),
-                    "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
-                    "fail_closed",
+                # A prior dispatch with the same parent and body may have been
+                # accepted by upstream. Without upstream idempotency/status
+                # proof, never submit it a second time.
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason="operation_already_recorded_no_status_proof",
+                    previous_response_id=request_state.previous_response_id,
+                    session_id=request_state.session_id,
+                    upstream_error_code="upstream_operation_status_unknown",
                 )
-                indefinite_recovery = recovery_mode == "server_indefinite_recovery"
-                one_shot_recovery = recovery_mode == "server_anchored_replay_once" and request_state.replay_count == 0
-                async with session.pending_lock:
-                    same_operation_pending = any(
-                        pending_request is not request_state
-                        and getattr(pending_request, "operation_id", None) == operation.operation_id
-                        for pending_request in session.pending_requests
-                    )
-                if (
-                    (indefinite_recovery or one_shot_recovery)
-                    and operation.state == "unknown"
-                    and not same_operation_pending
-                ):
-                    # A previous owner may have persisted a partial sequence
-                    # before its socket died. Claim UNKNOWN atomically with
-                    # the transcript reset so concurrent reconnects cannot
-                    # both pass admission and submit the same operation.
-                    claim_unknown_operation = getattr(
-                        self._durable_bridge,
-                        "claim_unknown_operation_for_recovery",
-                        None,
-                    )
-                    if not callable(claim_unknown_operation):
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                "bridge_continuity_persistence_failed",
-                                "HTTP response recovery could not claim the previous operation; retry the request.",
-                            ),
-                        )
-                    claimed = await _call_with_supported_optional_kwargs(
-                        claim_unknown_operation,
-                        optional_kwargs={"max_recovery_dispatches": 1} if one_shot_recovery else {},
-                        operation_id=operation.operation_id,
-                        session_id=session.durable_session_id,
-                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                        owner_epoch=session.durable_owner_epoch,
-                    )
-                    if not claimed:
-                        session.closed = True
-                        session.upstream_control.reconnect_requested = True
-                        session.upstream_control.retire_after_drain = True
-                        raise ProxyResponseError(
-                            503,
-                            openai_error(
-                                "bridge_continuity_persistence_failed",
-                                "HTTP response recovery ownership changed; retry the request.",
-                            ),
-                        )
-                    request_state.operation_recovery_claimed = True
-                    request_state.operation_attempt_generation = getattr(operation, "recovery_dispatch_count", 0) + 1
-                    # The operation remains fenced to one durable identity.
-                    # One-shot mode consumes its existing replay-count budget;
-                    # indefinite mode may make further serialized attempts
-                    # after cooldown because upstream has no idempotency or
-                    # status endpoint.
-                    request_state.operation_id = operation.operation_id
-                    request_state.operation_fingerprint = operation_fingerprint
-                    request_state.operation_registered = True
-                else:
-                    # A prior dispatch with the same parent and body may have
-                    # been accepted by upstream, or another request may still
-                    # be using the same operation in this session. Without
-                    # upstream idempotency/status proof, never submit it a
-                    # second time.
-                    _record_continuity_fail_closed(
-                        surface="http_bridge",
-                        reason="operation_already_recorded_no_status_proof",
-                        previous_response_id=request_state.previous_response_id,
-                        session_id=request_state.session_id,
-                        upstream_error_code="upstream_operation_status_unknown",
-                    )
-                    retry_after_seconds = max(
-                        1,
-                        math.ceil(await self._http_bridge_precreated_retry_cooldown_seconds(session)),
-                    )
-                    raise ProxyResponseError(
-                        503,
-                        openai_error(
-                            "upstream_operation_status_unknown",
-                            "The previous response operation may still be running; retry after the cooldown.",
-                        ),
-                        retry_after_seconds=retry_after_seconds,
-                    )
+                retry_after_seconds = max(
+                    1,
+                    math.ceil(await self._http_bridge_precreated_retry_cooldown_seconds(session)),
+                )
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        "upstream_operation_status_unknown",
+                        "The previous response operation may still be running; retry after the cooldown.",
+                    ),
+                    retry_after_seconds=retry_after_seconds,
+                )
             request_state.operation_id = operation.operation_id
             request_state.operation_fingerprint = operation_fingerprint
             request_state.operation_parent_response_id = operation_parent_response_id
@@ -1716,17 +1538,12 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.operation_rebound_from_parent_response_id = getattr(
                 operation, "rebound_from_parent_response_id", None
             )
-            request_state.operation_persisted_response_id = (
-                None if request_state.operation_recovery_claimed else getattr(operation, "response_id", None)
-            )
-            if not request_state.operation_recovery_claimed:
-                request_state.operation_attempt_generation = getattr(operation, "recovery_dispatch_count", 0)
+            request_state.operation_persisted_response_id = getattr(operation, "response_id", None)
+            request_state.operation_attempt_generation = getattr(operation, "recovery_dispatch_count", 0)
 
         async def _cleanup_unsubmitted_recovery_claim() -> None:
             if (
-                not request_state.operation_recovery_claimed
-                and not request_state.operation_created
-                and not request_state.operation_rebound
+                not request_state.operation_created and not request_state.operation_rebound
             ) or request_state.operation_dispatched:
                 return
             await self._cleanup_http_bridge_submit_interruption(
@@ -2524,11 +2341,6 @@ class _HTTPBridgeRequestSubmitMixin:
             # previous_response_not_found causes the client to drop
             # previous_response_id and resend the full conversation
             # history, inflating per-turn context by ~20x.
-            if _http_bridge_client_full_history_recovery_enabled(request_state):
-                raise ProxyResponseError(
-                    400,
-                    _http_bridge_client_full_history_recovery_error(),
-                ) from exc
             raise ProxyResponseError(
                 502,
                 openai_error(error_code, failure_error_message),
@@ -2563,12 +2375,46 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.prewarm_status = "skipped"
             _record_http_bridge_prewarm_outcome(outcome="skipped")
             return
+        # Build the warm-up outside the lock. It is a pure function of
+        # ``text_data``, so the locked body gets the same answer, and this keeps
+        # a parse of a possibly large payload off the critical section.
+        warmup_text = _build_http_bridge_prewarm_text(text_data)
+        # The two settings readers the locked body reaches -- the admission
+        # gate's account caps/tunables and the reconnect the timeout path takes
+        # -- get this one row instead of reading it themselves, so neither
+        # awaits the settings cache while ``prewarm_lock`` is held. A refresh
+        # behind that read runs a DB query under a process-global lock; one
+        # stalled query would then hold this session's prewarm lock and stall
+        # every later turn on it (issues #1971 and #1972). A payload with no
+        # warm-up to send reaches neither reader, so it resolves nothing and
+        # reads nothing, exactly as before the snapshot existed.
+        dashboard_settings: DashboardSettings | None = None
+        if warmup_text is not None:
+            settings_cache = _service_get_settings_cache()
+            try:
+                dashboard_settings = await settings_cache.get()
+            except Exception:  # noqa: BLE001 - a prewarm must never fail a servable request
+                # The same fallback the request entry point's dashboard-overrides
+                # middleware applies to this row: prefer the last one this replica
+                # loaded. With no row at all the prewarm is skipped rather than run
+                # without a snapshot, which would put the read back under the lock.
+                dashboard_settings = settings_cache.cached_row()
+                logger.warning(
+                    "HTTP bridge prewarm settings snapshot unavailable; %s",
+                    "using the last loaded dashboard values"
+                    if dashboard_settings is not None
+                    else "skipping the prewarm",
+                    exc_info=True,
+                )
+            if dashboard_settings is None:
+                request_state.prewarm_status = "skipped"
+                _record_http_bridge_prewarm_outcome(outcome="skipped")
+                return
         async with prewarm_lock:
             if session.prewarmed:
                 request_state.prewarm_status = "skipped"
                 _record_http_bridge_prewarm_outcome(outcome="skipped")
                 return
-            warmup_text = _build_http_bridge_prewarm_text(text_data)
             session.prewarmed = True
             if warmup_text is None:
                 request_state.prewarm_status = "skipped"
@@ -2605,6 +2451,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     account_id=session.account.id,
                     surface="http_bridge_prewarm",
                     bridge_session=session,
+                    dashboard_settings=dashboard_settings,
                 )
                 gate_acquired = True
                 async with session.lifecycle_lock:
@@ -2677,6 +2524,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                     kind=session.key.affinity_kind,
                                     key=session.key.affinity_key,
                                 ),
+                                dashboard_settings=dashboard_settings,
                             )
                         except Exception:
                             session.closed = True
@@ -2807,37 +2655,6 @@ class _HTTPBridgeRequestSubmitMixin:
                         exc_info=True,
                     )
         if (
-            request_state.operation_recovery_claimed
-            and request_state.operation_registered
-            and request_state.operation_id is not None
-            and not request_state.operation_dispatched
-            and session.durable_session_id is not None
-            and session.durable_owner_epoch is not None
-        ):
-            mark_operation_unknown = getattr(self._durable_bridge, "mark_operation_unknown", None)
-            restored = False
-            if callable(mark_operation_unknown):
-                try:
-                    restored = await _call_with_supported_optional_kwargs(
-                        mark_operation_unknown,
-                        optional_kwargs={"restore_recovery_dispatch_claim": True},
-                        operation_id=request_state.operation_id,
-                        session_id=session.durable_session_id,
-                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                        owner_epoch=session.durable_owner_epoch,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to restore pre-dispatch HTTP bridge recovery operation UNKNOWN operation_id=%s",
-                        request_state.operation_id,
-                        exc_info=True,
-                    )
-            if restored:
-                request_state.operation_recovery_claimed = False
-                request_state.operation_id = None
-                request_state.operation_fingerprint = None
-                request_state.operation_parent_response_id = None
-        elif (
             (request_state.operation_created or request_state.operation_rebound)
             and request_state.operation_registered
             and request_state.operation_id is not None

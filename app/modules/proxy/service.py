@@ -1286,6 +1286,7 @@ class ProxyService(
         account_id: str | None = None,
         surface: str = "websocket",
         routing_tunables: RoutingTunables | None = None,
+        dashboard_settings: DashboardSettings | None = None,
     ) -> None:
         scheduler = self._scheduler
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
@@ -1296,9 +1297,16 @@ class ProxyService(
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = self._clock.monotonic()
         if account_id is not None:
-            # One cached snapshot for this lease operation; a caller that already
-            # resolved the tunables for the same turn (bridge submit) passes them.
-            settings = await get_settings_cache().get()
+            # One cached snapshot for this lease operation. A caller that
+            # already resolved the row for the same turn passes it in, and then
+            # this helper awaits nothing here at all -- which the prewarm path
+            # needs: it admits its warm-up while holding the session's
+            # ``prewarm_lock``, and a cache refresh behind this read runs a DB
+            # query under a process-global lock, so one stalled refresh would
+            # suspend that critical section (issues #1971/#1972 wedged every
+            # keyed submit on exactly this pattern). Tunables resolved by the
+            # caller (bridge submit) still override the snapshot's.
+            settings = dashboard_settings if dashboard_settings is not None else await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=account_id,
                 request_id=request_state.request_id,

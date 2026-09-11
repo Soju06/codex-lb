@@ -23,7 +23,7 @@ max_lines = 60
 # Single source of truth for dashboard nav width. If the nav refactor moves or
 # renames this array, the checker exits 2 until path/array here are repointed —
 # that coupling is intentional.
-path = "frontend/src/components/layout/app-header.tsx"
+path = "frontend/src/components/layout/nav-items.ts"
 array = "CORE_NAV_ITEMS"
 max_items = 5
 
@@ -51,7 +51,11 @@ max_items = 5
 # 130 -> 103 constantize-core-tunables turned 27 never-tuned core tunables
 # into fixed constants (#1340 precedent, slop-removal 0908 K1); 103 -> 96
 # K2 bridge: constantize-session-bridge-tunables fixed seven never-tuned
-# HTTP session bridge tunables.
+# HTTP session bridge tunables; 96 -> 95 drop-bridge-recovery-modes deleted
+# the ambiguous-continuation recovery mode selector (fail-closed is the only
+# behaviour now); 95 -> 96 dashboard_auth_proxy_groups_header (the reverse
+# proxy's group header must match that proxy's config, so it cannot be a
+# dashboard row, PR-2c-2).
 max = 96
 
 [root_files]

@@ -3,18 +3,29 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+import pyotp
 import pytest
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
+from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug
 from app.core.auth.dashboard_mode import DashboardAuthMode
+from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.middleware.dashboard_auth_proxy import add_dashboard_auth_proxy_middleware
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKeyLimit, DashboardSettings, LimitType, LimitWindow
+from app.db.models import (
+    Account,
+    AccountStatus,
+    ApiKeyLimit,
+    DashboardSettings,
+    DashboardUser,
+    LimitType,
+    LimitWindow,
+)
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -40,7 +51,39 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str) -> Accou
     )
 
 
-async def _set_migration_inconsistent_totp_only_mode() -> None:
+_LEGACY_SESSION_FIELDS = (
+    "authenticated",
+    "passwordRequired",
+    "totpRequiredOnLogin",
+    "totpConfigured",
+    "bootstrapRequired",
+    "bootstrapTokenConfigured",
+    "authMode",
+    "passwordManagementEnabled",
+    "passwordSessionActive",
+    "role",
+    "permissions",
+    "guestAccessEnabled",
+    "guestPasswordRequired",
+)
+
+
+def _legacy_session_view(payload: dict[str, object]) -> dict[str, object]:
+    """The session response as a previous-release client sees it (aliases only in ``permissions``)."""
+
+    view = {key: payload[key] for key in _LEGACY_SESSION_FIELDS}
+    permissions = payload["permissions"]
+    assert isinstance(permissions, list)
+    view["permissions"] = [entry for entry in permissions if entry in ("read", "write")]
+    return view
+
+
+async def _set_migration_inconsistent_totp_only_mode() -> DashboardUser:
+    """Legacy inconsistency: TOTP enforced while no account holds a password.
+
+    Returns the TOTP-only account so tests can mint a session for it.
+    """
+
     async with SessionLocal() as session:
         settings = await session.get(DashboardSettings, 1)
         if settings is None:
@@ -58,8 +101,28 @@ async def _set_migration_inconsistent_totp_only_mode() -> None:
         else:
             settings.password_hash = None
             settings.totp_required_on_login = True
+        user = DashboardUser(
+            username="totp-only",
+            role_id=PRESET_ROLE_IDS[PresetRoleSlug.ADMIN],
+            password_hash=None,
+            totp_secret_encrypted=b"secret",
+        )
+        session.add(user)
         await session.commit()
+        await session.refresh(user)
     await get_settings_cache().invalidate()
+    await get_dashboard_users_cache().invalidate()
+    return user
+
+
+def _user_session(user: DashboardUser, *, password_verified: bool, totp_verified: bool) -> str:
+    return get_dashboard_session_store().create_user_session(
+        user.id,
+        user.session_generation,
+        password_verified=password_verified,
+        totp_verified=totp_verified,
+        ttl_seconds=12 * 60 * 60,
+    )
 
 
 async def _set_api_key_auth_enabled(enabled: bool) -> None:
@@ -130,26 +193,31 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
 
     blocked_auth_export = await client.post("/api/accounts/missing/export/auth")
     assert blocked_auth_export.status_code == 403
-    assert blocked_auth_export.json()["error"]["code"] == "read_only_access"
+    assert blocked_auth_export.json()["error"]["code"] == "permission_required"
+    assert blocked_auth_export.json()["error"]["param"] == "accounts:export"
 
     blocked_alias = await client.put("/api/accounts/missing/alias", json={"alias": "Guest Alias"})
     assert blocked_alias.status_code == 403
-    assert blocked_alias.json()["error"]["code"] == "read_only_access"
+    assert blocked_alias.json()["error"]["code"] == "permission_required"
+    assert blocked_alias.json()["error"]["param"] == "accounts:write"
 
     blocked_limit_warmup = await client.put("/api/accounts/missing/limit-warmup", json={"enabled": True})
     assert blocked_limit_warmup.status_code == 403
-    assert blocked_limit_warmup.json()["error"]["code"] == "read_only_access"
+    assert blocked_limit_warmup.json()["error"]["code"] == "permission_required"
+    assert blocked_limit_warmup.json()["error"]["param"] == "accounts:write"
 
     blocked_usage_reset = await client.post("/api/accounts/missing/usage-reset-credits/consume")
     assert blocked_usage_reset.status_code == 403
-    assert blocked_usage_reset.json()["error"]["code"] == "read_only_access"
+    assert blocked_usage_reset.json()["error"]["code"] == "permission_required"
+    assert blocked_usage_reset.json()["error"]["param"] == "accounts:write"
 
     blocked_proxy_endpoint = await client.post(
         "/api/settings/upstream-proxy/endpoints",
         json={"name": "Guest Proxy", "scheme": "http", "host": "proxy.internal", "port": 8080},
     )
     assert blocked_proxy_endpoint.status_code == 403
-    assert blocked_proxy_endpoint.json()["error"]["code"] == "read_only_access"
+    assert blocked_proxy_endpoint.json()["error"]["code"] == "permission_required"
+    assert blocked_proxy_endpoint.json()["error"]["param"] == "security:write"
 
     blocked_proxy_probe = await client.post("/api/settings/upstream-proxy/endpoints/missing-endpoint/test")
     assert blocked_proxy_probe.status_code == 403
@@ -191,6 +259,28 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_quota_planner_cancel.status_code == 403
     assert blocked_quota_planner_cancel.json()["error"]["code"] == "read_only_access"
 
+    blocked_firewall_add = await client.post("/api/firewall/ips", json={"ipAddress": "203.0.113.9"})
+    assert blocked_firewall_add.status_code == 403
+    assert blocked_firewall_add.json()["error"]["code"] == "permission_required"
+    assert blocked_firewall_add.json()["error"]["param"] == "security:write"
+
+    blocked_firewall_delete = await client.delete("/api/firewall/ips/203.0.113.9")
+    assert blocked_firewall_delete.status_code == 403
+    assert blocked_firewall_delete.json()["error"]["code"] == "permission_required"
+    assert blocked_firewall_delete.json()["error"]["param"] == "security:write"
+
+    blocked_guest_password_set = await client.post(
+        "/api/dashboard-auth/guest/password", json={"password": "guest-secret-1"}
+    )
+    assert blocked_guest_password_set.status_code == 403
+    assert blocked_guest_password_set.json()["error"]["code"] == "permission_required"
+    assert blocked_guest_password_set.json()["error"]["param"] == "security:write"
+
+    blocked_guest_password_remove = await client.delete("/api/dashboard-auth/guest/password")
+    assert blocked_guest_password_remove.status_code == 403
+    assert blocked_guest_password_remove.json()["error"]["code"] == "permission_required"
+    assert blocked_guest_password_remove.json()["error"]["param"] == "security:write"
+
 
 async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
     blocked_archive_records = await client.get(
@@ -199,7 +289,7 @@ async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
     )
     assert blocked_archive_records.status_code == 403
     blocked_archive_payload = blocked_archive_records.json()
-    assert blocked_archive_payload["error"]["code"] == "admin_access_required"
+    assert blocked_archive_payload["error"]["code"] == "permission_required"
     assert not {"records", "payload", "headers"} & blocked_archive_payload.keys()
     # M5 conversation archive: a guest may read the settings page (and the
     # effective toggle) but not the filesystem path of this replica's shard.
@@ -208,6 +298,21 @@ async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
     guest_payload = guest_settings.json()
     assert guest_payload["conversationArchiveDir"] is None
     assert guest_payload["conversationArchiveEnabled"] is False
+
+
+async def _step_up_header_account(client: AsyncClient, proxy_headers: dict[str, str]) -> None:
+    """Security writes need a recent step-up (H5); a proxy account without a password enrols TOTP for it."""
+
+    start = await client.post("/api/dashboard-auth/totp/setup/start", json={}, headers=proxy_headers)
+    assert start.status_code == 200, start.text
+    secret = start.json()["secret"]
+    code = pyotp.TOTP(secret).now()
+    confirm = await client.post(
+        "/api/dashboard-auth/totp/setup/confirm", json={"secret": secret, "code": code}, headers=proxy_headers
+    )
+    assert confirm.status_code == 200, confirm.text
+    stepped = await client.post("/api/dashboard-auth/step-up", json={"code": code}, headers=proxy_headers)
+    assert stepped.status_code == 200, stepped.text
 
 
 @pytest.mark.asyncio
@@ -574,7 +679,7 @@ async def test_passwordless_guest_access_allows_remote_reads_and_blocks_writes(a
             session_payload = session.json()
             assert session_payload["authenticated"] is True
             assert session_payload["role"] == "guest"
-            assert session_payload["permissions"] == ["read"]
+            assert session_payload["permissions"] == ["read", "accounts:read:all", "dashboard:read:all"]
             assert session_payload["guestAccessEnabled"] is True
             assert session_payload["guestPasswordRequired"] is False
 
@@ -631,7 +736,7 @@ async def test_passwordless_guest_access_does_not_shadow_admin_session(app_insta
             login_payload = login.json()
             assert login_payload["authenticated"] is True
             assert login_payload["role"] == "admin"
-            assert login_payload["permissions"] == ["read", "write"]
+            assert login_payload["permissions"][:2] == ["read", "write"]
 
             admin_settings = await remote_client.get("/api/settings")
             assert admin_settings.status_code == 200
@@ -686,14 +791,14 @@ async def test_guest_password_login_allows_remote_reads_and_blocks_writes(app_in
             login_payload = login.json()
             assert login_payload["authenticated"] is True
             assert login_payload["role"] == "guest"
-            assert login_payload["permissions"] == ["read"]
+            assert login_payload["permissions"] == ["read", "accounts:read:all", "dashboard:read:all"]
 
             refresh = await remote_client.get("/api/dashboard-auth/session")
             assert refresh.status_code == 200
             refresh_payload = refresh.json()
             assert refresh_payload["authenticated"] is True
             assert refresh_payload["role"] == "guest"
-            assert refresh_payload["permissions"] == ["read"]
+            assert refresh_payload["permissions"] == ["read", "accounts:read:all", "dashboard:read:all"]
             assert refresh_payload["guestAccessEnabled"] is True
             assert refresh_payload["guestPasswordRequired"] is True
 
@@ -715,7 +820,7 @@ async def test_trusted_header_mode_requires_proxy_header_for_open_dashboard(asyn
 
     session = await async_client.get("/api/dashboard-auth/session")
     assert session.status_code == 200
-    assert session.json() == {
+    assert _legacy_session_view(session.json()) == {
         "authenticated": False,
         "passwordRequired": False,
         "totpRequiredOnLogin": False,
@@ -730,6 +835,11 @@ async def test_trusted_header_mode_requires_proxy_header_for_open_dashboard(asyn
         "guestAccessEnabled": False,
         "guestPasswordRequired": False,
     }
+    unauthenticated = session.json()
+    # Without the proxy header the caller is not authenticated: no team facts.
+    assert unauthenticated["accessSummary"] is None
+    assert unauthenticated["assignableRoleIds"] == []
+    assert unauthenticated["user"] is None
 
     blocked = await async_client.get("/api/settings")
     assert blocked.status_code == 401
@@ -745,6 +855,7 @@ async def test_trusted_header_mode_rejects_guest_login_without_proxy_header(asyn
     )
 
     proxy_headers = {"Remote-User": "admin@example.com"}
+    await _step_up_header_account(async_client, proxy_headers)
     read_settings = await async_client.get("/api/settings", headers=proxy_headers)
     assert read_settings.status_code == 200
     enabled_settings = await async_client.put("/api/settings", json={"guestAccessEnabled": True}, headers=proxy_headers)
@@ -792,6 +903,7 @@ async def test_trusted_header_mode_blocks_passwordless_guest_without_proxy_heade
             )
             assert setup.status_code == 200
 
+            await _step_up_header_account(local_client, proxy_headers)
             read_settings = await local_client.get("/api/settings", headers=proxy_headers)
             assert read_settings.status_code == 200
             enabled_settings = await local_client.put(
@@ -809,7 +921,7 @@ async def test_trusted_header_mode_blocks_passwordless_guest_without_proxy_heade
             session_payload = session.json()
             assert session_payload["authenticated"] is False
             assert session_payload["role"] == "admin"
-            assert session_payload["permissions"] == ["read", "write"]
+            assert session_payload["permissions"][:2] == ["read", "write"]
             assert session_payload["guestAccessEnabled"] is True
             assert session_payload["guestPasswordRequired"] is False
             assert session_payload["authMode"] == "trusted_header"
@@ -841,6 +953,7 @@ async def test_trusted_header_mode_blocks_passwordless_guest_login_on_proxied_lo
             )
             assert setup.status_code == 200
 
+            await _step_up_header_account(local_client, proxy_headers)
             read_settings = await local_client.get("/api/settings", headers=proxy_headers)
             assert read_settings.status_code == 200
             enabled_settings = await local_client.put(
@@ -917,7 +1030,7 @@ async def test_disabled_dashboard_auth_mode_bypasses_guard_and_disables_password
 
     session = await async_client.get("/api/dashboard-auth/session")
     assert session.status_code == 200
-    assert session.json() == {
+    assert _legacy_session_view(session.json()) == {
         "authenticated": True,
         "passwordRequired": False,
         "totpRequiredOnLogin": False,
@@ -1038,11 +1151,9 @@ async def test_totp_only_mode_requires_session_even_when_password_hash_is_null(a
 
 @pytest.mark.asyncio
 async def test_totp_only_mode_accepts_totp_verified_session(async_client):
-    await _set_migration_inconsistent_totp_only_mode()
+    user = await _set_migration_inconsistent_totp_only_mode()
 
-    session_id = get_dashboard_session_store().create(
-        password_verified=False, totp_verified=True, ttl_seconds=12 * 60 * 60
-    )
+    session_id = _user_session(user, password_verified=True, totp_verified=True)
     async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
 
     allowed = await async_client.get("/api/settings")
@@ -1051,11 +1162,9 @@ async def test_totp_only_mode_accepts_totp_verified_session(async_client):
 
 @pytest.mark.asyncio
 async def test_totp_only_mode_rejects_missing_totp_verification(async_client):
-    await _set_migration_inconsistent_totp_only_mode()
+    user = await _set_migration_inconsistent_totp_only_mode()
 
-    session_id = get_dashboard_session_store().create(
-        password_verified=True, totp_verified=False, ttl_seconds=12 * 60 * 60
-    )
+    session_id = _user_session(user, password_verified=True, totp_verified=False)
     async_client.cookies.set(DASHBOARD_SESSION_COOKIE, session_id)
 
     blocked = await async_client.get("/api/settings")

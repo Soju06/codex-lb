@@ -8,6 +8,7 @@ import json
 import logging
 import socket
 import ssl
+import sys
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
@@ -39295,26 +39296,27 @@ def test_http_bridge_should_attempt_local_previous_response_recovery_normalizes_
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(type_only_not_found_error) is True
 
 
-def test_http_bridge_server_recovery_mode_retries_ambiguous_transport_once(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("code", ["stream_incomplete", "stream_idle_timeout", "upstream_request_timeout"])
+def test_http_bridge_ambiguous_transport_never_attempts_local_recovery(code: str):
+    """Ambiguous continuation failures are always classified fail-closed.
+
+    The bridge has no upstream idempotency or status endpoint, so a transport
+    failure on an anchored ``response.create`` cannot be distinguished from an
+    accepted-but-unobserved dispatch. There is no setting that relaxes this
+    (``drop-bridge-recovery-modes`` deleted the three at-least-once modes).
+    """
     ambiguous_error = proxy_module.ProxyResponseError(
         502,
         {
             "error": {
                 "type": "server_error",
-                "code": "upstream_request_timeout",
+                "code": code,
                 "message": "Upstream did not acknowledge response.create",
             }
         },
     )
-    monkeypatch.setattr(
-        proxy_service,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_anchored_replay_once"
-        ),
-    )
 
-    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(ambiguous_error) is True
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(ambiguous_error) is False
 
 
 def test_http_bridge_should_rollover_after_context_overflow():
@@ -49357,83 +49359,6 @@ async def test_http_bridge_eventless_retry_transport_failure_uses_bridge_timeout
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_eventless_retry_transport_failure_raises_bridge_timeout_proxy_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
-    settings = _make_proxy_settings()
-    settings.sse_keepalive_interval_seconds = 0.001
-    settings.stream_idle_timeout_seconds = 1.0
-    monkeypatch.setattr(http_bridge_helpers_module, "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS", 0.002)
-    settings.http_responses_session_bridge_ambiguous_continuation_recovery_mode = "server_indefinite_recovery"
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="req_bridge_retry_transport_failure_proxy",
-        model="gpt-5.1",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=time.monotonic(),
-        response_id=None,
-        event_queue=asyncio.Queue(),
-        request_text='{"type":"response.create"}',
-        previous_response_id="resp-anchor",
-        transport="http",
-    )
-    session = proxy_service._HTTPBridgeSession(
-        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-retry-transport-failure-proxy", None),
-        headers={},
-        affinity=proxy_service._AffinityPolicy(),
-        request_model="gpt-5.1",
-        account=_make_account("acc_bridge_retry_transport_failure_proxy"),
-        upstream=AsyncMock(),
-        upstream_control=proxy_service._WebSocketUpstreamControl(),
-        pending_requests=deque([request_state]),
-        pending_lock=anyio.Lock(),
-        response_create_gate=asyncio.Semaphore(1),
-        queued_request_count=1,
-        last_used_at=0.0,
-        idle_ttl_seconds=30.0,
-    )
-    record_failure = AsyncMock(return_value=1)
-
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
-    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
-    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
-    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
-    monkeypatch.setattr(
-        service,
-        "_retry_http_bridge_precreated_request",
-        AsyncMock(
-            side_effect=UpstreamWebSocketTransportError(
-                "dial failed",
-                error_code="upstream_unavailable",
-            )
-        ),
-    )
-    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
-
-    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
-        async for _ in service._stream_http_bridge_session_events(
-            session,
-            request_state=request_state,
-            text_data='{"type":"response.create"}',
-            queue_limit=10,
-            propagate_http_errors=True,
-            downstream_turn_state=None,
-        ):
-            pass
-
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.payload["error"]["code"] == "bridge_eventless_timeout"
-    assert (
-        exc_info.value.payload["error"]["message"] == http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE
-    )
-    record_failure.assert_awaited_once_with(session, detail="bridge_eventless_timeout")
-
-
-@pytest.mark.asyncio
 async def test_http_bridge_retry_transport_failure_abandons_through_the_fenced_consult(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -49967,6 +49892,35 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_PREWARM_RESPONSE_TIMEOUT_SECONDS", 0.05)
+    # The one row the prewarm resolves before its lock. Both helpers under the
+    # lock must receive this exact object rather than reading their own, so the
+    # assertions below compare by identity, pin the read's call site, and -- via
+    # one shared event log with the lock -- pin that it happened first.
+    expected_snapshot = settings
+    events: list[str] = []
+
+    async def snapshot_get() -> Any:
+        events.append(f"read:{sys._getframe(1).f_code.co_name}")
+        return expected_snapshot
+
+    class _RecordingPrewarmLock:
+        def __init__(self) -> None:
+            self._lock = anyio.Lock()
+
+        async def __aenter__(self) -> None:
+            await self._lock.acquire()
+            events.append("lock_acquired")
+
+        async def __aexit__(self, *exc: object) -> None:
+            events.append("lock_released")
+            self._lock.release()
+
+    session.prewarm_lock = cast(Any, _RecordingPrewarmLock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=snapshot_get, cached_row=lambda: expected_snapshot),
+    )
     reconnect_observations: list[dict[str, object]] = []
     admission_observations: list[dict[str, object]] = []
     original_acquire_admission = service._acquire_request_state_response_create_admission
@@ -49979,12 +49933,15 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
         account_id: str | None = None,
         surface: str = "websocket",
         bridge_session: proxy_service._HTTPBridgeSession | None = None,
+        dashboard_settings: Any | None = None,
     ) -> None:
         admission_observations.append(
             {
                 "request_id": state.request_id,
                 "account_id": account_id,
                 "surface": surface,
+                # The prewarm resolves this before its lock and threads it in.
+                "dashboard_settings": dashboard_settings,
             }
         )
         await original_acquire_admission(
@@ -49994,6 +49951,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
             account_id=account_id,
             surface=surface,
             bridge_session=bridge_session,
+            dashboard_settings=dashboard_settings,
         )
 
     async def fake_reconnect_http_bridge_session(
@@ -50003,6 +49961,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
         restart_reader: bool = False,
         require_same_account: bool = False,
         require_preferred_account: bool = False,
+        dashboard_settings: Any | None = None,
     ) -> None:
         del require_same_account, require_preferred_account
         reconnect_observations.append(
@@ -50010,6 +49969,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
                 "pending_request_ids": [state.request_id for state in reconnect_session.pending_requests],
                 "request_id": request_state.request_id,
                 "restart_reader": restart_reader,
+                "dashboard_settings": dashboard_settings,
             }
         )
         reconnect_session.upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -50039,12 +49999,21 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
             "request_id": prewarm_admission["request_id"],
             "account_id": "acc_prewarm_timeout",
             "surface": "http_bridge_prewarm",
+            "dashboard_settings": expected_snapshot,
         }
     ]
     assert cast(str, prewarm_admission["request_id"]).startswith("http_prewarm_")
     observation = reconnect_observations[0]
     assert observation["request_id"] == "req_prewarm_timeout"
     assert observation["restart_reader"] is True
+    # Both helpers run under ``prewarm_lock`` and are handed the very snapshot
+    # the prewarm resolved before taking it ...
+    assert observation["dashboard_settings"] is expected_snapshot
+    assert admission_observations[0]["dashboard_settings"] is expected_snapshot
+    # ... which is the only settings read on the path, taken by the prewarm
+    # helper itself and -- ordering asserted directly, not inferred from the
+    # caller -- strictly before the lock was acquired.
+    assert events == ["read:_maybe_prewarm_http_bridge_session", "lock_acquired", "lock_released"]
     pending_request_ids = cast(list[str], observation["pending_request_ids"])
     assert len(pending_request_ids) == 1
     assert pending_request_ids[0].startswith("http_prewarm_")

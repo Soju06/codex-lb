@@ -16,6 +16,8 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeysService
 from app.modules.audit.repository import AuditRepository
 from app.modules.audit.service import AuditLogsService
+from app.modules.auth_providers.repository import AuthProvidersRepository
+from app.modules.auth_providers.service import AuthProvidersService
 from app.modules.automations.repository import AutomationsRepository
 from app.modules.automations.service import AutomationsService
 from app.modules.dashboard.repository import DashboardRepository
@@ -26,6 +28,9 @@ from app.modules.dashboard_auth.service import (
     DashboardAuthService,
     get_dashboard_session_store,
 )
+from app.modules.dashboard_roles.repository import DashboardRolesRepository
+from app.modules.dashboard_users.repository import DashboardUsersRepository
+from app.modules.dashboard_users.service import DashboardUsersService
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
@@ -42,6 +47,8 @@ from app.modules.reports.repository import ReportsRepository
 from app.modules.reports.service import ReportsService
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.service import RequestLogsService
+from app.modules.role_mappings.repository import RoleMappingsRepository
+from app.modules.role_mappings.service import RoleMappingsService
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
 from app.modules.sticky_sessions.service import StickySessionsService
@@ -80,6 +87,33 @@ class DashboardAuthContext:
     session: AsyncSession
     repository: DashboardAuthRepository
     service: DashboardAuthService
+
+
+@dataclass(slots=True)
+class DashboardUsersContext:
+    session: AsyncSession
+    repository: DashboardUsersRepository
+    service: DashboardUsersService
+
+
+@dataclass(slots=True)
+class AuthProvidersContext:
+    session: AsyncSession
+    repository: AuthProvidersRepository
+    service: AuthProvidersService
+
+
+@dataclass(slots=True)
+class RoleMappingsContext:
+    session: AsyncSession
+    repository: RoleMappingsRepository
+    service: RoleMappingsService
+
+
+@dataclass(slots=True)
+class DashboardRolesContext:
+    session: AsyncSession
+    repository: DashboardRolesRepository
 
 
 @dataclass(slots=True)
@@ -240,6 +274,36 @@ def get_dashboard_auth_context(
     repository = DashboardAuthRepository(session)
     service = DashboardAuthService(cast(DashboardAuthRepositoryProtocol, repository), get_dashboard_session_store())
     return DashboardAuthContext(session=session, repository=repository, service=service)
+
+
+def get_dashboard_users_context(
+    session: AsyncSession = Depends(get_session),
+) -> DashboardUsersContext:
+    repository = DashboardUsersRepository(session)
+    service = DashboardUsersService(repository, DashboardRolesRepository(session), DashboardAuthRepository(session))
+    return DashboardUsersContext(session=session, repository=repository, service=service)
+
+
+def get_auth_providers_context(
+    session: AsyncSession = Depends(get_session),
+) -> AuthProvidersContext:
+    repository = AuthProvidersRepository(session)
+    service = AuthProvidersService(repository, DashboardRolesRepository(session))
+    return AuthProvidersContext(session=session, repository=repository, service=service)
+
+
+def get_role_mappings_context(
+    session: AsyncSession = Depends(get_session),
+) -> RoleMappingsContext:
+    repository = RoleMappingsRepository(session)
+    service = RoleMappingsService(repository, DashboardRolesRepository(session))
+    return RoleMappingsContext(session=session, repository=repository, service=service)
+
+
+def get_dashboard_roles_context(
+    session: AsyncSession = Depends(get_session),
+) -> DashboardRolesContext:
+    return DashboardRolesContext(session=session, repository=DashboardRolesRepository(session))
 
 
 def get_proxy_context(request: Request) -> ProxyContext:

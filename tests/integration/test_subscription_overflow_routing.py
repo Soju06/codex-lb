@@ -62,6 +62,7 @@ from app.modules.proxy.model_source_pins import (
     ModelSourcePinRepository,
     PinIntent,
     PinWrite,
+    PinWriteOutcome,
     anchor_pin_key,
     thread_pin_key,
 )
@@ -2248,18 +2249,30 @@ async def test_database_outage_fails_thread_keyed_requests_closed_within_the_loo
 # -- decision 78: an owed anchor must be durable before the first content frame -----------------------------
 
 
-async def _release_after(event: asyncio.Event, delay: float) -> None:
-    """Let the stub's terminal frame out after the content trigger has been decided.
+def _release_hold_on_pin_commit(monkeypatch: pytest.MonkeyPatch, event: asyncio.Event) -> None:
+    """Let the stub's terminal frame out once the content-trigger pin write has committed.
 
     The frame split is what matters: while ``event`` is unset the stub has
     written the content frame and nothing else, so the pin hook runs with the
-    source id still unminted. The release only keeps the *previous* behaviour
-    terminating (an unanchored delivery would otherwise wait out the idle
-    budget) -- on this head the turn is already refused when it fires.
+    source id still unminted. Gating the release on ``commit`` itself -- rather
+    than on a wall-clock delay a slow fixture setup could outrun, which would
+    hand the hook an already-minted id and silently retire the case -- makes
+    that ordering deterministic. The release only keeps the *previous*
+    behaviour terminating (an unanchored delivery would otherwise wait out the
+    idle budget); on this head the turn is already refused when it fires.
     """
 
-    await asyncio.sleep(delay)
-    event.set()
+    commit = overflow_module.OverflowPinExecutor.commit
+
+    async def release_after_commit(
+        self: overflow_module.OverflowPinExecutor, *args: Any, **kwargs: Any
+    ) -> PinWriteOutcome:
+        try:
+            return await commit(self, *args, **kwargs)
+        finally:
+            event.set()
+
+    monkeypatch.setattr(overflow_module.OverflowPinExecutor, "commit", release_after_commit)
 
 
 @pytest.mark.asyncio
@@ -2288,12 +2301,11 @@ async def test_sdk_turn_whose_source_mints_its_id_after_the_first_content_frame_
         handler_cancellation=True,
         shutdown_timeout=1.0,
     )
-    releaser = asyncio.create_task(_release_after(hold, 0.5))
+    _release_hold_on_pin_commit(monkeypatch, hold)
     try:
         response = await async_client.post(V1_ROUTE, json=_codex_body(), headers={"user-agent": "openai-python/1.99"})
     finally:
-        hold.set()
-        await releaser
+        hold.set()  # safety net: unblock the stub even if the commit is never reached
     await _drain(async_client)
 
     assert response.status_code == 200, response.text  # the lifecycle is carried by the SSE terminal
@@ -2336,14 +2348,13 @@ async def test_native_store_false_turn_pins_its_thread_without_any_source_respon
         hold=hold,
         after_hold=[_completed(_USAGE, "resp_native_late")],
     )
-    releaser = asyncio.create_task(_release_after(hold, 0.5))
+    _release_hold_on_pin_commit(monkeypatch, hold)
     try:
         response = await async_client.post(
             CODEX_ROUTE, json={**_codex_body(), "store": False}, headers=_native_headers(thread_id)
         )
     finally:
-        hold.set()
-        await releaser
+        hold.set()  # safety net: unblock the stub even if the commit is never reached
     await _drain(async_client)
 
     assert response.status_code == 200, response.text
@@ -2378,7 +2389,7 @@ async def test_anchored_continuation_with_a_late_source_id_fails_closed_and_keep
     )
     await _write_pin(anchor_pin_key(None, "resp_prev"), kind=PIN_KIND_ANCHOR, source_id=scene.source_id)
     await _pool_is_healthy(async_client, tag="anchor_chain")
-    releaser = asyncio.create_task(_release_after(hold, 0.5))
+    _release_hold_on_pin_commit(monkeypatch, hold)
     try:
         response = await async_client.post(
             V1_ROUTE,
@@ -2386,8 +2397,7 @@ async def test_anchored_continuation_with_a_late_source_id_fails_closed_and_keep
             headers={"user-agent": "openai-python/1.99"},
         )
     finally:
-        hold.set()
-        await releaser
+        hold.set()  # safety net: unblock the stub even if the commit is never reached
     await _drain(async_client)
 
     events = _events(response.text)

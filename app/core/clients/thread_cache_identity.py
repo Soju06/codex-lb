@@ -39,10 +39,22 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Final
+from typing import Final, Protocol
 
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
+
+
+class HeaderReplacer(Protocol):
+    """The caller's position-preserving header setter.
+
+    ``app/core/clients/proxy.py`` keeps a native client's header order and
+    spelling by replacing a key in place rather than reassigning it, so the
+    scoping helper delegates the write instead of mutating the dict directly.
+    """
+
+    def __call__(self, headers: dict[str, str], name: str, value: str, *, fallback_name: str) -> None: ...
+
 
 THREAD_CACHE_IDENTITY_MODE_SHARED: Final = "shared"
 THREAD_CACHE_IDENTITY_MODE_ISOLATED: Final = "isolated"
@@ -188,7 +200,7 @@ def scope_session_headers(
     headers: dict[str, str],
     identity: ThreadCacheIdentity | None,
     *,
-    replace: object = None,
+    replace: HeaderReplacer | None = None,
 ) -> None:
     """Rewrite the Codex process-session/thread headers in place, per account.
 
@@ -207,7 +219,7 @@ def scope_session_headers(
             if not isinstance(value, str) or not value.strip():
                 continue
             scoped = _scoped_session_header_value(value.strip(), isolated)
-            if callable(replace):
+            if replace is not None:
                 replace(headers, key, scoped, fallback_name=key)
             else:
                 headers[key] = scoped

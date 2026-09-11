@@ -1,7 +1,7 @@
 """Add the thread cache identity mode setting and its per-API-key override.
 
 Revision ID: 20260911_010000_add_thread_cache_identity_mode
-Revises: 20260911_005000_merge_model_source_pins_and_affinity_heads
+Revises: 20260911_010000_merge_pin_index_and_affinity_heads
 Create Date: 2026-09-11 01:00:00.000000
 
 Both columns are nullable and are created without a server default, so an
@@ -18,7 +18,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260911_010000_add_thread_cache_identity_mode"
-down_revision = "20260911_005000_merge_model_source_pins_and_affinity_heads"
+down_revision = "20260911_010000_merge_pin_index_and_affinity_heads"
 branch_labels = None
 depends_on = None
 

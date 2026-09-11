@@ -75,6 +75,10 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("GET", "/api/settings/upstream-proxy"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/settings/runtime/connect-address"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/sticky-sessions"): PermissionRequirement(Permission.OPS_WRITE),
+    # The cache isolation probe spends real account quota, so both its cost
+    # preview and its run sit on the operational write gate.
+    ("GET", "/api/diagnostics/cache-isolation-probe"): PermissionRequirement(Permission.OPS_WRITE),
+    ("POST", "/api/diagnostics/cache-isolation-probe/run"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/oauth/status"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
     # Pure account mutations (PR-2a): accounts:write suffices, the coarse alias is not required.
     ("POST", "/api/oauth/start"): PermissionRequirement(Permission.ACCOUNTS_WRITE),

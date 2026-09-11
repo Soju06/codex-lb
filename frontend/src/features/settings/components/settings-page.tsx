@@ -31,6 +31,7 @@ import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
+import { CacheIsolationProbeSection } from "@/features/cache-probe/components/cache-isolation-probe-section";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
 import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
 import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
@@ -70,6 +71,9 @@ export function SettingsPage() {
   // Security-bearing controls (API-key auth policy, firewall, proxy endpoints)
   // need `security:write`; an Operator sees them read-only instead of a 403.
   const canWriteSecurity = usePermission("security:write");
+  // The probe spends account quota, so it mirrors its backend `ops:write` gate
+  // rather than the coarse write alias.
+  const canWriteOps = usePermission("ops:write");
   // A fully signed-in account without `write` (a Viewer) still owns its password and two-factor.
   // Any signed-in account reaches its own password/two-factor controls: a
   // reverse-proxy account has no password session and still needs to enrol a
@@ -269,6 +273,8 @@ export function SettingsPage() {
               <FirewallSection disabled={controlsDisabled || !canWriteSecurity} />
               <QuotaPlannerSection disabled={controlsDisabled} />
               {canWrite ? <StickySessionsSection disabled={controlsDisabled} /> : null}
+              {/* Next to sticky sessions: both answer "which account served this, and what did it reuse?" */}
+              {canWriteOps ? <CacheIsolationProbeSection disabled={controlsDisabled} /> : null}
               <DataRetentionSettings
                 key={[
                   settings.requestLogRetentionOverrideDays,

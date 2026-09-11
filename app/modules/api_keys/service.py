@@ -162,6 +162,8 @@ class ApiKeysRepositoryProtocol(Protocol):
         items: list[UsageReservationItemData],
     ) -> None: ...
 
+    async def add_usage_reservation_item(self, reservation_id: str, item: UsageReservationItemData) -> None: ...
+
     async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None: ...
 
     async def get_usage_reservation_for_update(self, reservation_id: str) -> UsageReservationData | None: ...
@@ -1020,11 +1022,13 @@ class ApiKeysService:
         *,
         request_service_tier: str | None,
         request_usage_budget: ApiKeyRequestUsageBudget | None,
+        successor_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> bool:
         return await self._adjust_usage_reservation_input_budget(
             reservation_id,
             request_service_tier=request_service_tier,
             request_usage_budget=request_usage_budget,
+            successor_usage_budget=successor_usage_budget,
             direction=1,
         )
 
@@ -1049,6 +1053,7 @@ class ApiKeysService:
         request_service_tier: str | None,
         request_usage_budget: ApiKeyRequestUsageBudget | None,
         direction: int,
+        successor_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> bool:
         for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
             try:
@@ -1057,12 +1062,18 @@ class ApiKeysService:
                     request_service_tier=request_service_tier,
                     request_usage_budget=request_usage_budget,
                     direction=direction,
+                    successor_usage_budget=successor_usage_budget,
                 )
             except OperationalError as exc:
                 await self._repository.rollback()
-                if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                if not await should_retry_after_sqlite_lock(
+                    exc,
+                    what="adjust_usage_reservation_input_budget",
+                    attempt=attempt,
+                    max_attempts=_SQLITE_BUSY_RETRY_ATTEMPTS,
+                    base_delay_seconds=_SQLITE_BUSY_RETRY_BASE_SECONDS,
+                ):
                     raise
-                await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
         raise RuntimeError("unreachable")
 
     async def _adjust_usage_reservation_input_budget_once(
@@ -1072,6 +1083,7 @@ class ApiKeysService:
         request_service_tier: str | None,
         request_usage_budget: ApiKeyRequestUsageBudget | None,
         direction: int,
+        successor_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> bool:
         if direction not in {-1, 1}:
             raise ValueError("direction must be -1 or 1")
@@ -1083,6 +1095,40 @@ class ApiKeysService:
                 await self._repository.rollback()
                 return False
             try:
+                if direction > 0:
+                    key = _ensure_valid_api_key_row(
+                        await self._repository.get_for_limit_enforcement(reservation.api_key_id)
+                    )
+                    if key.expires_at is not None and key.expires_at < utcnow():
+                        raise ApiKeyInvalidError("API key has expired")
+                    existing_limit_ids = {item.limit_id for item in reservation.items}
+                    for limit in key.limits:
+                        if not _limit_applies_for_request(limit, request_model=reservation.model):
+                            continue
+                        if limit.id in existing_limit_ids:
+                            continue
+                        if limit.current_value >= limit.max_value:
+                            raise _rate_limit_exceeded_error(limit)
+                        delta = _reserve_delta_for_limit(
+                            limit,
+                            request_model=reservation.model,
+                            request_service_tier=request_service_tier,
+                            request_usage_budget=_normalize_request_usage_budget(successor_usage_budget),
+                        )
+                        result = await self._repository.try_reserve_usage(
+                            limit.id, delta=delta, expected_reset_at=limit.reset_at
+                        )
+                        if not result.success:
+                            raise _rate_limit_exceeded_error(limit)
+                        await self._repository.add_usage_reservation_item(
+                            reservation_id,
+                            UsageReservationItemData(
+                                limit_id=limit.id,
+                                limit_type=limit.limit_type,
+                                reserved_delta=delta,
+                                expected_reset_at=limit.reset_at,
+                            ),
+                        )
                 for item in reservation.items:
                     input_delta = _reserve_additional_input_delta_for_limit_type(
                         item.limit_type,

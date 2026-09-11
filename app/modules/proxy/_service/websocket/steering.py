@@ -25,7 +25,11 @@ from app.core.openai.requests import ResponsesRequest, validate_passthrough_dept
 from app.core.types import JsonValue
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.models import Account
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import (
+    API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+    ApiKeyData,
+    ApiKeyRequestUsageBudget,
+)
 from app.modules.proxy._service.support import (
     _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE,
     _REQUEST_TRANSPORT_WEBSOCKET,
@@ -546,14 +550,46 @@ async def submit_websocket_steering(
         parent.fresh_upstream_request_text = None
         parent.fresh_upstream_request_is_retry_safe = False
     if initial_continuation is not None:
-        reservation = continuation.request_state.api_key_reservation
-        extended = await proxy._extend_websocket_api_key_usage(
-            reservation,
-            request_service_tier=request.service_tier,
-            request_usage_budget=request_usage_budget,
-        )
-        if not extended:
-            raise steering_error("response_not_found", "The steering continuation is no longer active.")
+        # Keep the successor's settlement owner stable while adding its first
+        # reservation or reconciling newly applicable limit items.
+        with anyio.CancelScope(shield=True):
+            async with pending_lock:
+                if (
+                    control.steering_continuations.get(parent_id) is not continuation
+                    or continuation.request_state not in pending_requests
+                ):
+                    raise steering_error("response_not_found", "The steering continuation is no longer active.")
+                budgets = [item.request_usage_budget for item in continuation.submissions] + [request_usage_budget]
+                successor_usage_budget = ApiKeyRequestUsageBudget(
+                    input_tokens=sum(
+                        budget.input_tokens
+                        if budget.input_tokens is not None
+                        else API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS
+                        for budget in budgets
+                    ),
+                    output_tokens=request_usage_budget.output_tokens,
+                )
+                reservation = continuation.request_state.api_key_reservation
+                if reservation is None:
+                    reservation = await proxy._reserve_websocket_api_key_usage(
+                        refreshed_key,
+                        request_model=request.model,
+                        request_service_tier=request.service_tier,
+                        request_usage_budget=successor_usage_budget,
+                    )
+                    continuation.request_state.api_key_reservation = reservation
+                    proxy._start_request_state_api_key_reservation_heartbeat(
+                        continuation.request_state, api_key=refreshed_key, surface="websocket"
+                    )
+                else:
+                    extended = await proxy._extend_websocket_api_key_usage(
+                        reservation,
+                        request_service_tier=request.service_tier,
+                        request_usage_budget=request_usage_budget,
+                        successor_usage_budget=successor_usage_budget,
+                    )
+                    if not extended:
+                        raise steering_error("response_not_found", "The steering continuation is no longer active.")
     submission = _WebSocketSteerSubmission(
         input=payload.get("input"),
         wire_bytes=wire_bytes,

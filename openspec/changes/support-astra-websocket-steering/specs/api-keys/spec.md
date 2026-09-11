@@ -10,6 +10,27 @@ reduction SHALL leave the conservative reservation for terminal
 settlement. Ordinary finalize and release paths SHALL keep their existing
 lock behavior.
 
+Every additional submission SHALL reconcile the currently applicable API-key
+limits, including limits added or activated after the first submission. When
+no reservation exists, admission SHALL create one if limits now apply. Missing
+reservation items SHALL reserve the queued successor's input and single output
+budget under the existing request-admission policy; existing items SHALL extend
+only the new input increment. An exhausted newly applicable limit SHALL reject
+the new submission before dispatch without disturbing admitted work. Reconciliation
+SHALL keep one successor reservation and its existing terminal settlement owner.
+
+#### Scenario: A limit becomes applicable after unmetered steering
+- **GIVEN** the first steer has no applicable quota reservation
+- **WHEN** a new applicable limit is exhausted before another submission
+- **THEN** the additional steer SHALL be rejected before upstream dispatch
+- **AND** the original steer SHALL retain its successor lifecycle
+
+#### Scenario: A new limit is added to an already reserved successor
+- **GIVEN** queued steering has a reservation for an existing limit
+- **WHEN** another submission is admitted after a new applicable limit is added
+- **THEN** the same reservation SHALL gain an item for that limit before dispatch
+- **AND** terminal settlement SHALL charge actual successor usage once to each item
+
 #### Scenario: Additional steering input extends the successor reservation
 
 - **GIVEN** a successor already holds a reserved usage reservation

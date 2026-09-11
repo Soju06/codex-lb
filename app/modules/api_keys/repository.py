@@ -740,6 +740,17 @@ class ApiKeysRepository:
                 )
             )
 
+    async def add_usage_reservation_item(self, reservation_id: str, item: UsageReservationItemData) -> None:
+        self._session.add(
+            ApiKeyUsageReservationItem(
+                reservation_id=reservation_id,
+                limit_id=item.limit_id,
+                limit_type=item.limit_type.value,
+                reserved_delta=item.reserved_delta,
+                expected_reset_at=item.expected_reset_at,
+            )
+        )
+
     async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None:
         result = await self._session.execute(
             select(ApiKeyUsageReservation)

@@ -155,6 +155,7 @@ class _ApiKeyUsageMixin:
         *,
         request_service_tier: str | None,
         request_usage_budget: ApiKeyRequestUsageBudget | None,
+        successor_usage_budget: ApiKeyRequestUsageBudget | None = None,
     ) -> bool:
         if reservation is None:
             return True
@@ -167,7 +168,10 @@ class _ApiKeyUsageMixin:
                         reservation.reservation_id,
                         request_service_tier=request_service_tier,
                         request_usage_budget=request_usage_budget,
+                        successor_usage_budget=successor_usage_budget,
                     )
+                except ApiKeyInvalidError as exc:
+                    raise ProxyAuthError(str(exc)) from exc
                 except ApiKeyRateLimitExceededError as exc:
                     message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
                     raise ProxyRateLimitError(message) from exc

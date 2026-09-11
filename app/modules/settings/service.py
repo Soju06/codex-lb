@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from app.core.auth.dashboard_access import is_admin_level
 from app.core.config.background_jobs import BACKGROUND_JOB_SETTINGS
 from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 
@@ -20,7 +21,8 @@ from app.core.config.settings import Settings, get_settings
 from app.core.config.spool_retention import OPERATION_SPOOL_RETENTION_SETTING
 from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
-from app.db.models import DashboardSettings
+from app.db.models import COMPAT_ADMIN_USERNAME, DashboardSettings
+from app.modules.dashboard_roles.service import resolve_role_grants
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
     normalize_additional_quota_key,
@@ -79,7 +81,9 @@ class DashboardSettingsData:
     warmup_model: str
     import_without_overwrite: bool
     totp_required_on_login: bool
-    totp_configured: bool
+    totp_required_for_admin_role: bool
+    users_without_totp_count: int
+    admins_without_totp_count: int
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
@@ -195,6 +199,7 @@ class DashboardSettingsUpdateData:
     warmup_model: str
     import_without_overwrite: bool
     totp_required_on_login: bool
+    totp_required_for_admin_role: bool
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
@@ -269,23 +274,65 @@ class DashboardSettingsUpdateData:
     # end M1 stream/bridge budgets
 
 
+class CompatAdminUnenrolledError(Exception):
+    """Requiring TOTP at sign-in while the migrated ``admin`` account has no secret.
+
+    A previous-release replica reads the legacy settings columns: with the
+    policy on and no secret there it would refuse that account forever.
+    Remove together with the legacy mirror in release N+1.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class TotpEnrollmentSummary:
+    """Who still has to enrol, and whether the acting account already did."""
+
+    actor_configured: bool
+    users_without_totp: int
+    admins_without_totp: int
+    compat_admin_unenrolled: bool
+
+
 class SettingsService:
     def __init__(self, repository: SettingsRepository) -> None:
         self._repository = repository
 
-    async def get_settings(self) -> DashboardSettingsData:
+    async def totp_enrollment(self, actor_user_id: str | None) -> TotpEnrollmentSummary:
+        users = await self._repository.list_active_password_users()
+        without_totp = [user for user in users if user.totp_secret_encrypted is None]
+        return TotpEnrollmentSummary(
+            actor_configured=any(user.id == actor_user_id and user.totp_secret_encrypted is not None for user in users),
+            users_without_totp=len(without_totp),
+            admins_without_totp=sum(1 for user in without_totp if is_admin_level(resolve_role_grants(user.role))),
+            compat_admin_unenrolled=any(user.username == COMPAT_ADMIN_USERNAME for user in without_totp),
+        )
+
+    async def get_settings(self, *, actor_user_id: str | None = None) -> DashboardSettingsData:
         row = await self._repository.get_or_create()
-        return _settings_data(row)
+        return _settings_data(row, await self.totp_enrollment(actor_user_id))
 
     async def update_settings(
         self,
         payload: DashboardSettingsUpdateData,
         *,
+        actor_user_id: str | None = None,
         expected_version: int | None = None,
     ) -> DashboardSettingsData:
         current = await self._repository.get_or_create()
-        if payload.totp_required_on_login and current.totp_secret_encrypted is None:
-            raise ValueError("Configure TOTP before enabling login enforcement")
+        # Requiring TOTP of others starts with the acting account: whoever turns
+        # either requirement on must already hold a secret, or the next request
+        # would park them at the enrolment gate they just created.
+        enabling_global = payload.totp_required_on_login and not current.totp_required_on_login
+        enabling_admin_role = payload.totp_required_for_admin_role and not current.totp_required_for_admin_role
+        if enabling_global or enabling_admin_role:
+            enrollment = await self.totp_enrollment(actor_user_id)
+            if not enrollment.actor_configured:
+                raise ValueError("Set up your own TOTP before requiring it at sign-in")
+            if enabling_global and enrollment.compat_admin_unenrolled:
+                raise CompatAdminUnenrolledError(
+                    "Enrol the 'admin' account in two-factor, or remove its password, "
+                    "before requiring two-factor at sign-in"
+                )
         row = await self._repository.update(
             expected_version=expected_version,
             sticky_threads_enabled=payload.sticky_threads_enabled,
@@ -346,6 +393,7 @@ class SettingsService:
             warmup_model=payload.warmup_model,
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
+            totp_required_for_admin_role=payload.totp_required_for_admin_role,
             api_key_auth_enabled=payload.api_key_auth_enabled,
             hide_upstream_quota_from_api_keys=payload.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=payload.limit_warmup_enabled,
@@ -430,7 +478,13 @@ class SettingsService:
             ),
             # end M1 stream/bridge budgets
         )
-        return _settings_data(row)
+        return _settings_data(row, await self.totp_enrollment(actor_user_id))
+        return _settings_data(row, await self.totp_enrollment(actor_user_id))
+
+
+# Retention has no environment fallback: NULL = never set from the dashboard =
+# disabled; 0 = explicitly disabled.
+_RETENTION_DISABLED_DAYS = 0
 
 
 _ROUTING_POLICIES = frozenset({"inherit", "normal", "burn_first", "preserve"})
@@ -527,7 +581,7 @@ def _resolve_inheritable_settings(
     return resolved
 
 
-def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
+def _settings_data(row: DashboardSettings, totp: TotpEnrollmentSummary) -> DashboardSettingsData:
     resolved = _resolve_inheritable_settings(row)
     return DashboardSettingsData(
         sticky_threads_enabled=row.sticky_threads_enabled,
@@ -586,7 +640,9 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         warmup_model=row.warmup_model,
         import_without_overwrite=row.import_without_overwrite,
         totp_required_on_login=row.totp_required_on_login,
-        totp_configured=row.totp_secret_encrypted is not None,
+        totp_required_for_admin_role=row.totp_required_for_admin_role,
+        users_without_totp_count=totp.users_without_totp,
+        admins_without_totp_count=totp.admins_without_totp,
         api_key_auth_enabled=row.api_key_auth_enabled,
         hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
         limit_warmup_enabled=row.limit_warmup_enabled,

@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 95 settings. Every setting is an environment
+codex-lb currently exposes 96 settings. Every setting is an environment
 variable, normally with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process); aliased settings list every accepted name.
 All defaults work with zero configuration —
@@ -208,6 +208,7 @@ anything else belongs in `app/core/config/settings.py`.
 | --- | --- | --- | --- |
 | `CODEX_LB_CONNECT_ADDRESS` | T1 | `str \| None` | `None` |
 | `CODEX_LB_DASHBOARD_AUTH_MODE` | T1 | `'standard' \| 'trusted_header' \| 'disabled'` | `'standard'` |
+| `CODEX_LB_DASHBOARD_AUTH_PROXY_GROUPS_HEADER` | T1 | `str` | `'Remote-Groups'` |
 | `CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER` | T1 | `str` | `'Remote-User'` |
 | `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN` | T0 | `str \| None` | `None` |
 | `CODEX_LB_DASHBOARD_TRUST_LOOPBACK_HOST_HEADER_FOR_LONG_SESSIONS` | T1 | `bool` | `False` |
@@ -267,6 +268,13 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_TIMEOUT_INVARIANT_VALIDATION_STRICT` | T4 | `bool` | `False` |
 
 ## Removed
+
+Images and default account probes choose `gpt-5.6-luna`, then `gpt-5.5`,
+using registry plan visibility and suppression. If neither qualifies, they
+use `gpt-5.6-luna`. Catalog visibility does not guarantee account access.
+There is no host-model setting. See the
+[Images spec](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/images-api-compat)
+and [probe spec](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy).
 
 Removed settings (ignored with a one-release startup warning; each is now a
 fixed default or a dashboard runtime setting — see PRINCIPLES.md P2 /

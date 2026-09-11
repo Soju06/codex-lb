@@ -14,10 +14,11 @@ from python_socks import ProxyType
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
 from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole, Permission
 from app.core.auth.dependencies import (
     ensure_dashboard_permission,
+    ensure_step_up,
     require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
@@ -42,7 +43,12 @@ from app.core.config.spool_retention import (
 )
 from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING, CONVERSATION_ARCHIVE_TOGGLED_ACTION
 from app.core.crypto import TokenEncryptor
-from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError, DashboardSettingsConflictError
+from app.core.exceptions import (
+    DashboardBadRequestError,
+    DashboardConflictError,
+    DashboardNotFoundError,
+    DashboardSettingsConflictError,
+)
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.core.timeout_invariants import find_timeout_invariant_violations
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint, sends_plaintext_credentials
@@ -78,7 +84,7 @@ from app.modules.settings.schemas import (
     UpstreamProxyPoolMemberRequest,
     UpstreamProxyPoolResponse,
 )
-from app.modules.settings.service import DashboardSettingsUpdateData
+from app.modules.settings.service import CompatAdminUnenrolledError, DashboardSettingsUpdateData
 from app.modules.settings.subscription_overflow import (
     load_subscription_overflow_preflight,
     resolve_drain_until,
@@ -271,7 +277,9 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         warmup_model=settings.warmup_model,
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
-        totp_configured=settings.totp_configured,
+        totp_required_for_admin_role=settings.totp_required_for_admin_role,
+        users_without_totp_count=settings.users_without_totp_count,
+        admins_without_totp_count=settings.admins_without_totp_count,
         api_key_auth_enabled=settings.api_key_auth_enabled,
         hide_upstream_quota_from_api_keys=settings.hide_upstream_quota_from_api_keys,
         limit_warmup_enabled=settings.limit_warmup_enabled,
@@ -342,7 +350,7 @@ async def get_settings(
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
-    settings = await context.service.get_settings()
+    settings = await context.service.get_settings(actor_user_id=principal.user_id)
     return _dashboard_settings_response(settings, principal=principal)
 
 
@@ -365,12 +373,20 @@ async def get_subscription_overflow_preflight(
     return preflight
 
 
-@router.get("/runtime/connect-address", response_model=RuntimeConnectAddressResponse)
+@router.get(
+    "/runtime/connect-address",
+    response_model=RuntimeConnectAddressResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def get_runtime_connect_address(request: Request) -> RuntimeConnectAddressResponse:
     return RuntimeConnectAddressResponse(connect_address=_resolve_runtime_connect_address(request))
 
 
-@router.get("/upstream-proxy", response_model=UpstreamProxyAdminResponse)
+@router.get(
+    "/upstream-proxy",
+    response_model=UpstreamProxyAdminResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def get_upstream_proxy_admin(
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyAdminResponse:
@@ -1043,7 +1059,7 @@ async def update_settings(
     principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
-    current = await context.service.get_settings()
+    current = await context.service.get_settings(actor_user_id=principal.user_id)
     # The dashboard client submits the whole form on every save, so a security
     # field merely being present must not require security:write; only a value
     # that differs from what is stored does.
@@ -1054,6 +1070,7 @@ async def update_settings(
     }
     if security_changes:
         ensure_dashboard_permission(principal, Permission.SECURITY_WRITE)
+        await ensure_step_up(request, principal, Permission.SECURITY_WRITE)
     if payload.expected_version is not None and payload.expected_version != current.version:
         raise DashboardSettingsConflictError(
             "Settings were modified since this form was loaded; reload and retry",
@@ -1343,6 +1360,11 @@ async def update_settings(
                     if payload.totp_required_on_login is not None
                     else current.totp_required_on_login
                 ),
+                totp_required_for_admin_role=(
+                    payload.totp_required_for_admin_role
+                    if payload.totp_required_for_admin_role is not None
+                    else current.totp_required_for_admin_role
+                ),
                 api_key_auth_enabled=(
                     payload.api_key_auth_enabled
                     if payload.api_key_auth_enabled is not None
@@ -1513,10 +1535,13 @@ async def update_settings(
             # repository must apply the UPDATE only if the row still carries
             # that version; a writer committing in between yields 409 instead
             # of silently reverting its fields.
+            actor_user_id=principal.user_id,
             expected_version=current.version,
         )
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
+    except CompatAdminUnenrolledError as exc:
+        raise DashboardConflictError(str(exc), code="compat_user_locked") from exc
 
     upstream_route_inputs_changed = (
         current.upstream_proxy_routing_enabled != updated.upstream_proxy_routing_enabled
@@ -1564,6 +1589,7 @@ async def update_settings(
             "warmup_model",
             "import_without_overwrite",
             "totp_required_on_login",
+            "totp_required_for_admin_role",
             "api_key_auth_enabled",
             "hide_upstream_quota_from_api_keys",
             "limit_warmup_enabled",
@@ -1653,6 +1679,8 @@ async def update_settings(
     AuditService.log_async(
         "settings_changed",
         actor_ip=actor_ip,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("settings", "dashboard"),
         details={"changed_fields": changed_fields},
     )
     # M5 conversation archive: enabling turns the proxy into a full

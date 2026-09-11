@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
+from dataclasses import dataclass
 from secrets import compare_digest
 
+from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -13,6 +15,19 @@ from app.modules.dashboard_auth.repository import DashboardAuthRepository
 
 logger = logging.getLogger(__name__)
 _encryptor: TokenEncryptor | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SharedBootstrapState:
+    """The cross-replica facts the bootstrap token depends on, read uncached.
+
+    ``local_password_configured`` is derived from ``dashboard_users`` (an active
+    account holding a password), never from the legacy settings column.
+    """
+
+    local_password_configured: bool
+    bootstrap_token_encrypted: bytes | None
+    bootstrap_token_hash: bytes | None
 
 
 def _get_manual_bootstrap_token() -> str | None:
@@ -51,10 +66,16 @@ def log_bootstrap_token(logger: logging.Logger, token: str, *, reason: str = "fi
     )
 
 
-async def _get_shared_bootstrap_state() -> tuple[str | None, bytes | None, bytes | None]:
+async def _get_shared_bootstrap_state() -> SharedBootstrapState:
     async with SessionLocal() as session:
-        settings = await DashboardAuthRepository(session).get_settings()
-        return settings.password_hash, settings.bootstrap_token_encrypted, settings.bootstrap_token_hash
+        repository = DashboardAuthRepository(session)
+        settings = await repository.get_settings()
+        auth_state = await repository.get_local_auth_state()
+        return SharedBootstrapState(
+            local_password_configured=auth_state.active_local_password_users > 0,
+            bootstrap_token_encrypted=settings.bootstrap_token_encrypted,
+            bootstrap_token_hash=settings.bootstrap_token_hash,
+        )
 
 
 async def has_active_bootstrap_token() -> bool:
@@ -62,8 +83,8 @@ async def has_active_bootstrap_token() -> bool:
     if manual:
         return True
 
-    password_hash, _, bootstrap_token_hash = await _get_shared_bootstrap_state()
-    return password_hash is None and bootstrap_token_hash is not None
+    state = await _get_shared_bootstrap_state()
+    return not state.local_password_configured and state.bootstrap_token_hash is not None
 
 
 async def validate_bootstrap_token(submitted_token: str) -> bool:
@@ -71,10 +92,10 @@ async def validate_bootstrap_token(submitted_token: str) -> bool:
     if manual is not None:
         return compare_digest(submitted_token.encode("utf-8"), manual.encode("utf-8"))
 
-    password_hash, _, bootstrap_token_hash = await _get_shared_bootstrap_state()
-    if password_hash is not None or bootstrap_token_hash is None:
+    state = await _get_shared_bootstrap_state()
+    if state.local_password_configured or state.bootstrap_token_hash is None:
         return False
-    return compare_digest(_hash_bootstrap_token(submitted_token), bootstrap_token_hash)
+    return compare_digest(_hash_bootstrap_token(submitted_token), state.bootstrap_token_hash)
 
 
 async def get_bootstrap_validation_status(submitted_token: str) -> str:
@@ -84,14 +105,19 @@ async def get_bootstrap_validation_status(submitted_token: str) -> str:
             return "valid"
         return "invalid"
 
-    password_hash, _, bootstrap_token_hash = await _get_shared_bootstrap_state()
-    if bootstrap_token_hash is None:
-        return "password_already_configured" if password_hash is not None else "unavailable"
-    if compare_digest(_hash_bootstrap_token(submitted_token), bootstrap_token_hash):
+    state = await _get_shared_bootstrap_state()
+    if state.bootstrap_token_hash is None:
+        return "password_already_configured" if state.local_password_configured else "unavailable"
+    if compare_digest(_hash_bootstrap_token(submitted_token), state.bootstrap_token_hash):
         return "valid"
-    if password_hash is not None:
+    if state.local_password_configured:
         return "password_already_configured"
     return "invalid"
+
+
+async def _invalidate_bootstrap_caches() -> None:
+    await get_settings_cache().invalidate()
+    await get_dashboard_users_cache().invalidate()
 
 
 async def ensure_auto_bootstrap_token() -> str | None:
@@ -100,11 +126,12 @@ async def ensure_auto_bootstrap_token() -> str | None:
     async with SessionLocal() as session:
         repository = DashboardAuthRepository(session)
         settings = await repository.get_settings()
+        local_password_configured = (await repository.get_local_auth_state()).active_local_password_users > 0
 
-        if manual or settings.password_hash is not None:
+        if manual or local_password_configured:
             if settings.bootstrap_token_hash is not None:
                 await repository.clear_bootstrap_token()
-                await get_settings_cache().invalidate()
+                await _invalidate_bootstrap_caches()
             return None
 
         if settings.bootstrap_token_hash is not None:
@@ -131,7 +158,7 @@ async def ensure_auto_bootstrap_token() -> str | None:
             _hash_bootstrap_token(token),
         )
 
-    await get_settings_cache().invalidate()
+    await _invalidate_bootstrap_caches()
     if stored:
         return token
     return None
@@ -142,4 +169,4 @@ async def clear_auto_generated_token() -> None:
         repository = DashboardAuthRepository(session)
         cleared = await repository.clear_bootstrap_token()
     if cleared:
-        await get_settings_cache().invalidate()
+        await _invalidate_bootstrap_caches()

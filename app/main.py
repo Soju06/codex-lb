@@ -23,7 +23,9 @@ from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
 from app.core.audit.service import drain_audit_log_tasks
+from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
 from app.core.auth.guardian import build_auth_guardian_scheduler
+from app.core.auth.providers.registry import get_auth_provider_registry
 from app.core.balancer import configure_replica_salt
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
@@ -50,6 +52,7 @@ from app.core.middleware import (
     add_app_version_middleware,
     add_backend_api_codex_v1_alias_middleware,
     add_dashboard_auth_proxy_middleware,
+    add_dashboard_csrf_middleware,
     add_multipart_content_encoding_middleware,
     add_request_body_limit_middleware,
     add_request_decompression_middleware,
@@ -90,11 +93,15 @@ from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.last_used_coalescer import build_api_key_last_used_flush_scheduler
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
 from app.modules.audit import api as audit_api
+from app.modules.auth_providers import api as auth_providers_api
 from app.modules.automations import api as automations_api
 from app.modules.automations.scheduler import build_automations_scheduler
 from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
+from app.modules.dashboard_roles import api as dashboard_roles_api
+from app.modules.dashboard_users import api as dashboard_users_api
+from app.modules.dashboard_users.identity_resolver import get_identity_resolution_cache
 from app.modules.firewall import api as firewall_api
 from app.modules.fleet import api as fleet_api
 from app.modules.health import api as health_api
@@ -121,6 +128,7 @@ from app.modules.rate_limit_reset_credits import api as rate_limit_reset_credits
 from app.modules.reports import api as reports_api
 from app.modules.reports.cache import ReportsCaches
 from app.modules.request_logs import api as request_logs_api
+from app.modules.role_mappings import api as role_mappings_api
 from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
 from app.modules.settings.service import warn_environment_shadowed_by_dashboard
@@ -497,6 +505,7 @@ async def lifespan(app: FastAPI):
     startup_module._startup_complete = False
     startup_module.reset_bridge_registration()
     await get_settings_cache().invalidate(propagate=False)
+    await get_dashboard_users_cache().invalidate(propagate=False)
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
     settings = get_settings()
@@ -549,6 +558,7 @@ async def lifespan(app: FastAPI):
         NAMESPACE_ACCOUNT_ROUTING,
         NAMESPACE_ACCOUNT_SELECTION,
         NAMESPACE_API_KEY,
+        NAMESPACE_DASHBOARD_USERS,
         NAMESPACE_FIREWALL,
         NAMESPACE_MODEL_REGISTRY,
         NAMESPACE_RESET_CREDITS,
@@ -590,6 +600,14 @@ async def lifespan(app: FastAPI):
     # streams; the invalidate above already expired it, so a failed refresh
     # degrades to the ordinary TTL reload instead of serving a stale value.
     cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_settings_cache().refresh)
+    cache_poller.on_invalidation(
+        NAMESPACE_DASHBOARD_USERS,
+        lambda: get_dashboard_users_cache().invalidate(propagate=False),
+    )
+    # Provider settings and identity resolutions ride the same bus: a PATCH on
+    # one replica bumps dashboard_users, every replica drops both caches.
+    cache_poller.on_invalidation(NAMESPACE_DASHBOARD_USERS, get_auth_provider_registry().clear)
+    cache_poller.on_invalidation(NAMESPACE_DASHBOARD_USERS, get_identity_resolution_cache().clear)
     cache_poller.on_invalidation(NAMESPACE_UPSTREAM_ROUTE, get_upstream_route_cache().clear)
     # The route resolver also reads the dashboard settings row (routing enabled
     # + default pool id), so settings bumps clear resolved routes as well.
@@ -979,6 +997,7 @@ def create_app() -> FastAPI:
     app.add_middleware(cast(Any, InFlightMiddleware))
     add_dashboard_gzip_middleware(app)
     add_dashboard_auth_proxy_middleware(app)
+    add_dashboard_csrf_middleware(app)
     add_request_decompression_middleware(app)
     add_request_body_limit_middleware(app)
     add_multipart_content_encoding_middleware(app)
@@ -1030,6 +1049,10 @@ def create_app() -> FastAPI:
     app.include_router(runtime_api.router)
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
+    app.include_router(dashboard_users_api.router)
+    app.include_router(dashboard_roles_api.router)
+    app.include_router(auth_providers_api.router)
+    app.include_router(role_mappings_api.router)
     app.include_router(settings_api.router)
     app.include_router(telemetry_api.router)
     app.include_router(firewall_api.router)

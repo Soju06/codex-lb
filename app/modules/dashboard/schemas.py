@@ -47,12 +47,31 @@ class DashboardMetricsComparison(DashboardModel):
     previous: DashboardMetricsComparisonPrevious
 
 
+class DashboardSubscriptionOverflow(DashboardModel):
+    """Subscription-overflow spend in the overview's window, plus live pins (#2123 WP-G).
+
+    ``cost_usd`` is a breakdown of the estimated-cost figure already reported by
+    ``cost``, not an addition to it. ``usage_less_requests`` counts the rows whose
+    source reported no usage, which therefore contribute nothing to the sum.
+    """
+
+    requests: int = Field(ge=0)
+    cost_usd: float
+    usage_less_requests: int = Field(ge=0)
+    live_pins: int = Field(ge=0)
+
+
 class DashboardOverviewSummary(DashboardModel):
     primary_window: UsageWindow
     secondary_window: UsageWindow | None = None
     cost: DashboardUsageCost
     metrics: DashboardUsageMetrics | None = None
     comparison: DashboardMetricsComparison | None = None
+    # ``None`` is the "render nothing" signal: no overflow has ever been
+    # dispatched and no pin is live, so the dashboard shows neither the tile nor
+    # the request-log source filter. Additive and default-``None`` so older
+    # clients are unaffected.
+    subscription_overflow: DashboardSubscriptionOverflow | None = None
 
 
 class DashboardUsageWindows(DashboardModel):

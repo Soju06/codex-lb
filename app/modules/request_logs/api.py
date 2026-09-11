@@ -83,6 +83,12 @@ async def list_request_logs(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    # Repeated ``source`` values, matched as an opaque equality set. Not
+    # validated server-side (same contract as ``status``/``accountId``); the
+    # closed two-value domain the dashboard offers lives in the UI. Deliberately
+    # absent from ``/options``: a two-value domain does not justify a fifth
+    # ``DISTINCT`` pass over the history on every panel load.
+    source: list[str] | None = Query(default=None),
     timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
@@ -110,9 +116,12 @@ async def list_request_logs(
         models=model,
         reasoning_efforts=reasoning_effort,
         status=status,
+        sources=source,
         cache_mode="timeframe" if cache_timeframe is not None else "since",
         timeframe=cache_timeframe,
         include_sensitive_metadata=principal.has(Permission.CONVERSATIONS_READ),
+        include_account_identity=principal.has(Permission.ACCOUNTS_WRITE),
+        include_api_key_identity=principal.has(Permission.API_KEYS_READ),
     )
     return RequestLogsResponse(
         requests=page.requests,
@@ -133,6 +142,7 @@ async def list_request_log_filter_options(
     timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> RequestLogFilterOptionsResponse:
     _ = status  # Keep input backward compatible but do not self-filter status facet.
@@ -156,10 +166,13 @@ async def list_request_log_filter_options(
             RequestLogModelOption(model=option.model, reasoning_effort=option.reasoning_effort)
             for option in options.model_options
         ],
+        # The API-key inventory (ids, names, prefixes) is an api_keys:read surface.
         api_keys=[
             RequestLogApiKeyOption(id=option.id, name=option.name, key_prefix=option.key_prefix)
             for option in options.api_keys
-        ],
+        ]
+        if principal.has(Permission.API_KEYS_READ)
+        else [],
         statuses=options.statuses,
     )
 

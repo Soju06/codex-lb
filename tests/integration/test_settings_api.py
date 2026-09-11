@@ -90,7 +90,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["warmupModel"] == "gpt-5.4-mini"
     assert payload["importWithoutOverwrite"] is True
     assert payload["totpRequiredOnLogin"] is False
-    assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
     assert payload["hideUpstreamQuotaFromApiKeys"] is False
     assert payload["limitWarmupEnabled"] is False
@@ -185,7 +184,6 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["warmupModel"] == "gpt-5.4-nano"
     assert updated["importWithoutOverwrite"] is False
     assert updated["totpRequiredOnLogin"] is False
-    assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
     assert updated["hideUpstreamQuotaFromApiKeys"] is True
     assert updated["limitWarmupEnabled"] is True
@@ -235,7 +233,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["warmupModel"] == "gpt-5.4-nano"
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
-    assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
     assert payload["hideUpstreamQuotaFromApiKeys"] is True
     assert payload["limitWarmupEnabled"] is True

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from app.core.auth.dashboard_access import Permission
+from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
     require_dashboard_permission,
     set_dashboard_error_format,
@@ -33,9 +33,13 @@ router = APIRouter(
 )
 async def get_overview(
     timeframe: DashboardOverviewTimeframeKey = Query("7d"),
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: DashboardContext = Depends(get_dashboard_context),
 ) -> DashboardOverviewResponse:
-    return await context.service.get_overview(timeframe)
+    return await context.service.get_overview(
+        timeframe,
+        redact_identity=not principal.has(Permission.ACCOUNTS_WRITE),
+    )
 
 
 @router.get(

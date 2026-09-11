@@ -26,7 +26,9 @@ Three layers, each usable on its own:
   statement and its COMMIT always run to completion with the caller's
   cancellation deferred, and a post-issuance failure is resolved by a bounded
   primary-key re-read so the caller learns ``written`` | ``not_written`` |
-  ``unknown`` instead of guessing (design §8.5, CL-4).
+  ``unknown`` instead of guessing (design §8.5, CL-4). An intent that still
+  owes its anchor is refused before anything is issued (decision 78), so a
+  ``store``-enabled turn is never delivered with a chain that resolves nowhere.
 
 This module is the only request-path reader of the pin table and of the TTL
 constants in ``app.modules.settings.subscription_overflow``. Its request-path
@@ -636,6 +638,13 @@ class PinIntent:
     anchor row for the source-minted response id through ``resolve`` at the
     content trigger, so SDK ``previous_response_id`` follow-ups return to the
     same source (design §3, §7.2).
+
+    The anchor is *owed*, not optional (decision 78): an anchored intent whose
+    source minted no ``response.id`` by that trigger stays ``anchor_pending``
+    and ``PinWriteExecutor.commit`` refuses it, because the client would
+    otherwise receive a turn whose ``previous_response_id`` chain resolves
+    nowhere. An intent that owes no anchor (``store: false``, i.e. every native
+    Codex turn) still commits its thread pin alone.
     """
 
     writes: tuple[PinWrite, ...]
@@ -643,15 +652,31 @@ class PinIntent:
     source_id: str | None = None
     anchor_api_key_id: str | None = None
     anchor: bool = False
+    # Set by ``resolve`` when the anchor row was appended; an anchored intent
+    # that never resolved still *owes* its anchor (I11: delivered => pinned
+    # *and* anchored). New field last: positional construction is unchanged.
+    anchor_resolved: bool = False
 
     def __post_init__(self) -> None:
         if self.anchor and self.source_id is None:
             raise ValueError("an anchored pin intent needs the source id")
+        if self.anchor_resolved and not self.anchor:
+            raise ValueError("an unanchored pin intent cannot carry a resolved anchor")
+
+    @property
+    def anchor_pending(self) -> bool:
+        """An anchor this intent owes (``store`` not ``false``) that no source ``response.id`` could build."""
+
+        return self.anchor and not self.anchor_resolved
 
     def resolve(self, response_id: str | None) -> PinIntent:
-        """The intent with the anchor row appended iff ``anchor`` is set and the source minted a response id."""
+        """The intent with the anchor row appended iff ``anchor`` is set and the source minted a response id.
 
-        if not self.anchor or not response_id or self.source_id is None:
+        Idempotent: an already-resolved intent is returned unchanged, so a
+        second ``resolve`` can never append a duplicate anchor write.
+        """
+
+        if not self.anchor or self.anchor_resolved or not response_id or self.source_id is None:
             return self
         anchor_write = PinWrite(
             anchor_pin_key(self.anchor_api_key_id, response_id),
@@ -659,7 +684,7 @@ class PinIntent:
             self.source_id,
             self.anchor_api_key_id,
         )
-        return replace(self, writes=(*self.writes, anchor_write))
+        return replace(self, writes=(*self.writes, anchor_write), anchor_resolved=True)
 
 
 PinWriteOutcome = Literal["written", "not_written", "unknown"]
@@ -688,6 +713,13 @@ class PinWriteExecutor:
     into an outcome). Every non-``written`` outcome is logged at WARN as
     ``model_source_pin_write outcome=...``.
 
+    ``commit`` refuses an intent that still owes its anchor
+    (``PinIntent.anchor_pending``) before issuing anything: ``not_written``
+    with ``reason=anchor_unresolved``, so the thread pin is not written either
+    and no content frame is delivered unanchored (decision 78). An intent with
+    nothing to write because its evidence is already durable (a pinned or
+    anchored continuation) stays vacuously ``written``.
+
     SQLite divergence (design §8.9): the acquisition deadline covers the
     in-process writer queue; an external writer holding the file makes the
     issued statement wait up to the driver's 30 s busy timeout, uncancellable
@@ -712,6 +744,16 @@ class PinWriteExecutor:
         scheduler: Scheduler = REAL_SCHEDULER,
         clock: Clock = REAL_CLOCK,
     ) -> PinWriteOutcome:
+        if intent.anchor_pending:
+            # I11 (delivered => pinned *and* anchored): a ``store``-enabled
+            # dispatch whose source minted no ``response.id`` by the content
+            # trigger cannot be anchored, so the client would receive a turn
+            # whose ``previous_response_id`` chain resolves nowhere -- and, for
+            # a request without a thread key, a turn with no durable row at
+            # all that this method used to report as ``written``. Fail closed
+            # with nothing issued; the thread pin is not written either,
+            # because nothing was delivered (design §6.3, §8.5, decision 78).
+            return self._log_outcome("not_written", action="upsert", kinds=PIN_KIND_ANCHOR, reason="anchor_unresolved")
         writes = intent.writes
         if not writes:
             return "written"

@@ -1889,7 +1889,7 @@ async def test_submit_http_bridge_request_keeps_reserved_detached_lane_after_rep
 async def test_release_handoffs_retires_ready_detached_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=VirtualClock())
     session = _make_bridge_session(key_value="detached-released-handoff")
     session.unanchored_reservation_id = "scope-detached-release"
     session.upstream_control.reconnect_requested = True
@@ -1905,6 +1905,47 @@ async def test_release_handoffs_retires_ready_detached_generation(
 
     assert session.unanchored_reservation_id is None
     retire.assert_awaited_once_with(session, lock_wait_timeout_seconds=5.0)
+
+
+@pytest.mark.asyncio
+async def test_release_handoffs_shares_deadline_and_revisits_deferred_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = VirtualClock()
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock)
+    sessions = [_make_bridge_session(key_value=f"deadline-{index}") for index in range(3)]
+    for session in sessions:
+        session.unanchored_reservation_id = "deadline-scope"
+        service._http_bridge_detached_sessions[id(session)] = session
+    waits: list[float] = []
+
+    async def busy_retire(session: Any, *, lock_wait_timeout_seconds: float) -> bool:
+        waits.append(lock_wait_timeout_seconds)
+        clock.advance(min(3.0, lock_wait_timeout_seconds))
+        return False
+
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", busy_retire)
+    await http_bridge_helpers_module._release_http_bridge_unanchored_handoffs_for_request(
+        service, request_scope_id="deadline-scope"
+    )
+
+    assert clock.monotonic() == 5.0
+    assert waits == [5.0, 2.0]
+    assert list(service._http_bridge_detached_sessions.values()) == sessions
+    assert all(session.unanchored_reservation_id is None for session in sessions)
+    assert "skipped_sessions=1" in caplog.text
+
+    async def ready_retire(session: Any, *, lock_wait_timeout_seconds: float) -> bool:
+        assert lock_wait_timeout_seconds == 5.0
+        service._http_bridge_detached_sessions.pop(id(session))
+        return True
+
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", ready_retire)
+    await http_bridge_helpers_module._release_http_bridge_unanchored_handoffs_for_request(
+        service, request_scope_id="next-scope"
+    )
+    assert not service._http_bridge_detached_sessions
 
 
 @pytest.mark.asyncio
@@ -2014,6 +2055,119 @@ async def test_http_bridge_request_cleanup_releases_pre_submit_handoff(
         reset_request_scope_id(request_scope_token)
 
     assert session.unanchored_reservation_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_request", [False, True])
+async def test_http_response_finalization_shares_detached_lock_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_request: bool,
+) -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
+    sessions = [_make_bridge_session(key_value=f"stream-deadline-{index}") for index in range(3)]
+    for session in sessions:
+        session.upstream_control.reconnect_requested = True
+        session.upstream_control.retire_after_drain = True
+        service._http_bridge_detached_sessions[id(session)] = session
+    sessions[0].unanchored_reservation_id = "stream-deadline"
+    sessions[2].unanchored_reservation_id = "other-request"
+    runtime_config = SimpleNamespace(
+        enabled=True,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=1800.0,
+        max_sessions=8,
+        queue_limit=4,
+        prompt_cache_idle_ttl_seconds=120.0,
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace())),
+    )
+    monkeypatch.setattr(http_bridge_streaming_module, "_service_get_settings", _make_app_settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *args: runtime_config)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    started = asyncio.Event()
+    release_holders = asyncio.Event()
+    scope = anyio.CancelScope()
+
+    async def upstream_stream(*args: object, **kwargs: object):
+        yield "data: completed\n\n"
+        first_request = not started.is_set()
+        started.set()
+        if cancel_request and first_request:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", upstream_stream)
+
+    async def hold(session: Any) -> None:
+        async with session.pending_lock:
+            await release_holders.wait()
+
+    async def consume() -> list[str]:
+        chunks: list[str] = []
+        token = set_request_scope_id("stream-deadline")
+        try:
+            with scope:
+                payload = proxy_service.ResponsesRequest.model_validate(
+                    {"model": "gpt-5.6-sol", "instructions": "test", "input": "hello"}
+                )
+                async for chunk in service.stream_http_responses(payload, {}, codex_session_affinity=True):
+                    chunks.append(chunk)
+        finally:
+            reset_request_scope_id(token)
+        return chunks
+
+    holders = [asyncio.create_task(hold(session)) for session in sessions]
+    await scheduler.drain()
+    consumer = asyncio.create_task(consume())
+    try:
+        await scheduler.drain()
+        assert started.is_set()
+        if cancel_request:
+            scope.cancel()
+            await scheduler.drain()
+        assert not consumer.done()
+        await scheduler.advance(5.0)
+        assert consumer.done(), "request finalization restarted the lock budget for another session"
+        assert await consumer == ["data: completed\n\n"]
+        assert scope.cancelled_caught is cancel_request
+        assert list(service._http_bridge_detached_sessions.values()) == sessions
+        assert sessions[0].unanchored_reservation_id is None
+        assert sessions[2].unanchored_reservation_id == "other-request"
+        for session in sessions:
+            assert session.pending_lock.locked()
+            assert session.pending_lock.statistics().tasks_waiting == 0
+            assert not session.upstream_close_attempted
+            cast(AsyncMock, session.upstream.close).assert_not_awaited()
+
+        release_holders.set()
+        await asyncio.gather(*holders)
+        # A later public request can retire drained generations; a foreign
+        # handoff still belongs to its request.
+        followup = asyncio.create_task(consume_followup(service))
+        await asyncio.wait_for(followup, timeout=1.0)
+        assert list(service._http_bridge_detached_sessions.values()) == [sessions[2]]
+        for session in sessions[:2]:
+            cast(AsyncMock, session.upstream.close).assert_awaited_once()
+        cast(AsyncMock, sessions[2].upstream.close).assert_not_awaited()
+    finally:
+        release_holders.set()
+        await asyncio.gather(*holders)
+        if not consumer.done():
+            consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        await scheduler.cancel_owned_tasks()
+
+
+async def consume_followup(service: proxy_service.ProxyService) -> None:
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "test", "input": "hello"}
+    )
+    async for _ in service.stream_http_responses(payload, {}, codex_session_affinity=True):
+        pass
 
 
 @pytest.mark.asyncio
@@ -18847,7 +19001,7 @@ async def test_http_bridge_local_owner_rejects_aliases_for_distinct_live_session
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner_forward_failure(
+async def test_stream_via_http_bridge_reuses_api_key_reservation_after_pre_dispatch_owner_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -18858,17 +19012,11 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         key_id=api_key.id,
         model="gpt-5.4",
     )
-    retried_reservation = proxy_service.ApiKeyUsageReservationData(
-        reservation_id="resv-retry",
-        key_id=api_key.id,
-        model="gpt-5.4",
-    )
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
             "instructions": "hi",
             "input": "hello",
-            "previous_response_id": "resp_prev_1",
         }
     )
 
@@ -18881,20 +19029,18 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
-        previous_response_id="resp_prev_1",
     )
-    request_state_initial.request_stage = "follow_up"
+    request_state_initial.request_stage = "first_turn"
     request_state_initial.preferred_account_id = "acc-1"
     request_state_retry = proxy_service._WebSocketRequestState(
         request_id="req-retry",
         model="gpt-5.4",
         service_tier=None,
         reasoning_effort=None,
-        api_key_reservation=retried_reservation,
+        api_key_reservation=initial_reservation,
         started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
-        previous_response_id="resp_prev_1",
     )
 
     prepare_reservations: list[proxy_service.ApiKeyUsageReservationData | None] = []
@@ -18942,7 +19088,18 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
 
     async def fake_forward_http_bridge_request_to_owner(**kwargs: object):
         del kwargs
-        raise ProxyResponseError(400, proxy_service.openai_error("previous_response_not_found", "missing"))
+        source = ProxyResponseError(
+            503,
+            proxy_service.openai_error(
+                "bridge_owner_unreachable",
+                "HTTP bridge owner is unreachable",
+                error_type="server_error",
+            ),
+        )
+        raise http_bridge_owner_forwarding_module._OwnerForwardRequestError(
+            source,
+            outcome=http_bridge_owner_forwarding_module._OwnerForwardOutcome.RECEIVER_REJECTED,
+        )
         yield ""
 
     async def fake_submit_http_bridge_request(
@@ -18964,7 +19121,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
 
         asyncio.create_task(produce_after_reattach_delay())
 
-    reserve_retry = AsyncMock(return_value=retried_reservation)
+    reserve_retry = AsyncMock(side_effect=AssertionError("pre-dispatch replay must reuse the original reservation"))
     capacity_unavailable = ProxyResponseError(
         503,
         proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
@@ -19029,9 +19186,9 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     assert any('"type":"codex.keepalive"' in chunk for chunk in chunks)
     assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
     assert get_or_create.await_count == 3
-    assert prepare_reservations == [initial_reservation, retried_reservation]
-    assert submitted_reservations == [retried_reservation]
-    reserve_retry.assert_awaited_once()
+    assert prepare_reservations == [initial_reservation, initial_reservation]
+    assert submitted_reservations == [initial_reservation]
+    reserve_retry.assert_not_awaited()
 
 
 async def _run_owner_forward_recovery_with_session(

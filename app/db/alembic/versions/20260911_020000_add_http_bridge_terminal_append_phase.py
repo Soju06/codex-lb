@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260911_020000_add_http_bridge_terminal_append_phase"
-down_revision = "20260911_020000_merge_http_bridge_and_affinity_heads"
+down_revision = "20260911_015000_merge_http_bridge_and_affinity_heads"
 branch_labels = None
 depends_on = None
 

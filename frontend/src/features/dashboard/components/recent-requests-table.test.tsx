@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { usePrivacyStore } from "@/hooks/use-privacy";
+import { ADMIN_PERMISSIONS, OPERATOR_PERMISSIONS } from "@/test/mocks/factories";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 import {
   ALL_REQUEST_LOG_COLUMNS,
@@ -102,7 +103,7 @@ describe("RecentRequestsTable", () => {
     toastError.mockReset();
     useAuthStore.setState({
       role: "admin",
-      permissions: ["read", "write"],
+      permissions: ADMIN_PERMISSIONS,
       canWrite: true,
     });
   });
@@ -617,12 +618,11 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 
-  it("hides identifying metadata and archive controls from guests", () => {
-    useAuthStore.setState({
-      role: "guest",
-      permissions: ["read"],
-      canWrite: false,
-    });
+  it.each([
+    ["guests", { role: "guest" as const, permissions: ["read"], canWrite: false }],
+    ["operators without conversations:read", { role: "admin" as const, permissions: OPERATOR_PERMISSIONS, canWrite: true }],
+  ])("hides identifying metadata and archive controls from %s", (_label, auth) => {
+    useAuthStore.setState(auth);
 
     render(
       <RecentRequestsTable

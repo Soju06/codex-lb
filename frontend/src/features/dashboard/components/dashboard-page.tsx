@@ -32,7 +32,7 @@ import { RecentRequestsTable } from "@/features/dashboard/components/recent-requ
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { useRequestLogTablePreferences } from "@/features/dashboard/hooks/use-request-log-table-preferences";
@@ -85,10 +85,14 @@ export function DashboardPage() {
   const accountListSort = useDashboardPreferencesStore((s) => s.accountListSort);
   const setAccountViewMode = useDashboardPreferencesStore((s) => s.setAccountViewMode);
   const setAccountListSort = useDashboardPreferencesStore((s) => s.setAccountListSort);
-  const canWrite = useAuthStore((state) => state.canWrite);
+  // Each surface follows the permission its backend route demands, not the
+  // coarse `write` alias: conversations and archives need `conversations:read`,
+  // account actions `accounts:write`, the API-key filter `api_keys:read`.
+  const canWriteAccounts = usePermission("accounts:write");
+  const canReadApiKeys = usePermission("api_keys:read");
   const initialized = useAuthStore((state) => state.initialized);
-  const role = useAuthStore((state) => state.role);
-  const isAdmin = initialized && role === "admin";
+  const hasConversationsRead = usePermission("conversations:read");
+  const canReadConversations = initialized && hasConversationsRead;
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
     [searchParams],
@@ -101,15 +105,15 @@ export function DashboardPage() {
     () => parseDashboardView(searchParams.get("view")),
     [searchParams],
   );
-  const dashboardView = isAdmin ? requestedDashboardView : "request-logs";
+  const dashboardView = canReadConversations ? requestedDashboardView : "request-logs";
   useEffect(() => {
-    if (!initialized || isAdmin || searchParams.get("view") !== "conversations") {
+    if (!initialized || canReadConversations || searchParams.get("view") !== "conversations") {
       return;
     }
     const next = new URLSearchParams(searchParams);
     next.delete("view");
     setSearchParams(next, { replace: true });
-  }, [initialized, isAdmin, searchParams, setSearchParams]);
+  }, [initialized, canReadConversations, searchParams, setSearchParams]);
   // Conversation stats must follow the timeframe restored for the active
   // view, including when that state came from a bookmarked URL.
   const dashboardTimeframe =
@@ -121,11 +125,14 @@ export function DashboardPage() {
     useState<OverviewTimeframe | null>(null);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const conversationsState = useConversations({
-    enabled: isAdmin && dashboardView === "conversations",
+    enabled: canReadConversations && dashboardView === "conversations",
   });
   const { conversationsQuery } = conversationsState;
+  // Read-only sessions never see the API-key filter control, so they must not
+  // query with one either (URL-carried `apiKeyId` is dropped).
   const { filters, emptyStateFiltersApplied, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
     enabled: dashboardView === "request-logs",
+    allowApiKeyFilters: canReadApiKeys,
   });
   const { resumeMutation, limitWarmupMutation } = useAccountMutations();
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
@@ -162,7 +169,7 @@ export function DashboardPage() {
 
   const handleDashboardViewChange = useCallback(
     (nextView: "request-logs" | "conversations") => {
-      if (nextView === "conversations" && !isAdmin) {
+      if (nextView === "conversations" && !canReadConversations) {
         return;
       }
       const next = new URLSearchParams(searchParams);
@@ -173,7 +180,7 @@ export function DashboardPage() {
       }
       setSearchParams(next);
     },
-    [isAdmin, searchParams, setSearchParams],
+    [canReadConversations, searchParams, setSearchParams],
   );
 
   const handleAccountAction = useCallback(
@@ -183,7 +190,7 @@ export function DashboardPage() {
           navigate(`/accounts?selected=${account.accountId}`);
           break;
         case "resume":
-          if (canWrite) {
+          if (canWriteAccounts) {
             void resumeMutation.mutateAsync(account.accountId);
           }
           break;
@@ -191,7 +198,7 @@ export function DashboardPage() {
           navigate(`/accounts?selected=${account.accountId}`);
           break;
         case "warmup-toggle":
-          if (canWrite) {
+          if (canWriteAccounts) {
             void limitWarmupMutation.mutateAsync({
               accountId: account.accountId,
               enabled: !account.limitWarmupEnabled,
@@ -206,7 +213,7 @@ export function DashboardPage() {
           break;
       }
     },
-    [canWrite, limitWarmupMutation, navigate, resetCreditDialog, resumeMutation],
+    [canWriteAccounts, limitWarmupMutation, navigate, resetCreditDialog, resumeMutation],
   );
 
   const handleConversationClick = useCallback(
@@ -522,13 +529,13 @@ export function DashboardPage() {
             {accountViewMode === "list" ? (
               <AccountList
                 accounts={overview?.accounts ?? []}
-                readOnly={!canWrite}
+                readOnly={!canWriteAccounts}
                 sort={accountListSort}
                 onSortChange={setAccountListSort}
                 onAction={handleAccountAction}
               />
             ) : (
-              <AccountCards accounts={overview?.accounts ?? []} readOnly={!canWrite} onAction={handleAccountAction} />
+              <AccountCards accounts={overview?.accounts ?? []} readOnly={!canWriteAccounts} onAction={handleAccountAction} />
             )}
           </section>
 
@@ -537,7 +544,7 @@ export function DashboardPage() {
               <DashboardViewSelector
                 value={dashboardView}
                 onChange={handleDashboardViewChange}
-                showConversations={isAdmin}
+                showConversations={canReadConversations}
               />
               <div className="h-px min-w-8 flex-1 bg-border" />
               {dashboardView === "request-logs" ? (
@@ -585,7 +592,7 @@ export function DashboardPage() {
                 </>
               ) : null}
             </div>
-            {isAdmin && dashboardView === "conversations" ? (
+            {canReadConversations && dashboardView === "conversations" ? (
               <ConversationsView state={conversationsState} accounts={overview?.accounts ?? []} />
             ) : (
               <>
@@ -620,6 +627,7 @@ export function DashboardPage() {
                       modelOptions={modelOptions}
                       statusOptions={statusOptions}
                       sourceOptions={sourceOptions}
+                      showApiKeyFilter={canReadApiKeys}
                       onSearchChange={(search) => updateFilters({ search, offset: 0 })}
                       onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
                       onAccountChange={(accountIds) => updateFilters({ accountIds, offset: 0 })}

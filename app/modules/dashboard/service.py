@@ -90,6 +90,8 @@ class DashboardService:
     async def get_overview(
         self,
         timeframe_key: DashboardOverviewTimeframeKey = "7d",
+        *,
+        redact_identity: bool = False,
     ) -> DashboardOverviewResponse:
         now = utcnow()
         overview_timeframe = resolve_overview_timeframe(timeframe_key)
@@ -109,6 +111,7 @@ class DashboardService:
                 limit_warmups_by_account=limit_warmups_by_account,
                 encryptor=self._encryptor,
                 include_auth=False,
+                redact_identity=redact_identity,
             ),
             key=lambda a: a.capacity_credits_primary or 0,
             reverse=True,

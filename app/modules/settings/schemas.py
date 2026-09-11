@@ -109,7 +109,11 @@ class DashboardSettingsResponse(DashboardModel):
     warmup_model: str = Field(min_length=1)
     import_without_overwrite: bool
     totp_required_on_login: bool
-    totp_configured: bool
+    totp_required_for_admin_role: bool
+    #: Active password accounts without a TOTP secret; the second counts only
+    #: admin-level ones. Both say "N accounts will have to enrol at next sign-in".
+    users_without_totp_count: int = Field(ge=0)
+    admins_without_totp_count: int = Field(ge=0)
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
@@ -190,6 +194,21 @@ class DashboardSettingsResponse(DashboardModel):
     provenance: dict[str, SettingProvenance] = Field(default_factory=dict)
 
 
+#: ``DashboardSettingsUpdateRequest`` fields that change the security posture of
+#: the install. A request that changes any of them (value differs from the
+#: stored setting) requires ``security:write`` on top of the generic write gate.
+SECURITY_SETTINGS_FIELDS: frozenset[str] = frozenset(
+    {
+        "totp_required_on_login",
+        "totp_required_for_admin_role",
+        "api_key_auth_enabled",
+        "guest_access_enabled",
+        "dashboard_session_ttl_seconds",
+        "hide_upstream_quota_from_api_keys",
+    }
+)
+
+
 class DashboardSettingsUpdateRequest(DashboardModel):
     """Partial update of the dashboard settings.
 
@@ -262,6 +281,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     warmup_model: str | None = Field(default=None, min_length=1)
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
+    totp_required_for_admin_role: bool | None = None
     api_key_auth_enabled: bool | None = None
     hide_upstream_quota_from_api_keys: bool | None = None
     limit_warmup_enabled: bool | None = None

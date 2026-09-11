@@ -3011,3 +3011,42 @@ async def test_missing_cost_index_upgrade_downgrade_and_query_plan(tmp_path):
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_guest_session_generation_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the NOT NULL guest_session_generation counter seeded at 0;
+    downgrade drops it; a final walk to head proves the single-head graph."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'guest-generation.sqlite'}"
+    parent_revision = "20260910_010000_dashboard_spool_retention"
+    target_revision = "20260908_000000_add_guest_session_generation"
+
+    async def _dashboard_columns(engine) -> set[str]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            return {row[1] for row in rows}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert "guest_session_generation" not in await _dashboard_columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, target_revision, bootstrap_legacy=False))
+        assert "guest_session_generation" in await _dashboard_columns(engine)
+        async with engine.connect() as conn:
+            rows = (await conn.execute(text("SELECT guest_session_generation FROM dashboard_settings"))).all()
+            assert all(row == (0,) for row in rows)
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert "guest_session_generation" not in await _dashboard_columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert "guest_session_generation" in await _dashboard_columns(engine)
+    finally:
+        await engine.dispose()

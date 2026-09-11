@@ -21,6 +21,8 @@ export type RequestFiltersProps = {
    * selection stays visible and clearable.
    */
   sourceOptions?: MultiSelectOption[];
+  /** Hide the API key filter (read-only guests receive no key options). */
+  showApiKeyFilter?: boolean;
   onSearchChange: (value: string) => void;
   onTimeframeChange: (value: FilterState["timeframe"]) => void;
   onAccountChange: (values: string[]) => void;
@@ -39,6 +41,7 @@ export function RequestFilters({
   modelOptions,
   statusOptions,
   sourceOptions,
+  showApiKeyFilter = true,
   onSearchChange,
   onTimeframeChange,
   onAccountChange,
@@ -74,12 +77,14 @@ export function RequestFilters({
           options={accountOptions}
           onChange={onAccountChange}
         />
-        <MultiSelectFilter
-          label={t("dashboard.filters.apiKeys")}
-          values={filters.apiKeyIds}
-          options={apiKeyOptions}
-          onChange={onApiKeyChange}
-        />
+        {showApiKeyFilter ? (
+          <MultiSelectFilter
+            label={t("dashboard.filters.apiKeys")}
+            values={filters.apiKeyIds}
+            options={apiKeyOptions}
+            onChange={onApiKeyChange}
+          />
+        ) : null}
         <MultiSelectFilter
           label={t("dashboard.filters.models")}
           values={filters.modelOptions}

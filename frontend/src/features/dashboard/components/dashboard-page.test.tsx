@@ -3,7 +3,13 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 
 import { renderWithProviders } from "@/test/utils";
-import { createDashboardOverview, createDashboardProjections } from "@/test/mocks/factories";
+import {
+  ADMIN_PERMISSIONS,
+  OPERATOR_PERMISSIONS,
+  VIEWER_PERMISSIONS,
+  createDashboardOverview,
+  createDashboardProjections,
+} from "@/test/mocks/factories";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
@@ -170,7 +176,7 @@ describe("DashboardPage", () => {
   beforeEach(() => {
     useAuthStore.setState({
       role: "admin",
-      permissions: ["read", "write"],
+      permissions: ADMIN_PERMISSIONS,
       canWrite: true,
       initialized: true,
     });
@@ -466,11 +472,30 @@ describe("DashboardPage", () => {
     });
   });
 
+  it.each([
+    ["an operator", OPERATOR_PERMISSIONS, true],
+    ["a viewer", VIEWER_PERMISSIONS, false],
+  ])("hides Conversations from %s (no conversations:read) even though the wire role is admin", async (_label, permissions, canWrite) => {
+    const user = userEvent.setup();
+    useAuthStore.setState({ role: "admin", permissions, canWrite });
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    expect(screen.queryByTestId("conversations-view")).not.toBeInTheDocument();
+    expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Request Logs" }));
+    expect(screen.queryByRole("menuitemradio", { name: "Conversations" })).not.toBeInTheDocument();
+    await waitFor(() => expect(window.location.search).not.toContain("view=conversations"));
+  });
+
   it("fails closed during auth hydration and preserves an admin bookmark until the guest is known", async () => {
     useAuthStore.setState({
       initialized: false,
       role: "admin",
-      permissions: ["read", "write"],
+      permissions: ADMIN_PERMISSIONS,
       canWrite: true,
     });
     window.history.pushState({}, "", "/dashboard?view=conversations");
@@ -498,6 +523,41 @@ describe("DashboardPage", () => {
       expect(window.location.search).not.toContain("view=conversations");
     });
     expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
+  });
+
+  it("fails closed during auth hydration from the least-privilege boot state", async () => {
+    // The store now boots as guest with no permissions; the gate normally
+    // holds rendering until initialized, but the page must still fail closed
+    // if it is mounted before the session resolves.
+    useAuthStore.setState({
+      initialized: false,
+      role: "guest",
+      permissions: [],
+      canWrite: false,
+    });
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    expect(screen.queryByTestId("conversations-view")).not.toBeInTheDocument();
+    expect(window.location.search).toContain("view=conversations");
+    expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
+
+    act(() => {
+      useAuthStore.setState({
+        initialized: true,
+        role: "admin",
+        permissions: ADMIN_PERMISSIONS,
+        canWrite: true,
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("conversations-view")).toBeInTheDocument();
+    });
+    expect(window.location.search).toContain("view=conversations");
   });
 
   it("customizes and restores the request-log table without a global width control", async () => {

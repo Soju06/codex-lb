@@ -120,6 +120,21 @@ SYNTHETIC_TRANSPORT_FAILURE_MARKER = "_codex_lb_synthetic_transport_failure"
 SYNTHETIC_TRANSPORT_FAILURE_CODES = frozenset(
     {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
 )
+# Every sentence upstream uses to say the account's subscription window is
+# spent, written in the form ``is_upstream_usage_limit_message`` normalizes to:
+# lowercase alphanumeric words joined by single spaces. The passive
+# "The usage limit has been reached" is what the HTTP bridge, the Codex
+# WebSocket and the SDK error body actually carry; the second-person forms come
+# from the native client rendering and from the promo text appended to a
+# decline. A table built from one voice is a table that never fires.
+_USAGE_LIMIT_MESSAGE_MARKERS = (
+    "usage limit has been reached",
+    "usage limit reached",
+    "hit your usage limit",
+    "reached your usage limit",
+    "exceeded your usage limit",
+)
+_MESSAGE_WORD_SEPARATOR_RE = re.compile(r"[^a-z0-9]+")
 
 
 def openai_error(
@@ -156,6 +171,24 @@ def previous_response_stream_incomplete_error() -> OpenAIErrorEnvelope:
         PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
         error_type="server_error",
     )
+
+
+def is_upstream_usage_limit_message(message: str | None) -> bool:
+    """True when the message asserts the account's usage limit is spent.
+
+    Upstream delivers this rejection as an HTTP body, as a serialized
+    ``response.failed`` frame that carries no status, and as a WebSocket
+    handshake error, and any of those forms may omit the error code -- so
+    neither the status nor the code table can be the gate, and every path that
+    needs the answer has to read it from the same place. The words are matched
+    after folding each run of non-alphanumeric characters to a single space,
+    because the same sentence arrives with a straight apostrophe, a curly one,
+    a hyphen joining "usage" and "limit", or wrapped across a line break.
+    """
+    if message is None:
+        return False
+    normalized = _MESSAGE_WORD_SEPARATOR_RE.sub(" ", message.lower()).strip()
+    return any(marker in normalized for marker in _USAGE_LIMIT_MESSAGE_MARKERS)
 
 
 def is_previous_response_not_found_message(message: str | None) -> bool:

@@ -567,6 +567,43 @@ async def test_usage_limit_stream_error_requests_tracked_usage_refresh(monkeypat
     assert kwargs == {"action": "request_usage_refresh", "request_id": "req_usage_limit_refresh"}
 
 
+@pytest.mark.parametrize("code", ["upstream_error", "invalid_request_error"])
+@pytest.mark.asyncio
+async def test_message_derived_usage_limit_requests_the_same_usage_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+) -> None:
+    """An envelope whose usage limit is proven by its message records the same evidence a coded
+    one does: the refresh is gated on what the rejection means, not on the literal error code
+    upstream happened to attach."""
+    load_balancer = _stream_error_load_balancer()
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=schedule)
+    requested: list[str] = []
+    refresh = _sentinel_usage_refresh()
+
+    def fake_request_refresh(account_id: str):
+        requested.append(account_id)
+        return refresh
+
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(fake_request_refresh), raising=False)
+    try:
+        classified = await streaming_helpers_module._handle_stream_error(
+            proxy,
+            cast(Account, SimpleNamespace(id="acc-message-usage-limit")),
+            {"message": "The usage limit has been reached"},
+            code,
+            429,
+        )
+    finally:
+        refresh.close()
+
+    assert classified["failure_class"] == "rate_limit"
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    assert requested == ["acc-message-usage-limit"]
+    schedule.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_usage_limit_stream_error_uses_unknown_request_id_outside_request_context(
     monkeypatch: pytest.MonkeyPatch,
@@ -643,6 +680,10 @@ async def test_usage_limit_stream_error_tolerates_proxy_without_cleanup_schedule
         # Quota codes already pin used_percent=100 in runtime state.
         ("insufficient_quota", 429, "You exceeded your current quota"),
         ("quota_exceeded", 429, "quota exceeded"),
+        # A quota code that repeats the usage-limit sentence stays a quota
+        # rejection: the refresh follows the classification, and widening it to
+        # the message alone would widen it to the quota class it excludes.
+        ("insufficient_quota", 429, "The usage limit has been reached"),
         # Account-neutral and model-scoped rejections never touch account health.
         ("invalid_request_error", 400, "No tool output found for function call call_abc."),
         (

@@ -5,10 +5,50 @@ import json
 import pytest
 from starlette.requests import Request
 
-from app.core.clients.proxy import ProxyResponseError, _error_event_from_response, _error_payload_from_response
+from app.core.clients.proxy import (
+    ProxyResponseError,
+    _error_event_from_response,
+    _error_payload_from_response,
+    _infer_websocket_handshake_error_code,
+)
 from app.modules.proxy.api import _logged_error_json_response, _stream_response_error_events
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("status", [429, 403, None])
+@pytest.mark.parametrize(
+    "message",
+    [
+        # The wording the fixtures across this repository observe upstream send.
+        "The usage limit has been reached",
+        "You've hit your usage limit.",
+        "Usage limit reached.",
+        "You have exceeded your usage limit.",
+    ],
+)
+def test_websocket_handshake_usage_limit_is_coded_from_the_message(status, message):
+    # The handshake carries the rejection as free text, so the inferred code is
+    # the only place the usage limit can still be read off it.
+    assert _infer_websocket_handshake_error_code(status, message) == "usage_limit_reached"
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "expected"),
+    [
+        (403, "This account has been deactivated", "account_deactivated"),
+        (403, "Usage not included in your plan", "usage_not_included"),
+        (429, "Insufficient quota for this request", "insufficient_quota"),
+        (429, "Quota exceeded for this organization", "quota_exceeded"),
+        (429, "Rate limit exceeded, try again shortly", "rate_limit_exceeded"),
+        (401, "Unauthorized", "invalid_api_key"),
+        (404, "Not found", "not_found"),
+        (429, "Too many requests", "rate_limit_exceeded"),
+        (503, "Upstream unavailable", "upstream_error"),
+    ],
+)
+def test_websocket_handshake_error_codes_keep_their_hints(status, message, expected):
+    assert _infer_websocket_handshake_error_code(status, message) == expected
 
 
 def test_logged_error_json_response_preserves_upstream_diagnostic_markers():

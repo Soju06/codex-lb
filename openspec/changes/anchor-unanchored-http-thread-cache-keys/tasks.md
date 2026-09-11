@@ -32,6 +32,8 @@
 - [x] 4.1 Version-prefix minted keys (`v2t-` / `v2u-`).
 - [x] 4.2 One-shot bounded sweep of retired-shape `sticky_thread` rows in the
   sticky-session cleanup pass, self-retiring once a pass finds nothing.
+- [x] 4.3 Recurring bounded purge of anchored (`v2t-`) `sticky_thread` rows idle
+  past the freshness window, so the no-TTL kind stays bounded.
 
 ## 5. Tests
 
@@ -44,7 +46,8 @@
 - [x] 5.5 Unanchorable bodies report the outcome, attach a stable key, and
   supply no sticky key.
 - [x] 5.6 Compaction mints a new anchor and reports `anchor_reset`.
-- [x] 5.7 Cleanup scheduler sweeps retired-shape `sticky_thread` rows once.
+- [x] 5.7 Cleanup scheduler sweeps retired-shape `sticky_thread` rows once and
+  keeps purging anchored ones.
 
 ## 6. Validation
 

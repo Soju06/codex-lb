@@ -65,6 +65,17 @@ _STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS = 6 * 3600
 # has been idle past the freshness window loses only soft locality.
 _LEGACY_DERIVED_PROMPT_CACHE_KEY_PREFIXES = ("std-", "codex-", "mini-")
 
+# Namespace of keys minted by the thread-anchor derivation. The anchor that
+# can reuse such a key expires at `openai_cache_affinity_max_age_seconds`, so a
+# `sticky_thread` row of this shape that has been idle past the same window can
+# never be hit again. `prompt_cache` rows already expire through
+# `purge_prompt_cache_before`; this keeps the no-TTL `sticky_thread` kind from
+# accumulating one permanent row per thread.
+_ANCHORED_PROMPT_CACHE_KEY_PREFIX = "v2t-"
+# Bounded batches per pass, mirroring the retired-shape sweep. A backlog is
+# resumed on the next tick instead of monopolising the database.
+_ANCHORED_STICKY_THREAD_PURGE_MAX_BATCHES = 4
+
 _OPERATION_RETENTION_BATCH_SIZE = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
 _OPERATION_RETENTION_MAX_BATCHES = 4
 _OPERATION_RETENTION_TIME_BUDGET_SECONDS = 5.0
@@ -383,6 +394,25 @@ class StickySessionCleanupScheduler:
             return
         logger.info("Purged legacy derived sticky_thread mappings deleted_count=%s", deleted)
 
+    async def _purge_expired_anchored_sticky_threads(
+        self,
+        sticky_repo: StickySessionsRepository,
+        cutoff: datetime,
+    ) -> int:
+        """Drop `sticky_thread` rows whose thread anchor has already expired."""
+
+        deleted = 0
+        for _ in range(_ANCHORED_STICKY_THREAD_PURGE_MAX_BATCHES):
+            batch = await sticky_repo.purge_before_for_key_prefix(
+                cutoff,
+                kind=StickySessionKind.STICKY_THREAD,
+                key_prefix=_ANCHORED_PROMPT_CACHE_KEY_PREFIX,
+            )
+            deleted += batch
+            if batch == 0:
+                break
+        return deleted
+
     async def _cleanup_as_leader(self) -> bool | None:
         async with self._lock:
             backlog_likely = False
@@ -418,6 +448,12 @@ class StickySessionCleanupScheduler:
                                 stale_hard_codex_session_deleted_count,
                             )
                         await self._sweep_legacy_derived_sticky_threads(sticky_repo, cutoff)
+                        anchored_deleted_count = await self._purge_expired_anchored_sticky_threads(sticky_repo, cutoff)
+                        if anchored_deleted_count > 0:
+                            logger.info(
+                                "Purged expired anchored sticky_thread mappings deleted_count=%s",
+                                anchored_deleted_count,
+                            )
                     if startup_module._bridge_durable_schema_ready or not await missing_durable_bridge_tables(session):
                         if self.enabled:
                             bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)

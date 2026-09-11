@@ -141,9 +141,13 @@ process-local thread identity rather than by hashing truncated request text.
 The derivation MUST reuse the key it previously minted for a thread when, and
 only when, the new turn's input items exactly extend that thread's recorded
 item sequence: the recorded sequence, from some offset to its end, MUST equal
-the head of the new turn's items, with at least two items matched. Byte-equal
-re-derivation of the same body MUST return the same key. No partial, fuzzy,
-truncated-prefix, or summary-aware match may reuse a key.
+the head of the new turn's items. A match starting past the beginning of the
+recorded sequence MUST cover at least two items; a match that consumes the
+recorded sequence from its beginning MAY cover one item, which is the ordinary
+second turn of a one-item opening. Byte-equal re-derivation of the same body
+MUST return the same key. No partial, fuzzy, truncated-prefix, or
+summary-aware match may reuse a key, and the per-item digests that back the
+comparison MUST cover each item's complete canonical encoding.
 
 Anchor identity MUST be scoped by API key, model class, and the **complete**
 `instructions` value, so two threads whose instructions differ only past a
@@ -151,8 +155,10 @@ truncation boundary never share a key. A turn that does not verifiably extend
 any recorded thread MUST mint a new key; in particular a compacted or
 summarized turn MUST mint a new key rather than be matched heuristically.
 
-A turn with nothing to anchor — a non-list input, or fewer than two input
-items — MUST be reported unanchorable. The service MUST still attach a derived
+A turn with nothing to anchor — an input that is not a list, an empty input
+list, or an input carrying an item the service will not digest exactly because
+its canonical encoding exceeds the documented per-item ceiling — MUST be
+reported unanchorable. The service MUST still attach a derived
 `prompt_cache_key` that is stable for the (model class, API key) pair, MUST NOT
 attach a per-request random value, and MUST NOT supply a sticky routing key for
 that request, so no single-use sticky mapping is written.
@@ -171,9 +177,12 @@ request-shape diagnostic and as a counter, so the anchored share of unanchored
 traffic is observable without a database query.
 
 Keys minted by this derivation MUST carry a version prefix that distinguishes
-them from the retired content-hash shape, and stale non-expiring
-`sticky_thread` mappings written under the retired shape MUST be removed by a
-bounded background sweep.
+them from the retired content-hash shape. Stale non-expiring `sticky_thread`
+mappings written under the retired shape MUST be removed by a bounded one-shot
+background sweep, and `sticky_thread` mappings written under the new prefix
+MUST be removed by a bounded recurring background purge once they are idle past
+the same freshness window that expires their anchor, so the kind without a TTL
+cannot accumulate one permanent row per thread.
 
 #### Scenario: Appended turns reuse one anchor
 
@@ -223,3 +232,10 @@ bounded background sweep.
 - **WHEN** the sticky-session cleanup pass runs as leader
 - **THEN** it deletes those rows in bounded batches until none remain
 - **AND** it stops sweeping once a pass finds none
+
+#### Scenario: Anchored sticky_thread mappings expire with their anchor
+
+- **GIVEN** `sticky_sessions` holds `sticky_thread` rows keyed by the anchored derivation and idle past the freshness window
+- **WHEN** the sticky-session cleanup pass runs as leader
+- **THEN** it deletes those rows in bounded batches
+- **AND** it keeps doing so on later passes rather than retiring the purge

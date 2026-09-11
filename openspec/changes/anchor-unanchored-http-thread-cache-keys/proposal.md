@@ -57,14 +57,16 @@ user item* `[:512]`. Append-only histories do stay stable, which is why one
 - Compaction is handled by admitting it, not by bridging it: a compacted turn
   does not extend the recorded transcript, mints a new key, and is reported as
   `anchor_reset`. The upstream prefix cache is genuinely cold there.
-- The `uuid4` branch is gone. A body with nothing to anchor (non-list input, or
-  fewer than two items) still gets a stable derived `prompt_cache_key`
-  forwarded upstream — the spec's MUST — but supplies **no** sticky routing
-  key, so selection takes the unbound path and no single-use `sticky_sessions`
-  row is written. Requiring two items also stops one throwaway row per
-  tool-result-only delta turn.
-- Serialization is bounded *during* encoding (`iterencode`, 16 KiB per item,
-  256 KiB per window, 32 items), so the unbounded join on the hot path is gone.
+- The `uuid4` branch is gone. A body with nothing to anchor (a non-list input,
+  an empty input list, or an item too large to digest exactly) still gets a
+  stable derived `prompt_cache_key` forwarded upstream — the spec's MUST — but
+  supplies **no** sticky routing key, so selection takes the unbound path and
+  no single-use `sticky_sessions` row is written.
+- Serialization is bounded *during* encoding (`iterencode`, chunks folded
+  straight into the hash, 256 KiB per window, 32 items), so the unbounded join
+  on the hot path is gone. Items are hashed in **full**: a truncated digest
+  would re-introduce the prefix collision being removed, so an item past the
+  1 MiB per-item ceiling makes the body unanchorable instead.
 - Diagnostics: every resolution reports `payload` / `disabled` / `anchor_hit` /
   `anchor_new` / `anchor_reset` / `unanchorable` on the existing
   `proxy_request_shape` trace line next to `sticky_key_source`, and on a new
@@ -113,8 +115,9 @@ None.
   deliberately **not** changed here: different blast radius (bridge socket
   sharing), and this derivation should be measurable on its own first.
 - Data: no schema change. Row volume moves from a few coarse keys to one row
-  per live unanchored thread; the two-item floor keeps delta-only turns from
-  adding rows, and the retired-shape sweep removes the non-expiring leftovers.
+  per live thread; `prompt_cache` rows expire as before, the new recurring
+  purge gives the `sticky_thread` kind the same bound, and the one-shot sweep
+  removes the retired shape's leftovers.
 - Operators: no action. Anchors are per process, so a restart or a blue/green
   window where both colors serve can leave one thread holding two keys and two
   owners for that window — bounded by the freshness window and worth one
@@ -126,8 +129,10 @@ None.
 
 This recovers locality for threads that resend a transcript and either append
 to it or trim its front. It does **not** recover: a client that compacts every
-turn (each compaction is a genuine cache reset), a string-input client (one
-opaque blob whose only turn-stable prefix is a truncation — the exact
-false-merge mechanism being removed), a single-item or delta-only turn, or
-anything after a process restart. Those cases are now *reported* rather than
-silently served by a key that looks sticky and is not.
+turn (each compaction is a genuine cache reset), a delta-only turn that shares
+no item with the previous one, a body carrying an item too large to digest
+exactly, an empty body, or anything after a process restart or an anchor
+eviction. Those cases are now *reported* — `anchor_reset` or `unanchorable` —
+rather than silently served by a key that looks sticky and is not. It also does
+nothing for `inferred_http_bridge_key`, which has the same defect and is left
+for a follow-up so this change can be measured on its own.

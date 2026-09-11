@@ -711,7 +711,9 @@ async def test_unrelated_cleanup_failure_preserves_existing_backlog_retry(monkey
 @pytest.mark.asyncio
 async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     """_cleanup_once should purge prompt-cache entries by affinity TTL.
-    STICKY_THREAD is never purged here. CODEX_SESSION is only ever purged
+    STICKY_THREAD is never purged wholesale here; only the two namespaced
+    key-prefix purges (retired derived shape, expired anchored shape) touch it.
+    CODEX_SESSION is only ever purged
     via the separate, account-status-gated purge_stale_hard_codex_session_mappings
     call (see test_sticky_repository.py), never by this TTL-based path."""
     dashboard_settings = SimpleNamespace(
@@ -732,6 +734,7 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=5)
+    sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     sticky_repo.purge_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=2)
@@ -797,6 +800,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=0)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
@@ -860,6 +864,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=1)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
@@ -939,6 +944,7 @@ async def test_cleanup_once_gates_abandoned_purge_on_prompt_cache_reuse_ttl(monk
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=0)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
@@ -1054,3 +1060,53 @@ class TestLegacyDerivedStickyThreadSweep:
         repo.purge_before_for_key_prefix.reset_mock()
         await scheduler._sweep_legacy_derived_sticky_threads(repo, cutoff)
         repo.purge_before_for_key_prefix.assert_not_awaited()
+
+
+class TestAnchoredStickyThreadPurge:
+    """`sticky_thread` has no TTL, and anchored keys are now per thread.
+
+    The anchor that could reuse such a key expires at the same freshness
+    window, so an idle row of that shape can never be hit again.
+    """
+
+    @pytest.mark.asyncio
+    async def test_purge_drains_bounded_batches_and_stops_when_empty(self) -> None:
+        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
+        repo = AsyncMock()
+        repo.purge_before_for_key_prefix = AsyncMock(side_effect=[5, 4, 0])
+        cutoff = utcnow() - timedelta(seconds=1800)
+
+        deleted = await scheduler._purge_expired_anchored_sticky_threads(repo, cutoff)
+
+        assert deleted == 9
+        assert repo.purge_before_for_key_prefix.await_count == 3
+        assert all(
+            call.kwargs["key_prefix"] == cleanup_scheduler._ANCHORED_PROMPT_CACHE_KEY_PREFIX
+            for call in repo.purge_before_for_key_prefix.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_purge_is_batch_capped_per_pass(self) -> None:
+        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
+        repo = AsyncMock()
+        repo.purge_before_for_key_prefix = AsyncMock(return_value=1000)
+        cutoff = utcnow() - timedelta(seconds=1800)
+
+        await scheduler._purge_expired_anchored_sticky_threads(repo, cutoff)
+
+        assert (
+            repo.purge_before_for_key_prefix.await_count == cleanup_scheduler._ANCHORED_STICKY_THREAD_PURGE_MAX_BATCHES
+        )
+
+    @pytest.mark.asyncio
+    async def test_purge_recurs_unlike_the_one_shot_legacy_sweep(self) -> None:
+        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
+        repo = AsyncMock()
+        repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
+        cutoff = utcnow() - timedelta(seconds=1800)
+
+        await scheduler._purge_expired_anchored_sticky_threads(repo, cutoff)
+        repo.purge_before_for_key_prefix.reset_mock()
+        await scheduler._purge_expired_anchored_sticky_threads(repo, cutoff)
+
+        repo.purge_before_for_key_prefix.assert_awaited()

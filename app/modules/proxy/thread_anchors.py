@@ -15,11 +15,12 @@ consumed exactly by the head of the new turn's window::
 
     stored[offset:] == incoming[:len(stored) - offset]
 
-with at least ``_MIN_OVERLAP_ITEMS`` items matched. ``offset == 0`` is the
-append case (and, when the two windows are equal, an identical re-derivation of
-the same body, which must return the same key). ``offset > 0`` is the
-leading-trim case: the client dropped the oldest items and kept a contiguous
-recent window. Nothing else matches. A compacted or summarised turn does not
+with at least ``_MIN_OVERLAP_ITEMS`` items matched, or with the whole stored
+window matched (``offset == 0``) when the thread's recorded body was shorter
+than that. ``offset == 0`` is the append case -- and, when the two windows are
+equal, an identical re-derivation of the same body, which must return the same
+key. ``offset > 0`` is the leading-trim case: the client dropped the oldest
+items and kept a contiguous recent window. Nothing else matches. A compacted or summarised turn does not
 extend any stored window, so it mints a new anchor -- which is correct, because
 the upstream prefix cache is genuinely cold after compaction. There is no
 fuzzy, suffix-only, or "longest common prefix" fallback: partial evidence
@@ -69,17 +70,21 @@ _ITEM_DIGEST_BYTES = 8
 # Trailing items retained per thread. Bounds both the memory per anchor and the
 # leading-trim depth that can still be recognised.
 _MAX_WINDOW_ITEMS = 32
-# A single-item body has no transcript to extend and no prefix cache worth
-# protecting, and minting for it would write one throwaway sticky row per
-# tool-result-only delta turn. Such bodies are reported unanchorable instead.
-_MIN_WINDOW_ITEMS = 2
-# Two consecutive exactly-equal items are the least evidence accepted. One item
-# is not enough: independent threads routinely share a single opening
-# `<environment_context>` block or a one-word prompt.
+# A body must carry at least one item to be anchorable at all.
+_MIN_WINDOW_ITEMS = 1
+# Two consecutive exactly-equal items are the least evidence accepted for a
+# *partial* alignment. One item is not enough there: independent threads
+# routinely share a single opening `<environment_context>` block or a one-word
+# prompt, and accepting a one-item tail alignment would merge them. A single
+# item is accepted only when it is the thread's whole recorded body and the new
+# turn extends it from item zero, which is the ordinary second turn of a
+# one-item opening.
 _MIN_OVERLAP_ITEMS = 2
-# Serialization ceilings. Both are applied *during* encoding, so a 450k-token
-# first item is never materialised to produce a digest.
-_MAX_ITEM_ENCODED_CHARS = 16 * 1024
+# Serialization ceilings, applied *during* encoding so a 450k-token item is
+# never materialised. Items are hashed in full -- a truncated digest would
+# re-introduce exactly the prefix collision this module removes -- so an item
+# past the per-item ceiling makes the body unanchorable instead.
+_MAX_ITEM_ENCODED_CHARS = 1024 * 1024
 _MAX_WINDOW_ENCODED_CHARS = 256 * 1024
 # LRU caps. See "Memory bound" above. Measured at ~9 MiB with every cap
 # saturated; a replica serving the observed unanchored volume (16.6k requests
@@ -96,7 +101,7 @@ _MAX_LOOKUP_PROBE_ITEMS = 8
 
 # Same canonical encoding as ``_fingerprint_input_items``
 # (app/modules/proxy/_service/response_create.py), applied per item so the
-# window can be truncated without materialising the whole list.
+# window can be bounded without materialising the whole list.
 _ITEM_ENCODER = json.JSONEncoder(ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
@@ -128,40 +133,37 @@ def thread_anchor_domain(*, api_key_id: str, model_class: str, instructions: str
     return sha256(framed).digest()
 
 
-def _bounded_item_json(item: JsonValue) -> str | None:
-    """Canonical JSON for one item, stopped at ``_MAX_ITEM_ENCODED_CHARS``.
+def _bounded_item_digest(domain: bytes, item: JsonValue) -> tuple[bytes, int] | None:
+    """Digest one item's full canonical JSON, or ``None`` if it is unusable.
 
-    ``iterencode`` yields chunks lazily, so an oversized item costs the cap
-    rather than its full size. An item the canonical encoder cannot represent
-    returns ``None``; the body is then reported unanchorable rather than
-    anchored on a non-deterministic fallback encoding.
+    ``iterencode`` yields chunks lazily and each chunk is folded straight into
+    the hash, so the encoding is never materialised. ``None`` means the item
+    exceeds ``_MAX_ITEM_ENCODED_CHARS`` or the canonical encoder cannot
+    represent it; the body is then reported unanchorable rather than anchored
+    on a partial or non-deterministic encoding.
     """
 
-    chunks: list[str] = []
+    hasher = sha256(domain + b"\x1e")
     size = 0
     try:
         for chunk in _ITEM_ENCODER.iterencode(item):
-            chunks.append(chunk)
             size += len(chunk)
-            if size >= _MAX_ITEM_ENCODED_CHARS:
-                break
+            if size > _MAX_ITEM_ENCODED_CHARS:
+                return None
+            hasher.update(chunk.encode())
     except (TypeError, ValueError):
         return None
-    return "".join(chunks)[:_MAX_ITEM_ENCODED_CHARS]
-
-
-def _item_digest(domain: bytes, encoded: str) -> bytes:
-    return sha256(domain + b"\x1e" + encoded.encode()).digest()[:_ITEM_DIGEST_BYTES]
+    return hasher.digest()[:_ITEM_DIGEST_BYTES], size
 
 
 def build_thread_window(input_value: JsonValue, *, domain: bytes) -> ThreadWindow | None:
     """Digest the trailing items of ``input_value``, or ``None`` if unanchorable.
 
-    Only a list input is anchorable. A string input is one opaque blob whose
-    tail changes on every turn, so the only prefix of it that is stable across
-    turns is a truncation -- exactly the collision this module exists to
-    remove. Such bodies are reported unanchorable rather than anchored on a
-    prefix that merges distinct threads.
+    Only a list of items is anchorable: discrete items are what make "the
+    client appended a turn" distinguishable from "this is a different thread
+    that happens to share a prefix". ``ResponsesRequest`` already normalises a
+    bare string input into a one-item list, so the non-list branch is
+    defensive.
     """
 
     if not isinstance(input_value, list):
@@ -176,11 +178,12 @@ def build_thread_window(input_value: JsonValue, *, domain: bytes) -> ThreadWindo
             break
         if encoded_chars >= _MAX_WINDOW_ENCODED_CHARS and len(digests) >= _MIN_WINDOW_ITEMS:
             break
-        encoded = _bounded_item_json(item)
-        if encoded is None:
+        digested = _bounded_item_digest(domain, item)
+        if digested is None:
             return None
-        encoded_chars += len(encoded)
-        digests.append(_item_digest(domain, encoded))
+        digest, encoded_size = digested
+        encoded_chars += encoded_size
+        digests.append(digest)
     if len(digests) < _MIN_WINDOW_ITEMS:
         return None
     digests.reverse()
@@ -267,7 +270,10 @@ class ThreadAnchorIndex:
                     continue
                 seen.add(thread_key)
                 overlap = _overlap_items(anchor.digests, window.digests)
-                if overlap >= _MIN_OVERLAP_ITEMS and overlap > best_overlap:
+                accepted = overlap >= _MIN_OVERLAP_ITEMS or (
+                    overlap > 0 and overlap * _ITEM_DIGEST_BYTES == len(anchor.digests)
+                )
+                if accepted and overlap > best_overlap:
                     best_key = thread_key
                     best_overlap = overlap
             if not candidates:

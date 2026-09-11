@@ -1334,6 +1334,7 @@ class _HTTPBridgeStreamingMixin:
             headers,
             sticky_kind=affinity.kind.value if affinity.kind is not None else None,
             sticky_key_source=sticky_key_source,
+            derivation_outcome=affinity.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
 

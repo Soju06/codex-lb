@@ -113,6 +113,28 @@ class TestAppendStability:
         keys = {_derive_prompt_cache_key(payload, api_key) for _ in range(10)}
         assert len(keys) == 1
 
+    def test_one_item_opening_turn_anchors_its_second_turn(self):
+        """The plain SDK shape: turn one is a single user item."""
+        api_key = _make_api_key()
+        first = _derive_prompt_cache_anchor(_request([_user("build a server")]), api_key)
+        assert first.sticky_key is not None
+        second = _derive_prompt_cache_anchor(
+            _request([_user("build a server"), _assistant("here"), _user("add logging")]),
+            api_key,
+        )
+        assert second.sticky_key == first.sticky_key
+        assert second.outcome == DERIVATION_OUTCOME_ANCHOR_HIT
+
+    def test_a_one_item_tail_alignment_is_not_enough_to_merge(self):
+        """Partial alignment needs two items; one shared item must not merge."""
+        api_key = _make_api_key()
+        established = _derive_prompt_cache_key(
+            _request([_env_item(), _user("u0"), _assistant("a0"), _user("continue")]), api_key
+        )
+        # A fresh thread whose opening item equals the other thread's last item.
+        other = _derive_prompt_cache_key(_request([_user("continue"), _assistant("x"), _user("y")]), api_key)
+        assert other != established
+
     def test_volatile_trailing_content_does_not_move_the_key(self):
         """Only the newest item changes between turns; older items anchor it."""
         api_key = _make_api_key()
@@ -232,17 +254,12 @@ class TestUnanchorableRequests:
         assert first.attached_key == second.attached_key
         assert first.attached_key
 
-    def test_single_item_body_is_unanchorable(self):
-        """One item is no transcript: minting would write a single-use row."""
-        anchor = _derive_prompt_cache_anchor(_request([_user("hi")]), _make_api_key())
-        assert anchor.outcome == DERIVATION_OUTCOME_UNANCHORABLE
-        assert anchor.sticky_key is None
-
-    def test_string_input_is_unanchorable(self):
-        payload = ResponsesRequest(model="gpt-5.4", instructions="sys", input="hello world")
-        anchor = _derive_prompt_cache_anchor(payload, _make_api_key())
-        assert anchor.outcome == DERIVATION_OUTCOME_UNANCHORABLE
-        assert anchor.sticky_key is None
+    def test_non_list_input_is_unanchorable(self):
+        """`ResponsesRequest` normalises a bare string into a one-item list, so
+        this guards the defensive branch for anything that is not a list."""
+        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        assert build_thread_window(_json_value("hello world"), domain=domain) is None
+        assert build_thread_window(_json_value(None), domain=domain) is None
 
     def test_unanchorable_request_writes_no_sticky_key(self):
         payload = _request([], instructions="")
@@ -365,11 +382,17 @@ class TestThreadAnchorIndexBounds:
         assert index.lookup(window, ttl_seconds=1800.0) is None
         assert len(index) == 0
 
-    def test_window_is_bounded_by_item_and_total_encoding_caps(self):
+    def test_window_is_bounded_by_the_total_encoding_ceiling(self):
         domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
-        huge = [_user("z" * (4 * _MAX_ITEM_ENCODED_CHARS)) for _ in range(40)]
-        window = build_thread_window(_json_value(huge), domain=domain)
+        big = [_user("z" * 64 * 1024) for _ in range(40)]
+        window = build_thread_window(_json_value(big), domain=domain)
         assert window is not None
         assert window.item_count <= 32
         # The byte ceiling stops the walk well before the item ceiling here.
         assert window.item_count < 32
+
+    def test_an_item_past_the_per_item_ceiling_makes_the_body_unanchorable(self):
+        """Never digest a truncated item: that is the collision being removed."""
+        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        oversized = [_user("z" * (_MAX_ITEM_ENCODED_CHARS + 1)), _user("tail")]
+        assert build_thread_window(_json_value(oversized), domain=domain) is None

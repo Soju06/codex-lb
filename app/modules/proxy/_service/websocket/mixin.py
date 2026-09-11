@@ -3498,6 +3498,7 @@ class _WebSocketMixin:
             headers,
             sticky_kind=affinity_policy.kind.value if affinity_policy.kind is not None else None,
             sticky_key_source=sticky_key_source,
+            derivation_outcome=affinity_policy.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(responses_payload) is not None,
         )
         request_state.affinity_policy = affinity_policy

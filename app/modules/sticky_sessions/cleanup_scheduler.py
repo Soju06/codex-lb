@@ -23,7 +23,7 @@ from app.core.metrics.prometheus import (
 )
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import utcnow
-from app.db.models import DashboardSettings
+from app.db.models import DashboardSettings, StickySessionKind
 from app.db.session import SessionLocal, get_background_session
 from app.modules.proxy.durable_bridge_repository import (
     DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
@@ -55,6 +55,16 @@ _STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS = 6 * 3600
 # Keep each pass large enough to outpace steady-state expiry, but small enough
 # that a historical backlog is resumed across scheduler ticks instead of
 # monopolizing the database in one drain-all loop.
+# Key prefixes written by the retired content-hash prompt-cache derivation
+# (``{model_class}-{api_key_id[:12]}-{hash}...``). PROMPT_CACHE rows of that
+# shape expire on their own through ``purge_prompt_cache_before``; STICKY_THREAD
+# rows have no TTL, so without this sweep the shape change would strand them in
+# the dashboard holding an account FK forever. Keys minted by the thread-anchor
+# derivation carry the ``v2t-``/``v2u-`` version prefix and are never matched.
+# A client-supplied key that happens to start with one of these prefixes and
+# has been idle past the freshness window loses only soft locality.
+_LEGACY_DERIVED_PROMPT_CACHE_KEY_PREFIXES = ("std-", "codex-", "mini-")
+
 _OPERATION_RETENTION_BATCH_SIZE = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
 _OPERATION_RETENTION_MAX_BATCHES = 4
 _OPERATION_RETENTION_TIME_BUDGET_SECONDS = 5.0
@@ -211,6 +221,9 @@ class StickySessionCleanupScheduler:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _operation_retention_attempt_failed: bool = False
     _operation_retention_cancelled_backlog_likely: bool | None = None
+    # One-shot per process: each pass deletes at most one bounded batch per
+    # legacy prefix, and the sweep retires itself once a pass finds nothing.
+    _legacy_derived_sticky_thread_sweep_done: bool = False
 
     async def start(self) -> None:
         if not self.enabled and not self.operation_retention_enabled:
@@ -349,6 +362,27 @@ class StickySessionCleanupScheduler:
                 self._operation_retention_attempt_failed = True
                 return True
 
+    async def _sweep_legacy_derived_sticky_threads(
+        self,
+        sticky_repo: StickySessionsRepository,
+        cutoff: datetime,
+    ) -> None:
+        """Retire STICKY_THREAD rows left behind by the content-hash derivation."""
+
+        if self._legacy_derived_sticky_thread_sweep_done:
+            return
+        deleted = 0
+        for key_prefix in _LEGACY_DERIVED_PROMPT_CACHE_KEY_PREFIXES:
+            deleted += await sticky_repo.purge_before_for_key_prefix(
+                cutoff,
+                kind=StickySessionKind.STICKY_THREAD,
+                key_prefix=key_prefix,
+            )
+        if deleted == 0:
+            self._legacy_derived_sticky_thread_sweep_done = True
+            return
+        logger.info("Purged legacy derived sticky_thread mappings deleted_count=%s", deleted)
+
     async def _cleanup_as_leader(self) -> bool | None:
         async with self._lock:
             backlog_likely = False
@@ -383,6 +417,7 @@ class StickySessionCleanupScheduler:
                                 "owner deleted_count=%s",
                                 stale_hard_codex_session_deleted_count,
                             )
+                        await self._sweep_legacy_derived_sticky_threads(sticky_repo, cutoff)
                     if startup_module._bridge_durable_schema_ready or not await missing_durable_bridge_tables(session):
                         if self.enabled:
                             bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)

@@ -1016,3 +1016,41 @@ async def test_cleanup_once_retains_operation_purge_when_sticky_cleanup_disabled
     sticky_repo.purge_prompt_cache_before.assert_not_awaited()
     bridge_repo.purge_closed_before.assert_not_awaited()
     bridge_repo.purge_operation_spool_batch.assert_awaited_once()
+
+
+class TestLegacyDerivedStickyThreadSweep:
+    """The retired content-hash derivation left non-expiring `sticky_thread` rows.
+
+    `purge_prompt_cache_before` covers the `prompt_cache` half; these rows have
+    no TTL at all, so the shape change would strand them forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sweep_deletes_each_retired_prefix_in_bounded_batches(self) -> None:
+        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
+        repo = AsyncMock()
+        repo.purge_before_for_key_prefix = AsyncMock(return_value=3)
+        cutoff = utcnow() - timedelta(seconds=1800)
+
+        await scheduler._sweep_legacy_derived_sticky_threads(repo, cutoff)
+
+        prefixes = [call.kwargs["key_prefix"] for call in repo.purge_before_for_key_prefix.await_args_list]
+        assert prefixes == list(cleanup_scheduler._LEGACY_DERIVED_PROMPT_CACHE_KEY_PREFIXES)
+        assert all(
+            call.kwargs["kind"].value == "sticky_thread" for call in repo.purge_before_for_key_prefix.await_args_list
+        )
+        assert scheduler._legacy_derived_sticky_thread_sweep_done is False
+
+    @pytest.mark.asyncio
+    async def test_sweep_retires_itself_once_a_pass_finds_nothing(self) -> None:
+        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
+        repo = AsyncMock()
+        repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
+        cutoff = utcnow() - timedelta(seconds=1800)
+
+        await scheduler._sweep_legacy_derived_sticky_threads(repo, cutoff)
+        assert scheduler._legacy_derived_sticky_thread_sweep_done is True
+
+        repo.purge_before_for_key_prefix.reset_mock()
+        await scheduler._sweep_legacy_derived_sticky_threads(repo, cutoff)
+        repo.purge_before_for_key_prefix.assert_not_awaited()

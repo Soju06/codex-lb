@@ -21,6 +21,12 @@ Fast Mode, Ultrafast, and service-tier behavior is documented in the
 `codex resume` filters by `model_provider` — re-tag old sessions with the built-in retag command. See
 [session retagging](client-setup.md#migrating-from-direct-openai-session-retagging).
 
+## Locked out of the dashboard
+
+**The company login is down, or the authenticator for the only administrator is gone.**
+Four host commands act on the database directly to re-open local sign-in, reset a password, or turn a sign-in provider off — see
+[Company Sign-In and Recovery](sso.md#host-recovery-commands).
+
 ---
 
 *Spec: [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*

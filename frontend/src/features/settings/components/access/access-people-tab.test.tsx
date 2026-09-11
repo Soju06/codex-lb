@@ -277,6 +277,10 @@ describe("AccessPeopleTab", () => {
     ["last_admin_protected", "At least one active admin must remain."],
     ["insufficient_delegation", "You can only grant or act on roles within your own permissions."],
     ["compat_user_locked", "The migrated admin account cannot be changed in this release."],
+    [
+      "last_break_glass_protected",
+      "This is the only emergency account that can still get in while password sign-in is restricted. Set up another one first.",
+    ],
   ])("shows a %s refusal inline and clears it when the next action starts", async (code, message) => {
     const user = userEvent.setup();
     server.use(

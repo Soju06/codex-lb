@@ -3,7 +3,7 @@
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrade
 from app.db.migration_url import to_sync_database_url
@@ -25,6 +25,25 @@ _AFFINITY = "20260910_200000_merge_affinity_identity_heads"
 _INVITES = "20260909_040000_add_dashboard_user_invites"
 _INVITE_MERGE = "20260910_220000_merge_affinity_invite_heads"
 _TABLES = ("accounts", "request_logs", "api_keys", "dashboard_settings", "audit_logs", "dashboard_user_invites")
+
+
+def _table_columns(connection, table: str) -> set[str]:
+    # Reflected rather than PRAGMA'd: this suite also runs against PostgreSQL.
+    return {str(column["name"]) for column in inspect(connection).get_columns(table)}
+
+
+def _narrow(rows: list[dict], columns: set[str]) -> list[dict]:
+    return sorted([{key: value for key, value in row.items() if key in columns} for row in rows], key=repr)
+
+
+def _rows_over_surviving_columns(connection, table: str, snapshot: list[dict]) -> list[dict]:
+    """The table's rows narrowed to the columns both it and ``snapshot`` still have.
+
+    The counterpart of ``_projected_rows`` for the downgrade direction: there
+    the snapshot is the narrower side, here the table is.
+    """
+
+    return _narrow(_rows(connection, table), _table_columns(connection, table))
 
 
 @pytest.mark.parametrize("starting_revision", [_AFFINITY, _INVITES])
@@ -95,7 +114,15 @@ def test_populated_invite_history_survives_merge_reversal(migration_url: str, st
             assert {_AFFINITY, _INVITES} <= applied
             assert _INVITE_MERGE not in applied
             for table, rows in preserved.items():
-                assert sorted(_rows(connection, table), key=repr) == sorted(rows, key=repr)
+                # ``preserved`` is a snapshot of the *tree head*, and the
+                # reversal legitimately takes back the columns that revisions
+                # above this merge added (`dashboard_settings.local_login_policy`
+                # is the first). Those columns are not row data this branch
+                # wrote, so the reversal is checked over the columns the table
+                # still has; the re-upgrade below compares the snapshot whole.
+                assert _rows_over_surviving_columns(connection, table, rows) == _narrow(
+                    rows, _table_columns(connection, table)
+                )
         # Drift is asserted only after walking back to head, as the sibling
         # affinity merge-reversal tests do. Reaching the merge's parents also
         # unwinds every revision layered above the merge since, so a drift

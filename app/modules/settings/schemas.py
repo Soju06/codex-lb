@@ -49,6 +49,10 @@ class SettingProvenance(DashboardModel):
     default: int | float | str | bool | None = None
 
 
+#: ``dashboard_settings.local_login_policy`` on the wire (PLAN §4.6).
+LocalLoginPolicyLiteral = Literal["enabled", "admins_only", "break_glass_only"]
+
+
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(auto|http|websocket)$")
@@ -110,6 +114,9 @@ class DashboardSettingsResponse(DashboardModel):
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_required_for_admin_role: bool
+    #: Who may still sign in with a local password (PLAN §4.6). Database
+    #: only: no environment variable can silently re-open a closed door.
+    local_login_policy: LocalLoginPolicyLiteral
     #: Active password accounts without a TOTP secret; the second counts only
     #: admin-level ones. Both say "N accounts will have to enrol at next sign-in".
     users_without_totp_count: int = Field(ge=0)
@@ -201,6 +208,7 @@ SECURITY_SETTINGS_FIELDS: frozenset[str] = frozenset(
     {
         "totp_required_on_login",
         "totp_required_for_admin_role",
+        "local_login_policy",
         "api_key_auth_enabled",
         "guest_access_enabled",
         "dashboard_session_ttl_seconds",
@@ -282,6 +290,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     totp_required_for_admin_role: bool | None = None
+    local_login_policy: LocalLoginPolicyLiteral | None = None
     api_key_auth_enabled: bool | None = None
     hide_upstream_quota_from_api_keys: bool | None = None
     limit_warmup_enabled: bool | None = None

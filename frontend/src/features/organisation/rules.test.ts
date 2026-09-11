@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  breakGlassDesignations,
+  hasCompanyLogin,
+  isLocalLoginRestricted,
   isOrganisationConfigured,
+  isQualifyingBreakGlass,
   moveInOrder,
   normalizeEmailDomain,
   orderRolesForPicker,
@@ -14,6 +18,7 @@ import {
 import {
   createAccessSummary,
   createAuthProvider,
+  createDashboardUser,
   createDashboardRole,
   createDefaultAuthProviders,
   createDefaultDashboardRoles,
@@ -35,8 +40,42 @@ describe("isOrganisationConfigured", () => {
     expect(isOrganisationConfigured(createAccessSummary({ roleMappings: 1 }))).toBe(true);
   });
 
+  it("counts a restricted password sign-in on its own, with no company login at all", () => {
+    const summary = createAccessSummary({ localLoginPolicy: "break_glass_only" });
+    expect(isOrganisationConfigured(summary)).toBe(true);
+    expect(isLocalLoginRestricted(summary)).toBe(true);
+    expect(hasCompanyLogin(summary)).toBe(false);
+  });
+
   it("fails closed when the summary is withheld", () => {
     expect(isOrganisationConfigured(null)).toBe(false);
+    expect(isLocalLoginRestricted(null)).toBe(false);
+    expect(hasCompanyLogin(null)).toBe(false);
+  });
+});
+
+describe("break-glass qualification", () => {
+  it("needs all five facts: designated, active, admin preset, second factor, local password", () => {
+    expect(isQualifyingBreakGlass(createDashboardUser())).toBe(true);
+    expect(isQualifyingBreakGlass(createDashboardUser({ isBreakGlass: false }))).toBe(false);
+    expect(isQualifyingBreakGlass(createDashboardUser({ status: "disabled" }))).toBe(false);
+    expect(isQualifyingBreakGlass(createDashboardUser({ totpConfigured: false }))).toBe(false);
+    // A proxy-provisioned admin cannot use the local form the designation is about.
+    expect(isQualifyingBreakGlass(createDashboardUser({ hasPassword: false }))).toBe(false);
+    expect(
+      isQualifyingBreakGlass(
+        createDashboardUser({
+          role: { id: PRESET_ROLE_IDS.operator, slug: "operator", name: "Operator", kind: "preset" },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("lists the designations whether or not they qualify, so the card can name one to enrol", () => {
+    const designated = createDashboardUser({ totpConfigured: false });
+    const ordinary = createDashboardUser({ id: "user_ops", username: "ops", isBreakGlass: false });
+    expect(breakGlassDesignations([designated, ordinary]).map((user) => user.username)).toEqual(["admin"]);
+    expect(breakGlassDesignations(undefined)).toEqual([]);
   });
 });
 

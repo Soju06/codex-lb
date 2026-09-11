@@ -296,6 +296,20 @@ async def test_upgraded_install_keeps_existing_roles(async_client: AsyncClient, 
 @pytest.mark.asyncio
 async def test_resolution_is_throttled_per_identity(async_client: AsyncClient, monkeypatch) -> None:
     _trusted_header_mode(monkeypatch)
+    from app.core.cache.invalidation import get_cache_invalidation_poller
+
+    # Provisioning an account invalidates the dashboard_users namespace, and the poller
+    # clears the resolution cache when it sees that bump — so let both accounts exist and
+    # acknowledge this replica's own bumps first. Otherwise the counter below measures a
+    # mid-test invalidation rather than the throttle. Only _provision() invalidates; the
+    # "already seen" path this test exercises does not.
+    for subject in ("alice", "bob"):
+        assert (await async_client.get(SESSION, headers=_as(subject))).status_code == 200
+    poller = get_cache_invalidation_poller()
+    assert poller is not None
+    await poller._poll_once()
+    identity_resolver.get_identity_resolution_cache().clear()
+
     calls: list[str] = []
     original = identity_resolver.IdentityResolver.resolve
 
@@ -304,6 +318,10 @@ async def test_resolution_is_throttled_per_identity(async_client: AsyncClient, m
         return await original(self, identity, provider, actor_ip=actor_ip)
 
     monkeypatch.setattr(identity_resolver.IdentityResolver, "resolve", counting)
+    # What is under test is "one resolution per identity while the entry is live", not the
+    # length of the window: pin the TTL so a slow request path cannot age the entry out
+    # mid-test and turn the throttle into a second resolution.
+    monkeypatch.setattr(identity_resolver.get_identity_resolution_cache(), "_ttl_seconds", 300.0)
 
     for _ in range(3):
         assert (await async_client.get("/api/settings", headers=_as("alice"))).status_code == 200
@@ -487,7 +505,7 @@ async def test_provider_api_lists_and_edits_the_resolver_knobs(async_client: Asy
     unknown = await async_client.patch(f"{PROVIDERS}/{uuid.uuid4()}", json={"linkByEmail": True}, headers=admin)
     assert unknown.status_code == 404 and _error(unknown) == "provider_not_found"
     extra = await async_client.patch(
-        f"{PROVIDERS}/{TRUSTED_HEADER_PROVIDER_ID}", json={"enabled": False}, headers=admin
+        f"{PROVIDERS}/{TRUSTED_HEADER_PROVIDER_ID}", json={"configEncrypted": "x"}, headers=admin
     )
     assert extra.status_code == 422
 

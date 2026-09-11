@@ -218,4 +218,97 @@ describe("LoginForm", () => {
       expect(login).toHaveBeenCalledWith("secret-pass");
     });
   });
+  describe("login policy", () => {
+    const PROXY = { kind: "trusted_header", providerKey: "default", label: "Reverse proxy", loginUrl: null };
+    const SSO = { kind: "oidc", providerKey: "okta", label: "Okta", loginUrl: "https://sso.example.com/start" };
+
+    it("renders the form as usual when nothing is restricted", () => {
+      render(<LoginForm localForm="shown" />);
+
+      expect(screen.getByLabelText("Password")).toBeInTheDocument();
+      expect(screen.queryByText("Sign in with a password instead")).not.toBeInTheDocument();
+    });
+
+    it("collapses the form behind a link under admins_only and reveals it in place", async () => {
+      const user = userEvent.setup();
+      render(<LoginForm localForm="collapsed" />);
+
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "Sign in with a password instead" }));
+
+      expect(screen.getByLabelText("Password")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Sign in with a password instead" })).not.toBeInTheDocument();
+    });
+
+    it("renders no field and no reveal link under break_glass_only, only the providers", () => {
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({ usernameField: "hidden", providers: [PROXY], localLogin: "break_glass_only" }),
+      });
+      render(<LoginForm localForm="hidden" />);
+
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Sign in with a password instead" })).not.toBeInTheDocument();
+      expect(screen.getByTestId("login-providers")).toHaveTextContent("Reverse proxy");
+    });
+
+    it("says the door is shut rather than rendering an empty card", () => {
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({ usernameField: "hidden", localLogin: "break_glass_only" }),
+      });
+      render(<LoginForm localForm="hidden" />);
+
+      expect(screen.getByText("Signing in with a password is restricted on this install.")).toBeInTheDocument();
+    });
+
+    it("puts the company sign-in first and never names an account", () => {
+      window.localStorage.setItem(LAST_USERNAME_STORAGE_KEY, "rescue");
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({
+          usernameField: "shown",
+          providers: [
+            { kind: "password", providerKey: "default", label: "Password", loginUrl: null },
+            SSO,
+          ],
+          localLogin: "admins_only",
+        }),
+      });
+      const { container } = render(<LoginForm localForm="collapsed" />);
+
+      const providers = screen.getByTestId("login-providers");
+      const link = screen.getByRole("link", { name: "Continue with Okta" });
+      expect(link).toHaveAttribute("href", "https://sso.example.com/start");
+      // The provider block is drawn before the local password disclosure.
+      expect(providers.compareDocumentPosition(screen.getByRole("button", { name: "Sign in with a password instead" })))
+        .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      // The local password provider is not offered twice.
+      expect(providers).not.toHaveTextContent("Password");
+      // The only name on screen is the one this browser remembered.
+      expect(container.textContent).not.toContain("admin");
+    });
+
+    it("tells the person where the reverse proxy sends them instead of drawing a dead button", () => {
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({ usernameField: "shown", providers: [PROXY], localLogin: "admins_only" }),
+      });
+      render(<LoginForm localForm="collapsed" />);
+
+      expect(screen.getByTestId("login-providers")).toHaveTextContent(
+        "Sign in through Reverse proxy first, then open this dashboard again.",
+      );
+      expect(screen.queryByRole("link", { name: /Reverse proxy/ })).not.toBeInTheDocument();
+    });
+
+    it("keeps the guest block reachable while the password form is hidden", () => {
+      useAuthStore.setState({
+        guestAccessEnabled: true,
+        guestPasswordRequired: false,
+        loginHint: LoginHintSchema.parse({ usernameField: "hidden", localLogin: "break_glass_only" }),
+      });
+      render(<LoginForm localForm="hidden" />);
+
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "View as Guest" })).toBeInTheDocument();
+    });
+  });
 });

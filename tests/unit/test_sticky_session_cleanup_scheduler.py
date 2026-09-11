@@ -1016,3 +1016,88 @@ async def test_cleanup_once_retains_operation_purge_when_sticky_cleanup_disabled
     sticky_repo.purge_prompt_cache_before.assert_not_awaited()
     bridge_repo.purge_closed_before.assert_not_awaited()
     bridge_repo.purge_operation_spool_batch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sticky_cleanup_enabled", [True, False])
+async def test_cleanup_once_sweeps_expired_rate_limit_attempts(monkeypatch, sticky_cleanup_enabled: bool) -> None:
+    """``rate_limit_attempts`` has no other way out: ``clear_for_key`` only runs on success.
+
+    The key space includes a caller-supplied username, so the sweep is what
+    bounds the table — and like operation retention it must not depend on the
+    sticky-mapping toggle.
+    """
+
+    settings_repo = _spool_retention_settings_repo()
+    sticky_repo = AsyncMock()
+    sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_operation_spool_batch = AsyncMock(return_value=_purge_batch(0))
+    sweeper = AsyncMock()
+
+    class FakeSession:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+            openai_cache_affinity_max_age_seconds=600,
+        ),
+    )
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=sticky_cleanup_enabled)
+
+    with (
+        patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+        patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+        patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+        patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "RingMembershipService", return_value=AsyncMock()),
+        patch.object(cleanup_scheduler, "get_rate_limit_attempt_sweeper", lambda: sweeper),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
+        patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
+    ):
+        await scheduler._cleanup_once()
+
+    sweeper.cleanup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_rate_limit_sweep_does_not_cost_the_rest_of_the_pass(monkeypatch) -> None:
+    settings_repo = _spool_retention_settings_repo()
+    bridge_repo = AsyncMock()
+    bridge_repo.purge_operation_spool_batch = AsyncMock(return_value=_purge_batch(0))
+    sweeper = AsyncMock()
+    sweeper.cleanup = AsyncMock(side_effect=RuntimeError("table is gone"))
+
+    class FakeSession:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_operation_spool_retention_seconds=604800.0),
+    )
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=False)
+
+    with (
+        patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+        patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+        patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "get_rate_limit_attempt_sweeper", lambda: sweeper),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
+        patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
+    ):
+        await scheduler._cleanup_once()
+
+    bridge_repo.purge_operation_spool_batch.assert_awaited_once()

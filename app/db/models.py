@@ -938,6 +938,21 @@ class AuthProviderKind(str, Enum):
     OIDC = "oidc"
 
 
+class LocalLoginPolicy(str, Enum):
+    """Who may still sign in with a local password (PLAN §4.6, DB only).
+
+    ``ENABLED`` is today's behaviour and the default: every active account that
+    holds a password may sign in. The two tightened values are the switch a
+    company throws once its people arrive through a sign-in provider; both are
+    guarded by the qualifying break-glass invariant so the switch can never be
+    a lockout.
+    """
+
+    ENABLED = "enabled"
+    ADMINS_ONLY = "admins_only"
+    BREAK_GLASS_ONLY = "break_glass_only"
+
+
 #: Username of the account the legacy shared dashboard password is migrated
 #: into. During the expand/contract release its credentials are mirrored to the
 #: legacy ``dashboard_settings`` columns so older replicas keep working.
@@ -1364,6 +1379,16 @@ class DashboardSettings(Base):
         Boolean,
         default=False,
         server_default=false(),
+        nullable=False,
+    )
+    # PLAN §4.6: who may still use the local password form. Deliberately has no
+    # environment variable -- a redeploy must not silently re-open local
+    # sign-in a company closed. Tightening it is gated on a qualifying
+    # break-glass account; the host CLI is the way back.
+    local_login_policy: Mapped[str] = mapped_column(
+        String(32),
+        default=LocalLoginPolicy.ENABLED.value,
+        server_default=text(f"'{LocalLoginPolicy.ENABLED.value}'"),
         nullable=False,
     )
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)

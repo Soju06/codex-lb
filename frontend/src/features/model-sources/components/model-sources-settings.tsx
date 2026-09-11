@@ -107,8 +107,8 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
   };
 
   return (
-    <section id="model-sources" className="min-w-0 space-y-4 rounded-xl border bg-card p-5">
-      <div className="flex items-center justify-between gap-4">
+    <section id="model-sources" className="scroll-mt-20 min-w-0 space-y-4 rounded-xl border bg-card p-5">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
             <Database className="h-4 w-4 text-primary" aria-hidden="true" />

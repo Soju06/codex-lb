@@ -1,10 +1,11 @@
 import { useTranslation } from "react-i18next";
 
+import { formatDateTimeInline } from "@/utils/formatters";
 import { Badge } from "@/components/ui/badge";
 import type { ModelSource } from "@/features/model-sources/schemas";
 
 const key = "modelSources.healthChecks";
-const timeLabel = (value: string | null | undefined) => value ? new Date(value).toLocaleString() : "—";
+const timeLabel = formatDateTimeInline;
 const latencyLabel = (value: number | null | undefined) => value == null ? "—" : `${(value / 1000).toFixed(2)}s`;
 
 export function CompanyModelHealth({ source }: { source: ModelSource }) {

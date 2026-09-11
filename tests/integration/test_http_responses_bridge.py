@@ -10,7 +10,7 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -34,8 +34,16 @@ from app.core.utils.request_id import (
     set_request_id,
     set_request_scope_id,
 )
-from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, DashboardSettings, HttpBridgeSessionState, RequestLog, StickySession
+from app.core.utils.time import to_utc_naive, utcnow
+from app.db.models import (
+    Account,
+    AccountStatus,
+    DashboardSettings,
+    HttpBridgeSessionRecord,
+    HttpBridgeSessionState,
+    RequestLog,
+    StickySession,
+)
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import support as proxy_support
@@ -50,6 +58,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _reserve_http_bridge_unanchored_handoff,
 )
 from app.modules.proxy.affinity import _codex_session_selection_key
+from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
 from app.modules.proxy.load_balancer import (
     CONTINUITY_OWNER_UNAVAILABLE,
     AccountSelection,
@@ -8670,6 +8679,152 @@ async def test_v1_responses_http_bridge_capacity_failure_writes_no_owner_request
             .all()
         )
     assert owner_rows == []
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_resumes_a_thread_whose_owner_was_retired(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    """The #1707 case end to end: a thread welded to a dead owner must rebind.
+
+    Before this, the durable row kept naming the unroutable account on every
+    resume, so the thread returned 502 forever while healthy accounts sat idle.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_retired_owner",
+        "http-bridge-retired-owner@example.com",
+    )
+    healthy_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_retired_replacement",
+        "http-bridge-retired-replacement@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    healthy_account = await _get_account(healthy_account_id)
+    upstream = _ClosingBridgeUpstreamWebSocket()
+    selected_account_ids: list[str | None] = []
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        preferred_account_id = cast(str | None, kwargs.get("preferred_account_id"))
+        selected_account_ids.append(preferred_account_id)
+        if preferred_account_id == owner_account.id:
+            # The paused owner is not selectable; this is the selection result
+            # that produced the permanent 502.
+            return AccountSelection(
+                account=None,
+                error_message="No available accounts",
+                error_code=CONTINUITY_OWNER_UNAVAILABLE,
+            )
+        if preferred_account_id is None and selected_account_ids.count(None) > 1:
+            return AccountSelection(account=healthy_account, error_message=None, error_code=None)
+        return AccountSelection(account=owner_account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    # The Codex backend surface with a thread identity, so the bridge key is
+    # ``thread_header`` and therefore hard: a soft prompt-cache key would fall
+    # back to a healthy account on its own and prove nothing about this fix.
+    thread_headers = {"session_id": "session-retired-owner", "thread-id": "thread-retired-owner"}
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=thread_headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello",
+                "prompt_cache_key": "http-bridge-retired-owner",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200
+
+    service = get_proxy_service_for_app(app_instance)
+    # Drop the in-process session so the resume has to go through the durable
+    # row, which is where the weld lives.
+    async with service._http_bridge_lock:
+        service._http_bridge_sessions.clear()
+
+    # The durable row is persisted off the request path, so wait for it rather
+    # than assuming it landed before the response returned.
+    deadline = time.monotonic() + _TEST_SYNC_TIMEOUT_SECONDS
+    owned_rows: list[HttpBridgeSessionRecord] = []
+    while time.monotonic() < deadline:
+        async with SessionLocal() as session:
+            owned_rows = list(
+                (
+                    await session.execute(
+                        select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.account_id == owner_account.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if owned_rows:
+            break
+        await asyncio.sleep(0.05)
+    assert owned_rows, "the first turn did not persist a durable bridge row"
+
+    # The owner goes unroutable and its rows age past the grace window, then
+    # the scheduler's sweep retires the owner.
+    stale = to_utc_naive(utcnow() - timedelta(hours=7))
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == owner_account.id).values(status=AccountStatus.PAUSED))
+        await session.execute(update(HttpBridgeSessionRecord).values(last_seen_at=stale))
+        await session.commit()
+    now = utcnow()
+    async with SessionLocal() as session:
+        retired = await DurableBridgeRepository(session).retire_stale_unavailable_bridge_owners(
+            now - timedelta(hours=6),
+            now=now,
+        )
+    assert retired == len(owned_rows)
+
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=thread_headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "continue",
+                "prompt_cache_key": "http-bridge-retired-owner",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    # The whole point: the same thread now serves instead of failing closed.
+    assert second.status_code == 200
+    # And it never asked for the retired owner again.
+    assert owner_account.id not in selected_account_ids[1:]
+
+    async with SessionLocal() as session:
+        rows = list((await session.execute(select(HttpBridgeSessionRecord))).scalars().all())
+    assert [row.continuity_abandoned_at for row in rows if row.account_id == owner_account.id] == []
 
 
 @pytest.mark.asyncio

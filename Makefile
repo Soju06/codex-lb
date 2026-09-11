@@ -43,6 +43,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_repositories.py::test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport \
 	tests/integration/test_migrations.py::test_account_plan_downgrade_observations_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_account_pending_deletion_migration_upgrade_and_downgrade \
+	tests/integration/test_migrations.py::test_bridge_continuity_abandonment_migration_upgrade_and_downgrade \
+	tests/integration/test_repositories.py::test_retire_stale_unavailable_bridge_owners_frees_a_reauth_pinned_thread \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_primary_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_cutoff_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_secondary_query_plan_is_index_only_postgresql \

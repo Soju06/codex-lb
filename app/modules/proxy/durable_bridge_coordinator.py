@@ -55,6 +55,12 @@ class DurableBridgeLookup:
     model: str | None = None
     latest_pending_tool_calls: dict[str, str] | None = None
     owner_process_epoch: str | None = None
+    # True when a writer retired this row's continuity owner. The lookup then
+    # carries no owner and no anchor, and the request proceeds as if this
+    # thread had never been pinned — which is different from "no row exists",
+    # because callers must not fail closed on the missing owner.
+    continuity_abandoned: bool = False
+    retired_account_id: str | None = None
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -1153,21 +1159,44 @@ class DurableBridgeSessionCoordinator:
 
 
 def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
+    # Every lookup path funnels through here, so retirement is applied once
+    # rather than at each call site — the detached-row filter above had to be
+    # repeated and ended up covering only two of the four paths.
+    #
+    # A retired row keeps its identity (callers still need the session id and
+    # canonical key to claim it) but surrenders every piece of continuity
+    # evidence: the owner, the response anchor and the turn state. Dropping
+    # the anchors alongside the owner is what makes the retirement coherent —
+    # an anchor without its account is upstream state no replacement account
+    # can read, and leaving it would have the next request inject a pointer
+    # that only the retired owner could resolve.
+    retired = snapshot.continuity_abandoned
     return DurableBridgeLookup(
         session_id=snapshot.id,
         canonical_kind=snapshot.session_key_kind,
         canonical_key=snapshot.session_key_value,
         api_key_scope=snapshot.api_key_scope,
-        account_id=snapshot.account_id,
-        owner_instance_id=snapshot.owner_instance_id,
-        owner_process_epoch=snapshot.owner_process_epoch,
+        account_id=None if retired else snapshot.account_id,
+        # The owning replica goes with the owner. ``_durable_bridge_lookup_active_owner``
+        # would otherwise still name it and forward the request there, and the
+        # takeover gates would treat the row as live. The sweep only retires
+        # rows that have been idle for the whole grace window, so no lease can
+        # realistically still be running — but leaving these set makes the
+        # invariant depend on the lease TTL staying below the grace window,
+        # which is a setting nobody would think to check before changing.
+        owner_instance_id=None if retired else snapshot.owner_instance_id,
+        owner_process_epoch=None if retired else snapshot.owner_process_epoch,
+        # The epoch is fencing state, not continuity evidence: a later claim
+        # must still advance past it, so it is preserved.
         owner_epoch=snapshot.owner_epoch,
-        lease_expires_at=snapshot.lease_expires_at,
+        lease_expires_at=None if retired else snapshot.lease_expires_at,
         state=snapshot.state,
-        latest_turn_state=snapshot.latest_turn_state,
-        latest_response_id=snapshot.latest_response_id,
-        latest_input_item_count=snapshot.latest_input_item_count,
-        latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
+        latest_turn_state=None if retired else snapshot.latest_turn_state,
+        latest_response_id=None if retired else snapshot.latest_response_id,
+        latest_input_item_count=None if retired else snapshot.latest_input_item_count,
+        latest_input_full_fingerprint=None if retired else snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
-        latest_pending_tool_calls=snapshot.latest_pending_tool_calls,
+        latest_pending_tool_calls=None if retired else snapshot.latest_pending_tool_calls,
+        continuity_abandoned=retired,
+        retired_account_id=snapshot.abandoned_account_id,
     )

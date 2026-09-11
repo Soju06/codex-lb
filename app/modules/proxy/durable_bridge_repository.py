@@ -16,13 +16,14 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.utils.time import to_utc_naive, utcnow
+from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import (
     HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2,
     HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
     HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED,
     HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING,
     HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED,
+    Account,
     HttpBridgeOperationEvent,
     HttpBridgeOperationEventChunk,
     HttpBridgeOperationRecord,
@@ -34,6 +35,7 @@ from app.db.models import (
     HttpBridgeSessionState,
 )
 from app.db.session import sqlite_writer_section
+from app.modules.proxy.account_eligibility import HARD_OWNER_UNAVAILABLE_STATUSES
 from app.modules.proxy.continuity import (
     HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
     HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND,
@@ -189,6 +191,11 @@ class DurableBridgeSessionSnapshot:
     closed_at: datetime | None
     latest_pending_tool_calls: dict[str, str] | None = None
     owner_process_epoch: str | None = None
+    # True once a writer retired this row's continuity owner. Readers must
+    # treat ``account_id`` as absent and may use ``abandoned_account_id`` only
+    # as exclusion evidence, never as a routing target.
+    continuity_abandoned: bool = False
+    abandoned_account_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1140,6 +1147,19 @@ class DurableBridgeRepository:
             state_closed = existing.state == HttpBridgeSessionState.CLOSED
             owner_absent = existing.owner_instance_id is None
             account_changed = existing.account_id != account_id
+            # Reclaiming a retired row discards continuity for the same reason
+            # an account change does. ``_to_lookup`` masked the anchors while
+            # the marker stood, so the request that triggered this claim was
+            # planned as an unanchored fresh start. Clearing only the marker
+            # would leave the old response id, turn state, fingerprints and
+            # pending calls behind, and the next lookup would serve that
+            # abandoned anchor as ordinary continuity — including when the
+            # retired account itself recovers and is selected again, where
+            # ``account_changed`` is False.
+            continuity_retired = _bridge_continuity_is_abandoned(
+                existing.continuity_abandoned_at,
+                existing.continuity_abandonment_scope,
+            )
             owner_changed = existing.owner_instance_id != instance_id
             if owner_changed:
                 lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
@@ -1177,8 +1197,14 @@ class DurableBridgeRepository:
                 "service_tier": service_tier,
                 "last_seen_at": now,
                 "closed_at": None,
+                # A successful claim re-establishes ownership, so any prior
+                # retirement is over. Clearing both markers here is what makes
+                # retirement reversible: the same row, re-pinned to a healthy
+                # account, becomes ordinary hard ownership again.
+                "continuity_abandoned_at": None,
+                "continuity_abandonment_scope": None,
             }
-            if account_changed:
+            if account_changed or continuity_retired:
                 values["latest_turn_state"] = latest_turn_state
                 values["latest_response_id"] = latest_response_id
                 values["latest_input_item_count"] = None
@@ -1212,7 +1238,7 @@ class DurableBridgeRepository:
                         contended = True
                         continue
                     raise RuntimeError("Failed to claim durable bridge session after retry")
-                if account_changed:
+                if account_changed or continuity_retired:
                     await self._clear_aliases_for_session(existing.id)
                 await self._session.commit()
             # Build the snapshot from the values THIS CAS wrote rather than a
@@ -3539,6 +3565,88 @@ class DurableBridgeRepository:
                 await self._session.commit()
             deleted_count += len(deleted.scalars().all())
 
+    async def retire_stale_unavailable_bridge_owners(self, cutoff: datetime, *, now: datetime) -> int:
+        """Retire continuity owners that have been unroutable since ``cutoff``.
+
+        The durable-bridge counterpart of
+        ``StickySessionsRepository.purge_stale_hard_codex_session_mappings``,
+        and it exists for the same reason. Deleting the row outright would be
+        indistinguishable from "this key was never seen", which leaves the
+        anchored lookup failing closed forever; a tombstone instead says the
+        owner was deliberately abandoned, so a later request may pick a fresh
+        one. Two phases:
+
+        1. Tombstone a row whose owner has sat in
+           :data:`HARD_OWNER_UNAVAILABLE_STATUSES` past its reset horizon while
+           the row itself went untouched for the whole grace window.
+        2. Delete a tombstone that then sat another full window with nobody
+           claiming it, as long as it owns no operation rows.
+
+        Unlike the row deletes elsewhere in this module, phase 1 is **not**
+        gated on ``~exists(operation)``. That guard protects the durable
+        recovery ledger from a ``CASCADE``, which retirement does not trigger:
+        it writes two columns and keeps every operation row intact. Gating it
+        would reproduce the 2026-09-04 outage, where every poisoned row
+        happened to own operations and so was never reachable by cleanup.
+        """
+        now_naive = to_utc_naive(now)
+        cutoff_naive = to_utc_naive(cutoff)
+        now_epoch = naive_utc_to_epoch(now_naive)
+        unavailable_account_ids = select(Account.id).where(
+            Account.status.in_(HARD_OWNER_UNAVAILABLE_STATUSES),
+            or_(Account.reset_at.is_(None), Account.reset_at < now_epoch),
+        )
+        tombstone_stmt = (
+            update(HttpBridgeSessionRecord)
+            .where(
+                HttpBridgeSessionRecord.account_id.is_not(None),
+                HttpBridgeSessionRecord.continuity_abandoned_at.is_(None),
+                HttpBridgeSessionRecord.continuity_abandonment_scope.is_(None),
+                HttpBridgeSessionRecord.last_seen_at < cutoff_naive,
+                HttpBridgeSessionRecord.account_id.in_(unavailable_account_ids),
+            )
+            # Timestamp with NULL scope is the global form: this sweep has no
+            # per-source question to answer, and a replica that predates the
+            # scope column still understands the timestamp.
+            .values(continuity_abandoned_at=now_naive, continuity_abandonment_scope=None)
+            .returning(HttpBridgeSessionRecord.id)
+        )
+        expired_tombstone_filter = (
+            HttpBridgeSessionRecord.continuity_abandoned_at.is_not(None),
+            HttpBridgeSessionRecord.continuity_abandonment_scope.is_(None),
+            HttpBridgeSessionRecord.continuity_abandoned_at < cutoff_naive,
+            ~exists(
+                select(HttpBridgeOperationRecord.operation_id).where(
+                    HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                )
+            ),
+        )
+        async with sqlite_writer_section():
+            tombstoned = len((await self._session.execute(tombstone_stmt)).scalars().all())
+            # Aliases first, matching ``purge_closed_before``: the FK cascade
+            # would cover it, but SQLite builds without foreign-key enforcement
+            # would leave orphans that later resolve to a deleted session.
+            await self._session.execute(
+                delete(HttpBridgeSessionAlias).where(
+                    HttpBridgeSessionAlias.session_id.in_(
+                        select(HttpBridgeSessionRecord.id).where(*expired_tombstone_filter)
+                    )
+                )
+            )
+            deleted = len(
+                (
+                    await self._session.execute(
+                        delete(HttpBridgeSessionRecord)
+                        .where(*expired_tombstone_filter)
+                        .returning(HttpBridgeSessionRecord.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            await self._session.commit()
+        return tombstoned + deleted
+
     async def purge_abandoned_before(self, cutoff: datetime, *, batch_size: int = _PURGE_CLOSED_BATCH_SIZE) -> int:
         """Purge ACTIVE/DRAINING rows whose lease expired and whose activity predates the cutoff."""
 
@@ -4168,11 +4276,17 @@ _SNAPSHOT_COLUMNS = (
     HttpBridgeSessionRecord.latest_pending_tool_calls_json,
     HttpBridgeSessionRecord.last_seen_at,
     HttpBridgeSessionRecord.closed_at,
+    HttpBridgeSessionRecord.continuity_abandoned_at,
+    HttpBridgeSessionRecord.continuity_abandonment_scope,
 )
 
 
 def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSessionSnapshot:
     mapping = row._mapping
+    continuity_abandoned = _bridge_continuity_is_abandoned(
+        mapping[HttpBridgeSessionRecord.continuity_abandoned_at],
+        mapping[HttpBridgeSessionRecord.continuity_abandonment_scope],
+    )
     return DurableBridgeSessionSnapshot(
         id=mapping[HttpBridgeSessionRecord.id],
         session_key_kind=mapping[HttpBridgeSessionRecord.session_key_kind],
@@ -4197,12 +4311,33 @@ def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSess
         ),
         last_seen_at=mapping[HttpBridgeSessionRecord.last_seen_at],
         closed_at=mapping[HttpBridgeSessionRecord.closed_at],
+        continuity_abandoned=continuity_abandoned,
+        abandoned_account_id=(mapping[HttpBridgeSessionRecord.account_id] if continuity_abandoned else None),
     )
+
+
+def _bridge_continuity_is_abandoned(
+    abandoned_at: datetime | None,
+    abandonment_scope: str | None,
+) -> bool:
+    """Return whether a writer retired this row's continuity owner.
+
+    Mirrors ``sticky_repository._continuity_is_abandoned_for_source``. The
+    bridge has one continuity source, so any scope marker retires the owner;
+    the legacy-timestamp form retires it globally. Scope is written alone so a
+    pre-migration replica, which knows neither column, keeps treating
+    ``account_id`` as hard ownership through a rolling deploy.
+    """
+    return abandonment_scope is not None or abandoned_at is not None
 
 
 def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSnapshot | None:
     if row is None:
         return None
+    continuity_abandoned = _bridge_continuity_is_abandoned(
+        row.continuity_abandoned_at,
+        row.continuity_abandonment_scope,
+    )
     return DurableBridgeSessionSnapshot(
         id=row.id,
         session_key_kind=row.session_key_kind,
@@ -4227,6 +4362,8 @@ def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSna
         ),
         last_seen_at=row.last_seen_at,
         closed_at=row.closed_at,
+        continuity_abandoned=continuity_abandoned,
+        abandoned_account_id=row.account_id if continuity_abandoned else None,
     )
 
 

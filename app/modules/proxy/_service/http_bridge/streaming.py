@@ -2012,13 +2012,24 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_turn_state is not None
             )
         )
+        # A retired owner is not a missing one. Failing closed is right when a
+        # row should name an account and does not — that is lost state. But a
+        # retirement marker is positive proof that the owner was deliberately
+        # abandoned because it could not come back, so the correct response is
+        # to pick a fresh owner, exactly as the sticky selector does when it
+        # sees its own tombstone. Without this exemption, retiring an owner
+        # would convert one 502 into a different 502.
         durable_owner_missing = (
-            durable_lookup is not None and durable_lookup_requires_owner and durable_lookup.account_id is None
+            durable_lookup is not None
+            and durable_lookup_requires_owner
+            and durable_lookup.account_id is None
+            and not durable_lookup.continuity_abandoned
         )
         model_transition_owner_missing = (
             durable_model_transition_lookup is not None
             and durable_model_transition_requires_owner
             and durable_model_transition_lookup.account_id is None
+            and not durable_model_transition_lookup.continuity_abandoned
         )
         required_continuity_owner_missing = (
             (request_state.previous_response_id is not None and request_state.preferred_account_id is None)

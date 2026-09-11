@@ -2452,6 +2452,14 @@ class HttpBridgeSessionRecord(Base):
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     latest_pending_tool_calls_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Continuity-owner retirement, mirroring sticky_sessions' pair: a non-NULL
+    # scope retires ownership only for the matching typed source, while a
+    # non-NULL timestamp with NULL scope retires it globally. Deleting the row
+    # instead would be indistinguishable from "never seen" and would leave the
+    # lookup failing closed forever; a marker says the owner was deliberately
+    # abandoned, so picking a fresh one is authorized.
+    continuity_abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    continuity_abandonment_scope: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

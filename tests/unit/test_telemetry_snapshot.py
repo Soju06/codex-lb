@@ -131,7 +131,8 @@ def test_day_upstream_transport_uses_producer_spellings(stored: str, expected: s
     [("websocket", "ws"), ("http", "http_bridge"), ("automation", "other"), ("unknown", "other")],
 )
 def test_day_transport_uses_only_known_request_spellings(stored: str, expected: str) -> None:
-    row = _request_log("transport", model="gpt-5.6-sol", useragent_group="codex_exec", transport=stored)
+    row = _request_log("transport", model="gpt-5.6-sol", useragent_group="codex_exec")
+    row.transport = stored
     day = _build_day_from_rows("instance", date(2026, 9, 9), [row])
     assert [entry.name for entry in day.dimensions.transport] == [expected]
 

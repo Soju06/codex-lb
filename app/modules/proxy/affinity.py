@@ -82,6 +82,14 @@ class _AffinityPolicy:
     # ``conversation`` has no dedicated owner index. Preserve that provenance
     # until selection can prove one hard owner or a one-account pool.
     require_unambiguous_account: bool = False
+    # For a policy whose key IS the prompt cache key: whether the client sent
+    # that key (``payload``) or the proxy derived it (``derived``). Recorded by
+    # the resolver rather than re-derived by callers, because
+    # ``_resolve_prompt_cache_key`` writes the derived key back onto the
+    # payload — so a later reader of the payload cannot tell the two apart, and
+    # a blank client hint the resolver rejected still looks present. Routing
+    # never reads this; it exists so the request log can describe the decision.
+    prompt_cache_key_source: str | None = None
 
     @property
     def selection_key(self) -> str | None:
@@ -684,7 +692,7 @@ def _sticky_key_for_responses_request(
     # This helper only classifies locality keys. Stored-object continuity such
     # as `previous_response_id` is resolved later by ProxyService and must stay
     # hard owner-bound even if this returns a prompt-cache affinity policy.
-    cache_key, _ = _resolve_prompt_cache_key(
+    cache_key, cache_key_source = _resolve_prompt_cache_key(
         payload,
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
@@ -717,12 +725,14 @@ def _sticky_key_for_responses_request(
             key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            prompt_cache_key_source=cache_key_source,
         )
     elif sticky_threads_enabled:
         policy = _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
+            prompt_cache_key_source=cache_key_source,
         )
     elif turn_state_key is not None and turn_state_key == synthesized_turn_state:
         policy = _AffinityPolicy(

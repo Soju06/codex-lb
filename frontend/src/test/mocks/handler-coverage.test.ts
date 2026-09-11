@@ -98,6 +98,7 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/settings/subscription-overflow/preflight",
 	"GET /api/settings/telemetry",
 	"PUT /api/settings/telemetry",
+	"POST /api/settings/telemetry/notice-ack",
 	"GET /api/settings/upstream-proxy",
 	"POST /api/settings/upstream-proxy/endpoints",
 	"POST /api/settings/upstream-proxy/endpoints/:endpointId/test",

@@ -1317,6 +1317,19 @@ export const handlers = [
     return HttpResponse.json(state.telemetryConsent);
   }),
 
+  http.post("/api/settings/telemetry/notice-ack", async ({ request }) => {
+    const payload = await parseJsonBody(request, z.object({ notice_version: z.number().int() }));
+    if (!payload) {
+      return HttpResponse.json(state.telemetryConsent);
+    }
+    state.telemetryConsent = createTelemetryConsent({
+      ...state.telemetryConsent,
+      notice_version: Math.min(payload.notice_version, state.telemetryConsent.notice_version),
+      preview: null,
+    });
+    return HttpResponse.json(state.telemetryConsent);
+  }),
+
   http.get("/api/settings/upstream-proxy", () => {
     return HttpResponse.json(state.upstreamProxyAdmin);
   }),

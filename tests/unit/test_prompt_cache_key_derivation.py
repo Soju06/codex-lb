@@ -9,6 +9,7 @@ there is nothing to anchor -- rather than the literal shape of the key.
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import cast
 
@@ -70,7 +71,9 @@ def _make_api_key(id: str = "ak_test_001122334455") -> ApiKeyData:
     )
 
 
-def _request(items: list[object], *, model: str = "gpt-5.4", instructions: str = "You are Codex") -> ResponsesRequest:
+def _request(
+    items: Sequence[object], *, model: str = "gpt-5.4", instructions: str = "You are Codex"
+) -> ResponsesRequest:
     return ResponsesRequest(model=model, instructions=instructions, input=_json_value(items))
 
 

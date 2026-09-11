@@ -45,12 +45,12 @@ is exhausted.
 - **One classifier, one richer answer.** `classify_upstream_failure` keeps
   producing today's `failure_class` for every envelope that already carries a
   code — no existing classification is inverted — and additionally reports
-  whether the rejection is account exhaustion. Account selection reads that
-  flag; account health keeps reading `failure_class`. A model-capacity message
-  sets the flag false even under a rate-limit code; a usage-limit message sets
-  it true and, when the envelope carries no code or a non-rate-limit code, also
-  raises the classification from `retryable_transient` to `rate_limit`. No
-  second classifier is introduced.
+  whether the walk may move off this account. Account selection reads that
+  answer; account health keeps reading `failure_class`. It is true for every
+  walkable class and false only for a model-capacity rejection, even under a
+  rate-limit code. A usage-limit message additionally raises the class from
+  `retryable_transient` to `rate_limit`, but only for the two codes that carry
+  no classification decision of their own. No second classifier is introduced.
 - **The walk is bounded by the pool, not by a constant.**
   `failover_decision` takes `more_candidates_possible: bool` instead of
   `candidates_remaining: int`, and the `non_retryable` check moves ahead of the
@@ -76,8 +76,8 @@ is exhausted.
 
 ## Impact
 
-- Affected capabilities: `account-routing` (two ADDED, two MODIFIED),
-  `responses-api-compat` (two MODIFIED).
+- Affected capabilities: `account-routing` (three ADDED, one MODIFIED),
+  `responses-api-compat` (two ADDED, one MODIFIED).
 - **Clients** that today receive one account's 429 while other accounts are
   usable now receive a served response. A client that receives a 429 now
   receives it because the pool is exhausted, and it carries `error.resets_at`.

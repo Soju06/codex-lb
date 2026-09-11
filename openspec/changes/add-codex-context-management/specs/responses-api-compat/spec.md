@@ -8,7 +8,7 @@ Transcript metadata SHALL contain only an optional nonblank `turn_id`, an option
 
 Client tool namespaces SHALL contain only a nonblank name, an optional textual description, and a nonempty list of independently validated function or custom tool declarations. Unknown namespace fields, nested namespaces, and hosted-resource tools within a namespace MUST remain nonportable.
 
-Unknown encrypted retained state, stored response/conversation references, input file IDs, container/vector-store references, incomplete tool exchanges, malformed local labels, and unknown metadata fields MUST continue to prevent cross-account replay. This requirement MUST NOT relax strict ownership or bypass API-key account scope, failure settlement or retry exclusions.
+Unknown encrypted retained state, stored response/conversation references, input file IDs, container/vector-store references, incomplete tool exchanges, malformed local labels, and unknown metadata fields MUST continue to prevent cross-account replay. A non-null input item `type` that is not a string MUST make the request ineligible for cross-account replay without raising a classification exception. This requirement MUST NOT relax strict ownership or bypass API-key account scope, failure settlement or retry exclusions.
 
 Authenticated context tool outputs MAY replace only verified native ciphertext parts in the classification projection. HTTP streaming and WebSocket request state SHALL carry this verification evidence internally and MUST NOT accept it from client fields. The upstream request MUST preserve the native ciphertext. A complete tool exchange with recognized namespace and transcript metadata SHALL remain eligible for the existing replay policy; unverified ciphertext and encrypted reasoning MUST remain fenced.
 
@@ -27,3 +27,9 @@ Authenticated context tool outputs MAY replace only verified native ciphertext p
 - **WHEN** an HTTP or WebSocket request receives a pre-visible quota rejection
 - **THEN** existing retry policy may send the same native ciphertext to another eligible account
 - **AND** the request retains ordinary reservation settlement, file ownership and retry exclusions
+
+#### Scenario: An input item has a non-string type
+- **GIVEN** an `all_turns` request contains an input item with an array or object as its `type`
+- **WHEN** the proxy classifies replay eligibility
+- **THEN** it denies cross-account replay without changing the request body
+- **AND** an ordinary upstream validation rejection reaches the HTTP client without a proxy classification error

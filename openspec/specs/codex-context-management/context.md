@@ -14,6 +14,8 @@ Keep the database and existing `encryption.key` together across restarts. Replic
 
 `docs/codex-context-management.md` describes setup and failure behavior. Integration tests use disposable databases and simulated upstream responses. Live CLI checks used an isolated two-account pool, synthetic notes, a quota rejection injected before provider dispatch, and a proxy restart followed by `new_context` and history recovery.
 
+Native `thread_hint` content stays opaque, but its raw response still uses the context size limit. For example, 2,000,001 bytes returns the same private 502 envelope as an oversized wrapped result. Other context results must decode before wrapping: malformed provider JSON or text encoding produces that private 502 error, including when a pooled query must cancel another participant. These are invalid provider results; the generic 503 remains for unexpected transport failures.
+
 HTTP streaming binds session/API-key ownership before starting the upstream iterator, then records participation after parsing the first event with a classified type. SSE comments and unclassified frames are forwarded without recording participation; a later valid event still records the account. A startup failure leaves the ownership fence intact without adding an unused history account. WebSocket persistence finishes before the sent timestamp is set; no database await separates that timestamp from send.
 
 The migration refuses pre-existing context tables before creating either one, so downgrade can only remove tables created by its successful upgrade. Historical test fixtures omit these new tables when simulating an older schema.

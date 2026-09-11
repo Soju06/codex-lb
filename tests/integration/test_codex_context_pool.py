@@ -18,7 +18,7 @@ from app.db.models import Account, AccountStatus, CodexContextParticipant, Codex
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeysService
-from app.modules.proxy.context_codec import expand_history_input
+from app.modules.proxy.context_codec import MAX_CONTEXT_BYTES, expand_history_input
 from app.modules.proxy.context_dispatch import record_context_dispatch
 from app.modules.proxy.request_policy import apply_api_key_enforcement
 from app.modules.settings.repository import SettingsRepository
@@ -52,6 +52,78 @@ def envelope():
         "reasoning": {"context": "all_turns"},
         "client_metadata": {"session_id": SID},
     }
+
+
+@pytest.mark.parametrize("excess_bytes", [0, 1])
+async def test_thread_hint_enforces_result_size_boundary(async_client, monkeypatch, excess_bytes):
+    owner, _, headers, key = await setup_pool(async_client)
+    await record_context_dispatch(envelope(), key, owner)
+    body = b'{"hint":"' + b"x" * (MAX_CONTEXT_BYTES - len(b'{"hint":""}') + excess_bytes) + b'"}'
+    upstream = AsyncMock(return_value=CodexControlResponse(status_code=200, body=body, headers={}))
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", upstream)
+    response = await async_client.post(
+        "/backend-api/codex/alpha/notes/v2/thread_hint", headers=headers, json={"context": CONTEXT}
+    )
+    if excess_bytes:
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "context_backend_unavailable"
+    else:
+        assert response.status_code == 200
+        assert response.content == body
+    upstream.assert_awaited_once()
+
+
+@pytest.mark.parametrize("participants", [1, 2])
+@pytest.mark.parametrize("body", [b'{"private-note":', b"\xffprivate-note"], ids=["json", "encoding"])
+async def test_invalid_context_result_returns_private_502_and_drains_siblings(
+    async_client, monkeypatch, participants, body
+):
+    owner, other, headers, key = await setup_pool(async_client)
+    await record_context_dispatch(envelope(), key, owner)
+    if participants == 2:
+        await record_context_dispatch(envelope(), key, other)
+    sibling_started = asyncio.Event()
+    sibling_finished = asyncio.Event()
+
+    async def upstream(path, **kwargs):
+        if kwargs["account_id"] == "context-a":
+            if participants == 2:
+                await sibling_started.wait()
+            return CodexControlResponse(status_code=200, body=body, headers={})
+        sibling_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            sibling_finished.set()
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", upstream)
+    response = await async_client.post(
+        "/backend-api/codex/alpha/history/v2/list_windows", headers=headers, json={"context": CONTEXT}
+    )
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "context_backend_unavailable"
+    assert "private-note" not in response.text
+    if participants == 2:
+        assert sibling_finished.is_set()
+
+
+@pytest.mark.parametrize("item_type", [[], {}])
+async def test_non_string_context_item_type_preserves_upstream_validation(async_client, monkeypatch, item_type):
+    _, _, headers, _ = await setup_pool(async_client)
+    body = {**envelope(), "input": [{"type": item_type}]}
+    seen = []
+
+    async def stream(payload, *args, **kwargs):
+        seen.append(payload.to_payload())
+        raise ProxyResponseError(400, {"error": {"code": "invalid_request_error", "message": "Invalid input type"}})
+        yield  # Establish the upstream async-generator interface.
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
+    response = await async_client.post("/backend-api/codex/responses", headers=headers, json=body)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request_error"
+    assert len(seen) == 1
+    assert seen[0]["input"] == body["input"]
 
 
 async def test_pool_notes_keep_owner_and_quota_status_after_rotation(async_client, monkeypatch):

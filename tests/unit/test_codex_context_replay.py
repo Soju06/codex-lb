@@ -85,3 +85,11 @@ def test_context_projection_requires_recognized_mode(context_request):
     assert not responses_payload_is_account_neutral_fresh_replay(context_request)
     del context_request["reasoning"]["context"]
     assert not responses_payload_is_account_neutral_fresh_replay(context_request)
+
+
+@pytest.mark.parametrize("item_type", [[], {}])
+def test_context_rejects_non_string_item_type_without_rewriting(context_request, item_type):
+    context_request["input"][1]["type"] = item_type
+    original = copy.deepcopy(context_request)
+    assert not responses_payload_is_account_neutral_fresh_replay(context_request)
+    assert context_request == original

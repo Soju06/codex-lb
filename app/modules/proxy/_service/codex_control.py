@@ -369,11 +369,14 @@ class _ContextManagementMixin:
         with scheduler.fail_after(max(0.01, deadline - clock.monotonic())):
             if len(account_ids) == 1:
                 response = await call(account_ids[0])
-                if path == "alpha/notes/v2/thread_hint":
-                    return response
                 if len(response.body) > MAX_CONTEXT_BYTES:
                     raise context_error("context_result_too_large", 502)
-                result = json.loads(response.body)
+                if path == "alpha/notes/v2/thread_hint":
+                    return response
+                try:
+                    result = json.loads(response.body)
+                except ValueError:
+                    raise context_error("context_result_invalid", 502) from None
                 if not isinstance(result, dict):
                     raise context_error("context_result_invalid", 502)
                 return CodexControlResponse(
@@ -393,7 +396,10 @@ class _ContextManagementMixin:
                     response = await call(account_id)
                 if len(response.body) > MAX_CONTEXT_BYTES:
                     raise context_error("context_result_too_large", 502)
-                result = json.loads(response.body)
+                try:
+                    result = json.loads(response.body)
+                except ValueError:
+                    raise context_error("context_result_invalid", 502) from None
                 if not isinstance(result, dict):
                     raise context_error("context_result_invalid", 502)
                 return HistoryPartition(account_id=account_id, result=result)

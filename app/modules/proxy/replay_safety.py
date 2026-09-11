@@ -814,6 +814,8 @@ def _codex_context_replay_projection(payload: Mapping[str, JsonValue]) -> dict[s
             return None
         candidate = dict(item)
         item_type = item.get("type")
+        if item_type is not None and not isinstance(item_type, str):
+            return None
         prefixes = {
             "function_call": "fc_",
             "function_call_output": "fco_",

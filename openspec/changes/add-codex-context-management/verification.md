@@ -1,3 +1,11 @@
+# Review corrections verification, September 11 (UTC)
+
+Native `thread_hint` responses now enforce the 2,000,000-byte limit before their opaque passthrough. Invalid JSON or text encoding from a wrapped context result produces a private HTTP 502 response for one or multiple participants; pending siblings still finish cancellation. Non-string input item types no longer raise in context replay classification or subsequent file-reference detection. Their upstream request stays unchanged, and content file references remain visible to ownership routing. The unused private-context control adapter and unreachable branches were removed; the Realtime adapter remains in use.
+
+The initial ten regression cases reproduced nine failures and one passing size-boundary control before the fixes. The HTTP path exposed a second unhashable-type access in file-reference detection after the replay classifier was repaired; that access was guarded too, with two focused file-reference preservation cases. All 12 regressions now pass.
+
+The affected suite passed 845 tests covering context codec/replay, OpenAI request parsing, general replay portability, history/notes, forks, pool dispatch, ownership, retries, Realtime and Codex control routes. These include the 12 regressions. `make lint`, full `ty check`, strict active-change validation and all 66 repository specs passed. Tests used temporary databases and simulated upstreams. The native canary and production evidence below belongs to the preceding integration, not a deployment of these corrections.
+
 # Publication integration verification, September 11 (UTC)
 
 Integrated upstream `4096c18acffcfca9267258057678e3898744db85`, including the three authentication commits published after the preceding candidate. The context runtime hooks merged without conflicts. The operator/viewer migration test retains both the current-head and restored-column assertions.

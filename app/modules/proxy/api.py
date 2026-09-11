@@ -906,13 +906,8 @@ class _CodexControlAdapter(Protocol):
 
 
 class _PassthroughCodexControlAdapter:
+    privacy_policy: Final = CodexControlRequestPrivacyPolicy.STANDARD
     success_gate: Final[None] = None
-
-    def __init__(
-        self,
-        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
-    ) -> None:
-        self.privacy_policy = privacy_policy
 
     async def finalize(
         self,
@@ -993,7 +988,6 @@ class _RealtimeCallCodexControlAdapter:
 
 
 _PASSTHROUGH_CODEX_CONTROL_ADAPTER = _PassthroughCodexControlAdapter()
-_CONTEXT_CODEX_CONTROL_ADAPTER = _PassthroughCodexControlAdapter(CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT)
 
 
 def _codex_context_error_response(request: Request, status_code: int) -> JSONResponse:
@@ -1030,14 +1024,10 @@ async def _codex_control_proxy(
             success_gate=adapter.success_gate,
         )
     except ProxyResponseError as exc:
-        if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT:
-            return _codex_context_error_response(request, exc.status_code)
         if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
             return _realtime_call_error_response(request, status_code=exc.status_code)
         return _logged_error_json_response(request, exc.status_code, exc.payload)
     except Exception:
-        if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_CONTEXT:
-            return _codex_context_error_response(request, 503)
         if adapter.privacy_policy is not CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
             raise
         logger.warning(

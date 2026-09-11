@@ -70,7 +70,17 @@ Authenticated Responses with `reasoning.context=all_turns` and a canonical `clie
 ### Requirement: Bounded history containers
 The proxy SHALL encrypt and authenticate each context result container using its persistent encryption key and include its API-key ID, session UUID and source account IDs. It SHALL validate integrity, canonical source and target session UUIDs, the issuing API key and current account scope before unfolding native encrypted content and images into a Responses tool output. A result issued to the same key MAY be replayed in another canonical session only when the request retains `reasoning.context=all_turns`, which MUST enforce the target session ownership before dispatch. Such replay grants no authority to read or write the source session, does not copy its notes or participant bindings, and leaves subsequent context operations scoped to their explicit target session. Multi-account history SHALL include all successful partitions and model instructions to combine, deduplicate and apply the requested global order and limit. The proxy MUST NOT claim deterministic global sorting or pagination of opaque history results.
 
-Each operation SHALL admit at most 32 history accounts and at most four concurrent upstream history calls. Context request and decoded aggregate result sizes SHALL be limited to 2,000,000 bytes. Upstream operations SHALL use a 30-second deadline. Fan-out tasks MUST own separate database sessions and MUST cancel and await siblings on failure. No partial history result SHALL be returned.
+Each operation SHALL admit at most 32 history accounts and at most four concurrent upstream history calls. Context request, upstream response and decoded aggregate result sizes SHALL be limited to 2,000,000 bytes, including native `thread_hint` responses. Malformed JSON or text encoding in an upstream result that requires container wrapping SHALL return a private HTTP 502 error. Upstream operations SHALL use a 30-second deadline. Fan-out tasks MUST own separate database sessions and MUST cancel and await siblings on failure. No partial history result SHALL be returned.
+
+#### Scenario: Native thread hint exceeds the result limit
+- **WHEN** an upstream `thread_hint` response exceeds 2,000,000 bytes
+- **THEN** the proxy returns HTTP 502 with the generic `context_backend_unavailable` error instead of forwarding the oversized response
+- **AND** a response at the limit remains unchanged
+
+#### Scenario: A context partition cannot be decoded
+- **WHEN** a single-account or pooled upstream result requiring container wrapping contains malformed JSON or text encoding
+- **THEN** the proxy returns HTTP 502 with the generic `context_backend_unavailable` error
+- **AND** it cancels and awaits any unfinished sibling calls without returning partial results or private content
 
 #### Scenario: Tampered or cross-key result is replayed
 - **WHEN** a tool output contains an invalid context container, one for another key or excluded account, or cross-session replay without history-enabled target ownership enforcement

@@ -223,7 +223,8 @@ def extract_input_file_ids(input_value: JsonValue) -> set[str]:
         collect_part(item)
         for part in _json_parts(item.get("content")):
             collect_part(part)
-        if item.get("type") in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
+        item_type = item.get("type")
+        if isinstance(item_type, str) and item_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
             for part in _json_parts(item.get("output")):
                 collect_part(part)
     return file_ids

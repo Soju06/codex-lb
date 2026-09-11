@@ -35,3 +35,11 @@ Full CI runs in GitHub Actions. Local verification here is scoped to the affecte
 - [x] Join the deployed context/dashboard head with the new authentication-provider migration chain.
 - [x] Verify upgrades from the deployed head and new upstream head, preserving identities, credentials and context ownership.
 - [x] Refresh affected tests and isolated native recovery evidence before the production cutover.
+
+## September 11 review corrections
+- [x] Apply the context response limit before returning native `thread_hint` results.
+- [x] Convert malformed upstream JSON and text encoding to private HTTP 502 errors for single-account and pooled results; retain sibling cancellation.
+- [x] Classify non-string input item types as ineligible for cross-account replay without raising an exception or changing the dispatched body.
+- [x] Keep file-reference detection safe for those same non-string types without losing content file pins.
+- [x] Remove the unused private-context control adapter while preserving Realtime handling.
+- [x] Run focused HTTP regressions, affected context/replay/Realtime tests and static/spec validation.

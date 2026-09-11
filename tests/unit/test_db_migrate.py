@@ -1498,24 +1498,6 @@ def test_check_schema_drift_ignores_retired_prewarm_canary_columns_kept_for_roll
     assert check_schema_drift(url) == ()
 
 
-def test_check_schema_drift_ignores_retired_recovery_dispatch_column_kept_for_rolling_upgrade(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "retired-recovery-dispatch-column.db"
-    url = _db_url(db_path)
-
-    run_upgrade(url, "head", bootstrap_legacy=False)
-
-    assert "recovery_dispatch_count" not in Base.metadata.tables["http_bridge_operations"].columns.keys()
-
-    sync_url = to_sync_database_url(url)
-    with create_engine(sync_url, future=True).connect() as connection:
-        head_columns = {column["name"] for column in inspect(connection).get_columns("http_bridge_operations")}
-    assert "recovery_dispatch_count" in head_columns
-
-    assert check_schema_drift(url) == ()
-
-
 def test_check_schema_drift_ignores_sqlite_real_float_reflection_for_sticky_thresholds(
     monkeypatch,
     tmp_path: Path,

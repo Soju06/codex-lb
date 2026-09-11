@@ -1,3 +1,13 @@
+> **Partially reverted by `restore-recovery-dispatch-claim`.** The owner decided
+> on 2026-09-11 that `relocate-anchored-turns-across-accounts` (#2374) is the
+> caller this proposal proves does not exist, so the durable claim, its refund
+> branches, the `expected_recovery_dispatch_count` CAS parameter surface, the
+> `recovery_dispatch_count` ORM mapping and the *Fenced one-shot recovery
+> dispatch* requirement are restored. What survives from this change is the
+> deletion of `HTTPRequestState.operation_attempt_generation` and its hops,
+> which carried a constant `0` whether or not the fence has a caller, plus the
+> per-writer proof in `design.md` that explains why.
+
 ## Why
 
 `drop-bridge-recovery-modes` (#2336) deleted every request-path caller of the

@@ -2508,10 +2508,7 @@ class HttpBridgeOperationRecord(Base):
     request_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'submitted'"))
     response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # ``recovery_dispatch_count`` is intentionally unmapped: the server-owned
-    # recovery dispatch it counted was deleted, so nothing reads or writes it.
-    # The physical column stays for one release so a previous-release replica
-    # can keep inserting operations (see ``_LEGACY_EXTRA_COLUMNS``).
+    recovery_dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_spool_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     spool_format: Mapped[str] = mapped_column(

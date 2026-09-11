@@ -15,6 +15,13 @@ without the proxy synthesizing interrupted results.
 
 - Sync interrupted-tool repair stays for non-async calls.
 - Matching outputs complete only the corresponding pending async call.
+- The existing stale WebSocket anchor retirement policy also owns pending
+  async state. Both denied-anchor retirement before reinjection and completion
+  without a response ID clear it through the shared retirement helper.
+- Current main's fail-closed bridge recovery policy is the baseline. This
+  change extends its retained full-resend proofs, not the removed optional
+  recovery modes or server-owned recovery loop. Anchored-turn relocation
+  remains separate (#2374).
 
 ## Failure modes
 

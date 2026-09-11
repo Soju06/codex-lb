@@ -20,6 +20,9 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2,
     HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
+    HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED,
+    HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING,
+    HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED,
     HttpBridgeOperationEvent,
     HttpBridgeOperationEventChunk,
     HttpBridgeOperationRecord,
@@ -75,6 +78,14 @@ _PROTECTED_OPERATION_ID_SAFE_LIMIT = _SESSION_ID_LOOKUP_CHUNK_SIZE
 # a large protected prefix cannot hold the SQLite writer section indefinitely.
 _PROTECTED_OPERATION_SCAN_BUDGET = 128
 _ABANDONMENT_LOG_AGE_CAP_SECONDS = 30 * 24 * 60 * 60
+# Operation states that publish a final upstream outcome. ``abandoned`` is a
+# duplicate-suppression fence rather than an outcome and is handled separately.
+_HTTP_BRIDGE_TERMINAL_OPERATION_STATES = frozenset({"completed", "incomplete", "failed"})
+# A terminal transcript outcome was already recorded for this dispatch, so a
+# second terminal append must not rewrite it.
+_HTTP_BRIDGE_TERMINAL_APPEND_RECORDED_PHASES = frozenset(
+    {HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED, HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED}
+)
 
 
 # Sentinel: rebind continuity clears without an anchor fence (legacy callers).
@@ -348,6 +359,16 @@ class DurableBridgeRepository:
         if owner_exists is None or operation is None or operation.state == "abandoned":
             await self._session.rollback()
             return None
+        # This dispatch already recorded a terminal transcript outcome (an
+        # append committed, or a fallback settlement published it), so the row
+        # is final: refuse the lock rather than let a duplicate or late
+        # terminal write rewrite it. The predicate is the dedicated phase
+        # marker, never ``event_spool_complete`` — an ordinary operation is
+        # ``state = completed`` with an incomplete spool for the whole window
+        # in which its terminal append runs, because the relay publishes the
+        # operation state before appending.
+        if operation.terminal_append_phase in _HTTP_BRIDGE_TERMINAL_APPEND_RECORDED_PHASES:
+            return operation, False
         if operation.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:
             if await self._operation_has_legacy_events(operation_id):
                 return operation, False
@@ -1858,6 +1879,7 @@ class DurableBridgeRepository:
                     await self._delete_operation_spool_material((operation.operation_id,))
                     operation.event_bytes = 0
                     operation.event_spool_complete = False
+                    operation.terminal_append_phase = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING
                     operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
                     operation.updated_at = utcnow()
                     rebound = True
@@ -2149,6 +2171,10 @@ class DurableBridgeRepository:
             await self._delete_operation_spool_material((operation_id,))
             operation.event_bytes = 0
             operation.event_spool_complete = False
+            # The phase fences the terminal write of one attempt only. A fresh
+            # transcript is a fresh attempt, so it must not inherit a previous
+            # attempt's recorded outcome (``failed`` rows are resettable).
+            operation.terminal_append_phase = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING
             operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
             operation.updated_at = utcnow()
             await self._session.commit()
@@ -2626,8 +2652,9 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
+        complete_spool: bool = True,
     ) -> bool:
         """Append a terminal v2 chunk and expose its outcome atomically."""
         event_bytes = len(event_text.encode("utf-8"))
@@ -2660,6 +2687,12 @@ class DurableBridgeRepository:
                 return False
             operation, append_allowed = locked_operation
             if not append_allowed:
+                if operation.terminal_append_phase in _HTTP_BRIDGE_TERMINAL_APPEND_RECORDED_PHASES:
+                    # A terminal outcome is already recorded for this dispatch:
+                    # keep it verbatim instead of restamping ``state`` from a
+                    # duplicate or late terminal write.
+                    await self._session.rollback()
+                    return False
                 operation.event_spool_complete = False
                 operation.state = state
                 if response_id is not None:
@@ -2700,7 +2733,12 @@ class DurableBridgeRepository:
             operation.state = state
             if response_id is not None:
                 operation.response_id = response_id
-            operation.event_spool_complete = True
+            operation.event_spool_complete = complete_spool
+            # The terminal transcript block is committed with the outcome.
+            # Recording the phase here is what makes a duplicate or late
+            # terminal write observe a finished dispatch and refuse, while a
+            # deferred ``complete_spool=False`` finalization is still allowed.
+            operation.terminal_append_phase = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED
             operation.updated_at = utcnow()
             await self._session.commit()
         return True
@@ -2773,8 +2811,9 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
+        complete_spool: bool = True,
     ) -> bool:
         """Append a terminal event and expose its operation state atomically."""
         async with sqlite_writer_section():
@@ -2787,17 +2826,29 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
-            operation = await self._session.scalar(
-                select(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
-                    HttpBridgeOperationRecord.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
-                )
-                .with_for_update()
+            # ``expected_recovery_dispatch_count`` is opt-in: a caller that
+            # claimed a recovery dispatch pins the generation it observed, and
+            # a caller that never claimed one passes nothing rather than a
+            # literal 0, so an operation retained from an older release with a
+            # non-zero counter still settles.
+            terminal_event_statement = select(HttpBridgeOperationRecord).where(
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
             )
+            if expected_recovery_dispatch_count is not None:
+                terminal_event_statement = terminal_event_statement.where(
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+                )
+            operation = await self._session.scalar(terminal_event_statement.with_for_update())
             if owner_exists is None or operation is None or operation.state == "abandoned":
+                await self._session.rollback()
+                return False
+            # Scoped to rows whose terminal outcome is already recorded: an
+            # ordinary terminal append always observes its own row as
+            # ``state = completed`` with an incomplete spool, because the relay
+            # updates the operation state before appending.
+            if operation.terminal_append_phase in _HTTP_BRIDGE_TERMINAL_APPEND_RECORDED_PHASES:
                 await self._session.rollback()
                 return False
             event_size = len(event_text.encode("utf-8"))
@@ -2833,7 +2884,11 @@ class DurableBridgeRepository:
             operation.state = state
             if response_id is not None:
                 operation.response_id = response_id
-            operation.event_spool_complete = True
+            operation.event_spool_complete = complete_spool
+            # Reached only when the terminal block was actually spooled (the
+            # over-cap branch above returns early), so the dispatch's terminal
+            # transcript outcome is now recorded.
+            operation.terminal_append_phase = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED
             operation.updated_at = utcnow()
             await self._session.commit()
         return persisted
@@ -2923,8 +2978,11 @@ class DurableBridgeRepository:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_state: str | None = None,
     ) -> bool:
         """Mark a terminal operation replay-complete after its queue drained."""
+        if expected_state is not None and expected_state not in {"completed", "incomplete", "failed"}:
+            return False
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
                 select(HttpBridgeSessionRecord.id)
@@ -2935,14 +2993,24 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
+            predicates = [
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.event_spool_complete.is_(False),
+                # A settled row was published without a confirmed append, so it
+                # is not replayable no matter which attempt reaches finalization
+                # (a terminal append can commit just as its bound expires, which
+                # runs settlement and leaves a finalize in flight).
+                HttpBridgeOperationRecord.terminal_append_phase != HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED,
+            ]
+            predicates.append(
+                HttpBridgeOperationRecord.state == expected_state
+                if expected_state is not None
+                else HttpBridgeOperationRecord.state.in_(("completed", "incomplete"))
+            )
             result = await self._session.execute(
                 update(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state.in_(("completed", "incomplete")),
-                    HttpBridgeOperationRecord.event_spool_complete.is_(False),
-                )
+                .where(*predicates)
                 .values(event_spool_complete=True, updated_at=utcnow())
             )
             if owner_exists is None:
@@ -3012,7 +3080,7 @@ class DurableBridgeRepository:
         owner_epoch: int,
         state: str,
         expected_response_id: str | None,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         alternate_expected_response_id: str | None = None,
         response_id: str | None = None,
     ) -> bool:
@@ -3050,25 +3118,41 @@ class DurableBridgeRepository:
                 "event_spool_complete": False,
                 "updated_at": utcnow(),
             }
+            if state in _HTTP_BRIDGE_TERMINAL_OPERATION_STATES:
+                # A terminal outcome is now published without a confirmed
+                # transcript append. SETTLED makes the row final for this
+                # dispatch so the append that lost the race can neither rewrite
+                # the state nor flip the spool back to replayable.
+                #
+                # Only genuinely terminal settlements set it. A continuity
+                # failure after acknowledgement settles back to
+                # ``acknowledged``, where the operation is still live and its
+                # later appends must keep working.
+                values["terminal_append_phase"] = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED
             if response_id is not None:
                 values["response_id"] = response_id
-            result = await self._session.execute(
-                update(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state != "abandoned",
-                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
-                    or_(
-                        and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
-                        and_(
-                            HttpBridgeOperationRecord.state == state,
-                            or_(acknowledged_response_matches, terminal_response_matches),
-                        ),
+            # Opt-in recovery-dispatch fence, as in
+            # ``append_terminal_operation_event``. The newer-attempt rejection
+            # below does not depend on it: a retry that reset the row to
+            # ``submitted`` matches neither ``acknowledged`` nor the terminal
+            # state being settled, so the update touches no row.
+            settlement_statement = update(HttpBridgeOperationRecord).where(
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.state != "abandoned",
+                or_(
+                    and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
+                    and_(
+                        HttpBridgeOperationRecord.state == state,
+                        or_(acknowledged_response_matches, terminal_response_matches),
                     ),
-                )
-                .values(**values)
+                ),
             )
+            if expected_recovery_dispatch_count is not None:
+                settlement_statement = settlement_statement.where(
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+                )
+            result = await self._session.execute(settlement_statement.values(**values))
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 

@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import {
@@ -17,6 +17,7 @@ const DEFAULT_FILTER_STATE: FilterState = {
   apiKeyIds: [],
   modelOptions: [],
   statuses: [],
+  sources: [],
   conversationId: null,
   limit: 25,
   offset: 0,
@@ -30,6 +31,7 @@ export function requestLogFiltersApplied(filters: FilterState): boolean {
     filters.apiKeyIds.length > 0 ||
     filters.modelOptions.length > 0 ||
     filters.statuses.length > 0 ||
+    filters.sources.length > 0 ||
     Boolean(filters.conversationId)
   );
 }
@@ -41,6 +43,7 @@ const REQUEST_LOG_PARAM_KEYS = [
   "apiKeyId",
   "modelOption",
   "status",
+  "source",
   "conversationId",
   "limit",
   "offset",
@@ -62,6 +65,7 @@ function parseFilterState(params: URLSearchParams): FilterState {
     apiKeyIds: params.getAll("apiKeyId"),
     modelOptions: params.getAll("modelOption"),
     statuses: params.getAll("status"),
+    sources: params.getAll("source"),
     conversationId: params.get("conversationId") || null,
     limit: parseNumber(params.get("limit"), DEFAULT_FILTER_STATE.limit),
     offset: parseNumber(params.get("offset"), DEFAULT_FILTER_STATE.offset),
@@ -96,6 +100,9 @@ function writeFilterState(state: FilterState, base?: URLSearchParams): URLSearch
   for (const value of state.statuses) {
     params.append("status", value);
   }
+  for (const value of state.sources) {
+    params.append("source", value);
+  }
   if (state.conversationId) {
     params.set("conversationId", state.conversationId);
   }
@@ -106,13 +113,34 @@ function writeFilterState(state: FilterState, base?: URLSearchParams): URLSearch
 
 export type UseRequestLogsOptions = {
   enabled?: boolean;
+  /**
+   * Set false for read-only sessions: the API-key filter control is hidden for
+   * them, so any `apiKeyId` carried by the URL (bookmark, or an admin's
+   * selection retained across logout) is ignored and removed instead of being
+   * sent as an invisible restriction.
+   */
+  allowApiKeyFilters?: boolean;
 };
 
 export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   const enabled = options.enabled ?? true;
+  const allowApiKeyFilters = options.allowApiKeyFilters ?? true;
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const filters = useMemo(() => parseFilterState(searchParams), [searchParams]);
+  const filters = useMemo(() => {
+    const parsed = parseFilterState(searchParams);
+    if (allowApiKeyFilters || parsed.apiKeyIds.length === 0) {
+      return parsed;
+    }
+    return { ...parsed, apiKeyIds: [] };
+  }, [allowApiKeyFilters, searchParams]);
+  const hasHiddenApiKeyParams = !allowApiKeyFilters && searchParams.has("apiKeyId");
+  useEffect(() => {
+    if (!hasHiddenApiKeyParams) {
+      return;
+    }
+    setSearchParams(writeFilterState(filters, searchParams), { replace: true });
+  }, [filters, hasHiddenApiKeyParams, searchParams, setSearchParams]);
   const filtersApplied = requestLogFiltersApplied(filters);
   const timeframe = filters.timeframe === "all" ? undefined : filters.timeframe;
   const listFilters = useMemo<RequestLogsListFilters>(
@@ -124,6 +152,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
       apiKeyIds: filters.apiKeyIds,
       statuses: filters.statuses,
       modelOptions: filters.modelOptions,
+      sources: filters.sources,
       timeframe,
       conversationId: filters.conversationId ?? undefined,
     }),

@@ -8,6 +8,7 @@ import pytest
 
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
+from app.core.openai.model_registry import get_model_registry
 from app.core.usage.models import UsagePayload
 from app.modules.accounts import api as accounts_api
 from app.modules.accounts.schemas import AccountProbeResponse
@@ -92,7 +93,30 @@ async def test_probe_refresh_failure_returns_structured_409(async_client, monkey
 
 
 @pytest.mark.asyncio
-async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
+@pytest.mark.parametrize("authoritative", [False, True])
+@pytest.mark.parametrize(
+    "catalog, requested_model, expected_model",
+    [
+        (None, None, "gpt-5.6-luna"),
+        (("gpt-5.6-luna", "gpt-5.5"), None, "gpt-5.6-luna"),
+        (("gpt-5.5",), None, "gpt-5.5"),
+        ((), None, "gpt-5.6-luna"),
+        (None, "gpt-5.5-test", "gpt-5.5-test"),
+    ],
+)
+async def test_probe_active_account_returns_snapshot(
+    async_client, monkeypatch, catalog, requested_model, expected_model, authoritative
+):
+    if catalog is not None:
+        registry = get_model_registry()
+        models = registry.get_models_with_fallback()
+        catalog_models = [models[slug] for slug in catalog]
+        await registry.update(
+            {"pro": catalog_models},
+            per_account_results={"catalog-account": ("pro", catalog_models)} if authoritative else None,
+        )
+        if authoritative and "gpt-5.6-luna" not in catalog:
+            assert registry.is_suppressed_model("gpt-5.6-luna")
     captured: dict = {}
     record_probe_result = AsyncMock()
 
@@ -120,7 +144,7 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
 
     response = await async_client.post(
         f"/api/accounts/{account_id}/probe",
-        json={"model": "gpt-5.5-test"},
+        json={"model": requested_model} if requested_model else {},
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -131,7 +155,7 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
     assert body["accountStatusBefore"] == "active"
     assert body["accountStatusAfter"] == "active"
 
-    assert captured["model"] == "gpt-5.5-test"
+    assert captured["model"] == expected_model
     assert captured["chatgpt_account_id"] == "acc_probe_active"
     assert captured["had_token"] is True
     record_probe_result.assert_awaited_once_with(

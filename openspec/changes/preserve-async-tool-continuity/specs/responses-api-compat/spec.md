@@ -72,6 +72,13 @@ calls.
 - **AND** an unavailable continuity owner MUST return the existing fail-closed compatibility error without an upstream replay
 - **AND** an omitted marker or `false` MUST retain synchronous settlement requirements, while `true` MUST retain asynchronous settlement semantics
 
+#### Scenario: Retiring a denied WebSocket anchor clears asynchronous state
+
+- **GIVEN** WebSocket continuity retains pending async calls for a completed response
+- **WHEN** the existing stale-anchor policy retires that response before reinjection, or completion removes its anchor
+- **THEN** the proxy MUST clear the pending async identities together with the retired anchor's synchronous tool metadata
+- **AND** the existing unanchored full-context retry and stale-anchor refusal policies MUST remain unchanged
+
 #### Scenario: Blank call identities cannot authorize fresh replay
 
 - **WHEN** a full-history replay contains an async tool call with an empty or whitespace-only call ID

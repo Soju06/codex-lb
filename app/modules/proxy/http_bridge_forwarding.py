@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import hmac
 import json
-import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -12,6 +11,8 @@ from typing import cast
 import aiohttp
 
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
 from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
@@ -73,6 +74,15 @@ HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
 # ``parse_forwarded_request``.
 HTTP_BRIDGE_SIGNATURE_V2_HEADER = "x-codex-bridge-signature-v2"
 _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
+# Response header (owner -> origin) carrying ``ProxyResponseError``
+# provenance back across the forward hop. The owner's error body is an
+# ordinary OpenAI envelope, so a refusal the owner raised before it sent any
+# upstream frame is indistinguishable by code from a transport failure it
+# observed: both end as ``stream_incomplete``. Without this marker the origin
+# rebuilds the error without the provenance and its own native Codex
+# transport-failure lifecycle aborts the committed body, moving issue #2364's
+# empty 200 from the owner onto the origin.
+HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER = "x-codex-bridge-local-pre-dispatch-refusal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,8 +185,10 @@ class HTTPBridgeOwnerClient:
         on_response_rejected: Callable[[], None] | None = None,
         on_response_wait: Callable[[], None] | None = None,
         on_response_ready: Callable[[], None] | None = None,
+        scheduler: Scheduler = REAL_SCHEDULER,
+        clock: Clock = REAL_CLOCK,
     ) -> AsyncIterator[str]:
-        settings = get_settings()
+        settings = with_dashboard_overrides(get_settings())
         timeout = _owner_forward_timeout(
             connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
             idle_timeout_seconds=settings.stream_idle_timeout_seconds,
@@ -213,6 +225,15 @@ class HTTPBridgeOwnerClient:
                             failure_phase="owner_forward_status",
                             failure_detail="owner_forward_non_200",
                             upstream_status_code=response.status,
+                            # Rebuilding the error from the owner's body alone
+                            # would drop the provenance the owner attached, so
+                            # carry it over the hop: a non-200 by itself does
+                            # not prove the owner sent no upstream frame, and
+                            # only the owner knows which of its failures was a
+                            # local pre-dispatch refusal (issue #2364).
+                            local_pre_dispatch_refusal=_bool_header(
+                                response.headers.get(HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER)
+                            ),
                         )
                     if on_response_ready is not None:
                         on_response_ready()
@@ -223,6 +244,8 @@ class HTTPBridgeOwnerClient:
                             request_started_at=request_started_at,
                             proxy_request_budget_seconds=_http_bridge_request_budget_seconds(settings),
                             stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
+                            scheduler=scheduler,
+                            clock=clock,
                         ):
                             yielded_event = True
                             yield event_block
@@ -686,6 +709,8 @@ async def _iter_sse_event_blocks(
     request_started_at: float,
     proxy_request_budget_seconds: float,
     stream_idle_timeout_seconds: float,
+    scheduler: Scheduler,
+    clock: Clock,
 ) -> AsyncIterator[str]:
     buffer = b""
     chunks = response.content.iter_chunked(65536)
@@ -694,9 +719,10 @@ async def _iter_sse_event_blocks(
             request_started_at=request_started_at,
             proxy_request_budget_seconds=proxy_request_budget_seconds,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+            now=clock.monotonic(),
         )
         try:
-            chunk = await asyncio.wait_for(chunks.__anext__(), timeout=receive_timeout.timeout_seconds)
+            chunk = await scheduler.wait_for(chunks.__anext__(), timeout=receive_timeout.timeout_seconds)
         except StopAsyncIteration:
             break
         except asyncio.TimeoutError as exc:
@@ -721,9 +747,10 @@ def _owner_forward_receive_timeout(
     request_started_at: float,
     proxy_request_budget_seconds: float,
     stream_idle_timeout_seconds: float,
+    now: float,
 ) -> _OwnerForwardReceiveTimeout:
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
-    remaining_budget = _remaining_budget_seconds(request_started_at + proxy_request_budget_seconds)
+    remaining_budget = max(0.0, request_started_at + proxy_request_budget_seconds - now)
     idle_timeout_matches_request_budget = idle_timeout_seconds == max(0.001, proxy_request_budget_seconds)
     if remaining_budget <= 0 and idle_timeout_matches_request_budget:
         return _OwnerForwardReceiveTimeout(
@@ -754,10 +781,6 @@ def _owner_forward_receive_timeout(
         error_code="upstream_request_timeout",
         error_message="Proxy request budget exhausted",
     )
-
-
-def _remaining_budget_seconds(deadline: float) -> float:
-    return max(0.0, deadline - time.monotonic())
 
 
 def _owner_forward_error_payload(*, status_code: int, payload_text: str) -> OpenAIErrorEnvelope:

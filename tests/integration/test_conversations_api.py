@@ -1605,7 +1605,7 @@ async def test_conversation_routes_reject_guest_principal(app_instance, async_cl
             response = await async_client.get(path)
             assert response.status_code == 403
             payload = response.json()
-            assert payload["error"]["code"] == "admin_access_required"
+            assert payload["error"]["code"] == "permission_required"
             assert "conversations" not in payload
             assert "conversationId" not in payload
     finally:

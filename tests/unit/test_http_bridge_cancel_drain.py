@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections import deque
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from app.modules.proxy._service.http_bridge import helpers as http_bridge_helper
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
 
@@ -332,6 +334,136 @@ async def test_cancelled_stream_settlement_task_releases_reservation(
     assert ("release_stream_api_key_reservation_after_cancelled_settlement", "req-cancel-settle") in scheduled
     assert ("key-cancel-settle", "res-cancel-settle") in scheduled
     assert release_retry_flags == [True]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_task_cleanup_is_scheduler_owned() -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    cleanup_tasks: set[asyncio.Task[None]] = set()
+    blocked = asyncio.Event()
+    task = scheduler.create_task(blocked.wait())
+
+    await scheduler.drain()
+    http_bridge_helpers._cancel_and_track_cancelled_task(
+        task,
+        label="owned-cleanup",
+        cleanup_tasks=cleanup_tasks,
+        scheduler=scheduler,
+    )
+
+    assert cleanup_tasks
+    await scheduler.cancel_owned_tasks()
+
+    assert task.done() is True
+    assert all(cleanup_task.done() for cleanup_task in cleanup_tasks)
+
+
+@pytest.mark.asyncio
+async def test_await_cancelled_task_reports_settled_child_at_zero_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    """An already-settled child is reported done even with no time budget left.
+
+    ``asyncio.wait({task}, timeout=0)`` reports a done task as done; the
+    takeover branch's ``wait_for(asyncio.wait(...), timeout=0)`` shape raised
+    ``TimeoutError`` instead, tracked the settled child as a stubborn cleanup
+    and returned ``False``. Both the virtual and the real scheduler must keep
+    main's answer.
+    """
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+
+    async def finished() -> str:
+        return "done"
+
+    for candidate in (scheduler, http_bridge_helpers.REAL_SCHEDULER):
+        cleanup_tasks: set[asyncio.Task[None]] = set()
+        child = scheduler.create_task(finished())
+        await scheduler.drain()
+        assert child.done()
+
+        with caplog.at_level(logging.WARNING):
+            result = await http_bridge_helpers._await_cancelled_task(
+                child,
+                timeout_seconds=0.0,
+                label="settled child",
+                cleanup_tasks=cleanup_tasks,
+                scheduler=candidate,
+            )
+
+        assert result is True
+        assert cleanup_tasks == set()
+        assert "Timed out waiting for settled child cancellation" not in caplog.text
+    assert scheduler.pending_timers == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_child_uses_owner_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+
+    async def blocked_reader() -> None:
+        await asyncio.Event().wait()
+
+    reader = scheduler.create_task(blocked_reader())
+    await scheduler.drain()
+    captured_schedulers: list[Any] = []
+
+    async def await_cancelled_task(task: asyncio.Task[Any], **kwargs: Any) -> bool:
+        captured_schedulers.append(kwargs["scheduler"])
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return True
+
+    monkeypatch.setattr(http_bridge_upstream_events, "_await_cancelled_task", await_cancelled_task)
+
+    assert await http_bridge_upstream_events._cancel_http_bridge_reader_child(
+        reader,
+        label="owned-reader",
+        scheduler_owner=SimpleNamespace(_scheduler=scheduler),
+    )
+    assert captured_schedulers == [scheduler]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_resource_close_uses_service_scheduler_for_reader_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+
+    async def blocked_reader() -> None:
+        await asyncio.Event().wait()
+
+    reader = scheduler.create_task(blocked_reader())
+    session.upstream_reader = reader
+    await scheduler.drain()
+
+    captured_schedulers: list[Any] = []
+
+    async def await_cancelled_task(task: asyncio.Task[Any], **kwargs: Any) -> bool:
+        captured_schedulers.append(kwargs["scheduler"])
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return True
+
+    monkeypatch.setattr(http_bridge_helpers, "_await_cancelled_task", await_cancelled_task)
+    service = SimpleNamespace(
+        _scheduler=scheduler,
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states=AsyncMock(),
+        _unregister_http_bridge_previous_response_ids=AsyncMock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _fail_pending_websocket_requests=AsyncMock(),
+    )
+
+    await http_bridge_helpers._close_http_bridge_session_resources(service, session)
+
+    assert captured_schedulers == [scheduler]
+    assert reader.cancelled()
+    assert session.upstream_reader is None
 
 
 @pytest.mark.asyncio
@@ -729,7 +861,9 @@ async def test_http_bridge_detach_reclaims_abandoned_terminal_settlement(
 async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()), clock=clock, scheduler=scheduler)
     queue_waiting = asyncio.Event()
 
     class ObservedQueue(asyncio.Queue[str | None]):
@@ -785,6 +919,10 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
     finalize_request = AsyncMock()
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
     monkeypatch.setattr(service, "_detach_http_bridge_request", fake_detach_http_bridge_request)
+    # The retry circuit lookup loads durable state over the real DB session,
+    # which the virtual clock cannot advance; this scenario is about the idle
+    # timeout, so the cooldown is stubbed out rather than simulated.
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock(return_value=True))
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
     monkeypatch.setattr(
@@ -811,9 +949,11 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
             )
         ]
 
-    stream_task = asyncio.create_task(consume_stream())
-    await asyncio.wait_for(queue_waiting.wait(), timeout=1.0)
-    event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+    stream_task = scheduler.create_task(consume_stream())
+    await scheduler.drain()
+    await scheduler.advance(0.001)
+    assert queue_waiting.is_set()
+    event_blocks = await stream_task
 
     assert queue_revoked_before_lock_release is True
     assert request_state.event_queue is None
@@ -832,7 +972,9 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
 async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()), clock=clock, scheduler=scheduler)
     recovery_started = asyncio.Event()
     release_recovery = asyncio.Event()
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -893,8 +1035,10 @@ async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait
             )
         ]
 
-    stream_task = asyncio.create_task(consume_stream())
-    await asyncio.wait_for(recovery_started.wait(), timeout=1.0)
+    stream_task = scheduler.create_task(consume_stream())
+    await scheduler.drain()
+    await scheduler.advance(0.001)
+    assert recovery_started.is_set()
 
     terminal_text = (
         '{"type":"response.completed","response":{"id":"resp-completed-during-recovery","status":"completed"}}'
@@ -905,7 +1049,8 @@ async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait
     assert request_state.completed_delivery_scope.active is False
     assert request_state.completed_delivery_scope.terminal_enqueued is True
     release_recovery.set()
-    event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+    await scheduler.drain()
+    event_blocks = await stream_task
 
     event_types = [
         payload["type"]
@@ -1092,7 +1237,11 @@ def test_anonymous_event_prefers_unresolved_draining_owner_before_visible_retry(
 
 
 def test_anonymous_event_prefers_unresolved_visible_request_before_active_response() -> None:
-    """A normal pipelined request awaiting response.created owns pre-created anonymous events."""
+    """A pipelined request awaiting response.created owns anonymous error/terminal events.
+
+    Anonymous ``response.*`` output events take the opposite branch; see the
+    ``test_anonymous_output_event_*`` cases below.
+    """
     active_request = _make_request_state(
         "req-active-created",
         response_id="resp-active-created",
@@ -1110,6 +1259,7 @@ def test_anonymous_event_prefers_unresolved_visible_request_before_active_respon
         deque([active_request, waiting_request]),
         prefer_previous_response_not_found=False,
         prefer_draining_requests=True,
+        event_type="error",
     )
 
     assert matched_request is waiting_request
@@ -1135,6 +1285,278 @@ def test_anonymous_terminal_errors_can_target_visible_retry_when_drain_exists() 
     )
 
     assert matched_request is retry_request
+
+
+def test_anonymous_output_event_targets_created_response_before_pipelined_sibling() -> None:
+    """Issue #2350: a pipelined sibling awaiting response.created must not receive the
+    created response's output frames."""
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([active_request, waiting_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="response.output_text.delta",
+    )
+
+    assert matched_request is active_request
+
+
+def test_anonymous_output_event_targets_created_response_over_unresolved_drain() -> None:
+    """The sibling that gave up (downstream closed, still draining) must not keep
+    swallowing the created response's output."""
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    detached_request = _make_request_state(
+        "req-detached-before-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=None,
+    )
+    detached_request.draining_until_terminal = True
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([active_request, detached_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="response.output_text.delta",
+    )
+
+    assert matched_request is active_request
+
+
+def test_anonymous_output_event_targets_draining_created_response_before_visible_sibling() -> None:
+    """A cancelled request whose response upstream already created still owns its
+    output while draining; the visible sibling awaiting response.created stays clean."""
+    draining_request = _make_request_state(
+        "req-cancelled-after-created",
+        response_id="resp-cancelled-after-created",
+        awaiting_response_created=False,
+        event_queue=None,
+    )
+    draining_request.draining_until_terminal = True
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([draining_request, waiting_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="response.output_text.delta",
+    )
+
+    assert matched_request is draining_request
+
+
+def test_anonymous_output_event_with_two_created_responses_stays_unmatched() -> None:
+    """Two created responses on one socket cannot be told apart by an anonymous
+    frame; it stays unmatched (liveness only) instead of being guessed."""
+    first_request = _make_request_state(
+        "req-first-created",
+        response_id="resp-first-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    second_request = _make_request_state(
+        "req-second-created",
+        response_id="resp-second-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([first_request, second_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="response.output_text.delta",
+    )
+
+    assert matched_request is None
+
+
+def test_anonymous_telemetry_event_keeps_pre_created_ownership_beside_created_response() -> None:
+    """Vendor telemetry (``codex.rate_limits``) is not response output: it still
+    reaches the request whose response.create is unacknowledged."""
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([active_request, waiting_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="codex.rate_limits",
+    )
+
+    assert matched_request is waiting_request
+
+
+_PIPELINED_OUTPUT_ITEM_ADDED = json.dumps(
+    {
+        "type": "response.output_item.added",
+        "sequence_number": 2,
+        "output_index": 0,
+        "item": {"id": "msg_pipelined", "type": "message", "role": "assistant", "status": "in_progress", "content": []},
+    }
+)
+_PIPELINED_TEXT_DELTA = json.dumps(
+    {
+        "type": "response.output_text.delta",
+        "sequence_number": 3,
+        "item_id": "msg_pipelined",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "Hello",
+    }
+)
+_PIPELINED_ANONYMOUS_ERROR = json.dumps({"type": "error", "error": {"code": "server_error", "message": "rejected"}})
+
+
+def _queued_event_types(queue: asyncio.Queue[str | None] | None) -> list[str]:
+    assert queue is not None
+    event_types: list[str] = []
+    while not queue.empty():
+        block = queue.get_nowait()
+        assert block is not None
+        event_types.append(json.loads(block.split("data: ", 1)[1])["type"])
+    return event_types
+
+
+def _make_pipelined_bridge_session(
+    active_request: proxy_service._WebSocketRequestState,
+    waiting_request: proxy_service._WebSocketRequestState,
+) -> proxy_service._HTTPBridgeSession:
+    # Two unanchored requests sharing one soft prompt-cache lane: the first is
+    # streaming, the second sent its response.create once the gate released.
+    return _make_http_bridge_session(
+        deque([active_request, waiting_request]),
+        queued_request_count=2,
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "shared-prompt-cache-key", None),
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_pipelined_sibling_does_not_receive_created_response_output() -> None:
+    """Issue #2350 at the bridge reader: output frames of the created response reach
+    its own downstream queue, not the pipelined sibling's."""
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_pipelined_bridge_session(active_request, waiting_request)
+
+    await service._process_http_bridge_upstream_text(session, _PIPELINED_OUTPUT_ITEM_ADDED)
+    await service._process_http_bridge_upstream_text(session, _PIPELINED_TEXT_DELTA)
+
+    assert _queued_event_types(active_request.event_queue) == [
+        "response.output_item.added",
+        "response.output_text.delta",
+    ]
+    assert _queued_event_types(waiting_request.event_queue) == []
+    assert list(session.pending_requests) == [active_request, waiting_request]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_pipelined_sibling_still_owns_anonymous_error() -> None:
+    """An anonymous error frame keeps targeting the request whose response.create is
+    still unacknowledged; the created response is untouched."""
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    service._load_balancer = cast(
+        Any,
+        SimpleNamespace(record_error=AsyncMock(), record_errors=AsyncMock(), release_account_lease=AsyncMock()),
+    )
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_pipelined_bridge_session(active_request, waiting_request)
+
+    await service._process_http_bridge_upstream_text(session, _PIPELINED_ANONYMOUS_ERROR)
+
+    assert list(session.pending_requests) == [active_request]
+    assert _queued_event_types(active_request.event_queue) == []
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_pipelined_sibling_still_owns_anonymous_completion(monkeypatch) -> None:
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_pipelined_bridge_session(active_request, waiting_request)
+    text = json.dumps({"type": "response.completed", "response": {"status": "completed", "output": []}})
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    assert list(session.pending_requests) == [active_request]
+    assert _queued_event_types(active_request.event_queue) == []
+    assert active_request.response_event_count == 0
+    assert waiting_request.response_event_count == 1
+    assert waiting_request.event_queue is not None
+    block = waiting_request.event_queue.get_nowait()
+    assert block is not None
+    assert json.loads(block.split("data: ", 1)[1]) == json.loads(text)
+    assert waiting_request.event_queue.get_nowait() is None
+    assert waiting_request.event_queue.empty()
+    finalize.assert_awaited_once()
+    assert finalize.await_args is not None
+    assert finalize.await_args.args[0] is waiting_request
 
 
 @pytest.mark.asyncio
@@ -1198,3 +1620,70 @@ async def test_response_created_does_not_promote_in_progress_durable_anchor() ->
     assert refreshed is not None
     assert refreshed.latest_response_id == "resp_B_completed"
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_schedule_http_bridge_background_cleanup_is_scheduler_owned() -> None:
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()), scheduler=scheduler)
+    release = asyncio.Event()
+
+    async def cleanup() -> None:
+        await release.wait()
+
+    task = http_bridge_helpers._schedule_http_bridge_background_cleanup(
+        service,
+        cleanup(),
+        name="http-bridge-virtual-cleanup",
+        error_message="virtual cleanup failed",
+    )
+
+    assert task is not None
+    assert task.get_name() == "http-bridge-virtual-cleanup"
+    assert task in service._background_cleanup_tasks
+    assert task in scheduler.owned_tasks
+
+    await scheduler.cancel_owned_tasks()
+    await scheduler.drain()
+
+    assert task.cancelled()
+    assert task not in service._background_cleanup_tasks
+
+
+@pytest.mark.asyncio
+async def test_close_http_bridge_session_bounded_times_out_on_injected_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded close waits on the owner scheduler; the timeout branch keeps tracking the close."""
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()), scheduler=scheduler)
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+    release_close = asyncio.Event()
+
+    async def slow_close(_session: object) -> None:
+        await release_close.wait()
+
+    monkeypatch.setattr(service, "_close_http_bridge_session", slow_close)
+    bounded = scheduler.create_task(
+        http_bridge_helpers._close_http_bridge_session_bounded(service, session, reason="virtual-timeout")
+    )
+    await scheduler.drain()
+    assert not bounded.done()
+
+    await scheduler.advance(http_bridge_helpers._HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS)
+
+    assert bounded.done()
+    close_tasks = [
+        task for task in service._background_cleanup_tasks if task.get_name().startswith("http-bridge-close-")
+    ]
+    assert len(close_tasks) == 1
+    assert not close_tasks[0].done()
+
+    release_close.set()
+    await scheduler.drain()
+
+    assert close_tasks[0].done()
+    assert close_tasks[0] not in service._background_cleanup_tasks
+    assert scheduler.owned_tasks == frozenset()

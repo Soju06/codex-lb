@@ -18,6 +18,7 @@ from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import Connection
 
 import app.db.migrate as migrate_module
+from app.core.config.settings import get_settings
 from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
 from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_migration_backups
 from app.db.migrate import (
@@ -1478,6 +1479,25 @@ def test_check_schema_drift_ignores_legacy_live_extra_request_log_column(tmp_pat
     assert check_schema_drift(url) == ()
 
 
+def test_check_schema_drift_ignores_retired_prewarm_canary_columns_kept_for_rolling_upgrade(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "retired-prewarm-columns.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    retired_columns = {"prewarm_canary_bucket", "prewarm_eligible_reason"}
+    assert not (retired_columns & set(Base.metadata.tables["request_logs"].columns.keys()))
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        head_columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+    assert retired_columns <= head_columns
+
+    assert check_schema_drift(url) == ()
+
+
 def test_check_schema_drift_ignores_sqlite_real_float_reflection_for_sticky_thresholds(
     monkeypatch,
     tmp_path: Path,
@@ -1730,6 +1750,7 @@ def test_run_upgrade_backfills_additional_usage_quota_key_from_configured_regist
     )
 
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry_path))
+    get_settings.cache_clear()
     clear_additional_quota_registry_cache()
 
     run_upgrade(url, "20260309_000000_add_additional_usage_history", bootstrap_legacy=False)
@@ -1852,6 +1873,7 @@ def test_run_upgrade_rejects_duplicate_additional_quota_aliases_in_registry(
     )
 
     monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry_path))
+    get_settings.cache_clear()
     clear_additional_quota_registry_cache()
 
     run_upgrade(url, "20260309_000000_add_additional_usage_history", bootstrap_legacy=False)
@@ -2519,6 +2541,23 @@ def test_dashboard_hot_path_postgresql_indexes_build_concurrently() -> None:
     # of being silently accepted by IF NOT EXISTS.
     assert source.count("DROP INDEX CONCURRENTLY IF EXISTS") >= 2
     assert "indisvalid" in source
+
+
+def test_request_logs_live_facet_postgresql_indexes_build_concurrently() -> None:
+    revision_path = (
+        Path(__file__).resolve().parents[2]
+        / "app/db/alembic/versions/20260909_130000_add_request_logs_live_facet_indexes.py"
+    )
+    source = revision_path.read_text(encoding="utf-8")
+
+    # Built outside the migration transaction so the proxy write path keeps
+    # inserting; leftover invalid indexes from an interrupted concurrent build
+    # are rebuilt instead of being silently accepted by IF NOT EXISTS.
+    assert "autocommit_block" in source
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS" in source
+    assert "DROP INDEX CONCURRENTLY IF EXISTS" in source
+    assert "indisvalid" in source
+    assert "deleted_at IS NULL" in source
 
 
 def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Path) -> None:

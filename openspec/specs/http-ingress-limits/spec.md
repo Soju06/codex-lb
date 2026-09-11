@@ -30,7 +30,7 @@ The service MUST enforce the applicable request-body budget against actual raw b
 
 ### Requirement: HTTP ingress reuses existing budgets
 
-The service MUST use `max_decompressed_body_bytes` as the general raw and decompressed HTTP request-body budget. When an owning route capability defines a larger budget from an existing route-specific setting, the ingress guard MUST use that route budget. The HTTP ingress guard MUST NOT add another setting or change existing defaults.
+The service MUST use the fixed general HTTP body budget (`MAX_DECOMPRESSED_BODY_BYTES`, 32 MiB, in `app/core/ingress_limits.py`) as the general raw and decompressed HTTP request-body budget. When an owning route capability defines a larger fixed budget (the Responses budget `MAX_DECOMPRESSED_RESPONSES_BODY_BYTES`, 128 MiB, in the same module), the ingress guard MUST use that route budget. Neither budget is operator-configurable; the HTTP ingress guard MUST NOT add a setting or change the fixed values.
 
 Route-specific budget and error-envelope selection MUST use the application-relative route path after removing any matching ASGI `root_path` prefix.
 
@@ -39,7 +39,7 @@ The generic guard MUST apply to requests solely because they declare `multipart/
 #### Scenario: Another HTTP path uses the general budget
 
 - **WHEN** a guarded request targets any other HTTP path
-- **THEN** its raw and decompressed HTTP ingress budget is `max_decompressed_body_bytes`
+- **THEN** its raw and decompressed HTTP ingress budget is the fixed 32 MiB general budget
 
 #### Scenario: Route-owned unencoded multipart uses dedicated admission
 
@@ -169,4 +169,166 @@ The client-declared multipart media type MUST NOT exempt any other method or pat
 - **WHEN** an unencoded or encoded request outside the four exact route-owned `POST` operations declares `multipart/form-data`
 - **THEN** the generic raw-body budget remains enforced
 - **AND** an oversized declared body is rejected before downstream parsing
+
+### Requirement: Non-WebSocket upgrade offers are served as plain HTTP/1.1
+
+The server MUST serve a valid HTTP/1.1 request that offers a non-WebSocket
+protocol switch (`Connection: Upgrade` with an `Upgrade` token other than
+`websocket`, such as `h2c`) as a normal HTTP/1.1 request. The complete request
+body MUST reach the application whether it arrives coalesced with the headers
+or in later TCP segments, and the offer MUST NOT cause the request or the
+connection to be rejected. The declined offer's hop-by-hop headers (`Upgrade`,
+`HTTP2-Settings`, and their `Connection` tokens) MUST NOT be exposed to the
+application. Genuine WebSocket upgrade requests MUST keep completing the
+protocol switch.
+
+#### Scenario: h2c offer with the body coalesced with the headers
+
+- **WHEN** a client sends an HTTP/1.1 POST carrying `Connection: Upgrade,
+  HTTP2-Settings`, `Upgrade: h2c`, and `HTTP2-Settings` headers with the body
+  in the same TCP segment as the headers
+- **THEN** the application receives the complete request body
+- **AND** the application does not observe the `Upgrade`, `HTTP2-Settings`, or
+  `Connection: Upgrade` headers
+
+#### Scenario: h2c offer with the body in a separate segment
+
+- **WHEN** the same request arrives with the headers and the body written as
+  separate TCP segments
+- **THEN** the application receives the complete request body
+- **AND** the server does not answer `400 Bad Request` at the protocol layer
+
+#### Scenario: Repeated Connection fields do not hide the offer
+
+- **WHEN** the h2c offer arrives with `Connection: Upgrade, HTTP2-Settings`
+  followed by a second `Connection: keep-alive` field
+- **THEN** the application receives the complete request body
+- **AND** the surviving `Connection` tokens (such as `keep-alive`) are
+  preserved while the upgrade tokens are removed
+
+#### Scenario: Connection stays usable after a declined offer
+
+- **WHEN** a request with a declined h2c offer completes on a keep-alive
+  connection
+- **THEN** a subsequent plain HTTP/1.1 request on the same connection is
+  served normally
+
+#### Scenario: Pipelined offers in one segment do not exhaust the server
+
+- **WHEN** a single TCP segment pipelines many upgrade-offering requests
+- **THEN** every request is served as plain HTTP/1.1 without the per-offer
+  replay growing the call stack or aborting the connection
+
+#### Scenario: WebSocket upgrades still switch protocols
+
+- **WHEN** a client requests a WebSocket upgrade (`Upgrade: websocket`)
+- **THEN** the protocol switch completes and WebSocket messages flow
+
+### Requirement: Zstd decoded output is bounded incrementally
+
+The request-decompression middleware MUST consume zstd decoded output
+incrementally. Before retaining each decoded chunk, it MUST enforce the
+route-specific decompressed-body limit. The middleware MUST NOT decode an
+entire zstd body through a one-shot output allocation before applying that
+limit.
+
+#### Scenario: Highly compressed zstd body exceeds decoded limit
+
+- **WHEN** a zstd request body expands beyond the route-specific decoded-body
+  limit
+- **THEN** the middleware stops consuming decoded output once the next bounded
+  chunk exceeds the remaining budget
+- **AND** the request receives the existing body-too-large response
+- **AND** the service remains available for subsequent requests
+
+#### Scenario: Zstd body ends at the decoded limit
+
+- **WHEN** a valid zstd request body expands to exactly the route-specific
+  decoded-body limit
+- **THEN** the middleware delivers the complete decoded body downstream
+
+### Requirement: HTTP middleware relays responses in the request task
+
+Every middleware in the HTTP middleware stack MUST be a pure ASGI middleware that invokes the downstream application in the same task and forwards response messages directly. The stack MUST NOT include Starlette `BaseHTTPMiddleware` (including `@app.middleware("http")` registrations). Response bodies forwarded on success paths MUST be byte-identical to the downstream application's output.
+
+#### Scenario: Production middleware stack contains no BaseHTTPMiddleware
+
+- **WHEN** the production application is constructed
+- **THEN** no registered middleware entry is `starlette.middleware.base.BaseHTTPMiddleware`
+
+#### Scenario: Streaming body is forwarded unchanged
+
+- **WHEN** a route returns a streaming response through the middleware stack
+- **THEN** the sequence of ASGI response messages, including headers, body bytes, and `more_body` flags, is identical to the sequence emitted without the middleware
+
+#### Scenario: Mid-stream failure propagates without a synthetic terminator
+
+- **WHEN** a response body generator raises after at least one body chunk has been sent
+- **THEN** the exception propagates to the ASGI server
+- **AND** the stack does not emit an additional `http.response.body` message with `more_body=false` before propagating
+
+### Requirement: Keep-alive timers do not outlive lost connections
+
+The server MUST release the per-connection keep-alive timer whenever an HTTP
+connection is lost, regardless of whether the peer closed it cleanly or the
+loss was reported with an error (connection reset, timeout, or any other
+transport error). No per-connection server state (protocol, transport wrapper,
+request cycle, or request scope) MAY remain reachable from the event loop
+solely because a keep-alive timer is still armed for a connection that no
+longer exists. Clean-close teardown and the timer's idle-close behavior on
+intact connections MUST be unchanged, and the server MUST NOT close the
+transport again on the error path.
+
+#### Scenario: Peer resets an idle keep-alive connection after a response
+
+- **WHEN** a client completes an HTTP/1.1 request on a keep-alive connection
+  and then closes the connection abnormally so the server observes a
+  connection-reset error rather than end-of-stream
+- **THEN** the server cancels the connection's keep-alive timer immediately
+- **AND** the connection's protocol state becomes garbage-collectable without
+  waiting for the keep-alive window to elapse
+
+#### Scenario: Clean close is unchanged
+
+- **WHEN** a client completes a request and closes the connection cleanly
+- **THEN** the server closes the transport and cancels the keep-alive timer as
+  before
+- **AND** the connection's protocol state becomes garbage-collectable
+
+#### Scenario: Idle intact connection is still closed by the timer
+
+- **WHEN** a keep-alive connection stays open and idle for the configured
+  keep-alive window
+- **THEN** the server closes the connection when the timer fires
+
+### Requirement: Idle keep-alive window is bounded and configurable
+
+The server MUST close an idle HTTP/1.1 keep-alive connection after a
+configurable window. The default window MUST be 300 seconds. The window MUST
+be configurable via the `--timeout-keep-alive` CLI flag and the
+`UVICORN_TIMEOUT_KEEP_ALIVE` environment variable, with the CLI flag taking
+precedence, and an invalid (non-integer) value MUST fail startup with a clear
+error. The documented contract for the value is that it exceeds the largest
+connection pool idle timeout of the clients and proxies the deployment serves
+by a safety margin covering the network round-trip and timer scheduling
+(practically `S >= 2C`; reqwest default: 90 seconds, so the 300-second default
+leaves a 3.3x margin).
+
+#### Scenario: Default keep-alive window
+
+- **WHEN** the server starts without `--timeout-keep-alive` or
+  `UVICORN_TIMEOUT_KEEP_ALIVE`
+- **THEN** idle keep-alive connections are closed after 300 seconds
+
+#### Scenario: Operator overrides the keep-alive window
+
+- **WHEN** the operator starts the server with `--timeout-keep-alive <seconds>`
+  or sets `UVICORN_TIMEOUT_KEEP_ALIVE=<seconds>`
+- **THEN** idle keep-alive connections are closed after the configured window
+
+#### Scenario: Invalid keep-alive window fails startup
+
+- **WHEN** `UVICORN_TIMEOUT_KEEP_ALIVE` or `--timeout-keep-alive` is not an
+  integer
+- **THEN** startup fails with an error naming the flag and variable
 

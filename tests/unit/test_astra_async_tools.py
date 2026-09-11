@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import WebSocket
 
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
@@ -92,13 +92,13 @@ class ScriptedUpstream:
     def response_header(self, name: str) -> None:
         return None
 
-    async def receive(self) -> SimpleNamespace:
+    async def receive(self) -> UpstreamWebSocketMessage:
         return await self.messages.get()
 
     async def send_text(self, text: str) -> None:
         self.sent.append(json.loads(text))
         for event in self.events.pop(0):
-            self.messages.put_nowait(SimpleNamespace(kind="text", text=json.dumps(event)))
+            self.messages.put_nowait(UpstreamWebSocketMessage(kind="text", text=json.dumps(event)))
 
     async def close(self) -> None:
         pass

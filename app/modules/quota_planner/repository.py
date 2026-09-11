@@ -33,7 +33,14 @@ from app.db.models import (
 )
 from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_time_rollup import QUARTER_SLOT_SECONDS, from_dimension
-from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_demand_window
+from app.modules.accounts.usage_time_rollup_read import (
+    DemandSlotUnitsRow,
+    RawWindow,
+    demand_units_sql_expr,
+    raw_windows_clause,
+    read_demand_slot_units_window,
+    read_demand_window,
+)
 from app.modules.quota_planner.logic import PlannerSettings, encode_working_days, parse_working_days
 
 _SETTINGS_ID = 1
@@ -574,9 +581,88 @@ class QuotaPlannerRepository:
         bins.sort(key=lambda demand: demand.slot_epoch)
         return bins
 
-    async def _aggregate_demand_bins_raw(self, windows: list[RawWindow], bucket_seconds: int) -> list[DemandBin]:
+    async def aggregate_demand_slot_units(
+        self,
+        *,
+        since: datetime | None = None,
+    ) -> list[DemandSlotUnitsRow]:
+        """``aggregate_demand_bins`` reduced to units per ``(slot, request_kind)``.
+
+        Same folded/raw partition as the bin reader, but ``_bin_demand_units``
+        is applied per legacy-grain row inside SQL and summed per slot, so the
+        result is bounded by slots x request kinds (a few thousand rows for
+        the 28-day window) instead of one object per grain row. The planner
+        tick and the forecast endpoint only ever consume per-slot totals, so
+        this is exact — see the parity test against ``aggregate_demand_bins``.
+        """
+        since = to_utc_naive(since) if since is not None else (utcnow() - timedelta(days=28))
+        slots, raw_windows = await read_demand_slot_units_window(
+            self._session,
+            since,
+            filters=(RequestDemandQuarterRollup.is_deleted.is_(false()),),
+        )
+        slots = list(slots)
+        if raw_windows:
+            slots.extend(await self._aggregate_demand_slot_units_raw(raw_windows, QUARTER_SLOT_SECONDS))
+        slots.sort(key=lambda slot: slot.slot_epoch)
+        return slots
+
+    async def _aggregate_demand_slot_units_raw(
+        self, windows: list[RawWindow], bucket_seconds: int
+    ) -> list[DemandSlotUnitsRow]:
+        dialect = self._dialect_name()
+        grain = self._raw_demand_bins_stmt(windows, bucket_seconds, dialect).subquery("demand_grain")
+        units_expr = demand_units_sql_expr(
+            dialect=dialect,
+            input_tokens=grain.c.input_tokens,
+            cached_input_tokens=grain.c.cached_input_tokens,
+            output_tokens=grain.c.output_tokens,
+            cost_usd=grain.c.cost_usd,
+            request_count=grain.c.request_count,
+        )
+        stmt = (
+            select(grain.c.slot_epoch, grain.c.request_kind, func.sum(units_expr).label("demand_units"))
+            .group_by(grain.c.slot_epoch, grain.c.request_kind)
+            .order_by(grain.c.slot_epoch)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            DemandSlotUnitsRow(
+                slot_epoch=int(row.slot_epoch),
+                request_kind=row.request_kind,
+                demand_units=float(row.demand_units or 0.0),
+            )
+            for row in result.all()
+        ]
+
+    def _dialect_name(self) -> str:
         bind = self._session.get_bind()
-        dialect = bind.dialect.name if bind else "sqlite"
+        return bind.dialect.name if bind else "sqlite"
+
+    async def _aggregate_demand_bins_raw(self, windows: list[RawWindow], bucket_seconds: int) -> list[DemandBin]:
+        stmt = self._raw_demand_bins_stmt(windows, bucket_seconds, self._dialect_name())
+        result = await self._session.execute(stmt)
+        return [
+            DemandBin(
+                slot_epoch=int(row.slot_epoch),
+                account_id=row.account_id,
+                api_key_id=row.api_key_id,
+                model=row.model,
+                reasoning_effort=row.reasoning_effort,
+                request_kind=row.request_kind,
+                status=row.status,
+                input_tokens=int(row.input_tokens or 0),
+                cached_input_tokens=int(row.cached_input_tokens or 0),
+                output_tokens=int(row.output_tokens or 0),
+                cost_usd=float(row.cost_usd or 0.0),
+                request_count=int(row.request_count or 0),
+            )
+            for row in result.all()
+        ]
+
+    @staticmethod
+    def _raw_demand_bins_stmt(windows: list[RawWindow], bucket_seconds: int, dialect: str):
+        """Legacy-grain GROUP BY over the raw ``request_logs`` tail."""
         if dialect == "postgresql":
             bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
         else:
@@ -614,24 +700,7 @@ class QuotaPlannerRepository:
             )
             .order_by(bucket_col)
         )
-        result = await self._session.execute(stmt)
-        return [
-            DemandBin(
-                slot_epoch=int(row.slot_epoch),
-                account_id=row.account_id,
-                api_key_id=row.api_key_id,
-                model=row.model,
-                reasoning_effort=row.reasoning_effort,
-                request_kind=row.request_kind,
-                status=row.status,
-                input_tokens=int(row.input_tokens or 0),
-                cached_input_tokens=int(row.cached_input_tokens or 0),
-                output_tokens=int(row.output_tokens or 0),
-                cost_usd=float(row.cost_usd or 0.0),
-                request_count=int(row.request_count or 0),
-            )
-            for row in result.all()
-        ]
+        return stmt
 
 
 def _settings_from_row(row: QuotaPlannerSettings) -> PlannerSettings:

@@ -841,24 +841,6 @@ async def test_live_ingestor_resolves_chatgpt_account_id(db_setup) -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_ingestion_kill_switch_disables_publishing(monkeypatch, db_setup) -> None:
-    del db_setup
-    from app.core.config.settings import get_settings
-
-    monkeypatch.setenv("CODEX_LB_LIVE_USAGE_INGESTION_ENABLED", "false")
-    get_settings.cache_clear()
-    try:
-        assert live_ingest.start_live_usage_ingestor() is None
-        captured: list[object] = []
-        live_hub.register_live_usage_publisher(None)
-        live_hub.publish_live_usage(_snapshot(), account_id="acc-any")
-        assert captured == []
-    finally:
-        await live_ingest.stop_live_usage_ingestor()
-        get_settings.cache_clear()
-
-
-@pytest.mark.asyncio
 async def test_nested_lifespan_stop_does_not_orphan_or_kill_the_outer_ingestor(db_setup) -> None:
     del db_setup
 

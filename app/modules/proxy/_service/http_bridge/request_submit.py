@@ -4861,6 +4861,18 @@ class _HTTPBridgeRequestSubmitMixin:
                 and retryability_fingerprint(request_state) == request_state_retryability_baseline
             )
 
+        def has_other_visible_pending_requests(selected: _WebSocketRequestState) -> bool:
+            """Return whether a sibling has emitted lifecycle/output data on this socket."""
+            return any(
+                pending_request is not selected
+                and (
+                    pending_request.response_event_count > 0
+                    or pending_request.downstream_visible
+                    or pending_request.upstream_model_output_seen
+                )
+                for pending_request in session.pending_requests
+            )
+
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -4926,14 +4938,16 @@ class _HTTPBridgeRequestSubmitMixin:
                 # it would strand every sibling still bound to the dead
                 # upstream, so both fail closed with ``stream_incomplete`` as
                 # they did before accepted replays existed.
-                if (request_state.response_id is None or not request_state.awaiting_response_created) and any(
-                    pending_request is not request_state for pending_request in session.pending_requests
-                ):
+                if (
+                    request_state.response_id is None or not request_state.awaiting_response_created
+                ) and has_other_visible_pending_requests(request_state):
                     # A pre-created request has not established a downstream
                     # identity yet, so retrying it alone would cancel the
                     # shared reader while an already-visible sibling remains
                     # bound to the dead socket. Keep the all-pending sibling
-                    # guard even when that sibling is not itself retryable.
+                    # guard for visible siblings even when that sibling is not
+                    # itself retryable. Stale response-id entries with no
+                    # observed lifecycle data remain eligible for this retry.
                     return False
         assert request_state is not None
         async with session.pending_lock:
@@ -4950,9 +4964,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 or not request_is_retryable(request_state)
             ):
                 return False
-            if (request_state.response_id is None or not request_state.awaiting_response_created) and any(
-                pending_request is not request_state for pending_request in session.pending_requests
-            ):
+            if (
+                request_state.response_id is None or not request_state.awaiting_response_created
+            ) and has_other_visible_pending_requests(request_state):
                 return False
             # An accepted replay must reclaim the released create gate without
             # waiting behind another request on this socket.

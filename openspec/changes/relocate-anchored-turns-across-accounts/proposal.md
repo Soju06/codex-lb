@@ -44,6 +44,20 @@ confirmed pre-dispatch failures, which belong to the definitive class and need
 no fence. The request log cannot separate them, so 2,352 is a ceiling — not one
 that changes the ordering.
 
+**Coverage caveat, and it is the important one.** Split by transport, those same
+dead turns are overwhelmingly downstream-WebSocket: 2,151 of the definitive
+class and 1,768 of the ambiguous class, against 30 and 622 on the HTTP path.
+`DurableBridgeRepository.record_operation` has exactly one caller,
+`app/modules/proxy/_service/http_bridge/request_submit.py`, so the durable
+material this change rebuilds from exists **only for HTTP session bridge
+turns**. The WebSocket path imports the coordinator for owner lookup alone. The
+spool itself is healthy where it is written — 33,920 operations, every one with
+a stored request body, 96.6% with a complete event spool — but it does not cover
+the majority of the deaths. This change therefore fixes the bridge lane and
+leaves the larger WebSocket lane for the follow-up named in Out of scope. Saying
+otherwise would be claiming a fix for traffic that has no material to recover
+from.
+
 Separately worth recording: `upstream_operation_status_unknown` fired **zero**
 times in that window. The bounded 503 that is nominally the fail-closed terminal
 for an ambiguous operation is not what production reaches; these turns surface
@@ -105,20 +119,36 @@ deleted, and this is one behaviour with no operator knob.
   turn, not a dead thread.
 - **Cost**: a relocated turn re-sends the rebuilt conversation, and under ② a
   turn upstream may have already run can run a second time. The duplicate is
-  bounded at one per operation and cannot duplicate tool side effects; it can
-  duplicate model tokens.
+  bounded at one per operation. It cannot duplicate tool side effects **on a
+  transport that implements the side-effect replay-dedupe contract**, which
+  today is the HTTP session bridge and only the bridge
+  (`app/modules/proxy/tool_call_dedupe.py` is wired from
+  `_service/http_bridge/request_submit.py` and nowhere else). That is why the
+  fenced lane is restricted to transports carrying that contract: elsewhere the
+  duplicate would be unbounded in kind, not merely in tokens. What remains on
+  the bridge is duplicated model tokens and duplicated upstream-hosted tool
+  execution.
 - **Operators**: no new setting. The bound, the ambiguity window and the
   transcript caps are module constants. `[settings_fields].max` stays 96.
-- **Depends on the durable recovery primitives staying in the tree.** PR #2366
-  (`retire-recovery-dispatch-storage`) deletes
+- **Depends on the durable recovery primitives staying in the tree.** #2366
+  (`retire-recovery-dispatch-storage`) removed
   `claim_unknown_operation_for_recovery`, the `recovery_dispatch_count` ORM
   mapping and the `expected_recovery_dispatch_count` CAS predicates on the
-  grounds that they are callerless. This change is the caller. The two cannot
-  both land: either #2366 is closed, or ② must re-add equivalent storage and
-  two migrations. Resolve before implementation starts.
+  grounds that they were callerless; #2383 restored them. This change is the
+  caller that makes them reachable, and the retirement must not be reattempted
+  while it stands: the claim is a serialized `FOR UPDATE` over the session and
+  operation rows, and it is what makes concurrent reconnects unable to both
+  win.
 
 ## Out of scope
 
+- **The WebSocket lane, which is where most of the deaths are.** Covering it
+  needs an equivalent durable record on the WebSocket path — the same request
+  body, terminal event spool and parent link the bridge already writes — plus
+  the side-effect replay-dedupe contract, which is likewise bridge-only today.
+  Both are substantial pieces of work with their own failure modes, and neither
+  is a variation on this change; they are a prerequisite for extending it. This
+  change must not be read as fixing them.
 - **Compact.** "Compact requests recover from quota-caused previous-response
   owner loss" carries an explicit carve-out ("the durable prefix metadata that
   could prove it is deliberately not consulted here"). Reversing that paragraph

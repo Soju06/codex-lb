@@ -36,13 +36,15 @@ The verdict MUST decline, before consulting any evidence, when downstream-visibl
 
 When an anchored continuation cannot be served by its owner account and the evidence is definitive — an upstream quota or usage-limit rejection, or a confirmed pre-dispatch transport failure, in both cases with no response event emitted and no downstream-visible output — the proxy MUST attempt to rebuild the turn's full conversation from the durable operation spool and dispatch it to another account without the anchor.
 
-The rebuild MUST walk the `parent_response_id` chain from the anchor, oldest turn last, and for each turn MUST combine the stored request body with the stored terminal response output. It MUST be bounded by a maximum turn count and a maximum byte size. The rebuilt input MUST then be joined to the client's current turn, and any prefix the client resent that the rebuilt chain already contains MUST be deduplicated so the conversation is not doubled.
+The rebuild MUST walk the `parent_response_id` chain from the anchor and assemble the turns oldest first, matching the order the durable repository returns them in, and for each turn MUST combine the stored request body with the stored terminal response output. A rebuild that assembles the chain in any other order MUST be rejected: a chronologically reversed conversation satisfies every structural predicate and fails silently. It MUST be bounded by a maximum turn count and a maximum byte size. The rebuilt input MUST then be joined to the client's current turn, and any prefix the client resent that the rebuilt chain already contains MUST be deduplicated so the conversation is not doubled.
 
 The rebuilt body MUST satisfy the same strict account-neutral predicate a client-supplied full resend must satisfy. The proxy MUST fail closed — leaving today's owner-unavailable behaviour intact — when the transcript is unavailable or incomplete, when any turn lacks a stored request body or a complete event spool, when the parent chain is broken or cyclic, when a terminal response event is missing, when the current input is a scalar string that cannot carry prior context, when a tool call is unsettled, when a declared tool is not portable, or when any account-owned state survives projection.
 
 The proxy MUST NOT substitute a lenient projection when the strict predicate declines. An unclassifiable body MUST keep the request owner-bound.
 
 A relocation performed under this requirement MUST NOT consume the one-shot recovery budget defined by "Fenced one-shot recovery dispatch", because definitive evidence proves the operation was never accepted.
+
+The rebuild requires durable operation material — a stored request body, a complete event spool and a parent link for every turn in the chain. A transport that does not record that material has nothing to rebuild from and MUST keep today's fail-closed behaviour; it MUST NOT relocate on partial context, and it MUST NOT report the absence of a transcript as a rebuild failure. Today only the HTTP session bridge records it.
 
 #### Scenario: A delta continuation survives its exhausted owner
 
@@ -73,6 +75,13 @@ A relocation performed under this requirement MUST NOT consume the one-shot reco
 - **WHEN** the strict account-neutral predicate runs
 - **THEN** the rebuild is rejected and the request stays owner-bound
 
+#### Scenario: A transport without durable material keeps failing closed
+
+- **GIVEN** an anchored turn on a transport that records no durable operation material for its parent turns
+- **WHEN** its owner account answers with a definitive quota rejection
+- **THEN** no rebuild is attempted and the request keeps today's owner-unavailable behaviour
+- **AND** the outcome is reported as an absent transcript, not as a failed rebuild
+
 #### Scenario: A deterministic non-quota rejection is not relocated
 
 - **GIVEN** the owner answers with an invalid-request rejection
@@ -88,7 +97,7 @@ Beyond that claim, the proxy MUST require all of the following before relocating
 
 - no downstream-visible output, no recorded response id, and zero spooled events for the operation — a single spooled event is proof that upstream executed the turn, which makes the outcome known rather than ambiguous;
 - the elapsed time since dispatch is within a bounded ambiguity window, so a turn that may be mid-execution and about to write its first event is not duplicated;
-- the relocated dispatch carries the origin operation's side-effect replay-dedupe identity, so a tool call the original dispatch may already have produced is suppressed on the new account rather than executed a second time;
+- the relocated dispatch carries the origin operation's side-effect replay-dedupe identity, so a tool call the original dispatch may already have produced is suppressed on the new account rather than executed a second time. A transport that does not implement that dedupe contract MUST NOT take the fenced lane at all: without it the duplicate this lane knowingly risks is unbounded in kind, not just in tokens. Today only the HTTP session bridge implements it;
 - the rebuilt body satisfies the same strict account-neutral predicate required by "Anchored turns relocate on a rebuilt durable transcript".
 
 The one-shot budget MUST be at most one dispatch per operation for the whole of that operation's retention, across every replica and every reconnect. When the claim is refused, the request MUST terminate through the fail-closed outcome its transport already produces today and MUST NOT invent a second dispatch: on the HTTP session bridge that is the `upstream_operation_status_unknown` rejection with its cooldown retry hint; on the direct streaming and WebSocket paths it is the terminal transport failure the client receives today. A refused claim MUST NOT be reported as a pool-exhaustion or usage-limit outcome.

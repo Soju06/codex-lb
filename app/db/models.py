@@ -2367,6 +2367,23 @@ class HttpBridgeRecoveryAttemptState(str, Enum):
 HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1 = "rows_v1"
 HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2 = "chunks_v2"
 
+# Where one dispatch of an operation stands in the two-phase terminal write.
+# This is deliberately separate from ``event_spool_complete``: an ordinary
+# operation carries an incomplete spool under a terminal ``state`` for the whole
+# window in which its terminal append runs, because the relay publishes the
+# operation state before appending the terminal transcript block.
+#
+#   PENDING  -> no terminal transcript outcome recorded yet; appends allowed.
+#   APPENDED -> a terminal append committed and is awaiting fenced
+#               finalization; further terminal appends must not rewrite the
+#               outcome, but finalization may still mark it replayable.
+#   SETTLED  -> the terminal outcome was published without a confirmed append
+#               (fallback settlement). The row is final and never replayable,
+#               so both later appends and finalization are refused.
+HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING = "pending"
+HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED = "appended"
+HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED = "settled"
+
 
 class HttpBridgeOperationState(str, Enum):
     SUBMITTED = "submitted"
@@ -2511,6 +2528,12 @@ class HttpBridgeOperationRecord(Base):
     recovery_dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_spool_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    terminal_append_phase: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING,
+        server_default=text("'pending'"),
+    )
     spool_format: Mapped[str] = mapped_column(
         String(16),
         nullable=False,

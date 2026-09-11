@@ -50,6 +50,37 @@ that wait is spent on an account that cannot serve the request. After this
 change the message decides: the account is marked rate-limited and the request
 moves on.
 
+## What the first implementation attempt found
+
+Three defects in this proposal only became visible once code existed.
+
+The exclusion answer was specified as an exhaustion answer. "Is this account
+exhausted" and "may the walk move off this account" are different questions, and
+the walkable set includes `retryable_transient` — so a code-less burst 429, which
+"An unbound burst rejection walks instead of surfacing" requires to be excluded,
+and a model-capacity 429, which must not be, both come back false from an
+exhaustion field. The requirement now states the selection predicate directly.
+
+The terminal probe could not answer inside the request. `pool_usage_exhaustion`
+needs a status *and* an at-or-above-limit usage sample; `handle_quota_exceeded`
+writes the sample, `handle_rate_limit` does not, and the only other supplier is a
+debounced background refresh that cannot land before the terminal probe of the
+request that provoked it. So "every account exhausted yields the canonical pool
+rejection" was unreachable through the mechanism this change mandates — for
+coded rejections too, not only message-derived ones. That is now its own
+requirement rather than an assumption.
+
+The runaway ceiling was smaller than the fleet. A ceiling of 16 on a 28-account
+pool is not a runaway fence, it is the fixed attempt cap this change exists to
+remove, wearing a different name. The requirement now binds the ceiling to
+exceed the largest supported pool.
+
+A fourth, smaller one: the monotone-progress proof has a live counterexample in
+the function the walk will live in — the account-capacity recovery path discards
+its own exclusion to wait out a local cap. That re-admission is legitimate and is
+now carved out explicitly, because a progress check that fires on it would break
+a recovery path that works today.
+
 ## Worked example
 
 A 28-account pool. A client sends an unbound `/v1/responses` turn.
@@ -85,5 +116,5 @@ Owner-bound requests — those carrying a required previous-response owner, a
 file pin, or turn-state ownership — still cannot move, so this change does not
 help them. Making an anchored conversation relocatable by rebuilding its context
 from the durable operation spool is the separate
-`restore-anchored-cross-account-relocation` change. The two compose: this change
+`relocate-anchored-turns-across-accounts` change. The two compose: this change
 decides *whether* a request may walk, that change widens *which* requests can.

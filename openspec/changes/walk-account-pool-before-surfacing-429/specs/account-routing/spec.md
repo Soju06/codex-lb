@@ -6,11 +6,15 @@
 
 When a pre-visible upstream failure classified `rate_limit`, `quota`, or `retryable_transient` occurs on a request that is not owner-bound, the proxy MUST exclude the rejecting account for the remainder of that request and reselect from the accounts that remain, and MUST repeat this until either a selected account serves the request or no non-excluded candidate remains. The proxy MUST NOT bound this walk by a fixed attempt count unrelated to the size of the usable pool.
 
-The walk MUST terminate. Termination MUST be guaranteed by three independent bounds: the request budget deadline that already clamps every attempt; a fixed runaway ceiling applied to the number of account attempts in one request; and a monotone-progress invariant requiring every `failover_next` outcome to grow the request-scoped excluded-account set. When an attempt does not grow that set, the proxy MUST log a warning naming the request and MUST terminate the walk rather than reselect.
+The walk MUST terminate. Termination MUST be guaranteed by three independent bounds: the request budget deadline that already clamps every attempt; a runaway ceiling on the number of account attempts in one request, which MUST exceed the largest pool the deployment supports so that it can never become the ordinary bound; and a monotone-progress invariant requiring every `failover_next` outcome to grow the request-scoped excluded-account set. When a `failover_next` outcome does not grow that set, the proxy MUST log a warning naming the request and MUST terminate the walk rather than reselect.
+
+The monotone-progress invariant governs failover outcomes only. An account-capacity recovery that deliberately re-admits a previously excluded account — waiting for a local cap to clear rather than rejecting the account — MUST be allowed to remove its own exclusion, MUST NOT be reported as a progress failure, and MUST remain bounded by the request budget. A walk that could re-admit an account on failover evidence would not terminate; a walk that could not re-admit on capacity evidence would lose a recovery path that exists today.
 
 The proxy MUST record account health exactly once per attempted account per request. A walk across N accounts MUST produce N health writes, not N writes per attempt.
 
 Owner-bound requests are outside this requirement: a request that cannot move to another account MUST continue to take the bounded same-account path and surface its original rejection unchanged.
+
+When a walk ends without a served response, the proxy MUST record which bound ended it — a non-retryable failure, an exhausted pool, the request deadline, the runaway ceiling, or a progress failure. Those outcomes are operationally different and MUST be distinguishable after the fact; collapsing them into one undifferentiated "surface" leaves an operator unable to tell a bad request from an exhausted fleet.
 
 #### Scenario: A usable sibling serves what one account rejected
 
@@ -45,6 +49,32 @@ Owner-bound requests are outside this requirement: a request that cannot move to
 - **WHEN** account A returns a pre-visible failure
 - **THEN** the proxy does not walk the pool
 - **AND** the request takes the bounded same-account retry path and then surfaces account A's failure unchanged
+
+### Requirement: Usage-limit evidence is immediately visible to the exhaustion probe
+
+When the proxy records account health for an upstream usage-limit or quota rejection, the evidence it persists MUST be sufficient for the pool-exhaustion predicate to recognise that account as exhausted **within the same request**. The predicate requires both a rate-limited or quota-exhausted status and a usage sample at or above the account's limit, so writing only the status is not enough: a walk that exhausts every account would otherwise consult the probe, be told the pool is healthy, and surface a single account's rejection as the pool's answer.
+
+The proxy MUST NOT depend on a background or debounced usage refresh to supply that sample, because such a refresh cannot land before the terminal probe of the request that provoked it. A message-derived usage-limit classification MUST record the same evidence a coded one does; the evidence MUST be keyed on the classification, not on the literal upstream error code.
+
+#### Scenario: An exhausting rejection is provable without waiting for a refresh
+
+- **GIVEN** an account answers with an upstream usage-limit rejection
+- **WHEN** account health is recorded for it
+- **THEN** the pool-exhaustion predicate evaluated immediately afterwards treats that account as exhausted
+- **AND** no background usage refresh has had to complete first
+
+#### Scenario: A message-derived usage limit records the same evidence
+
+- **GIVEN** an envelope whose usage limit is proven by its message rather than its error code
+- **WHEN** account health is recorded for it
+- **THEN** the persisted evidence is the same as for a coded `usage_limit_reached` rejection
+
+#### Scenario: A fully exhausted pool answers with the canonical rejection
+
+- **GIVEN** every selectable account has answered this request with a usage-limit rejection
+- **WHEN** the walk ends and the probe is consulted
+- **THEN** the probe reports pool exhaustion
+- **AND** the client receives the canonical `usage_limit_reached` 429 rather than the last account's verbatim body
 
 ### Requirement: Pool-walk termination consults the exhaustion probe
 

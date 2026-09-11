@@ -87,6 +87,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
     _websocket_continuity_key_from_headers,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.helpers import (
@@ -459,6 +460,7 @@ class _StreamingRetryMixin:
             sticky_key_source = "session_header"
         elif affinity.key:
             sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
         _maybe_log_proxy_request_shape(
             "stream",
             payload,
@@ -847,6 +849,7 @@ class _StreamingRetryMixin:
             settlement.error_message = "Proxy request budget exhausted"
             settlement.error = {"message": "Proxy request budget exhausted"}
             await proxy._write_stream_preflight_error(
+                affinity_observation=affinity_observation,
                 account_id=account.id,
                 api_key=api_key,
                 request_id=request_id,
@@ -929,6 +932,7 @@ class _StreamingRetryMixin:
                     request_id,
                     False,
                     request_started_at=start,
+                    affinity_observation=affinity_observation,
                     allow_transient_retry=True,
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
@@ -1187,6 +1191,7 @@ class _StreamingRetryMixin:
             _apply_error_metadata(event["response"]["error"], error)
             if not any_attempt_logged:
                 await proxy._write_request_log(
+                    affinity_observation=affinity_observation,
                     account_id=account_id,
                     api_key=api_key,
                     request_id=request_id,
@@ -1303,6 +1308,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1343,6 +1349,7 @@ class _StreamingRetryMixin:
                         attempt + 1,
                     )
                     await proxy._write_stream_preflight_error(
+                        affinity_observation=affinity_observation,
                         account_id=None,
                         api_key=api_key,
                         request_id=request_id,
@@ -1402,6 +1409,7 @@ class _StreamingRetryMixin:
                         error_message = error.message if error else None
                         if _facade()._is_proxy_budget_exhausted_error(exc):
                             await proxy._write_stream_preflight_error(
+                                affinity_observation=affinity_observation,
                                 account_id=None,
                                 api_key=api_key,
                                 request_id=request_id,
@@ -1599,6 +1607,7 @@ class _StreamingRetryMixin:
                         no_accounts_msg = selection.error_message or "Usage limit reached"
                         status_code, error_payload = selection_failure_response(selection)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1639,6 +1648,7 @@ class _StreamingRetryMixin:
                             response_id=request_id,
                         )
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1696,6 +1706,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1742,6 +1753,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=preferred_account_id,
                             api_key=api_key,
                             request_id=request_id,
@@ -1778,6 +1790,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=None,
                             api_key=api_key,
                             request_id=request_id,
@@ -1809,6 +1822,7 @@ class _StreamingRetryMixin:
                     )
                     yield format_sse_event(event)
                     await proxy._write_request_log(
+                        affinity_observation=affinity_observation,
                         account_id=None,
                         api_key=api_key,
                         request_id=request_id,
@@ -1893,6 +1907,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
+                            affinity_observation=affinity_observation,
                             account_id=preferred_account_id,
                             api_key=api_key,
                             request_id=request_id,
@@ -1923,6 +1938,7 @@ class _StreamingRetryMixin:
                             account.id,
                         )
                         await proxy._write_stream_preflight_error(
+                            affinity_observation=affinity_observation,
                             account_id=account.id,
                             api_key=api_key,
                             request_id=request_id,
@@ -1948,6 +1964,7 @@ class _StreamingRetryMixin:
                     except UpstreamProxyRouteError as exc:
                         message = f"Upstream proxy route unavailable: {exc.reason}"
                         await proxy._write_stream_preflight_error(
+                            affinity_observation=affinity_observation,
                             account_id=account.id,
                             api_key=api_key,
                             request_id=request_id,
@@ -2049,6 +2066,7 @@ class _StreamingRetryMixin:
                                     {"message": message},
                                 )
                                 await proxy._write_stream_preflight_error(
+                                    affinity_observation=affinity_observation,
                                     account_id=account.id,
                                     api_key=api_key,
                                     request_id=request_id,
@@ -2146,6 +2164,7 @@ class _StreamingRetryMixin:
                             excluded_account_ids.add(account.id)
                             continue
                         await proxy._write_stream_preflight_error(
+                            affinity_observation=affinity_observation,
                             account_id=account.id,
                             api_key=api_key,
                             request_id=request_id,
@@ -2182,6 +2201,7 @@ class _StreamingRetryMixin:
                             account.id,
                         )
                         await proxy._write_stream_preflight_error(
+                            affinity_observation=affinity_observation,
                             account_id=account.id,
                             api_key=api_key,
                             request_id=request_id,
@@ -2219,6 +2239,7 @@ class _StreamingRetryMixin:
                                 request_id,
                                 allow_retry_flag,
                                 request_started_at=start,
+                                affinity_observation=affinity_observation,
                                 allow_transient_retry=(
                                     transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1
                                     or allow_retry_flag
@@ -2859,6 +2880,7 @@ class _StreamingRetryMixin:
                                 account.id,
                             )
                             await proxy._write_stream_preflight_error(
+                                affinity_observation=affinity_observation,
                                 account_id=account.id,
                                 api_key=api_key,
                                 request_id=request_id,
@@ -2953,6 +2975,7 @@ class _StreamingRetryMixin:
                                         {"message": message},
                                     )
                                     await proxy._write_stream_preflight_error(
+                                        affinity_observation=affinity_observation,
                                         account_id=account.id,
                                         api_key=api_key,
                                         request_id=request_id,
@@ -3025,6 +3048,7 @@ class _StreamingRetryMixin:
                                 excluded_account_ids.add(account.id)
                                 continue
                             await proxy._write_stream_preflight_error(
+                                affinity_observation=affinity_observation,
                                 account_id=account.id,
                                 api_key=api_key,
                                 request_id=request_id,
@@ -3059,6 +3083,7 @@ class _StreamingRetryMixin:
                                 account.id,
                             )
                             await proxy._write_stream_preflight_error(
+                                affinity_observation=affinity_observation,
                                 account_id=account.id,
                                 api_key=api_key,
                                 request_id=request_id,
@@ -3531,6 +3556,7 @@ class _StreamingRetryMixin:
                     yield format_sse_event(event)
                 if not any_attempt_logged:
                     await proxy._write_request_log(
+                        affinity_observation=affinity_observation,
                         account_id=None,
                         api_key=api_key,
                         request_id=request_id,
@@ -3586,6 +3612,7 @@ class _StreamingRetryMixin:
             yield format_sse_event(event)
             if not any_attempt_logged:
                 await proxy._write_request_log(
+                    affinity_observation=affinity_observation,
                     account_id=None,
                     api_key=api_key,
                     request_id=request_id,

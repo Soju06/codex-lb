@@ -2837,12 +2837,18 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
         # sweep runs. Reconsider every detached generation so marker ordering
         # cannot leave a fully drained predecessor owning a socket and cap slot.
         detached_sessions = tuple(service._http_bridge_detached_sessions.values())
-    for session in detached_sessions:
-        # Bounded: this sweep is on every request's path, so one detached
-        # session whose lock stays busy (or wedged) must not stall the fleet.
+    deadline = clock_for(service).monotonic() + _HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS
+    for index, session in enumerate(detached_sessions):
+        remaining = deadline - clock_for(service).monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "Detached HTTP bridge retire sweep deadline exhausted: skipped_sessions=%d",
+                len(detached_sessions) - index,
+            )
+            break
         await service._retire_http_bridge_after_drain_if_ready(
             session,
-            lock_wait_timeout_seconds=_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS,
+            lock_wait_timeout_seconds=remaining,
         )
 
 

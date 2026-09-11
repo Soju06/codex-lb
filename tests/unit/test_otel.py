@@ -601,7 +601,6 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     api_key_limit_reset_scheduler = _DummyScheduler()
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
-    account_deletion_scheduler = _DummyScheduler()
     call_order: list[str] = []
     lifespan_entered = asyncio.Event()
     begin_shutdown = asyncio.Event()
@@ -739,7 +738,6 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     monkeypatch.setattr(main, "build_api_key_limit_reset_scheduler", lambda: api_key_limit_reset_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
-    monkeypatch.setattr(main, "build_account_deletion_scheduler", lambda: account_deletion_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
     monkeypatch.setattr(shutdown_state, "wait_for_in_flight_drain", _force_in_flight_timeout)
     monkeypatch.setattr(main, "_drain_detached_control_plane_tasks", _track_control_plane_drain)

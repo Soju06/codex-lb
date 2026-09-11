@@ -99,6 +99,13 @@ class HttpBridgeOperationEventBatcher:
         self._contexts: dict[str, _PendingOperationEvent] = {}
         self._dropped_operations: set[str] = set()
         self._closing_operations: set[str] = set()
+        # Attempt token per operation. A terminal append that outlived its
+        # bound still runs its own cleanup when the durable layer finally
+        # releases it; by then a later attempt may own the in-memory state for
+        # the same operation id, so cleanup is fenced on the attempt that
+        # registered it instead of clearing whatever is there now.
+        self._operation_attempts: dict[str, int] = {}
+        self._attempt_counter = 0
         self._pending_count = 0
         self._pending_bytes = 0
         self._lock = asyncio.Lock()
@@ -292,6 +299,9 @@ class HttpBridgeOperationEventBatcher:
                 ),
             )
             self._closing_operations.add(operation_id)
+            self._attempt_counter += 1
+            attempt = self._attempt_counter
+            self._operation_attempts[operation_id] = attempt
         append_task = asyncio.create_task(
             self._append_terminal_event_unbounded(
                 operation_id=operation_id,
@@ -300,6 +310,7 @@ class HttpBridgeOperationEventBatcher:
                 state=state,
                 expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 response_id=response_id,
+                attempt=attempt,
             ),
             name=f"http-bridge-terminal-spool-{operation_id}",
         )
@@ -312,11 +323,11 @@ class HttpBridgeOperationEventBatcher:
             )
         except asyncio.CancelledError:
             append_task.cancel()
-            await self._clear_operation(operation_id)
+            await self._clear_operation(operation_id, attempt=attempt)
             raise
         if append_task in done:
             if append_task.cancelled():
-                await self._clear_operation(operation_id)
+                await self._clear_operation(operation_id, attempt=attempt)
                 return TerminalOperationEventAppendResult(
                     persisted=False,
                     settlement_required=True,
@@ -334,7 +345,7 @@ class HttpBridgeOperationEventBatcher:
             return append_result
 
         append_task.cancel()
-        await self._clear_operation(operation_id)
+        await self._clear_operation(operation_id, attempt=attempt)
         logger.info(
             "Timed out persisting HTTP bridge terminal transcript operation_id=%s timeout_seconds=%.1f",
             operation_id,
@@ -354,6 +365,7 @@ class HttpBridgeOperationEventBatcher:
         state: str,
         expected_recovery_dispatch_count: int,
         response_id: str | None,
+        attempt: int,
     ) -> TerminalOperationEventAppendResult:
         try:
             await self.flush_pending_operation(operation_id=operation_id)
@@ -408,10 +420,18 @@ class HttpBridgeOperationEventBatcher:
                 settlement_required=True,
             )
         finally:
-            await self._clear_operation(operation_id)
+            await self._clear_operation(operation_id, attempt=attempt)
 
-    async def _clear_operation(self, operation_id: str) -> None:
+    async def _clear_operation(self, operation_id: str, *, attempt: int) -> None:
         async with self._lock:
+            if self._operation_attempts.get(operation_id) != attempt:
+                # A newer terminal attempt already owns this operation's
+                # in-memory state (this attempt timed out, was settled, and the
+                # durable layer released it only afterwards). Clearing here
+                # would strand the newer attempt with no context, so it would
+                # give up its transcript and fall back to settlement.
+                return
+            self._operation_attempts.pop(operation_id, None)
             pending = self._pending.pop(operation_id, [])
             self._pending_count -= len(pending)
             self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)

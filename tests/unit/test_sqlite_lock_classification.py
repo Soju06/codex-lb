@@ -78,6 +78,15 @@ def test_lock_text_in_the_statement_or_parameters_is_not_a_lock_failure() -> Non
     assert is_sqlite_lock_error(exc) is False
 
 
+def test_wrapper_without_a_driver_exception_is_not_a_lock_failure() -> None:
+    # SQLAlchemy raises a wrapper with ``orig is None`` itself, so there is no
+    # driver evidence to classify. Falling back to ``str(exc)`` there would
+    # reintroduce the statement/parameter match this module exists to remove.
+    exc = OperationalError("UPDATE api_keys SET name = ?", {"name": "database is locked"}, None)
+    assert exc.orig is None
+    assert is_sqlite_lock_error(exc) is False
+
+
 def test_error_name_is_read_from_the_driver_exception() -> None:
     class _DriverLockError(sqlite3.OperationalError):
         def __init__(self) -> None:

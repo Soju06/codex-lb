@@ -74,11 +74,13 @@ def is_sqlite_lock_error(exc: BaseException) -> bool:
     message is inspected — ``str(OperationalError)`` also renders the failing
     statement and its bound parameters, so matching on it would classify an
     unrelated failure as transient whenever the SQL or a parameter value
-    happened to contain the lock text.
+    happened to contain the lock text. A wrapper with no ``orig`` carries no
+    driver evidence at all, so it is not contention either: SQLAlchemy raises
+    those itself, and every lock failure we retry comes from the driver.
     """
-    if not isinstance(exc, OperationalError):
+    if not isinstance(exc, OperationalError) or exc.orig is None:
         return False
-    message = str(exc.orig if exc.orig is not None else exc).lower()
+    message = str(exc.orig).lower()
     return any(fragment in message for fragment in _SQLITE_LOCK_MESSAGE_FRAGMENTS)
 
 

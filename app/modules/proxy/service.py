@@ -1816,6 +1816,11 @@ class ProxyService(
                     settings, lease_kind=lease_kind, request_stage=request_stage
                 )
                 api_key_id = api_key.id if api_key is not None else None
+                api_key_account_usage_percent = (
+                    api_key.account_usage_percent
+                    if api_key is not None and api_key.account_assignment_scope_enabled
+                    else None
+                )
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
@@ -1929,6 +1934,7 @@ class ProxyService(
                         redact_sensitive_details=redact_sensitive_details,
                         allow_usage_exhaustion_error=not required_preferred_account,
                         api_key_id=api_key_id,
+                        api_key_account_usage_percent=api_key_account_usage_percent,
                         api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
                     )
                     if preferred_selection.account is not None:
@@ -1991,6 +1997,7 @@ class ProxyService(
                     concurrency_caps=concurrency_caps,
                     redact_sensitive_details=redact_sensitive_details,
                     api_key_id=api_key_id,
+                    api_key_account_usage_percent=api_key_account_usage_percent,
                     api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
                     routing_tunables=routing_tunables,
                 )

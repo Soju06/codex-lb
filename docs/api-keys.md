@@ -27,6 +27,19 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 ![API keys with assigned accounts](screenshots/apis-assigned-accounts.jpg)
 
+For a scoped key, **Local account usage share** optionally limits the key to a percentage of each assigned
+account's 7-day quota budget. The budget is estimated in request-cost units from the account's current upstream
+usage snapshot and all successful local API-key request logs for that account's current quota window. Once the key's
+successful local request cost reaches its configured share on one account, routing skips that account and can
+continue with another assigned account. This is not an account-wide cap; other keys retain their normal routing
+behavior.
+
+The policy deliberately does not enforce when the account has no live secondary snapshot, no recognized plan
+capacity, or no attributable successful local cost in the current window. In those cases there is no defensible
+USD-to-quota-credit conversion, so routing preserves its normal behavior. Accounting is request-log based and
+settles asynchronously with request-log persistence; concurrent requests can therefore pass before a prior
+request's log is committed.
+
 ## Reasoning effort policies
 
 A key can either enforce one reasoning effort or allow a selected non-empty set of client-requested efforts.

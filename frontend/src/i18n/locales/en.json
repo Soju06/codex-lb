@@ -216,6 +216,7 @@
   "apiKeys.form.allowedReasoningEfforts": "Allowed efforts",
   "apiKeys.form.applyToCodexModel": "Apply to codex /model",
   "apiKeys.form.assignedAccounts": "Assigned accounts",
+  "apiKeys.form.accountUsagePercent": "Per-account local usage share (%)",
   "apiKeys.form.assignedModelSources": "Assigned model sources",
   "apiKeys.form.currentUsage": "Current usage",
   "apiKeys.form.enforcedModel": "Enforced Model",

@@ -169,6 +169,7 @@ from app.modules.proxy.fair_share import (
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings
+from app.modules.request_logs.repository import AccountLocalCostShare
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     get_additional_quota_routing_policy,
@@ -296,6 +297,33 @@ def _required_continuity_owner_failure(
 
 
 SelectionInputs = _SelectionInputs
+
+
+def _api_key_account_usage_share_exhausted(
+    *,
+    account: Account,
+    usage: UsageHistory | None,
+    cost_share: AccountLocalCostShare | None,
+    percent: int,
+) -> bool:
+    """Compare USD costs only after projecting the account quota budget into USD.
+
+    Plan capacity is measured in synthetic credits, not USD. The local ledger
+    supplies a USD-per-credit observation for the current upstream window:
+    total local account cost / upstream used credits. Missing or zero evidence
+    therefore deliberately leaves the key admissible rather than inventing a
+    conversion or treating unknown usage as exhausted.
+    """
+    if usage is None or cost_share is None or usage.used_percent is None:
+        return False
+    capacity = usage_core.capacity_for_plan(account.plan_type, "secondary")
+    if capacity is None or capacity <= 0 or not 0 < usage.used_percent <= 100:
+        return False
+    used_credits = capacity * float(usage.used_percent) / 100.0
+    if used_credits <= 0 or cost_share.total_cost_usd <= 0:
+        return False
+    budget_cost_usd = capacity * (cost_share.total_cost_usd / used_credits)
+    return cost_share.api_key_cost_usd * 100 >= budget_cost_usd * percent
 
 
 class LoadBalancer:
@@ -607,6 +635,7 @@ class LoadBalancer:
         redact_sensitive_details: bool = False,
         allow_usage_exhaustion_error: bool = True,
         api_key_id: str | None = None,
+        api_key_account_usage_percent: int | None = None,
         api_key_stream_fair_share_threshold_pct: int = 0,
         routing_tunables: RoutingTunables | None = None,
         dashboard_settings: object | None = None,
@@ -752,6 +781,55 @@ class LoadBalancer:
             return replace(await load_unresolved_selection_inputs(), soft_drain_enabled=resilience.soft_drain_enabled)
 
         selection_inputs = await load_selection_inputs()
+        if api_key_id is not None and api_key_account_usage_percent is not None and selection_inputs.accounts:
+            try:
+                window_minutes = usage_core.default_window_minutes("secondary")
+                now_epoch = int(self._clock.time())
+                if window_minutes is not None:
+                    window_starts = {
+                        account.id: datetime.fromtimestamp(
+                            usage.reset_at - window_minutes * 60,
+                            tz=timezone.utc,
+                        ).replace(tzinfo=None)
+                        for account in selection_inputs.accounts
+                        if (usage := selection_inputs.latest_secondary.get(account.id)) is not None
+                        and isinstance(usage, UsageHistory)
+                        and usage.reset_at is not None
+                        and usage.reset_at > now_epoch
+                        and usage.used_percent is not None
+                        and 0 < usage.used_percent <= 100
+                        and usage_core.capacity_for_plan(account.plan_type, "secondary") not in (None, 0.0)
+                    }
+                    if window_starts:
+                        # Plan capacity is expressed in abstract credits while request
+                        # logs are USD. Map the observed account usage into a local USD
+                        # budget before comparing key costs, never directly mix units.
+                        async with self._repo_factory() as repos:
+                            costs = await repos.request_logs.successful_cost_share_by_account(
+                                api_key_id=api_key_id,
+                                window_starts=window_starts,
+                            )
+                        exhausted_ids = {
+                            account.id
+                            for account in selection_inputs.accounts
+                            if _api_key_account_usage_share_exhausted(
+                                account=account,
+                                usage=(
+                                    usage
+                                    if isinstance(
+                                        usage := selection_inputs.latest_secondary.get(account.id), UsageHistory
+                                    )
+                                    else None
+                                ),
+                                cost_share=costs.get(account.id),
+                                percent=api_key_account_usage_percent,
+                            )
+                        }
+                        if exhausted_ids:
+                            excluded_ids.update(exhausted_ids)
+                            selection_inputs = await load_selection_inputs()
+            except Exception:
+                logger.warning("Could not read local API key usage share; preserving account selection", exc_info=True)
         caps = concurrency_caps or effective_account_concurrency_caps()
         circuit_breaker_open = _is_upstream_circuit_breaker_open(resilience.circuit_breaker_enabled)
         if circuit_breaker_open:

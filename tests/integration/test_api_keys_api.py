@@ -347,6 +347,39 @@ async def test_api_key_update_persists_assigned_account_ids(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_account_usage_percent_create_update_read_and_validation(async_client):
+    account_id = await _import_account(async_client, "acc-usage-share", "usage-share@example.com")
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "usage-share-key",
+            "assignedAccountIds": [account_id],
+            "accountUsagePercent": 25,
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    assert created.json()["accountUsagePercent"] == 25
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"accountUsagePercent": 50},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["accountUsagePercent"] == 50
+
+    invalid = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"accountUsagePercent": 101},
+    )
+    assert invalid.status_code == 422
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["accountUsagePercent"] == 50
+
+
+@pytest.mark.asyncio
 async def test_api_key_create_persists_assigned_account_ids(async_client):
     first_account_id = await _import_account(async_client, "acc-create-a", "create-a@example.com")
     second_account_id = await _import_account(async_client, "acc-create-b", "create-b@example.com")

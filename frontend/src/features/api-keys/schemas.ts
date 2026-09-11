@@ -64,6 +64,7 @@ export const ApiKeySchema = z.object({
   accountAssignmentScopeEnabled: z.boolean().default(false),
   sourceAssignmentScopeEnabled: z.boolean().default(false),
   assignedAccountIds: z.array(z.string()).default([]),
+  accountUsagePercent: z.number().int().min(1).max(100).nullable().default(null),
   assignedSourceIds: z.array(z.string()).default([]),
   createdAt: z.iso.datetime({ offset: true }),
   lastUsedAt: z.iso.datetime({ offset: true }).nullable(),
@@ -99,6 +100,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  accountUsagePercent: z.number().int().min(1).max(100).nullable().optional(),
   assignedSourceIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
 });
@@ -125,6 +127,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  accountUsagePercent: z.number().int().min(1).max(100).nullable().optional(),
   assignedSourceIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
   resetUsage: z.boolean().optional(),

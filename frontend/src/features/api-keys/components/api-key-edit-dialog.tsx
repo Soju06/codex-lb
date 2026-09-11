@@ -105,6 +105,7 @@ type ApiKeyEditDraft = {
   enforcedServiceTier: string;
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
+  accountUsagePercent: string;
 };
 
 function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
@@ -123,6 +124,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     enforcedServiceTier: apiKey.enforcedServiceTier || "none",
     trafficClass: apiKey.trafficClass || "foreground",
     transportPolicyOverride: apiKey.transportPolicyOverride,
+    accountUsagePercent: apiKey.accountUsagePercent?.toString() ?? "",
   };
 }
 
@@ -181,6 +183,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       usageSections: draft.usageSections,
       expiresAt: draft.expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
+      accountUsagePercent: draft.selectedAccountIds.length > 0 && draft.accountUsagePercent
+        ? Number(draft.accountUsagePercent)
+        : null,
     };
     if (shouldSubmitAssignedAccountIds) {
       payload.assignedAccountIds = draft.selectedAccountIds;
@@ -240,6 +245,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</div>
               <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="edit-api-key-account-usage-percent" className="text-sm font-medium">{t("apiKeys.form.accountUsagePercent")}</label>
+              <Input id="edit-api-key-account-usage-percent" type="number" min="1" max="100" disabled={draft.selectedAccountIds.length === 0} value={draft.accountUsagePercent} onChange={(event) => updateDraft({ accountUsagePercent: event.target.value })} />
             </div>
 
             <div className="space-y-1">

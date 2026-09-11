@@ -260,6 +260,7 @@ describe("ApiKeyEditDialog", () => {
     await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }));
     await user.keyboard("{Escape}");
+    await user.type(screen.getByLabelText("Per-account local usage share (%)"), "50");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
@@ -268,6 +269,7 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+    expect(payload.accountUsagePercent).toBe(50);
   });
 
   it("keeps the dialog open when selecting portalled model and account menu items", async () => {

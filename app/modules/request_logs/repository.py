@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -64,6 +65,12 @@ from app.modules.accounts.usage_time_rollup_read import (
 class _RequestLogFilters:
     conditions: list
     needs_related_search_joins: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AccountLocalCostShare:
+    api_key_cost_usd: float
+    total_cost_usd: float
 
 
 # Earliest representable listing lower bound for the rollup-count window.
@@ -515,6 +522,48 @@ class RequestLogsRepository:
             )
         )
         return list(result.scalars().all())
+
+    async def successful_cost_share_by_account(
+        self,
+        *,
+        api_key_id: str,
+        window_starts: Mapping[str, datetime],
+    ) -> dict[str, AccountLocalCostShare]:
+        """Return local cost totals for one key and every key in each account window."""
+        if not window_starts:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(
+                    RequestLog.account_id,
+                    func.coalesce(
+                        func.sum(case((RequestLog.api_key_id == api_key_id, RequestLog.cost_usd), else_=0.0)),
+                        0.0,
+                    ),
+                    func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+                )
+                .where(
+                    RequestLog.status == "success",
+                    RequestLog.api_key_id.is_not(None),
+                    self._exclude_warmup_clause(),
+                    or_(
+                        *(
+                            and_(RequestLog.account_id == account_id, RequestLog.requested_at >= window_start)
+                            for account_id, window_start in window_starts.items()
+                        )
+                    ),
+                )
+                .group_by(RequestLog.account_id)
+            )
+        ).all()
+        return {
+            str(account_id): AccountLocalCostShare(
+                api_key_cost_usd=float(api_key_cost or 0.0),
+                total_cost_usd=float(total_cost or 0.0),
+            )
+            for account_id, api_key_cost, total_cost in rows
+            if account_id is not None
+        }
 
     async def find_latest_owner_record_for_response_id(
         self,

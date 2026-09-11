@@ -18,7 +18,7 @@ from app.modules.proxy.account_cache import AccountSelectionCache
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountSelection, LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
-from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.request_logs.repository import AccountLocalCostShare, RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.unit
@@ -160,16 +160,32 @@ class _StickySessionsRepository:
         return True
 
 
+class _RequestLogsRepository:
+    def __init__(self, cost_shares_by_key: dict[str, dict[str, AccountLocalCostShare]] | None = None) -> None:
+        self.cost_shares_by_key = cost_shares_by_key or {}
+        self.calls: list[tuple[str, dict[str, datetime]]] = []
+
+    async def successful_cost_share_by_account(
+        self,
+        *,
+        api_key_id: str,
+        window_starts: dict[str, datetime],
+    ) -> dict[str, AccountLocalCostShare]:
+        self.calls.append((api_key_id, window_starts))
+        return self.cost_shares_by_key.get(api_key_id, {})
+
+
 @asynccontextmanager
 async def _repositories(
     accounts: _AccountsRepository,
     usage: _UsageRepository,
     sticky_sessions: _StickySessionsRepository,
+    request_logs: _RequestLogsRepository | None = None,
 ) -> AsyncIterator[ProxyRepositories]:
     yield ProxyRepositories(
         accounts=cast(AccountsRepository, accounts),
         usage=cast(UsageRepository, usage),
-        request_logs=cast(RequestLogsRepository, object()),
+        request_logs=cast(RequestLogsRepository, request_logs or _RequestLogsRepository()),
         sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
         api_keys=cast(ApiKeysRepository, object()),
         additional_usage=cast(AdditionalUsageRepository, object()),
@@ -183,13 +199,59 @@ def _balancer(
     primary: dict[str, UsageHistory] | None = None,
     secondary: dict[str, UsageHistory] | None = None,
     monthly: dict[str, UsageHistory] | None = None,
+    cost_shares_by_key: dict[str, dict[str, AccountLocalCostShare]] | None = None,
 ) -> tuple[LoadBalancer, _AccountsRepository, _UsageRepository, _StickySessionsRepository]:
     accounts_repo = _AccountsRepository(accounts)
     usage_repo = _UsageRepository(primary=primary, secondary=secondary, monthly=monthly)
     sticky_repo = _StickySessionsRepository()
-    balancer = LoadBalancer(lambda: _repositories(accounts_repo, usage_repo, sticky_repo))
+    request_logs = _RequestLogsRepository(cost_shares_by_key)
+    balancer = LoadBalancer(lambda: _repositories(accounts_repo, usage_repo, sticky_repo, request_logs))
     balancer._selection_inputs_cache = cache
     return balancer, accounts_repo, usage_repo, sticky_repo
+
+
+@pytest.mark.asyncio
+async def test_assigned_account_usage_share_blocks_only_exhausted_key(selection_cache: AccountSelectionCache) -> None:
+    account = _account("share-account")
+    secondary = _usage_row(1, account.id, window="secondary", used_percent=50.0)
+    # The account has spent $10 locally while upstream reports half its credit
+    # budget consumed, projecting a $20 local budget. Key A has spent the $10
+    # allowed by its 50% share; key B has spent nothing and remains eligible.
+    shares = {
+        "key-a": {account.id: AccountLocalCostShare(api_key_cost_usd=10.0, total_cost_usd=10.0)},
+        "key-b": {account.id: AccountLocalCostShare(api_key_cost_usd=0.0, total_cost_usd=10.0)},
+    }
+    balancer, _, _, _ = _balancer(
+        [account],
+        selection_cache,
+        secondary={account.id: secondary},
+        cost_shares_by_key=shares,
+    )
+
+    blocked = await balancer.select_account(
+        account_ids={account.id},
+        api_key_id="key-a",
+        api_key_account_usage_percent=50,
+        routing_strategy="usage_weighted",
+    )
+    admitted = await balancer.select_account(
+        account_ids={account.id},
+        api_key_id="key-b",
+        api_key_account_usage_percent=50,
+        routing_strategy="usage_weighted",
+    )
+    unavailable_ledger = await balancer.select_account(
+        account_ids={account.id},
+        api_key_id="key-c",
+        api_key_account_usage_percent=50,
+        routing_strategy="usage_weighted",
+    )
+
+    assert blocked.account is None
+    assert admitted.account is not None
+    assert admitted.account.id == account.id
+    assert unavailable_ledger.account is not None
+    assert unavailable_ledger.account.id == account.id
 
 
 async def _select_with_lease(balancer: LoadBalancer, *, sticky: bool) -> AccountSelection:

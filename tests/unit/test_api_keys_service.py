@@ -165,6 +165,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         transport_policy_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
+        account_usage_percent: int | None | _Unset = _UNSET,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
@@ -188,6 +189,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "transport_policy_override": transport_policy_override,
             "usage_sections": usage_sections,
             "account_assignment_scope_enabled": account_assignment_scope_enabled,
+            "account_usage_percent": account_usage_percent,
             "source_assignment_scope_enabled": source_assignment_scope_enabled,
             "expires_at": expires_at,
             "is_active": is_active,
@@ -2726,6 +2728,27 @@ async def test_create_key_stores_empty_usage_sections() -> None:
         )
     )
     assert created.usage_sections == "upstream_limits,account_pool_usage"
+
+
+async def test_api_key_account_usage_percent_is_persisted_and_validated() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(name="share-key", allowed_models=None, account_usage_percent=50)
+    )
+
+    assert created.account_usage_percent == 50
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(account_usage_percent=None, account_usage_percent_set=True),
+    )
+    assert updated.account_usage_percent is None
+
+    with pytest.raises(ApiKeyValidationError, match="account_usage_percent"):
+        await service.create_key(
+            ApiKeyCreateData(name="invalid-share-key", allowed_models=None, account_usage_percent=101)
+        )
 
 
 async def test_update_key_usage_sections() -> None:

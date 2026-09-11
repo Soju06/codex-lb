@@ -366,6 +366,7 @@ class ApiKeysRepository:
         transport_policy_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
+        account_usage_percent: int | None | _Unset = _UNSET,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
@@ -409,6 +410,9 @@ class ApiKeysRepository:
         if account_assignment_scope_enabled is not _UNSET:
             assert isinstance(account_assignment_scope_enabled, bool)
             row.account_assignment_scope_enabled = account_assignment_scope_enabled
+        if account_usage_percent is not _UNSET:
+            assert account_usage_percent is None or isinstance(account_usage_percent, int)
+            row.account_usage_percent = account_usage_percent
         if source_assignment_scope_enabled is not _UNSET:
             assert isinstance(source_assignment_scope_enabled, bool)
             row.source_assignment_scope_enabled = source_assignment_scope_enabled

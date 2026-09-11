@@ -77,6 +77,7 @@ type ApiKeyCreateDraft = {
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
   applyToCodexModel: boolean;
+  accountUsagePercent: string;
 };
 
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
@@ -93,6 +94,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   trafficClass: "foreground",
   transportPolicyOverride: null,
   applyToCodexModel: false,
+  accountUsagePercent: "",
 };
 
 function apiKeyCreateDraftReducer(
@@ -121,6 +123,9 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
+      ...(draft.selectedAccountIds.length > 0
+        ? { accountUsagePercent: draft.accountUsagePercent ? Number(draft.accountUsagePercent) : null }
+        : {}),
       ...(draft.selectedSourceIds.length > 0 ? { assignedSourceIds: draft.selectedSourceIds } : {}),
       usageSections: draft.usageSections,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
@@ -191,6 +196,11 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             <div className="space-y-1">
               <p className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</p>
               <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="create-api-key-account-usage-percent" className="text-sm font-medium">{t("apiKeys.form.accountUsagePercent")}</label>
+              <Input id="create-api-key-account-usage-percent" type="number" min="1" max="100" disabled={draft.selectedAccountIds.length === 0} value={draft.accountUsagePercent} onChange={(event) => updateDraft({ accountUsagePercent: event.target.value })} />
             </div>
 
             <div className="space-y-1">

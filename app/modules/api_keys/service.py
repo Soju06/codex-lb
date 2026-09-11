@@ -94,6 +94,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         transport_policy_override: str | None | _Unset = ...,
         usage_sections: str | _Unset = ...,
         account_assignment_scope_enabled: bool | _Unset = ...,
+        account_usage_percent: int | None | _Unset = ...,
         source_assignment_scope_enabled: bool | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
@@ -286,6 +287,7 @@ class ApiKeyCreateData:
     usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
+    account_usage_percent: int | None = None
     assigned_source_ids: list[str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
@@ -318,6 +320,8 @@ class ApiKeyUpdateData:
     is_active_set: bool = False
     assigned_account_ids: list[str] | None = None
     assigned_account_ids_set: bool = False
+    account_usage_percent: int | None = None
+    account_usage_percent_set: bool = False
     assigned_source_ids: list[str] | None = None
     assigned_source_ids_set: bool = False
     limits: list[LimitRuleInput] | None = None
@@ -348,6 +352,7 @@ class ApiKeyData:
     account_assignment_scope_enabled: bool = False
     source_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
+    account_usage_percent: int | None = None
     assigned_source_ids: list[str] = field(default_factory=list)
     pooled_credits: "PooledCreditData | None" = None
 
@@ -485,6 +490,7 @@ class ApiKeysService:
         traffic_class = _normalize_traffic_class(payload.traffic_class)
         transport_policy_override = _normalize_transport_policy_override(payload.transport_policy_override)
         usage_sections = _normalize_usage_sections(payload.usage_sections)
+        account_usage_percent = _normalize_account_usage_percent(payload.account_usage_percent)
         _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
         _validate_reasoning_effort_policy(
             enforced_reasoning_effort=enforced_reasoning_effort,
@@ -502,6 +508,7 @@ class ApiKeysService:
             allowed_reasoning_efforts=_serialize_allowed_reasoning_efforts(allowed_reasoning_efforts),
             enforced_service_tier=enforced_service_tier,
             account_assignment_scope_enabled=bool(assigned_account_ids),
+            account_usage_percent=account_usage_percent,
             source_assignment_scope_enabled=bool(assigned_source_ids),
             traffic_class=traffic_class,
             transport_policy_override=transport_policy_override,
@@ -609,6 +616,9 @@ class ApiKeysService:
         else:
             assigned_account_ids = None
             account_assignment_scope_enabled = _UNSET
+        account_usage_percent: int | None | _Unset = _UNSET
+        if payload.account_usage_percent_set:
+            account_usage_percent = _normalize_account_usage_percent(payload.account_usage_percent)
         if payload.assigned_source_ids_set:
             assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
             source_assignment_scope_enabled: bool | _Unset = bool(assigned_source_ids)
@@ -721,6 +731,7 @@ class ApiKeysService:
                 transport_policy_override=transport_policy_override_update,
                 usage_sections=usage_sections,
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
+                account_usage_percent=account_usage_percent,
                 source_assignment_scope_enabled=source_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
                 is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
@@ -763,6 +774,7 @@ class ApiKeysService:
 
         if (
             payload.assigned_account_ids_set
+            or payload.account_usage_percent_set
             or payload.assigned_source_ids_set
             or limit_rows is not None
             or payload.name_set
@@ -1394,6 +1406,14 @@ def _normalize_name(name: str) -> str:
     return normalized
 
 
+def _normalize_account_usage_percent(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
+        raise ApiKeyValidationError("account_usage_percent must be an integer from 1 through 100")
+    return value
+
+
 _VALID_USAGE_SECTIONS = {"upstream_limits", "account_pool_usage"}
 _DEFAULT_USAGE_SECTIONS = "upstream_limits,account_pool_usage"
 
@@ -1846,6 +1866,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         account_assignment_scope_enabled=data.account_assignment_scope_enabled,
         source_assignment_scope_enabled=data.source_assignment_scope_enabled,
         assigned_account_ids=data.assigned_account_ids,
+        account_usage_percent=data.account_usage_percent,
         assigned_source_ids=data.assigned_source_ids,
         key=key,
     )
@@ -1886,6 +1907,7 @@ def _to_api_key_data(
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
         source_assignment_scope_enabled=getattr(row, "source_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
+        account_usage_percent=row.account_usage_percent,
         assigned_source_ids=[assignment.source_id for assignment in source_assignments],
         pooled_credits=pooled_credits,
     )

@@ -229,6 +229,7 @@ describe("ApiKeyCreateDialog", () => {
     await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }));
     await user.keyboard("{Escape}");
+    await user.type(screen.getByLabelText("Per-account local usage share (%)"), "50");
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => {
@@ -237,6 +238,7 @@ describe("ApiKeyCreateDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+    expect(payload.accountUsagePercent).toBe(50);
   });
 
   it("clears selected assigned accounts when the dialog is dismissed", async () => {

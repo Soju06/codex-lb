@@ -1670,6 +1670,10 @@ class ApiKey(Base):
             "allowed_reasoning_efforts IS NULL OR enforced_reasoning_effort IS NULL",
             name="ck_api_keys_reasoning_policy_exclusive",
         ),
+        CheckConstraint(
+            "account_usage_percent IS NULL OR (account_usage_percent >= 1 AND account_usage_percent <= 100)",
+            name="ck_api_keys_account_usage_percent_range",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1700,6 +1704,7 @@ class ApiKey(Base):
         server_default=false(),
         nullable=False,
     )
+    account_usage_percent: Mapped[int | None] = mapped_column(nullable=True)
     source_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

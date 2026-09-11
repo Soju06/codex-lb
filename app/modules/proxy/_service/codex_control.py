@@ -241,6 +241,12 @@ class _CodexControlMixin:
             sticky_seed_kind=affinity.seed_selection_kind,
             sticky_max_age_seconds=affinity.max_age_seconds,
             account_ids=scoped_account_ids,
+            api_key_id=api_key.id if api_key is not None else None,
+            api_key_account_usage_percent=(
+                api_key.account_usage_percent
+                if api_key is not None and api_key.account_assignment_scope_enabled
+                else None
+            ),
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             redact_sensitive_details=privacy_policy.redacts_sensitive_details,
             routing_strategy=_routing_strategy(settings),

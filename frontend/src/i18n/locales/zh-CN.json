@@ -216,6 +216,7 @@
   "apiKeys.form.allowedReasoningEfforts": "允许的推理强度",
   "apiKeys.form.applyToCodexModel": "应用到 codex /model",
   "apiKeys.form.assignedAccounts": "分配账户",
+  "apiKeys.form.accountUsagePercent": "每个账户的本地用量份额 (%)",
   "apiKeys.form.assignedModelSources": "分配 Model source",
   "apiKeys.form.currentUsage": "当前用量",
   "apiKeys.form.enforcedModel": "强制 Model",

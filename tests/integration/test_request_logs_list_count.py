@@ -348,3 +348,97 @@ async def test_list_recent_count_cache_uses_symbolic_timeframe_identity(
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", _capture)
         logs_repository_module._clear_recent_count_cache()
+
+
+@pytest.mark.asyncio
+async def test_source_filter_totals_bypass_the_demand_rollup(db_setup, monkeypatch):
+    """A `source` filter is not expressible on the demand rollup.
+
+    The rollup's grain carries no ``source`` column, so counting a source-filtered
+    listing from it would advertise the *unfiltered* total. The guard must send
+    such signatures down the exact raw path instead.
+    """
+    from app.modules.request_logs import repository as logs_repository_module
+
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 0.0)
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        for index, source in enumerate(("subscription_overflow", "subscription_overflow_pinned", None)):
+            await repo.add_log(
+                account_id=None,
+                request_id=f"req_demand_source_{index}",
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=1,
+                latency_ms=10,
+                status="success",
+                error_code=None,
+                source=source,
+                requested_at=now - timedelta(minutes=index),
+            )
+
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+        try:
+            statements.clear()
+            filtered = await repo.list_recent(limit=50, sources=["subscription_overflow"])
+            filtered_statements = list(statements)
+
+            statements.clear()
+            unfiltered = await repo.list_recent(limit=50)
+            unfiltered_statements = list(statements)
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    assert filtered.total == 1
+    assert unfiltered.total == 3
+    assert not any("request_demand_quarter_rollups" in statement for statement in filtered_statements)
+    assert any("count(" in statement.lower() and "FROM request_logs" in statement for statement in filtered_statements)
+    # Control: the same listing without the source filter still takes the rollup path.
+    assert any("request_demand_quarter_rollups" in statement for statement in unfiltered_statements)
+
+
+@pytest.mark.asyncio
+async def test_count_cache_key_separates_different_source_filters(db_setup, monkeypatch):
+    from app.modules.request_logs import repository as logs_repository_module
+
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    logs_repository_module._clear_recent_count_cache()
+    now = utcnow()
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        for index, source in enumerate(
+            (
+                "subscription_overflow",
+                "subscription_overflow_pinned",
+                "subscription_overflow_pinned",
+            )
+        ):
+            await repo.add_log(
+                account_id=None,
+                request_id=f"req_cache_source_{index}",
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=1,
+                latency_ms=10,
+                status="success",
+                error_code=None,
+                source=source,
+                requested_at=now - timedelta(minutes=index),
+            )
+
+        fresh = await repo.list_recent(limit=50, sources=["subscription_overflow"])
+        pinned = await repo.list_recent(limit=50, sources=["subscription_overflow_pinned"])
+        both = await repo.list_recent(
+            limit=50,
+            sources=["subscription_overflow", "subscription_overflow_pinned"],
+        )
+        unfiltered = await repo.list_recent(limit=50)
+
+    logs_repository_module._clear_recent_count_cache()
+    assert (fresh.total, pinned.total, both.total, unfiltered.total) == (1, 2, 3, 3)

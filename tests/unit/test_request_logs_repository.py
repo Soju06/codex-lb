@@ -82,6 +82,32 @@ async def test_add_log_persists_request_and_connection_kinds(db_setup) -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_log_listing_preserves_optional_affinity_metadata(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repository = RequestLogsRepository(session)
+        await repository.add_log(
+            account_id=None,
+            request_id="affinity-observed",
+            model="gpt-5.4",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            sticky_key_source="payload",
+            sticky_kind="prompt_cache",
+            sticky_key_hash="ba7816bf8f01cfea",
+        )
+    async with SessionLocal() as session:
+        result = await RequestLogsRepository(session).list_recent()
+        assert result.total == 1
+        assert result.logs[0].sticky_key_source == "payload"
+        assert result.logs[0].sticky_kind == "prompt_cache"
+        assert result.logs[0].sticky_key_hash == "ba7816bf8f01cfea"
+
+
+@pytest.mark.asyncio
 async def test_add_log_persists_normalized_conversation_id(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

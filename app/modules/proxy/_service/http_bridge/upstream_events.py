@@ -2710,6 +2710,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     error_message=error_message,
                     allow_unanchored_previous_response_error=is_previous_response_not_found_event,
                     prefer_draining_requests=anonymous_event_prefers_draining,
+                    event_type=event_type,
                 )
                 release_create_gate = False
             else:

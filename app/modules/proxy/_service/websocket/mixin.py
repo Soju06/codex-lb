@@ -473,6 +473,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
     _websocket_continuity_aliases_from_headers,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import (
     CAPABILITY_ROUTING_UNAVAILABLE_CODE,
@@ -757,6 +758,7 @@ def _websocket_archive_request_state_for_payload(
         previous_response_id_hint=_facade()._previous_response_id_from_not_found_message(error_message),
         error_message=error_message,
         allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
+        event_type=event_type,
     )
 
 
@@ -3165,6 +3167,7 @@ class _WebSocketMixin:
         synthesized_turn_state: str | None = None,
         capability_header_values: tuple[str, ...] | None = None,
     ) -> _PreparedWebSocketRequest:
+        """Validate a create frame, reserve usage, and prepare safe continuity metadata."""
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         refreshed_api_key = await proxy._refresh_websocket_api_key_policy(api_key)
@@ -3298,6 +3301,7 @@ class _WebSocketMixin:
                 continuity_state,
                 responses_payload=responses_payload,
                 codex_session_affinity=codex_session_affinity,
+                api_key_id=refreshed_api_key.id if refreshed_api_key is not None else None,
             )
         if session_anchor is not None:
             original_input_items = cast(list[JsonValue], responses_payload.input)
@@ -3498,6 +3502,7 @@ class _WebSocketMixin:
             prompt_cache_key_set=_prompt_cache_key_from_request_model(responses_payload) is not None,
         )
         request_state.affinity_policy = affinity_policy
+        request_state.affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity_policy)
 
         # First-turn ``input_file.file_id`` references must land on the
         # account that registered the upload (chatgpt-account-id-scoped).
@@ -5525,6 +5530,7 @@ class _WebSocketMixin:
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
                     allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
+                    event_type=event_type,
                 )
                 release_create_gate = False
             else:
@@ -6590,6 +6596,7 @@ class _WebSocketMixin:
             )
             try:
                 await proxy._write_request_log(
+                    affinity_observation=request_state.affinity_observation,
                     account_id=account_id_value,
                     api_key=api_key,
                     request_id=request_log_response_id,
@@ -6689,6 +6696,16 @@ class _WebSocketMixin:
                         account,
                         _stream_settlement_error_payload(settlement),
                         settlement.error_code or "upstream_error",
+                        # Evidence only, for the soft-overload window. On the
+                        # HTTP bridge a terminal ``error`` frame can carry the
+                        # upstream HTTP status, which the bridge already parsed
+                        # into this field; such a failure is not a status-less
+                        # terminal. It stays ``None`` for a direct WebSocket
+                        # terminal, which is the shape the window is for.
+                        # Forwarding it positionally would double-count the
+                        # reasoning-replay metric for a frame already counted at
+                        # ``_observe_terminal_stream_error_frame``.
+                        upstream_http_status=request_state.error_http_status_override,
                     )
                 except Exception:
                     _facade().logger.warning(
@@ -6745,6 +6762,7 @@ class _WebSocketMixin:
         if request_state.skip_request_log:
             return
         await proxy._write_request_log(
+            affinity_observation=request_state.affinity_observation,
             account_id=account_id,
             api_key=api_key,
             request_id=request_state.request_log_id or request_state.request_id,
@@ -7119,6 +7137,7 @@ class _WebSocketMixin:
                     )
             try:
                 await proxy._write_request_log(
+                    affinity_observation=request_state.affinity_observation,
                     account_id=account_id_value,
                     # HTTP-bridge callers fan a shared session failure out to
                     # requests from multiple API keys, so they pass api_key=None;

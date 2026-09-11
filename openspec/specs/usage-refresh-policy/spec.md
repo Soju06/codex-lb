@@ -2,7 +2,9 @@
 
 ## Purpose
 Define how background usage refresh reacts to auth-like failures without permanently hammering bad accounts.
+
 ## Requirements
+
 ### Requirement: Usage refresh cools down repeated auth-like failures
 
 Background usage refresh MUST apply a cooldown to accounts that repeatedly fail usage refresh with ambiguous `401` or `403` responses. Accounts in that cooldown window MUST be skipped until the cooldown expires or a later successful refresh clears it.
@@ -2207,3 +2209,17 @@ with zero configuration and MUST NOT require an operator setting.
 - **WHEN** two refreshes of that account observe `plan_type` `free` concurrently
 - **THEN** the recorded observation count reflects both observations rather than one
 
+### Requirement: Default account probe model selection
+Account probes without an explicit model MUST use the same ordered registry selection as Images: `gpt-5.6-luna`, then `gpt-5.5`, requiring nonempty plan visibility and no suppression, with `gpt-5.6-luna` as fallback. Explicit probe models MUST remain unchanged.
+
+#### Scenario: Cold registry prefers the current host
+- **WHEN** the registry uses the bootstrap catalog
+- **THEN** the internal model is `gpt-5.6-luna`
+
+#### Scenario: Preferred model unavailable in registry
+- **WHEN** only `gpt-5.5` has registry plan visibility without suppression
+- **THEN** the internal model is `gpt-5.5`
+
+#### Scenario: No candidate qualifies
+- **WHEN** neither candidate has plan visibility without suppression
+- **THEN** the selected host is `gpt-5.6-luna` and existing downstream error handling applies

@@ -56,6 +56,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
     _thread_codex_session_affinity,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
     resolve_required_account_id,
@@ -877,6 +878,7 @@ class _CompactMixin:
                 sticky_key_source = "payload"
         elif affinity.key:
             sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
         _maybe_log_proxy_request_shape(
             "compact",
             payload,
@@ -2143,6 +2145,7 @@ class _CompactMixin:
             usage = response.usage if response else None
             reasoning_effort = payload.reasoning.effort if payload.reasoning else None
             await proxy._write_request_log(
+                affinity_observation=affinity_observation,
                 account_id=account_id_value,
                 api_key=api_key,
                 request_id=request_id,

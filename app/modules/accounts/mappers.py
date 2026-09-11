@@ -45,6 +45,7 @@ def build_account_summaries(
     encryptor: TokenEncryptor,
     include_auth: bool = True,
     reset_credits_store: RateLimitResetCreditsStore | None = None,
+    redact_identity: bool = False,
 ) -> list[AccountSummary]:
     store = reset_credits_store or get_rate_limit_reset_credits_store()
     duplicate_keys = _duplicate_detection_keys_appearing_more_than_once(accounts)
@@ -61,9 +62,18 @@ def build_account_summaries(
             include_auth=include_auth,
             is_email_duplicate=_duplicate_detection_key(account) in duplicate_keys,
             reset_credits_snapshot=_reset_credits_snapshot_for_account(account, store),
+            redact_identity=redact_identity,
         )
         for account in accounts
     ]
+
+
+def mask_email(email: str) -> str:
+    """Keep the first character of the local part and the domain: ``a***@example.com``."""
+
+    local, sep, domain = email.partition("@")
+    prefix = local[:1] if local else ""
+    return f"{prefix}***{sep}{domain}" if sep else f"{prefix}***"
 
 
 def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) -> set[tuple[str, str, str | None]]:
@@ -108,8 +118,12 @@ def _account_to_summary(
     include_auth: bool = True,
     is_email_duplicate: bool = False,
     reset_credits_snapshot: RateLimitResetCreditsSnapshot | None = None,
+    redact_identity: bool = False,
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
+    # Principals without account write access see the account, its status and
+    # quota, but not who it belongs to upstream.
+    email = mask_email(account.email) if redact_identity else account.email
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
     effective_primary_usage, effective_secondary_usage = _effective_usage_windows(
         primary_usage,
@@ -252,12 +266,12 @@ def _account_to_summary(
 
     return AccountSummary(
         account_id=account.id,
-        chatgpt_account_id=account.chatgpt_account_id,
-        email=account.email,
+        chatgpt_account_id=None if redact_identity else account.chatgpt_account_id,
+        email=email,
         alias=account.alias,
-        display_name=account.alias or account.email,
-        workspace_id=account.workspace_id,
-        workspace_label=account.workspace_label,
+        display_name=account.alias or email,
+        workspace_id=None if redact_identity else account.workspace_id,
+        workspace_label=None if redact_identity else account.workspace_label,
         seat_type=account.seat_type,
         plan_type=plan_type,
         status=effective_status.value,

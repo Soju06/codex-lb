@@ -1594,7 +1594,51 @@ async def _close_http_bridge_session_resources(
         logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
     finally:
         session.account_lease = None
+    # Keep the durable bridge lease until pending terminal events have been
+    # appended and their asynchronous spool finalizers have committed. The
+    # finalizer is owner-fenced and would otherwise lose the lease during
+    # shutdown, leaving a complete transcript marked incomplete.
     durable_release_succeeded = durable_owner_epoch is None
+    upstream_reader = session.upstream_reader
+    if upstream_reader is not None:
+        if upstream_reader is asyncio.current_task():
+            session.upstream_reader = None
+        else:
+            await _await_cancelled_task(
+                upstream_reader,
+                label="http bridge upstream reader",
+                cleanup_tasks=service._background_cleanup_tasks,
+                scheduler=scheduler_for(service),
+            )
+            if session.upstream_reader is upstream_reader:
+                session.upstream_reader = None
+    try:
+        await session.upstream.close()
+    except Exception:
+        logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
+    pending_requests = getattr(session, "pending_requests", None)
+    pending_lock = getattr(session, "pending_lock", None)
+    response_create_gate = getattr(session, "response_create_gate", None)
+    if pending_requests is not None and pending_lock is not None:
+        async with pending_lock:
+            session.queued_request_count = 0
+        await service._fail_pending_websocket_requests(
+            account=session.account,
+            account_id_value=session.account.id,
+            pending_requests=pending_requests,
+            pending_lock=pending_lock,
+            error_code="stream_incomplete",
+            error_message="HTTP bridge session closed before response.completed",
+            api_key=None,
+            response_create_gate=response_create_gate,
+        )
+    event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    drain_terminal_finalizers = getattr(event_batcher, "drain_terminal_finalizers", None)
+    if callable(drain_terminal_finalizers):
+        try:
+            await drain_terminal_finalizers()
+        except Exception:
+            logger.warning("Failed to drain HTTP bridge terminal finalizers before lease release", exc_info=True)
     if durable_release_allowed:
         try:
             released = await service._durable_bridge.release_live_session(
@@ -1628,39 +1672,6 @@ async def _close_http_bridge_session_resources(
             owner_key,
             owner_epoch=durable_owner_epoch,
             preserve_response_ids=pending_denied_response_ids,
-        )
-    upstream_reader = session.upstream_reader
-    if upstream_reader is not None:
-        if upstream_reader is asyncio.current_task():
-            session.upstream_reader = None
-        else:
-            await _await_cancelled_task(
-                upstream_reader,
-                label="http bridge upstream reader",
-                cleanup_tasks=service._background_cleanup_tasks,
-                scheduler=scheduler_for(service),
-            )
-            if session.upstream_reader is upstream_reader:
-                session.upstream_reader = None
-    try:
-        await session.upstream.close()
-    except Exception:
-        logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
-    pending_requests = getattr(session, "pending_requests", None)
-    pending_lock = getattr(session, "pending_lock", None)
-    response_create_gate = getattr(session, "response_create_gate", None)
-    if pending_requests is not None and pending_lock is not None:
-        async with pending_lock:
-            session.queued_request_count = 0
-        await service._fail_pending_websocket_requests(
-            account=session.account,
-            account_id_value=session.account.id,
-            pending_requests=pending_requests,
-            pending_lock=pending_lock,
-            error_code="stream_incomplete",
-            error_message="HTTP bridge session closed before response.completed",
-            api_key=None,
-            response_create_gate=response_create_gate,
         )
     _log_http_bridge_event(
         "close",

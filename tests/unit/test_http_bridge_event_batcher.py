@@ -375,6 +375,30 @@ async def test_background_flushes_nonterminal_events_as_one_batch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_new_recovery_generation_clears_previous_overflow_marker() -> None:
+    """A replacement generation must not inherit the predecessor's dropped marker."""
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=1,
+    )
+    try:
+        await _enqueue(batcher, "first")
+        await _enqueue(batcher, "overflow")
+        assert batcher._dropped_operations == {"op-1"}
+
+        await _enqueue(batcher, "replacement", recovery_dispatch_count=1)
+        assert batcher._dropped_operations == set()
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["replacement"]]
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_chunk_mode_routes_batch_and_terminal_without_legacy_writes() -> None:
     """Chunk mode persists both event batches and terminals without calling legacy row writers."""
     durable = _FakeDurableBridge()
@@ -621,6 +645,47 @@ async def test_cancellation_resistant_terminal_append_does_not_extend_delivery_b
     finally:
         durable.release_append.set()
         await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_terminal_append_schedules_bounded_generation_cleanup() -> None:
+    """A timed-out nonzero generation keeps only a bounded late-event fence."""
+    durable = _CancellationResistantTerminalDurableBridge()
+    scheduler = VirtualScheduler(VirtualClock())
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+        terminal_append_timeout_seconds=0.01,
+        scheduler=scheduler,
+    )
+    try:
+        result = await batcher.append_terminal_event(
+            operation_id="op-1",
+            session_id="session-1",
+            instance_id="instance-1",
+            owner_epoch=1,
+            event_text="terminal",
+            max_bytes=1024,
+            state="completed",
+            expected_recovery_dispatch_count=1,
+        )
+        assert result.persisted is False
+        assert result.settlement_required is True
+        assert batcher._operation_generations == {"op-1": 1}
+        assert batcher._generation_cleanup_tasks.keys() == {"op-1"}
+
+        late_tasks = tuple(batcher._terminal_append_tasks)
+        durable.release_append.set()
+        await asyncio.gather(*late_tasks)
+        await scheduler.drain()
+        await scheduler.advance(300.0)
+        assert batcher._operation_generations == {}
+        assert batcher._generation_cleanup_tasks == {}
+    finally:
+        durable.release_append.set()
+        await batcher.close()
+        await scheduler.cancel_owned_tasks()
 
 
 @pytest.mark.asyncio
@@ -975,6 +1040,40 @@ async def test_close_owns_terminal_finalize_pending_past_bound(caplog: pytest.Lo
         assert batcher._terminal_finalize_tasks == set()
     finally:
         durable.finalize_stall.release.set()
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_caller_stays_tracked_until_finalizer_handoff() -> None:
+    """Shutdown tracking covers the caller window between append completion and finalizer scheduling."""
+    durable = _BlockingTerminalAppendDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+        terminal_append_timeout_seconds=1.0,
+    )
+    try:
+        append_task = asyncio.create_task(
+            batcher.append_terminal_event(
+                operation_id="op-1",
+                session_id="session-1",
+                instance_id="instance-1",
+                owner_epoch=1,
+                event_text="terminal",
+                max_bytes=1024,
+                state="completed",
+            )
+        )
+        await asyncio.wait_for(durable.terminal_started.wait(), timeout=1.0)
+        assert len(batcher._terminal_append_callers) == 1
+        durable.release_terminal.set()
+        result = await asyncio.wait_for(append_task, timeout=1.0)
+        assert result.persisted is True
+        assert batcher._terminal_append_callers == set()
+        await batcher.close()
+    finally:
+        durable.release_terminal.set()
+        await batcher.close()
 
 
 @pytest.mark.asyncio

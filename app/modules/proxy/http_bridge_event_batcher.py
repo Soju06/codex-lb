@@ -141,6 +141,11 @@ class HttpBridgeOperationEventBatcher:
         self._task: asyncio.Task[None] | None = None
         self._terminal_append_tasks: set[asyncio.Task[TerminalOperationEventAppendResult]] = set()
         self._terminal_finalize_tasks: set[asyncio.Task[None]] = set()
+        # Keep terminal callers visible while they hand off an append result
+        # to the finalizer tracker.  Shutdown waits for this handoff so a
+        # finalizer cannot be created after the close drain snapshots tasks.
+        self._terminal_append_callers: set[asyncio.Task[Any]] = set()
+        self._closing = False
 
     async def _operation_lock_for(self, operation_id: str) -> asyncio.Lock:
         """Return an operation lock while synchronizing its map lifetime."""
@@ -274,6 +279,10 @@ class HttpBridgeOperationEventBatcher:
                 self._cancel_generation_cleanup_locked(operation_id)
                 if recovery_dispatch_count > current_generation:
                     self._operation_generations[operation_id] = recovery_dispatch_count
+                    # A newer recovery generation gets a fresh spool budget;
+                    # do not let an overflow marker from the predecessor
+                    # suppress its events.
+                    self._dropped_operations.discard(operation_id)
                 owner_context_changed = (
                     current_context is not None
                     and current_context.recovery_dispatch_count == recovery_dispatch_count
@@ -584,6 +593,43 @@ class HttpBridgeOperationEventBatcher:
         expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
     ) -> TerminalOperationEventAppendResult:
+        """Track a terminal caller so shutdown can finish finalizer handoff before draining."""
+        caller = asyncio.current_task()
+        async with self._lock:
+            if self._closing:
+                return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
+            if caller is not None:
+                self._terminal_append_callers.add(caller)
+        try:
+            return await self._append_terminal_event_impl(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                event_text=event_text,
+                max_bytes=max_bytes,
+                state=state,
+                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+                response_id=response_id,
+            )
+        finally:
+            if caller is not None:
+                async with self._lock:
+                    self._terminal_append_callers.discard(caller)
+
+    async def _append_terminal_event_impl(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        event_text: str,
+        max_bytes: int,
+        state: str,
+        expected_recovery_dispatch_count: int | None = None,
+        response_id: str | None = None,
+    ) -> TerminalOperationEventAppendResult:
         """Drain queued events and atomically append the terminal outcome."""
         async with self._flush_lock:
             async with self._lock:
@@ -835,6 +881,10 @@ class HttpBridgeOperationEventBatcher:
             self._closing_operations.discard(operation_id)
             self._contexts.pop(operation_id, None)
             self._dropped_operations.discard(operation_id)
+            generation = self._operation_generations.get(operation_id, 0)
+            if generation:
+                self._schedule_generation_cleanup_locked(operation_id, generation)
+            self._cleanup_operation_state_locked(operation_id)
 
     def _terminal_append_done(self, task: asyncio.Task[TerminalOperationEventAppendResult]) -> None:
         self._terminal_append_tasks.discard(task)
@@ -985,6 +1035,10 @@ class HttpBridgeOperationEventBatcher:
                 self._dropped_operations.discard(operation_id)
                 self._cleanup_operation_state_locked(operation_id)
 
+    async def drain_terminal_finalizers(self) -> None:
+        """Await tracked terminal spool finalizers without stopping the batcher."""
+        await self._drain_terminal_tasks(tuple(self._terminal_finalize_tasks), kind="finalize", cancel=False)
+
     async def fence_operation(self, *, operation_id: str, recovery_dispatch_count: int) -> None:
         """Drop queued events from an attempt after its operation is rebound.
 
@@ -1060,6 +1114,8 @@ class HttpBridgeOperationEventBatcher:
 
     async def close(self) -> None:
         """Cancel and await generation-expiry tasks and the background flusher owned by this batcher."""
+        async with self._lock:
+            self._closing = True
         cleanup_tasks = list(self._generation_cleanup_tasks.values())
         self._generation_cleanup_tasks.clear()
         for cleanup_task in cleanup_tasks:
@@ -1074,12 +1130,25 @@ class HttpBridgeOperationEventBatcher:
                 await task
             except asyncio.CancelledError:
                 pass
-        await self._drain_terminal_tasks(tuple(self._terminal_append_tasks), kind="append", cancel=True)
+        # Cancel known append tasks, then yield until callers that were between
+        # append completion and finalizer scheduling have handed off.  This
+        # closes the race where a finalizer would otherwise appear after the
+        # finalizer snapshot below.
+        while True:
+            await self._drain_terminal_tasks(tuple(self._terminal_append_tasks), kind="append", cancel=True)
+            current = asyncio.current_task()
+            async with self._lock:
+                active_callers = tuple(
+                    caller for caller in self._terminal_append_callers if caller is not current and not caller.done()
+                )
+            if not active_callers:
+                break
+            await asyncio.sleep(0)
         # A successful terminal append has already made the transcript eligible
         # for replay; cancelling its finalizer during shutdown would leave the
         # durable row permanently marked event_spool_complete=false. Finalizer
         # tasks are therefore drained to completion instead of cancelled.
-        await self._drain_terminal_tasks(tuple(self._terminal_finalize_tasks), kind="finalize", cancel=False)
+        await self.drain_terminal_finalizers()
 
     async def _drain_terminal_tasks(
         self,

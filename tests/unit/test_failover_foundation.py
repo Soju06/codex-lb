@@ -9,11 +9,15 @@ from app.core.balancer.logic import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
+    MAX_ACCOUNT_ATTEMPTS_CEILING,
     ROUTING_POLICY_BURN_FIRST,
     AccountState,
+    FailoverAction,
+    FailoverOutcome,
     burst_same_account_backoff_seconds,
     evaluate_health_tier,
     failover_decision,
+    failover_outcome,
     select_account,
 )
 from app.core.balancer.types import FailureClass, UpstreamError
@@ -21,6 +25,10 @@ from app.db.models import AccountStatus
 from app.modules.proxy.helpers import classify_upstream_failure, is_upstream_burst_rejection
 
 pytestmark = pytest.mark.unit
+
+# The account count of the largest fleet this proxy is deployed on, which the
+# walk has to be able to reach the end of.
+LARGEST_DEPLOYED_ACCOUNT_POOL = 28
 
 
 class TestClassifyUpstreamFailure:
@@ -240,7 +248,7 @@ class TestFailoverDecision:
             failover_decision(
                 failure_class="rate_limit",
                 downstream_visible=True,
-                candidates_remaining=5,
+                more_candidates_possible=True,
             )
             == "surface"
         )
@@ -250,7 +258,7 @@ class TestFailoverDecision:
             failover_decision(
                 failure_class="rate_limit",
                 downstream_visible=False,
-                candidates_remaining=0,
+                more_candidates_possible=False,
             )
             == "surface"
         )
@@ -260,7 +268,7 @@ class TestFailoverDecision:
             failover_decision(
                 failure_class="rate_limit",
                 downstream_visible=False,
-                candidates_remaining=2,
+                more_candidates_possible=True,
             )
             == "failover_next"
         )
@@ -270,7 +278,7 @@ class TestFailoverDecision:
             failover_decision(
                 failure_class="quota",
                 downstream_visible=False,
-                candidates_remaining=1,
+                more_candidates_possible=True,
             )
             == "failover_next"
         )
@@ -280,7 +288,7 @@ class TestFailoverDecision:
             failover_decision(
                 failure_class="retryable_transient",
                 downstream_visible=False,
-                candidates_remaining=1,
+                more_candidates_possible=True,
             )
             == "failover_next"
         )
@@ -290,7 +298,7 @@ class TestFailoverDecision:
             failover_decision(
                 failure_class="non_retryable",
                 downstream_visible=False,
-                candidates_remaining=5,
+                more_candidates_possible=True,
             )
             == "surface"
         )
@@ -301,7 +309,7 @@ class TestFailoverDecision:
                 failover_decision(
                     failure_class=fc,
                     downstream_visible=True,
-                    candidates_remaining=10,
+                    more_candidates_possible=True,
                 )
                 == "surface"
             )
@@ -548,7 +556,7 @@ class TestFailoverDecisionOwnerBound:
             failover_decision(
                 failure_class=failure_class,
                 downstream_visible=False,
-                candidates_remaining=5,
+                more_candidates_possible=True,
                 owner_bound=True,
             )
             == "surface"
@@ -559,7 +567,7 @@ class TestFailoverDecisionOwnerBound:
             failover_decision(
                 failure_class="retryable_transient",
                 downstream_visible=False,
-                candidates_remaining=0,
+                more_candidates_possible=False,
                 owner_bound=True,
                 same_account_retry_available=True,
             )
@@ -571,7 +579,7 @@ class TestFailoverDecisionOwnerBound:
             failover_decision(
                 failure_class="retryable_transient",
                 downstream_visible=True,
-                candidates_remaining=3,
+                more_candidates_possible=True,
                 owner_bound=True,
                 same_account_retry_available=True,
             )
@@ -583,7 +591,7 @@ class TestFailoverDecisionOwnerBound:
             failover_decision(
                 failure_class="retryable_transient",
                 downstream_visible=False,
-                candidates_remaining=2,
+                more_candidates_possible=True,
                 owner_bound=False,
                 same_account_retry_available=True,
             )
@@ -593,7 +601,7 @@ class TestFailoverDecisionOwnerBound:
             failover_decision(
                 failure_class="retryable_transient",
                 downstream_visible=False,
-                candidates_remaining=0,
+                more_candidates_possible=False,
                 owner_bound=False,
                 same_account_retry_available=True,
             )
@@ -601,7 +609,8 @@ class TestFailoverDecisionOwnerBound:
         )
 
     def test_defaults_keep_legacy_positional_free_callers(self) -> None:
-        # websocket/mixin.py and compact.py call without the new keywords.
+        # The deprecated count alone, with the owner-bound keywords left at
+        # their defaults, still decides.
         assert (
             failover_decision(
                 failure_class="rate_limit",
@@ -609,6 +618,204 @@ class TestFailoverDecisionOwnerBound:
                 candidates_remaining=1,
             )
             == "failover_next"
+        )
+
+
+class TestFailoverDecisionPoolShaped:
+    """The walk is bounded by the pool, so the decision reads a predicate, not a countdown."""
+
+    @pytest.mark.parametrize("failure_class", ["rate_limit", "quota", "retryable_transient"])
+    def test_a_usable_sibling_keeps_the_walk_going(self, failure_class: FailureClass) -> None:
+        assert (
+            failover_decision(
+                failure_class=failure_class,
+                downstream_visible=False,
+                more_candidates_possible=True,
+            )
+            == "failover_next"
+        )
+
+    @pytest.mark.parametrize("failure_class", ["rate_limit", "quota", "retryable_transient"])
+    def test_an_exhausted_pool_surfaces(self, failure_class: FailureClass) -> None:
+        assert (
+            failover_decision(
+                failure_class=failure_class,
+                downstream_visible=False,
+                more_candidates_possible=False,
+            )
+            == "surface"
+        )
+
+    @pytest.mark.parametrize("more_candidates_possible", [True, False])
+    def test_non_retryable_is_answered_before_the_candidate_question(self, more_candidates_possible: bool) -> None:
+        # A bad request is bad on every account, so the pool's size never
+        # enters the decision.
+        assert (
+            failover_decision(
+                failure_class="non_retryable",
+                downstream_visible=False,
+                more_candidates_possible=more_candidates_possible,
+            )
+            == "surface"
+        )
+
+    def test_missing_candidate_answer_is_a_programming_error(self) -> None:
+        with pytest.raises(TypeError):
+            failover_decision(failure_class="rate_limit", downstream_visible=False)
+
+    def test_the_runaway_fence_sits_above_the_largest_pool_a_deployment_runs(self) -> None:
+        # A fence at or below the pool size is not a fence: it is the fixed
+        # attempt cap again under another name, giving up on the request while
+        # the pool still holds accounts it has not tried. Every account of the
+        # largest fleet has to be attemptable before it fires.
+        assert MAX_ACCOUNT_ATTEMPTS_CEILING > LARGEST_DEPLOYED_ACCOUNT_POOL
+
+
+class TestFailoverOutcomeNamesTheEnding:
+    """A walk that ends without a response has to say which bound ended it."""
+
+    def test_a_bad_request_and_an_exhausted_pool_are_different_endings(self) -> None:
+        # Both surface, and collapsing them into that one word is what leaves
+        # an operator unable to tell a bad request from an exhausted fleet --
+        # and what would let a bad request be answered with the pool's
+        # usage-limit rejection and a reset deadline that cannot help it.
+        bad_request = failover_outcome(
+            failure_class="non_retryable",
+            downstream_visible=False,
+            more_candidates_possible=False,
+        )
+        exhausted_pool = failover_outcome(
+            failure_class="rate_limit",
+            downstream_visible=False,
+            more_candidates_possible=False,
+        )
+
+        assert bad_request.action == exhausted_pool.action == "surface"
+        assert bad_request.ended_by == "non_retryable"
+        assert exhausted_pool.ended_by == "pool_exhausted"
+
+    @pytest.mark.parametrize("more_candidates_possible", [True, False])
+    def test_a_bad_request_ends_the_walk_whatever_the_pool_holds(self, more_candidates_possible: bool) -> None:
+        outcome = failover_outcome(
+            failure_class="non_retryable",
+            downstream_visible=False,
+            more_candidates_possible=more_candidates_possible,
+        )
+
+        assert outcome == FailoverOutcome(action="surface", ended_by="non_retryable")
+
+    @pytest.mark.parametrize("failure_class", ["rate_limit", "quota", "retryable_transient"])
+    def test_a_continued_walk_has_not_ended(self, failure_class: FailureClass) -> None:
+        outcome = failover_outcome(
+            failure_class=failure_class,
+            downstream_visible=False,
+            more_candidates_possible=True,
+        )
+
+        assert outcome == FailoverOutcome(action="failover_next", ended_by=None)
+
+    @pytest.mark.parametrize("same_account_retry_available", [True, False])
+    def test_an_owner_bound_request_never_walked_so_nothing_ended_it(self, same_account_retry_available: bool) -> None:
+        outcome = failover_outcome(
+            failure_class="retryable_transient",
+            downstream_visible=False,
+            more_candidates_possible=False,
+            owner_bound=True,
+            same_account_retry_available=same_account_retry_available,
+        )
+
+        assert outcome.ended_by is None
+
+    def test_a_failure_the_client_has_already_seen_part_of_ends_no_walk(self) -> None:
+        outcome = failover_outcome(
+            failure_class="rate_limit",
+            downstream_visible=True,
+            more_candidates_possible=False,
+        )
+
+        assert outcome == FailoverOutcome(action="surface", ended_by=None)
+
+    @pytest.mark.parametrize(
+        ("failure_class", "downstream_visible", "more_candidates_possible", "owner_bound"),
+        [
+            ("rate_limit", False, True, False),
+            ("rate_limit", False, False, False),
+            ("non_retryable", False, True, False),
+            ("retryable_transient", True, True, False),
+            ("retryable_transient", False, False, True),
+        ],
+    )
+    def test_the_action_is_exactly_what_the_decision_answers(
+        self,
+        failure_class: FailureClass,
+        downstream_visible: bool,
+        more_candidates_possible: bool,
+        owner_bound: bool,
+    ) -> None:
+        # Naming the ending must not move a single caller's action.
+        outcome = failover_outcome(
+            failure_class=failure_class,
+            downstream_visible=downstream_visible,
+            more_candidates_possible=more_candidates_possible,
+            owner_bound=owner_bound,
+        )
+        decision = failover_decision(
+            failure_class=failure_class,
+            downstream_visible=downstream_visible,
+            more_candidates_possible=more_candidates_possible,
+            owner_bound=owner_bound,
+        )
+
+        assert outcome.action == decision
+
+
+class TestFailoverDecisionDeprecatedCandidatesRemaining:
+    """``candidates_remaining`` survives one release as the deprecated spelling."""
+
+    @pytest.mark.parametrize(
+        ("candidates_remaining", "expected"),
+        [(5, "failover_next"), (1, "failover_next"), (0, "surface"), (-1, "surface")],
+    )
+    def test_count_is_read_as_a_predicate(self, candidates_remaining: int, expected: FailoverAction) -> None:
+        assert (
+            failover_decision(
+                failure_class="rate_limit",
+                downstream_visible=False,
+                candidates_remaining=candidates_remaining,
+            )
+            == expected
+        )
+
+    def test_explicit_predicate_wins_over_the_deprecated_count(self) -> None:
+        assert (
+            failover_decision(
+                failure_class="rate_limit",
+                downstream_visible=False,
+                more_candidates_possible=True,
+                candidates_remaining=0,
+            )
+            == "failover_next"
+        )
+        assert (
+            failover_decision(
+                failure_class="rate_limit",
+                downstream_visible=False,
+                more_candidates_possible=False,
+                candidates_remaining=3,
+            )
+            == "surface"
+        )
+
+    def test_owner_bound_shim_call_keeps_retrying_the_same_account(self) -> None:
+        assert (
+            failover_decision(
+                failure_class="retryable_transient",
+                downstream_visible=False,
+                candidates_remaining=0,
+                owner_bound=True,
+                same_account_retry_available=True,
+            )
+            == "retry_same_account"
         )
 
 

@@ -4660,16 +4660,20 @@ class _WebSocketMixin:
         else:
             classified = await proxy._handle_websocket_connect_error(account, exc)
             failure_class = classified["failure_class"] if isinstance(classified, dict) else "non_retryable"
-        candidates_remaining = max_attempts - attempt
+        more_candidates_possible = attempt < max_attempts
         if confirmed_pre_dispatch:
-            action = "surface" if require_preferred_account or candidates_remaining <= 0 else "failover_next"
-        elif exc.status_code == 401 and candidates_remaining > 0:
+            action = "surface" if require_preferred_account or not more_candidates_possible else "failover_next"
+        elif exc.status_code == 401 and more_candidates_possible:
             action = "failover_next"
         elif deterministic_failover_enabled:
+            # The connect path has no same-account burst retry to offer, so a
+            # preferred-account requirement keeps being answered by the
+            # confirmed-pre-dispatch branch and by selection itself rather than
+            # by ``owner_bound`` here.
             action = failover_decision(
                 failure_class=failure_class,
                 downstream_visible=False,
-                candidates_remaining=candidates_remaining,
+                more_candidates_possible=more_candidates_possible,
             )
         else:
             action = "surface"

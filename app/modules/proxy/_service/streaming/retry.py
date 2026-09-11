@@ -2609,7 +2609,7 @@ class _StreamingRetryMixin:
                                     action = failover_decision(
                                         failure_class=classified["failure_class"],
                                         downstream_visible=settlement.downstream_visible,
-                                        candidates_remaining=max_attempts - attempt - 1,
+                                        more_candidates_possible=attempt < max_attempts - 1,
                                         owner_bound=_stream_owner_bound_to(account),
                                         same_account_retry_available=_burst_same_account_retry_available(
                                             account, burst=burst
@@ -3320,23 +3320,23 @@ class _StreamingRetryMixin:
                                 http_status=retry_exc.status_code,
                                 phase="first_event",
                             )
-                            candidates_remaining = max_attempts - attempt - 1
+                            more_candidates_possible = attempt < max_attempts - 1
                             burst = is_upstream_burst_rejection(
                                 failure_class=classified["failure_class"],
                                 http_status=retry_exc.status_code,
                             )
-                            if retry_exc.status_code == 401 and candidates_remaining > 0:
+                            if retry_exc.status_code == 401 and more_candidates_possible:
                                 action = "failover_next"
                             elif resilience.deterministic_failover_enabled:
                                 action = failover_decision(
                                     failure_class=classified["failure_class"],
                                     downstream_visible=False,
-                                    candidates_remaining=candidates_remaining,
+                                    more_candidates_possible=more_candidates_possible,
                                     owner_bound=_stream_owner_bound_to(account),
                                     # The post-refresh redispatch re-enters the
                                     # attempt loop, so it also needs an attempt.
                                     same_account_retry_available=(
-                                        candidates_remaining > 0
+                                        more_candidates_possible
                                         and _burst_same_account_retry_available(account, burst=burst)
                                     ),
                                 )

@@ -20,6 +20,7 @@ from tests.integration.test_affinity_identity_migration import (
 pytestmark = pytest.mark.integration
 _AFFINITY = "20260910_200000_merge_affinity_identity_heads"
 _INVITES = "20260909_040000_add_dashboard_user_invites"
+_MERGE = "20260910_220000_merge_affinity_invite_heads"
 _HEAD = "20260911_040000_merge_affinity_model_source_pin_heads"
 _TABLES = ("accounts", "request_logs", "api_keys", "dashboard_settings", "audit_logs", "dashboard_user_invites")
 
@@ -72,14 +73,19 @@ def test_populated_invite_history_survives_merge_reversal(migration_url: str, st
             before.update({table: _rows(connection, table) for table in _TABLES[:-1]})
         script = ScriptDirectory.from_config(_build_alembic_config(url))
         assert script.get_heads() == [_HEAD]
-        assert script.get_revision(_HEAD).down_revision == (_AFFINITY, _INVITES)
+        assert script.get_revision(_MERGE).down_revision == (_AFFINITY, _INVITES)
         assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _HEAD
         assert check_schema_drift(url) == ()
         with engine.connect() as connection:
             for table, rows in before.items():
                 after = _rows(connection, table)
                 assert sorted([{key: row[key] for key in rows[0]} for row in after], key=repr) == sorted(rows, key=repr)
-            assert sorted(_rows(connection, "dashboard_user_invites"), key=repr) == sorted(invites, key=repr)
+            # Later revisions add invite columns, so compare the captured
+            # columns only: the claim is that no seeded value was lost.
+            invited = _rows(connection, "dashboard_user_invites")
+            if invites:
+                invited = [{key: row[key] for key in invites[0]} for row in invited]
+            assert sorted(invited, key=repr) == sorted(invites, key=repr)
             if starting_revision == _INVITES:
                 log = _rows(connection, "request_logs")[0]
                 assert (log["sticky_key_source"], log["sticky_kind"], log["sticky_key_hash"]) == (None, None, None)
@@ -87,10 +93,14 @@ def test_populated_invite_history_survives_merge_reversal(migration_url: str, st
             preserved.update({table: _rows(connection, table) for table in _TABLES})
         command.downgrade(_build_alembic_config(url), _AFFINITY)
         with engine.connect() as connection:
-            assert set(connection.execute(text("SELECT version_num FROM alembic_version")).scalars()) == {
-                _AFFINITY,
-                _INVITES,
-            }
+            # The merge and everything above it is reversed. Since a later
+            # merge revision now sits on top, the walk down to ``_AFFINITY``
+            # also unwinds the invite parent instead of leaving it stamped, and
+            # a branch that does not descend from the merge keeps its own head.
+            # Assert the reversal, not the whole stamped set.
+            stamped = set(connection.execute(text("SELECT version_num FROM alembic_version")).scalars())
+            assert _AFFINITY in stamped
+            assert stamped.isdisjoint({_MERGE, _HEAD})
             for table, rows in preserved.items():
                 assert sorted(_rows(connection, table), key=repr) == sorted(rows, key=repr)
         assert check_schema_drift(url) == ()

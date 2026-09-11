@@ -210,7 +210,12 @@ def test_populated_upgrade_and_merge_reversal_preserve_both_histories(
         assert check_schema_drift(url) == ()
         with engine.connect() as connection:
             for table, rows in preserved.items():
-                assert sorted(_rows(connection, table), key=repr) == sorted(rows, key=repr)
+                # The snapshot was taken at ``_HEAD``; revisions between it and
+                # the current head legitimately add columns, so compare the
+                # captured columns only -- the claim is that no seeded value was
+                # lost, not that the schema stopped growing.
+                after = [{key: row[key] for key in rows[0]} for row in _rows(connection, table)] if rows else []
+                assert sorted(after, key=repr) == sorted(rows, key=repr)
     finally:
         engine.dispose()
 

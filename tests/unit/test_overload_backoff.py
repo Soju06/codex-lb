@@ -26,6 +26,7 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     OVERLOAD_TRIP_COUNT,
     OVERLOAD_WINDOW_SECONDS,
     OverloadIsolationPolicy,
+    deterministic_isolation_substitute,
     filter_overload_backoff_candidates,
     overload_backoff_active,
     overload_backoff_seconds,
@@ -508,6 +509,29 @@ def test_sticky_owner_reroute_pool_requires_isolation_and_an_overload_free_sibli
     assert sticky_owner_isolation_reroute_pool(states, isolated, owner_account_id="hot", now=now + 1801.0) is None
 
 
+def test_deterministic_substitute_is_stable_and_order_independent() -> None:
+    pool = [_state("b"), _state("c"), _state("a"), _state("owner")]
+    first = deterministic_isolation_substitute(pool, sticky_key="thread-1", owner_account_id="owner")
+    assert first is not None and first.account_id != "owner"
+    # Same key, same pool, any candidate order -> the same substitute, so two
+    # replicas that observe the same overload-free pool converge without
+    # shared state.
+    shuffled = [_state("owner"), _state("c"), _state("a"), _state("b")]
+    again = deterministic_isolation_substitute(shuffled, sticky_key="thread-1", owner_account_id="owner")
+    assert again is not None and again.account_id == first.account_id
+    # Distinct threads spread over the siblings instead of herding.
+    picks = [
+        deterministic_isolation_substitute(pool, sticky_key=f"thread-{index}", owner_account_id="owner")
+        for index in range(50)
+    ]
+    assert {pick.account_id for pick in picks if pick is not None} == {"a", "b", "c"}
+
+
+def test_deterministic_substitute_returns_none_without_a_sibling() -> None:
+    assert deterministic_isolation_substitute([], sticky_key="k", owner_account_id="owner") is None
+    assert deterministic_isolation_substitute([_state("owner")], sticky_key="k", owner_account_id="owner") is None
+
+
 async def _select_sticky_outcome(
     balancer: LoadBalancer,
     states: list[AccountState],
@@ -515,12 +539,13 @@ async def _select_sticky_outcome(
     *,
     kind: StickySessionKind = StickySessionKind.PROMPT_CACHE,
     initial_preferred_account_id: str | None = None,
+    sticky_key: str = "owned-key",
 ):
     account_map = {state.account_id: cast(Account, AsyncMock()) for state in states}
     return await balancer._select_with_stickiness(
         states=states,
         account_map=account_map,
-        sticky_key="owned-key",
+        sticky_key=sticky_key,
         sticky_kind=kind,
         reallocate_sticky=False,
         sticky_max_age_seconds=600 if kind == StickySessionKind.PROMPT_CACHE else None,
@@ -537,7 +562,12 @@ async def _select_sticky_outcome(
     "kind",
     [StickySessionKind.PROMPT_CACHE, StickySessionKind.STICKY_THREAD, StickySessionKind.CODEX_SESSION],
 )
-async def test_isolated_soft_sticky_owner_is_rerouted_and_rebound(kind: StickySessionKind) -> None:
+async def test_isolated_soft_sticky_owner_is_served_by_a_substitute_without_rebinding(
+    kind: StickySessionKind,
+) -> None:
+    """The release is request-local: the sibling serves the turn and the
+    sticky row keeps pointing at the isolated owner, so the thread returns
+    home when isolation lifts instead of gaining a permanent new owner."""
     clock = VirtualClock(epoch_value=2_000_000_000.0)
     balancer = LoadBalancer(_mock_repo_factory, clock=clock)
     balancer._runtime["hot"] = _isolated_runtime(clock.time())
@@ -545,11 +575,67 @@ async def test_isolated_soft_sticky_owner_is_rerouted_and_rebound(kind: StickySe
     outcome = await _select_sticky_outcome(balancer, [_state("hot"), _state("clean")], _sticky_repo("hot"), kind=kind)
     assert outcome.selection.account is not None
     assert outcome.selection.account.account_id == "clean"
-    # The session is rebound to the replacement, not left flapping back to the
-    # isolated owner on every request.
-    assert outcome.mutation is not None and outcome.mutation.account_id == "clean"
+    # No delete and no rebind: the mapping survives the isolation episode.
+    assert outcome.mutation is None
     assert outcome.effective_states is not None
     assert [state.account_id for state in outcome.effective_states] == ["clean"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    [StickySessionKind.PROMPT_CACHE, StickySessionKind.STICKY_THREAD, StickySessionKind.CODEX_SESSION],
+)
+async def test_isolated_soft_sticky_owner_keeps_one_substitute_across_turns(kind: StickySessionKind) -> None:
+    """Substitute stability is the correctness condition for request-local
+    release: the pick is repeated every turn, so a weighted-random draw would
+    bounce the thread across siblings and be worse than the single rebind it
+    replaces."""
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = _isolated_runtime(clock.time())
+    states = [_state("hot"), _state("clean-a"), _state("clean-b"), _state("clean-c"), _state("clean-d")]
+
+    chosen = set()
+    for _ in range(24):
+        outcome = await _select_sticky_outcome(balancer, states, _sticky_repo("hot"), kind=kind)
+        assert outcome.selection.account is not None
+        assert outcome.mutation is None
+        chosen.add(outcome.selection.account.account_id)
+    assert len(chosen) == 1, chosen
+    assert "hot" not in chosen
+
+    # Distinct threads are spread across the siblings rather than herded onto
+    # a single "best" account, so retention does not concentrate load.
+    spread = set()
+    for index in range(40):
+        outcome = await _select_sticky_outcome(
+            balancer,
+            states,
+            _sticky_repo("hot"),
+            kind=kind,
+            sticky_key=f"thread-{index}",
+        )
+        assert outcome.selection.account is not None
+        spread.add(outcome.selection.account.account_id)
+    assert len(spread) > 1, spread
+
+
+@pytest.mark.asyncio
+async def test_isolated_owner_that_is_no_longer_recoverable_is_released_on_the_next_turn() -> None:
+    """Availability bound: retention only ever applies to an owner that can
+    come back. A PAUSED/DEACTIVATED owner is abandoned on the very next turn
+    rather than held for the isolation window."""
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["dead"] = _isolated_runtime(clock.time())
+    dead = AccountState(account_id="dead", status=AccountStatus.DEACTIVATED, used_percent=0.0)
+
+    outcome = await _select_sticky_outcome(balancer, [dead, _state("clean")], _sticky_repo("dead"))
+    assert outcome.selection.account is not None
+    assert outcome.selection.account.account_id == "clean"
+    # Rebound, not retained: the mapping is released within one turn.
+    assert outcome.mutation is not None and outcome.mutation.account_id == "clean"
 
 
 @pytest.mark.asyncio
@@ -715,7 +801,8 @@ async def test_isolated_bare_session_owner_is_kept_when_the_only_sibling_is_at_c
     for lease in [*saturated, selected.lease]:
         await balancer.release_account_lease(lease)
 
-    # With capacity on the sibling the isolated owner is released and rebound.
+    # With capacity on the sibling the isolated owner is released for this
+    # request only -- the sibling serves the turn, the mapping stays put.
     moved = await balancer.select_account(
         sticky_key=_codex_session_selection_key(raw_session),
         sticky_kind=StickySessionKind.CODEX_SESSION,
@@ -727,15 +814,16 @@ async def test_isolated_bare_session_owner_is_kept_when_the_only_sibling_is_at_c
     )
     assert moved.account is not None, moved.error_message
     assert moved.account.id == alternate.id
-    assert any(account_id == alternate.id for _, account_id, _ in sticky_repo.upserts)
+    assert sticky_repo.upserts == []
     await balancer.release_account_lease(moved.lease)
 
 
 @pytest.mark.asyncio
-async def test_isolated_and_capped_bare_session_owner_is_rebound_instead_of_request_local_spillover() -> None:
-    """Request path: cap spillover alone preserves the mapping (the session
-    returns to its owner when the cap clears); an owner that is also isolated
-    is rebound to the sibling so later turns do not bounce across accounts."""
+async def test_isolated_and_capped_bare_session_owner_keeps_its_request_local_spillover() -> None:
+    """Request path: cap spillover preserves the mapping (the session returns
+    to its owner when the cap clears) and overload isolation is request-local
+    for the same reason, so an owner that is both capped and isolated keeps
+    its mapping instead of being stranded on the sibling."""
     from tests.unit.test_load_balancer_concurrency import (
         _codex_session_selection_key,
         _make_cap_spillover_balancer,
@@ -764,13 +852,61 @@ async def test_isolated_and_capped_bare_session_owner_is_rebound_instead_of_requ
     assert sticky_repo.upserts == []
     await balancer.release_account_lease(spilled.lease)
 
-    # Capped and isolated: the fallback is rebound to the sibling.
+    # Capped and isolated: still request-local, still no write.
     _isolate(balancer, owner.id)
-    rebound = await _select()
-    assert rebound.account is not None and rebound.account.id == alternate.id
-    assert any(account_id == alternate.id for _, account_id, _ in sticky_repo.upserts)
-    for lease in [*saturated, rebound.lease]:
+    retained = await _select()
+    assert retained.account is not None and retained.account.id == alternate.id
+    assert sticky_repo.upserts == []
+    for lease in [*saturated, retained.lease]:
         await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_isolated_hard_sticky_owner_is_not_released_or_rebound() -> None:
+    """Hard continuity owners keep their existing semantics. A hard Codex
+    session mapping is an ownership constraint, not a locality hint, so
+    overload isolation must neither serve it elsewhere nor touch its row."""
+    from tests.unit.test_load_balancer_concurrency import _make_cap_spillover_balancer
+
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("iso-hard-owner")
+    assert alternate is not None
+    _isolate(balancer, owner.id)
+    sticky_repo.account_ids_by_key = {"hard-session": owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key="hard-session",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert selected.account is not None, selected.error_message
+    assert selected.account.id == owner.id
+    assert sticky_repo.upserts == []
+    assert sticky_repo.deleted == []
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_request_local_isolation_release_is_logged_as_retained(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The diagnostic is what makes the accounts-per-conversation change
+    attributable: it says the turn went to a sibling without adding an owner."""
+    clock = VirtualClock(epoch_value=2_000_000_000.0)
+    balancer = LoadBalancer(_mock_repo_factory, clock=clock)
+    balancer._runtime["hot"] = _isolated_runtime(clock.time())
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.load_balancer")
+    outcome = await _select_sticky_outcome(balancer, [_state("hot"), _state("clean")], _sticky_repo("hot"))
+
+    assert outcome.mutation is None
+    messages = [record.getMessage() for record in caplog.records]
+    retained = [message for message in messages if "sticky_owner_overload_isolation_reroute" in message]
+    assert retained, messages
+    assert "mapping=retained" in retained[0]
+    assert "substitute=deterministic" in retained[0]
+    # Account identifiers must not leak onto this unflagged diagnostic.
+    assert "hot" not in retained[0] and "clean" not in retained[0]
 
 
 @pytest.mark.asyncio
@@ -810,7 +946,8 @@ async def test_budget_pressured_isolated_owner_is_released_with_the_secondary_bu
     )
     assert outcome.selection.account is not None
     assert outcome.selection.account.account_id == "safe"
-    assert outcome.mutation is not None and outcome.mutation.account_id == "safe"
+    # Request-local: the filter picks the substitute, not a new persisted owner.
+    assert outcome.mutation is None
 
 
 # --- burst cooldown (code-less upstream HTTP 429) ----------------------------

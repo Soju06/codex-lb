@@ -3240,7 +3240,7 @@ async def test_excluded_prompt_cache_owner_not_in_pool_is_rebound() -> None:
 
 
 @pytest.mark.asyncio
-async def test_isolated_and_capped_prompt_cache_owner_is_rebound() -> None:
+async def test_isolated_and_capped_prompt_cache_owner_keeps_its_mapping() -> None:
     balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-isolated-capped")
     assert alternate is not None
     thread_key = "thread-isolated-capped-key"
@@ -3258,7 +3258,10 @@ async def test_isolated_and_capped_prompt_cache_owner_is_rebound() -> None:
 
     assert selected.account is not None
     assert selected.account.id == alternate.id
-    assert sticky_repo.upserts == [(thread_key, alternate.id, StickySessionKind.PROMPT_CACHE)]
+    # Request-local release: the alternate serves the turn and the thread row
+    # still points at the isolated owner, so the thread returns home once
+    # isolation lifts instead of gaining a permanent new owner.
+    assert sticky_repo.upserts == []
     for lease in [*saturated_leases, selected.lease]:
         await balancer.release_account_lease(lease)
 

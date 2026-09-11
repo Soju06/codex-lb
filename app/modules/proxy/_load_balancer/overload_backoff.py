@@ -23,12 +23,25 @@ account with two escalation stages:
    churns warm sessions.
 2. **Isolation** (the configured trip level, sustained overload): the account
    is held out for a longer, operator-configured interval and established
-   *soft* sticky owners are rerouted as well. Only a soft sticky mapping is a
-   locality hint; every request that re-enters the pinned account is a fresh
-   upstream admission, so keeping the owner pinned just replays the rejection
-   wait per request. Hard continuity owners (``previous_response_id``, bridge
-   ownership, file pins) are resolved before soft selection and are never
-   moved by this module.
+   *soft* sticky owners are served by a sibling as well. Only a soft sticky
+   mapping is a locality hint; every request that re-enters the pinned
+   account is a fresh upstream admission, so keeping the owner pinned just
+   replays the rejection wait per request. Hard continuity owners
+   (``previous_response_id``, bridge ownership, file pins) are resolved
+   before soft selection and are never moved by this module.
+
+   The release is **request-local**: the sibling serves the turn while the
+   sticky row keeps pointing at the owner, so the thread returns home once
+   isolation lifts. Rebinding instead was measurably worse -- nothing ever
+   returned a rebound thread to its owner, so each isolation episode a
+   conversation touched added one more account to it permanently, and the
+   observed accounts-per-conversation factor rose from ~1.02 against a quiet
+   upstream to 2.29 on a healthy day and 3.45 during an incident. Because the
+   turn still goes to the sibling either way, retaining the mapping costs
+   nothing in availability. The substitute must be *stable* across turns for
+   this to hold (see ``deterministic_isolation_substitute``): a per-turn
+   random pick would bounce the thread across siblings and be worse than the
+   single rebind.
 
 In both stages the account is dropped from a candidate pool only while at
 least one other candidate remains, so the window can never empty the pool.
@@ -52,6 +65,7 @@ the burst path.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -323,3 +337,40 @@ def sticky_owner_isolation_reroute_pool(
     if pool is states:
         return None
     return pool
+
+
+def deterministic_isolation_substitute(
+    pool: list[AccountState],
+    *,
+    sticky_key: str,
+    owner_account_id: str,
+) -> AccountState | None:
+    """Stable per-thread substitute for an isolated *soft* sticky owner.
+
+    The isolation release is request-local -- the mapping stays on the owner
+    so the thread returns home when isolation lifts -- which means the
+    replacement is re-picked on *every* turn of the thread instead of once.
+    A weighted-random pick would therefore bounce the thread across siblings
+    turn after turn, which is strictly worse than the single rebind it
+    replaces. Hashing the sticky key over the sorted pool gives one substitute
+    per ``(thread, pool)`` pair, spreads distinct threads across the siblings
+    rather than herding every released thread onto the single best account,
+    and lets replicas that observe the same pool converge without shared
+    state.
+
+    Convergence is best-effort only: each replica keeps its own overload
+    window, so the pools themselves can differ and the same thread can hold a
+    different substitute per replica. That caps the fan-out at one substitute
+    per ``(replica, pool)`` instead of eliminating it.
+
+    Returns ``None`` when the pool holds no sibling. Callers must still put the
+    returned state through the real selector before using it, so the strategy,
+    health, quota and budget gates stay authoritative and this helper can only
+    ever express a *preference* among candidates the selector already accepts.
+    """
+    by_account_id = {state.account_id: state for state in pool if state.account_id != owner_account_id}
+    if not by_account_id:
+        return None
+    candidates = [by_account_id[account_id] for account_id in sorted(by_account_id)]
+    digest = hashlib.blake2b(sticky_key.encode("utf-8", "surrogatepass"), digest_size=8).digest()
+    return candidates[int.from_bytes(digest, "big") % len(candidates)]

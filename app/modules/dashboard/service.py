@@ -21,6 +21,7 @@ from app.modules.dashboard.schemas import (
     DashboardOverviewResponse,
     DashboardOverviewTimeframeKey,
     DashboardProjectionsResponse,
+    DashboardSubscriptionOverflow,
     DashboardUsageWindows,
     DepletionResponse,
     WeeklyCreditApiKeyAttribution,
@@ -162,6 +163,18 @@ class DashboardService:
             ),
         )
 
+        # Loaded here rather than further down so the overflow read can be
+        # gated on it: on a ship-dark install the gate is two attribute reads on
+        # a row this poll fetches anyway, so the tile costs zero statements.
+        dashboard_settings = await self._repo.get_settings()
+        # Same bounds as the activity aggregate above, so the overflow slice and
+        # the estimated-cost total it breaks down always describe one window.
+        overflow_activity = await self._repo.subscription_overflow_activity(
+            settings=dashboard_settings,
+            since=bucket_since,
+            until=now,
+            now=now,
+        )
         summary = build_dashboard_overview_summary(
             accounts=accounts,
             primary_rows=primary_rows,
@@ -169,6 +182,16 @@ class DashboardService:
             activity_metrics=activity_metrics,
             activity_cost=activity_cost,
             comparison=comparison,
+            subscription_overflow=(
+                None
+                if overflow_activity is None
+                else DashboardSubscriptionOverflow(
+                    requests=overflow_activity.requests,
+                    cost_usd=overflow_activity.cost_usd,
+                    usage_less_requests=overflow_activity.usage_less_requests,
+                    live_pins=overflow_activity.live_pins,
+                )
+            ),
         )
 
         secondary_minutes = usage_core.resolve_window_minutes("secondary", secondary_rows)
@@ -189,7 +212,6 @@ class DashboardService:
             ),
         )
 
-        dashboard_settings = await self._repo.get_settings()
         _, secondary_history = await _load_projection_histories(
             self._repo,
             primary_usage,

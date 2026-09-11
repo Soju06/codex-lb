@@ -1071,7 +1071,8 @@ async def test_invites_migration_upgrades_and_downgrades(tmp_path) -> None:
     await to_thread.run_sync(lambda: run_upgrade(db_url, _PARENT_REVISION, bootstrap_legacy=False))
     engine = create_async_engine(db_url, future=True)
     try:
-        await to_thread.run_sync(lambda: run_upgrade(db_url, _TARGET_REVISION, bootstrap_legacy=False))
+        target = await to_thread.run_sync(lambda: run_upgrade(db_url, _TARGET_REVISION, bootstrap_legacy=False))
+        assert target.current_revision == _TARGET_REVISION
         config = _build_alembic_config(db_url)
         # Re-running the upgrade body over the existing table is a no-op.
         await to_thread.run_sync(lambda: command.stamp(config, _PARENT_REVISION))

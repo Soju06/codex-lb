@@ -697,18 +697,41 @@ def _prepare_websocket_request_state_for_account_switch(
     return _install_verified_fresh_replay(request_state)
 
 
+def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
+    """Drop the completed-response anchor and the state that only exists for it."""
+    continuity_state.last_completed_response_id = None
+    continuity_state.last_completed_input_count = 0
+    continuity_state.last_completed_input_prefix_fingerprint = None
+    continuity_state.last_pending_function_call_ids = []
+    continuity_state.last_pending_tool_call_types = {}
+
+
 def _websocket_continuity_anchor_for_payload(
     continuity_state: _WebSocketContinuityState | None,
     *,
     responses_payload: ResponsesRequest,
     codex_session_affinity: bool,
+    api_key_id: str | None = None,
 ) -> _WebSocketContinuityAnchor | None:
+    """Select a matching session anchor, retiring any known upstream rejection."""
     if continuity_state is None or not codex_session_affinity:
         return None
     if responses_payload.previous_response_id is not None:
         return None
     previous_response_id = continuity_state.last_completed_response_id
     if previous_response_id is None:
+        return None
+    if _is_websocket_stale_previous_response(previous_response_id=previous_response_id, api_key_id=api_key_id):
+        # Upstream already denied this anchor (``previous_response_not_found``)
+        # and the fail-closed path remembered it. Injecting it again would
+        # fail the client's retry identically (#1921): retire it from session
+        # continuity so the full-context resend goes unanchored, and so the
+        # same id cannot return once the negative cache entry expires.
+        _retire_websocket_continuity_anchor(continuity_state)
+        _facade().logger.info(
+            "websocket_session_anchor_retired response_id=%s reason=stale_previous_response",
+            previous_response_id,
+        )
         return None
     stored_count = continuity_state.last_completed_input_count
     if not _facade()._input_prefix_matches_stored_context(
@@ -786,12 +809,9 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
+    """Record completed context and pending tools, or clear an absent response anchor."""
     if response_id is None:
-        continuity_state.last_completed_response_id = None
-        continuity_state.last_completed_input_count = 0
-        continuity_state.last_completed_input_prefix_fingerprint = None
-        continuity_state.last_pending_function_call_ids = []
-        continuity_state.last_pending_tool_call_types = {}
+        _retire_websocket_continuity_anchor(continuity_state)
         return
     # Record the completed response id and pending tool-call metadata
     # regardless of input shape (string inputs leave ``input_item_count`` at

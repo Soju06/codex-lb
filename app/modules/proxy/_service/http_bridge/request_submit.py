@@ -218,6 +218,7 @@ from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
     _sticky_key_from_turn_state_header,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
@@ -4238,6 +4239,7 @@ class _HTTPBridgeRequestSubmitMixin:
         previous_response_event_count = request_state.response_event_count
         previous_upstream_model_output_seen = request_state.upstream_model_output_seen
         previous_affinity_policy = request_state.affinity_policy
+        previous_affinity_observation = request_state.affinity_observation
         previous_session_affinity = session.affinity
         previous_session_codex_session = session.codex_session
         previous_session_upstream_turn_state = session.upstream_turn_state
@@ -4255,6 +4257,10 @@ class _HTTPBridgeRequestSubmitMixin:
             kind=None,
             reallocate_sticky=True,
         )
+        if previous_affinity_observation is not None:
+            request_state.affinity_observation = AffinityObservation.from_policy(
+                previous_affinity_observation.source, request_state.affinity_policy
+            )
         replacement_session_affinity = replace(
             session.affinity,
             key=None,
@@ -4445,6 +4451,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.upstream_model_output_seen = previous_upstream_model_output_seen
                 request_state.deferred_reasoning_downstream_texts = []
                 request_state.affinity_policy = previous_affinity_policy
+                request_state.affinity_observation = previous_affinity_observation
                 session.affinity = previous_session_affinity
                 session.codex_session = previous_session_codex_session
                 session.upstream_turn_state = previous_session_upstream_turn_state

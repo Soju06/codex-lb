@@ -17,6 +17,7 @@ const DEFAULT_FILTER_STATE: FilterState = {
   apiKeyIds: [],
   modelOptions: [],
   statuses: [],
+  sources: [],
   conversationId: null,
   limit: 25,
   offset: 0,
@@ -30,6 +31,7 @@ export function requestLogFiltersApplied(filters: FilterState): boolean {
     filters.apiKeyIds.length > 0 ||
     filters.modelOptions.length > 0 ||
     filters.statuses.length > 0 ||
+    filters.sources.length > 0 ||
     Boolean(filters.conversationId)
   );
 }
@@ -41,6 +43,7 @@ const REQUEST_LOG_PARAM_KEYS = [
   "apiKeyId",
   "modelOption",
   "status",
+  "source",
   "conversationId",
   "limit",
   "offset",
@@ -62,6 +65,7 @@ function parseFilterState(params: URLSearchParams): FilterState {
     apiKeyIds: params.getAll("apiKeyId"),
     modelOptions: params.getAll("modelOption"),
     statuses: params.getAll("status"),
+    sources: params.getAll("source"),
     conversationId: params.get("conversationId") || null,
     limit: parseNumber(params.get("limit"), DEFAULT_FILTER_STATE.limit),
     offset: parseNumber(params.get("offset"), DEFAULT_FILTER_STATE.offset),
@@ -95,6 +99,9 @@ function writeFilterState(state: FilterState, base?: URLSearchParams): URLSearch
   }
   for (const value of state.statuses) {
     params.append("status", value);
+  }
+  for (const value of state.sources) {
+    params.append("source", value);
   }
   if (state.conversationId) {
     params.set("conversationId", state.conversationId);
@@ -145,6 +152,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
       apiKeyIds: filters.apiKeyIds,
       statuses: filters.statuses,
       modelOptions: filters.modelOptions,
+      sources: filters.sources,
       timeframe,
       conversationId: filters.conversationId ?? undefined,
     }),

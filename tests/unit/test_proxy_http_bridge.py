@@ -18847,7 +18847,7 @@ async def test_http_bridge_local_owner_rejects_aliases_for_distinct_live_session
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner_forward_failure(
+async def test_stream_via_http_bridge_reuses_api_key_reservation_after_pre_dispatch_owner_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -18858,17 +18858,11 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         key_id=api_key.id,
         model="gpt-5.4",
     )
-    retried_reservation = proxy_service.ApiKeyUsageReservationData(
-        reservation_id="resv-retry",
-        key_id=api_key.id,
-        model="gpt-5.4",
-    )
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
             "instructions": "hi",
             "input": "hello",
-            "previous_response_id": "resp_prev_1",
         }
     )
 
@@ -18881,20 +18875,18 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
-        previous_response_id="resp_prev_1",
     )
-    request_state_initial.request_stage = "follow_up"
+    request_state_initial.request_stage = "first_turn"
     request_state_initial.preferred_account_id = "acc-1"
     request_state_retry = proxy_service._WebSocketRequestState(
         request_id="req-retry",
         model="gpt-5.4",
         service_tier=None,
         reasoning_effort=None,
-        api_key_reservation=retried_reservation,
+        api_key_reservation=initial_reservation,
         started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
-        previous_response_id="resp_prev_1",
     )
 
     prepare_reservations: list[proxy_service.ApiKeyUsageReservationData | None] = []
@@ -18942,7 +18934,18 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
 
     async def fake_forward_http_bridge_request_to_owner(**kwargs: object):
         del kwargs
-        raise ProxyResponseError(400, proxy_service.openai_error("previous_response_not_found", "missing"))
+        source = ProxyResponseError(
+            503,
+            proxy_service.openai_error(
+                "bridge_owner_unreachable",
+                "HTTP bridge owner is unreachable",
+                error_type="server_error",
+            ),
+        )
+        raise http_bridge_owner_forwarding_module._OwnerForwardRequestError(
+            source,
+            outcome=http_bridge_owner_forwarding_module._OwnerForwardOutcome.RECEIVER_REJECTED,
+        )
         yield ""
 
     async def fake_submit_http_bridge_request(
@@ -18964,7 +18967,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
 
         asyncio.create_task(produce_after_reattach_delay())
 
-    reserve_retry = AsyncMock(return_value=retried_reservation)
+    reserve_retry = AsyncMock(side_effect=AssertionError("pre-dispatch replay must reuse the original reservation"))
     capacity_unavailable = ProxyResponseError(
         503,
         proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
@@ -19029,9 +19032,9 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     assert any('"type":"codex.keepalive"' in chunk for chunk in chunks)
     assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
     assert get_or_create.await_count == 3
-    assert prepare_reservations == [initial_reservation, retried_reservation]
-    assert submitted_reservations == [retried_reservation]
-    reserve_retry.assert_awaited_once()
+    assert prepare_reservations == [initial_reservation, initial_reservation]
+    assert submitted_reservations == [initial_reservation]
+    reserve_retry.assert_not_awaited()
 
 
 async def _run_owner_forward_recovery_with_session(

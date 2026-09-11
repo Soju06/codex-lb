@@ -50,39 +50,46 @@ When a walk ends without a served response, the proxy MUST record which bound en
 - **THEN** the proxy does not walk the pool
 - **AND** the request takes the bounded same-account retry path and then surfaces account A's failure unchanged
 
-### Requirement: Usage-limit evidence is immediately visible to the exhaustion probe
+### Requirement: A walk proves exhaustion from its own attempts
 
-When the proxy records account health for an upstream usage-limit or quota rejection, the evidence it persists MUST be sufficient for the pool-exhaustion predicate to recognise that account as exhausted **within the same request**. The predicate requires both a rate-limited or quota-exhausted status and a usage sample at or above the account's limit, so writing only the status is not enough: a walk that exhausts every account would otherwise consult the probe, be told the pool is healthy, and surface a single account's rejection as the pool's answer.
+When a walk has attempted every candidate the selector offered and excluded each of them on exhaustion evidence, the proxy MUST treat the pool as exhausted, whether or not the persisted-state exhaustion predicate can see it yet.
 
-The proxy MUST NOT depend on a background or debounced usage refresh to supply that sample, because such a refresh cannot land before the terminal probe of the request that provoked it. A message-derived usage-limit classification MUST record the same evidence a coded one does; the evidence MUST be keyed on the classification, not on the literal upstream error code.
+The proxy MUST NOT make this conclusion depend on a background or debounced usage refresh, which cannot land before the terminal decision of the request that provoked it. It MUST NOT depend on writing a usage sample onto the transient account state either: the runtime state the health write persists carries the account's status but not that sample, so a sample written during the attempt does not survive to be read back.
 
-#### Scenario: An exhausting rejection is provable without waiting for a refresh
+The walk therefore MUST carry its own per-account evidence to the terminal decision, and the terminal decision MUST accept it. The persisted-state probe remains authoritative for the case the walk cannot speak to — a request that never attempted the whole pool, because selection refused it earlier.
 
-- **GIVEN** an account answers with an upstream usage-limit rejection
-- **WHEN** account health is recorded for it
-- **THEN** the pool-exhaustion predicate evaluated immediately afterwards treats that account as exhausted
-- **AND** no background usage refresh has had to complete first
+#### Scenario: Every attempted account was exhausted
 
-#### Scenario: A message-derived usage limit records the same evidence
+- **GIVEN** a walk that attempted every account the selector offered
+- **AND** each of them was excluded on usage-limit or quota evidence
+- **WHEN** the walk ends
+- **THEN** the pool is treated as exhausted without waiting for any background refresh
+- **AND** the client receives the canonical `usage_limit_reached` rejection
 
-- **GIVEN** an envelope whose usage limit is proven by its message rather than its error code
-- **WHEN** account health is recorded for it
-- **THEN** the persisted evidence is the same as for a coded `usage_limit_reached` rejection
+#### Scenario: A transient walk-out is not exhaustion
 
-#### Scenario: A fully exhausted pool answers with the canonical rejection
+- **GIVEN** a walk whose attempted accounts were excluded on transient evidence rather than exhaustion evidence
+- **WHEN** the walk ends
+- **THEN** the walk's own evidence does not prove exhaustion
+- **AND** the terminal decision falls back to the persisted-state probe
 
-- **GIVEN** every selectable account has answered this request with a usage-limit rejection
-- **WHEN** the walk ends and the probe is consulted
-- **THEN** the probe reports pool exhaustion
-- **AND** the client receives the canonical `usage_limit_reached` 429 rather than the last account's verbatim body
+#### Scenario: A message-derived usage limit counts as exhaustion evidence
+
+- **GIVEN** an account excluded because its rejection's message proved the usage limit rather than its error code
+- **WHEN** the walk tallies its evidence
+- **THEN** that exclusion counts exactly as a coded `usage_limit_reached` exclusion does
 
 ### Requirement: Pool-walk termination consults the exhaustion probe
 
-When an account walk ends without a served response, the proxy MUST determine the client-visible failure by asking the pool-exhaustion probe exactly once per request, using the same eligibility filtering ordinary selection applies. The proxy MUST NOT derive the client-visible failure from the first, the last, or an arbitrary per-account rejection without consulting the probe.
+When an account walk ends without a served response, the client-visible failure MUST be decided from the bound that ended the walk, and MUST NOT be the first, the last, or an arbitrary per-account rejection chosen without that decision.
+
+Two bounds answer without consulting the probe, because the pool's state is not what ended the walk: a `non_retryable` failure surfaces as itself, and an exhausted request budget yields `upstream_request_timeout` as "Streaming Responses requests use a bounded retry budget" requires. For every other bound the proxy MUST consult the pool-exhaustion probe at most once per request, using the same eligibility filtering ordinary selection applies, and MUST combine that answer with the walk's own evidence as required by "A walk proves exhaustion from its own attempts".
 
 When the probe reports pool-wide usage exhaustion, the proxy MUST render the canonical usage-limit rejection defined by "Pool usage exhaustion is reported as a usage-limit error", including `error.resets_at` when an authoritative reset timestamp is available.
 
-When the probe reports anything else — including the decline it returns for drain routing strategies — the proxy MUST return the preserved failure of the last attempted account, with its upstream status, error code, error body and retry hints unchanged.
+When neither the probe nor the walk's own evidence proves exhaustion — including the decline the probe returns for drain routing strategies — the proxy MUST return the preserved failure of the last attempted account, with its upstream status, error code, error body and retry hints unchanged.
+
+A client that receives the canonical pool rejection MUST NOT be left without retry guidance: when no authoritative reset timestamp is available for `error.resets_at`, the response MUST carry a retry hint instead.
 
 #### Scenario: Every account exhausted yields the canonical pool rejection
 

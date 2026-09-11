@@ -4,9 +4,11 @@
 
 ### Requirement: Usage-limit messages classify as account rate limits
 
-When an upstream error envelope carries a message asserting that the account's usage limit has been reached, and the envelope carries no error code or a code that is neither a rate-limit nor a quota code, the proxy MUST classify the failure `rate_limit`. Such a failure MUST NOT be classified `retryable_transient`, MUST NOT be treated as a burst rejection, and MUST NOT be answered with same-account backoff: the account is out of quota, so waiting on it cannot succeed.
+When an upstream error envelope carries a message asserting that the account's usage limit has been reached, and its normalized error code is either the `upstream_error` value a missing code normalizes to or `invalid_request_error`, the proxy MUST classify the failure `rate_limit`. The override is deliberately limited to those two codes: a code that already carries its own classification decision — a rate-limit or quota code, `overloaded_error`, or any other transient code — keeps it, so this requirement cannot silently reverse "Model-capacity messages are retryable transient failures" or the rule that `overloaded_error` stays retryable regardless of status. Such a failure MUST NOT be classified `retryable_transient`, MUST NOT be treated as a burst rejection, and MUST NOT be answered with same-account backoff: the account is out of quota, so waiting on it cannot succeed.
 
 This requirement does not change the classification of an envelope that already carries a quota or rate-limit code; that case keeps the stronger classification it has today.
+
+Reclassification MUST NOT remove client-visible retry guidance. A rejection that would previously have surfaced with a `Retry-After` hint MUST still carry one, or an `error.resets_at`, when it reaches the client.
 
 Message matching MUST be punctuation-insensitive and MUST NOT depend on the HTTP status, because upstream delivers this message both as an HTTP body and as a serialized `response.failed` frame that carries no status.
 
@@ -33,7 +35,9 @@ Message matching MUST be punctuation-insensitive and MUST NOT depend on the HTTP
 
 A rejection whose message says the selected model is at capacity describes the requested model, not the selected account. When the proxy decides whether a pre-visible failure justifies excluding the selected account for the remainder of the request, a model-capacity rejection MUST NOT justify that exclusion, even when the envelope also carries a rate-limit or quota error code that keeps the stronger health classification required by "Model-capacity messages are retryable transient failures".
 
-The account-health write, the persisted status, the reset deadline and the model-capacity replay wait are unchanged by this requirement: it governs account selection only. A message that asserts the usage limit MUST take precedence over a model-capacity match when both appear in one envelope, because the usage limit is account-scoped.
+The account-health write, the persisted status, the reset deadline and the model-capacity replay wait are unchanged by this requirement: it governs account selection only.
+
+The exclusion answer the classifier reports MUST be the selection predicate, not an exhaustion predicate. It is true for every pre-visible failure the walk may move away from — `rate_limit`, `quota` and `retryable_transient` alike, which includes the code-less burst 429 that "An unbound burst rejection walks instead of surfacing" requires to be excluded — and false only when the rejection is a model-capacity one. A field that answers "was this account exhaustion" instead collapses the burst rejection and the capacity rejection to the same value and cannot drive the walk. A message that asserts the usage limit MUST take precedence over a model-capacity match when both appear in one envelope, because the usage limit is account-scoped.
 
 #### Scenario: Capacity rejection under a rate-limit code does not rotate the pool
 

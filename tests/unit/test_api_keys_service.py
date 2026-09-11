@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+import sqlite3
 from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -23,6 +25,7 @@ from app.db.models import (
     ModelSource,
     UsageHistory,
 )
+from app.db.sqlite_lock_retry import is_sqlite_lock_error
 from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer
 from app.modules.api_keys.repository import (
     _UNSET,
@@ -45,7 +48,6 @@ from app.modules.api_keys.service import (
     LimitRuleInput,
     _build_api_key_trends,
     _hash_key,
-    _is_sqlite_database_locked,
     _normalize_usage_sections,
 )
 from app.modules.usage.repository import UsageRepository
@@ -62,8 +64,11 @@ pytestmark = pytest.mark.unit
         "SQLITE_BUSY_SNAPSHOT",
     ],
 )
-def test_is_sqlite_database_locked_matches_transient_lock_messages(message: str) -> None:
-    assert _is_sqlite_database_locked(OperationalError("sqlite busy", {}, Exception(message))) is True
+def test_usage_writes_still_classify_every_transient_lock_message(message: str) -> None:
+    # These four messages were matched by this module's own predicate before it
+    # was replaced by the shared one; the shared predicate must keep matching
+    # every one of them or a usage-reservation write stops retrying.
+    assert is_sqlite_lock_error(OperationalError("sqlite busy", {}, Exception(message))) is True
 
 
 class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
@@ -1716,7 +1721,7 @@ async def test_enforce_limits_retries_sqlite_busy_reservation_commit(monkeypatch
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="busy-retry-key",
@@ -1847,7 +1852,7 @@ async def test_enforce_limits_retries_sqlite_busy_during_lazy_reset_rolls_back(m
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="busy-lazy-reset-retry-key",
@@ -2386,7 +2391,7 @@ async def test_finalize_usage_reservation_retries_sqlite_busy_settlement(
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="reservation-finalize-busy-key",
@@ -2434,7 +2439,7 @@ async def test_release_usage_reservation_retries_sqlite_busy_settlement(
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="reservation-release-busy-key",
@@ -2727,3 +2732,73 @@ async def test_create_key_rejects_invalid_usage_sections() -> None:
                 usage_sections="bad_section",
             )
         )
+
+
+class _NamedDriverLockError(sqlite3.OperationalError):
+    """The driver-raised shape: ``sqlite3`` sets ``sqlite_errorname`` itself."""
+
+    def __init__(self, error_name: str) -> None:
+        super().__init__("database is locked")
+        self.sqlite_errorname = error_name
+
+
+@pytest.mark.asyncio
+async def test_update_key_retry_names_the_lock_mechanism(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ``database is locked`` is emitted both for an instant
+    # SQLITE_BUSY_SNAPSHOT (retrying is the whole fix) and for a SQLITE_BUSY
+    # returned only after the full busy timeout (a foreign writer held the
+    # slot, so the retry budget is beside the point). The retry decision must
+    # record which one it saw or the next production hit is unclassifiable.
+    class _BusyPatchRepo(_FakeApiKeysRepository):
+        fail_next_commit = False
+
+        async def commit(self) -> None:
+            if self.fail_next_commit:
+                self.fail_next_commit = False
+                raise OperationalError("UPDATE api_keys", {}, _NamedDriverLockError("SQLITE_BUSY_SNAPSHOT"))
+            await super().commit()
+
+    repo = _BusyPatchRepo()
+    service = ApiKeysService(repo)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
+    created = await service.create_key(ApiKeyCreateData(name="busy-key", allowed_models=None))
+    repo.fail_next_commit = True
+
+    with caplog.at_level(logging.DEBUG, logger="app.db.sqlite_lock_retry"):
+        updated = await service.update_key(created.id, ApiKeyUpdateData(name="retried-key", name_set=True))
+
+    assert updated.name == "retried-key"
+    assert any(
+        "what=update_key" in record.getMessage() and "sqlite_errorname=SQLITE_BUSY_SNAPSHOT" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_touch_usage_reservation_reports_the_exhausted_lock_budget(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Control flow is unchanged: a lock that outlives the budget still
+    # propagates to the caller. What is new is that the give-up says which
+    # mechanism it was.
+    class _AlwaysBusyRepo(_FakeApiKeysRepository):
+        async def touch_usage_reservation(self, reservation_id: str) -> bool:
+            raise OperationalError("touch reservation", {}, _NamedDriverLockError("SQLITE_BUSY"))
+
+    repo = _AlwaysBusyRepo()
+    service = ApiKeysService(repo)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
+
+    with caplog.at_level(logging.DEBUG, logger="app.db.sqlite_lock_retry"):
+        with pytest.raises(OperationalError):
+            await service.touch_usage_reservation("reservation-1")
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(
+        "budget exhausted" in message
+        and "what=touch_usage_reservation" in message
+        and "sqlite_errorname=SQLITE_BUSY" in message
+        for message in warnings
+    )

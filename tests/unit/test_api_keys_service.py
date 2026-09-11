@@ -1983,6 +1983,41 @@ async def test_update_key_retries_after_sqlite_snapshot_conflict(lock_message: s
 
 
 @pytest.mark.asyncio
+async def test_update_key_does_not_retry_a_wrapper_without_driver_evidence() -> None:
+    # The spec-governed PATCH retry (api-keys "API Key update") owes a retry to
+    # "a transient SQLite lock or snapshot conflict". A wrapper with no driver
+    # exception carries no such evidence: the only text left to match is the
+    # rendered statement and its bound parameters, and matching those is exactly
+    # the false positive the shared predicate exists to remove. So this must
+    # propagate on the first attempt instead of spending the budget on it.
+    class _OrigLessPatchRepo(_FakeApiKeysRepository):
+        fail_commits = False
+        failed_commits = 0
+
+        async def commit(self) -> None:
+            if self.fail_commits:
+                self.failed_commits += 1
+                raise OperationalError(
+                    "UPDATE api_keys SET name = ?",
+                    {"name": "database is locked"},
+                    cast(BaseException, None),
+                )
+            await super().commit()
+
+    repo = _OrigLessPatchRepo()
+    service = ApiKeysService(repo)
+    created = await service.create_key(ApiKeyCreateData(name="orig-less-key", allowed_models=None))
+    repo.fail_commits = True
+
+    with pytest.raises(OperationalError):
+        await service.update_key(created.id, ApiKeyUpdateData(name="retried-key", name_set=True))
+
+    # One attempt, not the four a classified lock failure would have spent.
+    assert repo.failed_commits == 1
+    assert repo.rollback_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_update_key_limit_reset_still_clears_matched_usage() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

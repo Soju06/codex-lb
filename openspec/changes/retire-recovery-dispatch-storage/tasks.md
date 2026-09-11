@@ -1,5 +1,9 @@
 # Tasks
 
+> Tasks 1.2, 1.3, 1.6, 1.7 and 1.9 — and the repository/coordinator/batcher half
+> of 1.4 — were reverted by `restore-recovery-dispatch-claim`. Task 1.5 (the
+> request-state plumbing) and the `upstream_events` call sites from 1.4 stand.
+
 - [x] 1.1 Prove no writer can advance `recovery_dispatch_count` on `main`:
       grep every occurrence across `app/`, `tests/`, `frontend/`, `scripts/`,
       `deploy/`, `openspec/` and confirm the only increments/decrements are

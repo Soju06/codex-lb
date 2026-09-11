@@ -18,10 +18,18 @@ import {
   unauthenticatedSession,
 } from "./fixtures";
 import {
+  ASSIGNABLE_ROLE_IDS,
   createAccountSummary,
+  createAccessSummary,
   createConversationDetails,
   createConversationEntry,
   createConversationsResponse,
+  createDashboardAuthSession,
+  createDefaultDashboardRoles,
+  createDefaultDashboardUsers,
+  createPendingInvite,
+  createPermissionDescriptors,
+  createSessionUser,
 } from "../src/test/mocks/factories";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -63,6 +71,10 @@ async function interceptApi(
     const p = url.pathname;
 
     if (p === "/api/dashboard-auth/session") return fulfill(route, session);
+    if (p === "/api/dashboard-users") return fulfill(route, createDefaultDashboardUsers());
+    if (p === "/api/dashboard-users/invites") return fulfill(route, [createPendingInvite()]);
+    if (p === "/api/dashboard-roles") return fulfill(route, createDefaultDashboardRoles());
+    if (p === "/api/dashboard-roles/permissions") return fulfill(route, createPermissionDescriptors());
     if (p === "/api/dashboard/overview") return fulfill(route, overview);
     if (p === "/api/request-logs/options") return fulfill(route, filterOptions);
     if (p === "/api/request-logs") {
@@ -109,6 +121,7 @@ async function interceptApi(
   });
 
   await page.route("**/health", (route) => fulfill(route, { status: "ok" }));
+  await page.route("**/health/ready", (route) => fulfill(route, { status: "ok" }));
 }
 
 // ── Theme ──
@@ -128,6 +141,7 @@ async function capture(
   page: Page,
   opts: {
     file: string;
+    directory?: string;
     theme: Theme;
     route: string;
     fullPage?: boolean;
@@ -175,7 +189,7 @@ async function capture(
   }
 
   await page.screenshot({
-    path: path.join(SCREENSHOT_DIR, opts.file),
+    path: path.join(opts.directory ?? SCREENSHOT_DIR, opts.file),
     type: "jpeg",
     quality: 90,
     fullPage: opts.fullPage ?? false,
@@ -385,6 +399,65 @@ test("login", async ({ page }) => {
     session: unauthenticatedSession,
     waitFor: 'input[type="password"]',
   });
+});
+
+test.describe("Japanese locale screenshots", () => {
+  const directory = path.resolve(
+    __dirname,
+    "../../openspec/changes/archive/2026-09-06-add-japanese-dashboard-locale/screenshots",
+  );
+  const session = createDashboardAuthSession({
+    ...authSession,
+    user: createSessionUser(),
+    authMethod: "password",
+    localPasswordConfigured: true,
+    passwordSessionActive: true,
+    accessSummary: createAccessSummary({
+      usersTotal: 3,
+      usersActive: 2,
+      usersInvited: 1,
+      pendingInvites: 1,
+      nonAdminUsers: 2,
+    }),
+    assignableRoleIds: ASSIGNABLE_ROLE_IDS,
+  });
+
+  for (const screen of ["dashboard", "settings"] as const) {
+    for (const viewport of [
+      { device: "desktop", width: 1440, height: 1000 },
+      { device: "mobile", width: 390, height: 844 },
+    ]) {
+      for (const language of ["en", "ja"] as const) {
+        test(`${screen} ${viewport.device} ${language}`, async ({ page }) => {
+          await page.setViewportSize({ width: viewport.width, height: viewport.height });
+          await capture(page, {
+            file: `${language === "en" ? "before" : "after"}-${screen}-${viewport.device}.jpg`,
+            directory,
+            theme: "light",
+            route: `/${screen}?lang=${language}`,
+            session,
+            fullPage: screen === "settings",
+            beforeScreenshot: async () => {
+              await expect(page.locator("html")).toHaveAttribute("lang", language);
+              if (screen === "settings") {
+                await expect(
+                  page.getByRole("tab", { name: language === "ja" ? "ユーザー" : "People", exact: true }),
+                ).toBeVisible();
+                await expect(page.getByText("Sarah Kim", { exact: true })).toBeVisible();
+                await expect(
+                  page.getByRole("button", {
+                    name: language === "ja" ? "組織設定を表示" : "Show organisation settings",
+                    exact: true,
+                  }),
+                ).toBeVisible();
+              }
+              expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+            },
+          });
+        });
+      }
+    }
+  }
 });
 
 test.describe("Japanese locale", () => {

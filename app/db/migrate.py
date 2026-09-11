@@ -115,9 +115,9 @@ _SQLITE_FLOAT_TYPE_COMPAT_COLUMNS = frozenset(
     }
 )
 # Columns the ORM no longer maps but the schema still carries. A replica running
-# the previous release keeps mapping them and renders an explicit value in its
-# INSERTs, so the physical drop must wait one release after the mapping
-# retirement (the Helm migration Job runs before old replicas drain).
+# the previous release keeps mapping them and renders explicit NULLs in its
+# request-log INSERTs, so the physical drop must wait one release after the
+# mapping retirement (the Helm migration Job runs before old replicas drain).
 _LEGACY_EXTRA_COLUMNS = frozenset(
     {
         ("request_logs", "slim_summary_json"),
@@ -125,10 +125,6 @@ _LEGACY_EXTRA_COLUMNS = frozenset(
         # revision + removal from this set is queued for the following release.
         ("request_logs", "prewarm_canary_bucket"),
         ("request_logs", "prewarm_eligible_reason"),
-        # Retired from the ORM in retire-recovery-dispatch-storage; same
-        # queued drop. The column is NOT NULL with a server default, so this
-        # release's INSERTs simply omit it.
-        ("http_bridge_operations", "recovery_dispatch_count"),
     }
 )
 

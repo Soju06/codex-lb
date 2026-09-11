@@ -1,8 +1,10 @@
 # Verification: Japanese dashboard locale
 
-Verified locally on 2026-09-06 using Bun, Node 24.20.0, Chromium, and OpenSpec
+Initially verified locally on 2026-09-06 using Bun, Node 24.20.0, Chromium, and OpenSpec
 1.12.0. Browser checks use the existing fixture APIs and a production frontend
 build, including Japanese browser settings and narrow mobile viewports.
+The latest main sync and screenshot refresh are recorded in the 2026-09-11
+section below.
 
 ## Assessment
 
@@ -22,10 +24,10 @@ Stable context and the existing Configuration page document the delivered behavi
 | Requirement | Implementation | Verification |
 | --- | --- | --- |
 | Dashboard supports runtime locale selection | `frontend/src/i18n/index.ts`, shared language toggle and existing mobile menu | Locale normalization tests; browser detection, query override, saved preference, reload, document language, and desktop/mobile switching checks. |
-| Dashboard feature surfaces render in the active locale | Complete `ja.json` bundle; API-key table and detail period labels | All four bundles have 1,491 matching keys; interpolation variables and inline tags match English. Japanese plural, table/detail, login, validation, and inline-code rendering tests pass. |
+| Dashboard feature surfaces render in the active locale | Complete `ja.json` bundle; API-key table and detail period labels | The refreshed bundles have 1,889 matching keys; interpolation variables and inline tags match English. Japanese plural, table/detail, login, validation, and inline-code rendering tests pass. |
 | Japanese locale formats dashboard dates and calendar controls | Shared Intl formatter locale and API-key expiry picker | Japanese date/time and relative labels; explicit ISO/12h/24h preferences; unchanged compact units and USD amounts; accessible calendar navigation and date selection retaining 23:59:59 expiry. |
 
-## Validation results
+## Initial validation results: 2026-09-06
 
 Commands below run in `frontend/` unless marked otherwise. Node-based commands
 were run through `fnm exec --using=default`.
@@ -56,10 +58,19 @@ were not changed.
 
 ## Visual verification
 
-The screenshots use the same fixture data, light theme, and viewport sizes:
-1440 × 1000 on desktop and 390 × 844 on mobile. Before images show English;
-after images show Japanese. The Japanese dashboard and settings also passed
-browser assertions against horizontal overflow at 1440 px and 390 px.
+The eight screenshots below were refreshed on 2026-09-11 after merging main at
+`a096b6092f7d43b5c59d823a4aefc1b08b6b7f6b`. Each English/Japanese pair uses the
+same fixture data, light theme, and viewport: 1440 × 1000 on desktop and
+390 × 844 on mobile, captured at 2× device scale. Dashboard images capture the
+viewport; Settings images capture the full page. Before images show English;
+after images show Japanese. Both languages pass assertions against page-level
+horizontal overflow at both widths.
+
+The authenticated administrator belongs to a three-account fixture team.
+Settings shows the current Access card with its People tab, a pending invite,
+and the collapsed Organisation group. Account names, roles, and timestamps
+come from fixtures. The service readiness response is also stubbed so these
+frontend-only captures do not depend on a running backend.
 
 | Screen | Before | After |
 | --- | --- | --- |
@@ -93,3 +104,42 @@ Validation after these fixes:
 - Simplicity budgets and `git diff --check`: passed.
 
 These are local results; GitHub checks must run again after the fix is pushed.
+
+## Main sync and screenshot refresh: 2026-09-11
+
+Merged main through `a096b6092f7d43b5c59d823a4aefc1b08b6b7f6b`. The preceding
+sync added 249 Japanese strings for the expanded access, organisation, auth,
+overflow, and retention surfaces, bringing all four locale bundles to 1,889
+keys. The two subsequent main commits only change backend code and its
+specifications/tests; the frontend application and dependency files remain
+unchanged from `914f81f9`.
+
+Refreshed all eight English/Japanese screenshots because the original images
+predate the account menu, Access card, and Organisation group. Their paths stay
+the same. Added reproducible capture cases to
+`frontend/screenshots/capture.spec.ts`, reusing the established capture helper
+and the shared user/role factories. The original five Japanese browser checks
+still run alongside the eight capture cases.
+
+| Check | Result |
+| --- | --- |
+| Related backend tests: `test_db_migrate.py`, `test_http_bridge_event_batcher.py`, `test_bridge_ring_lifecycle.py`, and `test_api_keys_service.py` | 241 passed; nine SQLAlchemy reflection warnings. |
+| `bun run lint` and `bun run build` | Passed; the production build includes TypeScript checking. |
+| Playwright `--config screenshots/playwright.config.ts --grep 'Japanese locale'` | 13 passed: eight refreshed screenshots and five locale behavior checks. |
+| `openspec validate --specs --strict` | All 65 specifications passed. The placeholder failures recorded in the initial verification above no longer occur. |
+| `git diff --check` | Passed. |
+
+The full frontend suite passed with 177 files and 1,571 tests during the
+preceding same-day sync. Since its application and dependency files are
+unchanged, this refresh reran the affected screenshot suite instead.
+
+To regenerate the eight tracked images without running the other screenshot
+scenes, run from `frontend/`:
+
+```sh
+bun run playwright test --config screenshots/playwright.config.ts --grep 'Japanese locale screenshots'
+```
+
+All eight regenerated images were visually inspected. The PR body originally
+pinned image and verification links to `f27f8a2c`; publishing this refresh also
+requires updating those links to the new commit after pushing it.

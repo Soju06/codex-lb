@@ -91,14 +91,14 @@ Beyond that claim, the proxy MUST require all of the following before relocating
 - the relocated dispatch carries the origin operation's side-effect replay-dedupe identity, so a tool call the original dispatch may already have produced is suppressed on the new account rather than executed a second time;
 - the rebuilt body satisfies the same strict account-neutral predicate required by "Anchored turns relocate on a rebuilt durable transcript".
 
-The one-shot budget MUST be at most one dispatch per operation for the whole of that operation's retention, across every replica and every reconnect. When the claim is refused, the request MUST terminate with the existing `upstream_operation_status_unknown` rejection and its cooldown retry hint.
+The one-shot budget MUST be at most one dispatch per operation for the whole of that operation's retention, across every replica and every reconnect. When the claim is refused, the request MUST terminate through the fail-closed outcome its transport already produces today and MUST NOT invent a second dispatch: on the HTTP session bridge that is the `upstream_operation_status_unknown` rejection with its cooldown retry hint; on the direct streaming and WebSocket paths it is the terminal transport failure the client receives today. A refused claim MUST NOT be reported as a pool-exhaustion or usage-limit outcome.
 
 #### Scenario: One ambiguous failure buys one relocation
 
 - **GIVEN** an eventless operation whose transport failed with `stream_incomplete`
 - **WHEN** relocation is evaluated and the claim succeeds
 - **THEN** the turn is dispatched once on another account
-- **AND** a second ambiguous failure for the same operation is refused and terminates with `upstream_operation_status_unknown`
+- **AND** a second ambiguous failure for the same operation is refused and terminates through its transport's existing fail-closed outcome without a second dispatch
 
 #### Scenario: A spooled event proves execution and blocks relocation
 
@@ -180,7 +180,7 @@ fence. A replacement session MUST retain or transfer a fenced origin owner
 until the claim is rolled back or settled; selecting a replacement or failing
 preflight MUST NOT permanently consume an unsent replay.
 
-The claim MUST be refused unless the preconditions in "Ambiguous eventless dispatches relocate once behind the durable fence" hold. A refused claim MUST terminate the request with the existing `upstream_operation_status_unknown` rejection and its cooldown retry hint.
+The claim MUST be refused unless the preconditions in "Ambiguous eventless dispatches relocate once behind the durable fence" hold. A refused claim MUST terminate the request through the fail-closed outcome its transport already produces, without a second dispatch.
 
 #### Scenario: Concurrent reconnects consume one replay
 

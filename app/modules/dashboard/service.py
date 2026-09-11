@@ -163,9 +163,14 @@ class DashboardService:
             ),
         )
 
+        # Loaded here rather than further down so the overflow read can be
+        # gated on it: on a ship-dark install the gate is two attribute reads on
+        # a row this poll fetches anyway, so the tile costs zero statements.
+        dashboard_settings = await self._repo.get_settings()
         # Same bounds as the activity aggregate above, so the overflow slice and
         # the estimated-cost total it breaks down always describe one window.
         overflow_activity = await self._repo.subscription_overflow_activity(
+            settings=dashboard_settings,
             since=bucket_since,
             until=now,
             now=now,
@@ -207,7 +212,6 @@ class DashboardService:
             ),
         )
 
-        dashboard_settings = await self._repo.get_settings()
         _, secondary_history = await _load_projection_histories(
             self._repo,
             primary_usage,

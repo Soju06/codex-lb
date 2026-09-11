@@ -9,7 +9,10 @@ request detail view SHALL show the source, the model source id and its kind for
 those rows. The chip SHALL occupy the existing account cell (an overflow dispatch
 has no account, so that cell otherwise reports only that the row is unassigned);
 no request-log column is added, so stored column preferences keep their meaning.
-Rows with any other `source`, including null, MUST render exactly as before.
+Because the chip rides that cell rather than a column of its own, hiding the
+**Account** column hides it too; the request detail view is therefore the surface
+that MUST always carry the attribution. Rows with any other `source`, including
+null, MUST render exactly as before.
 
 The request-logs view SHALL offer a `source` filter over that closed set of two
 values, sent as repeated `source` query parameters, and the dashboard SHALL render
@@ -25,9 +28,11 @@ zh-CN.
 
 - **GIVEN** two request-log rows whose sources are `subscription_overflow` and
   `subscription_overflow_pinned`
-- **WHEN** the recent-requests table renders them
+- **WHEN** the recent-requests table renders them with the account column visible
 - **THEN** each row shows a source chip with its own label and styling
 - **AND** neither row shows the unassigned-account placeholder
+- **AND** with the account column hidden the chip is hidden with it, while the
+  request detail view still names the source, the model source id and its kind
 
 #### Scenario: A row without an overflow source is unchanged
 

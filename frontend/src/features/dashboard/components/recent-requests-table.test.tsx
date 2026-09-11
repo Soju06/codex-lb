@@ -1688,6 +1688,27 @@ describe("RecentRequestsTable subscription-overflow attribution", () => {
     expect(within(dialog).getByText("openai_compatible")).toBeInTheDocument();
   });
 
+  it("hides the chip with the account column but keeps the detail-dialog attribution", () => {
+    // The chip rides the account cell rather than a column of its own, so an
+    // operator who hides Account loses it from the table. The detail dialog is
+    // the surface the spec guarantees, so it must still name the source.
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[PINNED_REQUEST]}
+        visibleColumns={["time", "model"]}
+      />,
+    );
+
+    expect(screen.queryByTestId("request-log-source-chip")).not.toBeInTheDocument();
+
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("Source")).toBeInTheDocument();
+    expect(within(dialog).getByText("Overflow · pinned")).toBeInTheDocument();
+    expect(within(dialog).getByText("src_overflow")).toBeInTheDocument();
+  });
+
   it("omits the source block in the detail dialog for non-overflow rows", () => {
     render(
       <RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[LAYOUT_REQUEST]} />,

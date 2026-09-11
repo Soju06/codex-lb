@@ -3013,6 +3013,43 @@ async def test_missing_cost_index_upgrade_downgrade_and_query_plan(tmp_path):
         await engine.dispose()
 
 
+async def test_model_source_pins_kind_expires_index_upgrade_downgrade_and_query_plan(tmp_path):
+    """The dashboard's live thread-pin count rides the index instead of walking the table."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'pins-kind-expires.sqlite'}"
+    parent = "20260910_020000_add_dashboard_role_mappings"
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.connect() as conn:
+            plan = (
+                await conn.execute(
+                    text(
+                        "EXPLAIN QUERY PLAN SELECT count(*) FROM model_source_pins "
+                        "WHERE kind = :kind AND expires_at > :now AND purge_at > :now"
+                    ),
+                    {"kind": "thread", "now": "2026-09-11 00:00:00"},
+                )
+            ).fetchall()
+            assert "ix_model_source_pins_kind_expires_at" in str(plan)
+            assert "SCAN model_source_pins" not in str(plan)
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
+        async with engine.connect() as conn:
+            assert (
+                await conn.scalar(
+                    text("SELECT count(*) FROM sqlite_master WHERE name='ix_model_source_pins_kind_expires_at'")
+                )
+                == 0
+            )
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_guest_session_generation_migration_upgrade_and_downgrade(tmp_path):
     """Upgrade adds the NOT NULL guest_session_generation counter seeded at 0;

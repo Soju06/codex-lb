@@ -310,6 +310,7 @@ class DashboardRepository:
     async def subscription_overflow_activity(
         self,
         *,
+        settings: DashboardSettings,
         since: datetime,
         until: datetime,
         now: datetime,
@@ -317,6 +318,14 @@ class DashboardRepository:
         """Overflow spend and live pins for the overview tile (#2123 WP-G).
 
         ``None`` when the installation has never overflowed and holds no live
-        pin, which is every install that never designated a source.
+        pin, which is every install that never designated a source. ``settings``
+        gates the read and is the row the caller already loaded, so a ship-dark
+        install pays no statement for the tile -- not even the gate.
         """
-        return await load_subscription_overflow_activity(self._session, since=since, until=until, now=now)
+        return await load_subscription_overflow_activity(
+            self._session,
+            settings=settings,
+            since=since,
+            until=until,
+            now=now,
+        )

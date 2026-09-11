@@ -33,6 +33,7 @@ from app.core.openai.model_registry import (
 )
 from app.db.models import (
     ApiKeyModelSourceAssignment,
+    DashboardSettings,
     ModelSource,
     ModelSourceModel,
     ModelSourcePin,
@@ -389,9 +390,26 @@ async def count_live_thread_pins(session: AsyncSession, *, now: datetime) -> int
     return int(await session.scalar(stmt) or 0)
 
 
+def never_designated(settings: DashboardSettings) -> bool:
+    """Has overflow never been switched on here? Two attribute reads, no statement.
+
+    The same two columns the request path's ship-dark gate reads
+    (``app.modules.proxy.overflow._settings_off``), and the pair is only ever
+    written together by ``resolve_drain_until``: clearing a designation arms the
+    drain deadline, designating one clears it. So both ``NULL`` means no source
+    was ever designated, which in turn means no overflow request-log row and no
+    pin can exist -- the aggregate below is provably empty and is skipped rather
+    than issued. A drain deadline that has already elapsed deliberately does
+    *not* count as never-designated: the request path is off, but the history
+    the tile reports is real and stays visible.
+    """
+    return settings.subscription_overflow_source_id is None and settings.subscription_overflow_drain_until is None
+
+
 async def load_subscription_overflow_activity(
     session: AsyncSession,
     *,
+    settings: DashboardSettings,
     since: datetime,
     until: datetime,
     now: datetime,
@@ -404,7 +422,14 @@ async def load_subscription_overflow_activity(
     filter. ``since``/``until`` must be naive UTC to match ``requested_at``;
     ``now`` may be naive or aware and is coerced for the timezone-aware pin
     columns.
+
+    ``settings`` gates the whole read: on a ship-dark install this returns
+    ``None`` without issuing a statement, so an overview poll costs exactly what
+    it cost before this tile existed. ``tests/integration/test_dashboard_overview.py``
+    counts the statements of a default-install poll to keep that true.
     """
+    if never_designated(settings):
+        return None
     row = (await session.execute(overflow_window_statement(since=since, until=until))).one()
     requests = int(row[0])
     cost_usd = float(row[1] or 0.0)

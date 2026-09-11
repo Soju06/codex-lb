@@ -1312,6 +1312,31 @@ def account_status_for_permanent_failure(error_code: str) -> AccountStatus:
 
 FailoverAction = Literal["failover_next", "retry_same_account", "surface"]
 
+# The bound that ended an account walk without a served response. Two of them
+# fall out of the failover decision itself; ``deadline``, ``ceiling`` and
+# ``no_progress`` are only knowable to the transport running the walk, which
+# names them from its own state. They share one closed vocabulary because the
+# walk-end renderer answers them differently -- an exhausted pool may become the
+# pool's own usage-limit rejection, a failure no account can route around is the
+# client's own and is surfaced as itself, a spent request budget is a timeout --
+# and because an operator reading the log of a failed request needs to tell a
+# bad request from an exhausted fleet.
+PoolWalkBound = Literal["non_retryable", "pool_exhausted", "deadline", "ceiling", "no_progress"]
+
+
+@dataclass(frozen=True, slots=True)
+class FailoverOutcome:
+    """A failover decision plus, when that decision ends an unbound walk, the bound that ended it.
+
+    ``ended_by`` is ``None`` for every outcome that is not a walk ending: a
+    continued walk, an owner-bound request (which never walked), and a failure
+    the client has already seen part of.
+    """
+
+    action: FailoverAction
+    ended_by: PoolWalkBound | None
+
+
 # Owner-bound burst 429 (a code-less upstream HTTP 429 burst/concurrency
 # rejection on a request that cannot move to another account): bounded
 # same-account backoff before the original rejection is surfaced. Module
@@ -1324,6 +1349,18 @@ BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS = 10.0
 # ``Retry-After`` stamped on a surfaced burst 429 that carried none upstream;
 # matches ``app.core.resilience.overload.LOCAL_OVERLOAD_RETRY_AFTER_SECONDS``.
 BURST_SURFACE_RETRY_AFTER_SECONDS = 5
+
+# Runaway fence on the number of accounts one request may attempt, sized to sit
+# far above the largest pool a deployment runs -- the reference fleet is 28
+# accounts -- so it can never be the bound that ends an ordinary walk. A fence
+# at or below the pool size would be the fixed per-transport attempt cap again
+# under another name, giving up on a pool that still holds usable accounts.
+# What ends an ordinary walk is the request budget deadline, or a request that
+# has no candidate left it has not already attempted. This stops only a
+# selector that keeps handing back accounts. Module constant on purpose -- the
+# Settings ratchet is full and this is a transport invariant, not an operator
+# knob.
+MAX_ACCOUNT_ATTEMPTS_CEILING = 128
 
 
 def burst_same_account_backoff_seconds(retry_index: int, *, retry_after_seconds: float | None) -> float:
@@ -1339,31 +1376,71 @@ def burst_same_account_backoff_seconds(retry_index: int, *, retry_after_seconds:
     return min(BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS, max(floor, exponential))
 
 
-def failover_decision(
+def failover_outcome(
     *,
     failure_class: FailureClass,
     downstream_visible: bool,
-    candidates_remaining: int,
+    more_candidates_possible: bool | None = None,
     owner_bound: bool = False,
     same_account_retry_available: bool = False,
-) -> FailoverAction:
-    """Decide how a pre-visible upstream failure is handled.
+    candidates_remaining: int | None = None,
+) -> FailoverOutcome:
+    """Decide how a pre-visible upstream failure is handled, and name the ending when it ends a walk.
 
     ``owner_bound`` means the request cannot move to another account (dispatched
     account-bound payload, required previous-response / turn-state / file
     owner). Such a request never fails over -- ``failover_next`` would be a
     lie -- so it either retries the same account (when the caller reports a
     bounded same-account retry is still available) or surfaces the failure.
+
+    ``more_candidates_possible`` answers "may this request still be reselected
+    onto an account it has not already excluded?". It is a predicate, not a
+    countdown: the walk is bounded by the usable pool and the request budget,
+    never by a fixed attempt count. A failure no other account can route around
+    is answered ahead of it, so an ending the pool caused and an ending the
+    request caused are two different answers rather than one ``surface``: the
+    former may be rendered as the pool's own rejection, the latter never can be.
+
+    ``candidates_remaining`` is the deprecated spelling of the same answer, kept
+    for one release while call sites migrate; it is read as ``> 0`` and only
+    when ``more_candidates_possible`` is omitted.
     """
+    if more_candidates_possible is None:
+        if candidates_remaining is None:
+            raise TypeError("a failover decision requires 'more_candidates_possible'")
+        more_candidates_possible = candidates_remaining > 0
     if downstream_visible:
-        return "surface"
+        return FailoverOutcome(action="surface", ended_by=None)
     if owner_bound:
-        return "retry_same_account" if same_account_retry_available else "surface"
-    if candidates_remaining <= 0:
-        return "surface"
-    if failure_class in ("rate_limit", "quota", "retryable_transient"):
-        return "failover_next"
-    return "surface"
+        if same_account_retry_available:
+            return FailoverOutcome(action="retry_same_account", ended_by=None)
+        return FailoverOutcome(action="surface", ended_by=None)
+    if failure_class not in ("rate_limit", "quota", "retryable_transient"):
+        return FailoverOutcome(action="surface", ended_by="non_retryable")
+    if not more_candidates_possible:
+        return FailoverOutcome(action="surface", ended_by="pool_exhausted")
+    return FailoverOutcome(action="failover_next", ended_by=None)
+
+
+def failover_decision(
+    *,
+    failure_class: FailureClass,
+    downstream_visible: bool,
+    more_candidates_possible: bool | None = None,
+    owner_bound: bool = False,
+    same_account_retry_available: bool = False,
+    candidates_remaining: int | None = None,
+) -> FailoverAction:
+    """The action half of :func:`failover_outcome`, for callers that do not render a walk ending."""
+
+    return failover_outcome(
+        failure_class=failure_class,
+        downstream_visible=downstream_visible,
+        more_candidates_possible=more_candidates_possible,
+        owner_bound=owner_bound,
+        same_account_retry_available=same_account_retry_available,
+        candidates_remaining=candidates_remaining,
+    ).action
 
 
 def plausible_rate_limit_reset_at(

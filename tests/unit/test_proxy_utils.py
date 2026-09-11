@@ -43610,6 +43610,79 @@ async def test_compact_flush_continues_after_one_deferred_health_failure(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_compact_last_attempted_account_surfaces_instead_of_failing_over_to_nobody(monkeypatch, caplog):
+    """The final compact attempt must be told the pool is out of candidates.
+
+    ``more_candidates_possible`` on the last attempt is the difference between
+    surfacing the account's rejection and recording a move to an account the
+    request never gets. An off-by-one there logs the wrong ending and settles
+    the request's usage after the last account's health write instead of
+    before it.
+    """
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_walk_end_a")
+    account_b = _make_account("acc_compact_walk_end_b")
+    account_c = _make_account("acc_compact_walk_end_c")
+    call_order: list[str] = []
+
+    async def handle_stream_error(failed_account: Account, *args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append(f"handle_stream_error:{failed_account.id}")
+        return {"failure_class": "quota"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("quota_exceeded", "quota exceeded"),
+            failure_phase="status",
+        )
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        for account in (account_a, account_b, account_c):
+            if account.id not in excluded_account_ids:
+                return AccountSelection(account=account, error_message=None)
+        return AccountSelection(account=None, error_message="no accounts")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    # Two attempts over a three-account pool: the walk stops holding account B's
+    # rejection while account C is still selectable.
+    monkeypatch.setattr(proxy_compact_service, "_compact_max_account_attempts", lambda: 2)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.service"):
+        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+            await service.compact_responses(payload, {"session_id": "sid-compact-walk-end"})
+
+    assert _proxy_error_code(exc_info.value) == "quota_exceeded"
+    decisions = [record.getMessage() for record in caplog.records if "Failover decision" in record.getMessage()]
+    assert len(decisions) == 2
+    assert "attempt=1" in decisions[0] and "action=failover_next" in decisions[0]
+    assert "attempt=2" in decisions[1] and "action=surface" in decisions[1]
+    # Account A moved on, so its health write lands where it failed; account B
+    # is the ending, so the request's usage settles before that write.
+    assert call_order == [
+        f"handle_stream_error:{account_a.id}",
+        "settle_compact_api_key_usage",
+        f"handle_stream_error:{account_b.id}",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_compact_selection_timeout_after_failover_flushes_deferred_health(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

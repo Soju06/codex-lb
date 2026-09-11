@@ -2054,7 +2054,7 @@ class _CompactMixin:
                             action = failover_decision(
                                 failure_class=classified["failure_class"],
                                 downstream_visible=False,
-                                candidates_remaining=_compact_max_account_attempts() - _account_attempt - 1,
+                                more_candidates_possible=_account_attempt < _compact_max_account_attempts() - 1,
                             )
                         else:
                             action = "surface"

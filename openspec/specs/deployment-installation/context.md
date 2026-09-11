@@ -268,11 +268,12 @@ Phase 2 (15 removed):
   anyway. `CODEX_LB_MEMORY_REJECT_THRESHOLD_MB` stays: it is the one
   genuine deployment decision (it depends on host memory size), default 0
   = fully off.
-- Images internals (2): host model fixed to `gpt-5.5`
-  (`_IMAGES_HOST_MODEL` in `app/modules/proxy/api.py`; the model registry
-  has no "default Responses model" concept, so a documented constant
-  tracking the bootstrap catalog beats inventing registry plumbing —
-  never echoed to clients) and partial-images cap fixed to 3 in
+- Images internals (2): `resolve_default_host_model()` in
+  `app/core/openai/host_models.py` selects `gpt-5.6-luna`, then `gpt-5.5`,
+  using registry plan visibility and suppression. If neither qualifies,
+  it falls back to `gpt-5.6-luna`. Images and default account probes share
+  this resolver. The internal host model is never echoed to Images clients.
+  The partial-images cap is fixed to 3 in
   `app/core/openai/images.py` (an upstream streaming contract).
   `CODEX_LB_IMAGES_DEFAULT_MODEL` stayed in this phase as the public API
   contract for clients that omit `model`; `constantize-core-tunables`

@@ -1196,3 +1196,96 @@ async def test_request_logs_conversation_summary_does_not_mix_cached_count_with_
     assert body["hasMore"] is True
     assert [entry["requestId"] for entry in body["requests"]] == ["req_conv_snapshot_new"]
     logs_repository_module._clear_recent_count_cache()
+
+
+async def _seed_source_attributed_logs() -> None:
+    """One row per ``source`` value the proxy writes, plus an unattributed one."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        for offset, (request_id, source) in enumerate(
+            (
+                ("req_source_fresh", "subscription_overflow"),
+                ("req_source_pinned", "subscription_overflow_pinned"),
+                ("req_source_limit_warmup", "limit_warmup"),
+                ("req_source_warmup_probe", "warmup_probe"),
+                ("req_source_none", None),
+            )
+        ):
+            await repo.add_log(
+                account_id=None,
+                request_id=request_id,
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=1,
+                latency_ms=10,
+                status="success",
+                error_code=None,
+                source=source,
+                requested_at=now - timedelta(minutes=offset),
+            )
+
+
+@pytest.mark.asyncio
+async def test_list_recent_filters_by_a_single_source(db_setup):
+    await _seed_source_attributed_logs()
+
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        fresh = await repo.list_recent(limit=50, sources=["subscription_overflow"])
+        pinned = await repo.list_recent(limit=50, sources=["subscription_overflow_pinned"])
+
+    assert [log.request_id for log in fresh.logs] == ["req_source_fresh"]
+    assert fresh.total == 1
+    assert [log.request_id for log in pinned.logs] == ["req_source_pinned"]
+    assert pinned.total == 1
+
+
+@pytest.mark.asyncio
+async def test_list_recent_filters_by_both_overflow_sources(db_setup):
+    await _seed_source_attributed_logs()
+
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        result = await repo.list_recent(
+            limit=50,
+            sources=["subscription_overflow", "subscription_overflow_pinned"],
+        )
+
+    assert sorted(log.request_id for log in result.logs) == ["req_source_fresh", "req_source_pinned"]
+    assert result.total == 2
+
+
+@pytest.mark.asyncio
+async def test_list_recent_without_a_source_filter_returns_every_source(db_setup):
+    await _seed_source_attributed_logs()
+
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        unset = await repo.list_recent(limit=50)
+        explicit_empty = await repo.list_recent(limit=50, sources=[])
+
+    assert unset.total == 5
+    assert explicit_empty.total == 5
+    assert sorted(log.source or "" for log in unset.logs) == [
+        "",
+        "limit_warmup",
+        "subscription_overflow",
+        "subscription_overflow_pinned",
+        "warmup_probe",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_recent_source_filter_composes_with_the_other_filters(db_setup):
+    await _seed_source_attributed_logs()
+
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        # An unrelated model narrows the same request to nothing, proving the
+        # source predicate is an AND term and not a replacement.
+        narrowed = await repo.list_recent(limit=50, sources=["subscription_overflow"], models=["gpt-5.4"])
+        unknown = await repo.list_recent(limit=50, sources=["not_a_source"])
+
+    assert narrowed.total == 0
+    assert unknown.total == 0

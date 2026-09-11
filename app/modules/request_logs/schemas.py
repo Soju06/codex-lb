@@ -15,6 +15,9 @@ class RequestLogCostBreakdown(DashboardModel):
 
 
 class RequestLogEntry(DashboardModel):
+    sticky_key_source: str | None = None
+    sticky_kind: str | None = None
+    sticky_key_hash: str | None = None
     requested_at: datetime
     conversation_id: str | None = None
     account_id: str | None = None

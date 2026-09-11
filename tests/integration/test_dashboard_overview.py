@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import event, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus, ApiKey, RequestLog
-from app.db.session import SessionLocal
+from app.db.models import Account, AccountStatus, ApiKey, ModelSourcePin, RequestLog
+from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
 from app.modules.dashboard.weekly_pace import _weekly_timing
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -1545,3 +1548,344 @@ async def test_dashboard_overview_exposes_zero_previous_window_totals_when_full_
             "costUsd": 0.0,
         },
     }
+
+
+def _pin(
+    pin_key: str,
+    *,
+    kind: str,
+    expires_in: timedelta,
+    purge_in: timedelta = timedelta(days=22),
+) -> ModelSourcePin:
+    now = datetime.now(timezone.utc)
+    return ModelSourcePin(
+        pin_key=pin_key,
+        kind=kind,
+        source_id="src_overflow",
+        api_key_id=None,
+        created_at=now - timedelta(hours=1),
+        last_seen_at=now - timedelta(minutes=1),
+        expires_at=now + expires_in,
+        purge_at=now + purge_in,
+    )
+
+
+async def _designate_overflow(
+    session: AsyncSession,
+    *,
+    source_id: str | None = "src_overflow",
+    drain_until: datetime | None = None,
+) -> None:
+    """Put the install in a state where overflow rows and pins can exist.
+
+    The overview's overflow read is gated on the same two settings columns the
+    request path's ship-dark gate reads, so a test that seeds overflow rows
+    without designating a source would be seeding a state production cannot
+    reach. ``drain_until`` alone models a de-designated install still draining
+    its pins.
+    """
+    settings = await SettingsRepository(session).get_or_create()
+    settings.subscription_overflow_source_id = source_id
+    settings.subscription_overflow_drain_until = drain_until
+    await session.commit()
+
+
+async def _add_overflow_log(
+    logs_repo: RequestLogsRepository,
+    request_id: str,
+    *,
+    source: str,
+    requested_at: datetime,
+    cost_usd: float | None,
+    status: str = "success",
+    with_usage: bool = True,
+) -> None:
+    await logs_repo.add_log(
+        account_id=None,
+        request_id=request_id,
+        model="gpt-5.1",
+        model_source_id="src_overflow",
+        model_source_kind="openai_compatible",
+        input_tokens=100 if with_usage else None,
+        output_tokens=50 if with_usage else None,
+        latency_ms=50,
+        status=status,
+        error_code=None if status == "success" else "client_disconnected",
+        source=source,
+        cost_usd=cost_usd,
+        requested_at=requested_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_omits_subscription_overflow_on_a_clean_install(async_client, db_setup):
+    """The ship-dark guarantee for the dashboard: nothing new is rendered."""
+    response = await async_client.get("/api/dashboard/overview")
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["subscriptionOverflow"] is None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_reports_overflow_spend_pins_and_usage_less_rows(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        await _designate_overflow(session)
+        logs_repo = RequestLogsRepository(session)
+        await _add_overflow_log(
+            logs_repo,
+            "req_overflow_fresh",
+            source="subscription_overflow",
+            requested_at=now - timedelta(hours=1),
+            cost_usd=0.25,
+        )
+        await _add_overflow_log(
+            logs_repo,
+            "req_overflow_pinned",
+            source="subscription_overflow_pinned",
+            requested_at=now - timedelta(hours=2),
+            cost_usd=0.5,
+        )
+        await _add_overflow_log(
+            logs_repo,
+            "req_overflow_cancelled",
+            source="subscription_overflow",
+            requested_at=now - timedelta(hours=3),
+            cost_usd=0.125,
+            status="cancelled",
+        )
+        # No usage reported by the source: the owner writes null token columns and
+        # `add_log` prices the row at 0.0, so it must be counted, not priced.
+        await _add_overflow_log(
+            logs_repo,
+            "req_overflow_usage_less",
+            source="subscription_overflow_pinned",
+            requested_at=now - timedelta(hours=4),
+            cost_usd=None,
+            with_usage=False,
+        )
+        # Control rows: a warmup source and an unattributed subscription row.
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_overflow_control_warmup",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            source="limit_warmup",
+            cost_usd=9.0,
+            requested_at=now - timedelta(hours=1),
+        )
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_overflow_control_plain",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            cost_usd=7.0,
+            requested_at=now - timedelta(hours=1),
+        )
+        session.add_all(
+            [
+                _pin("thread:conv-live", kind="thread", expires_in=timedelta(days=6)),
+                _pin("thread:conv-live-2", kind="thread", expires_in=timedelta(days=1)),
+                _pin("thread:conv-tombstone", kind="thread", expires_in=-timedelta(hours=1)),
+                _pin("anchor:key:resp_1", kind="anchor", expires_in=timedelta(days=6)),
+                _pin("bounce:conv-bounced", kind="bounce", expires_in=timedelta(seconds=60)),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/dashboard/overview")
+
+    assert response.status_code == 200
+    overflow = response.json()["summary"]["subscriptionOverflow"]
+    assert overflow == {
+        "requests": 4,
+        "costUsd": pytest.approx(0.875),
+        "usageLessRequests": 1,
+        "livePins": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_overflow_cost_is_a_slice_of_the_estimated_cost(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        await _designate_overflow(session)
+        logs_repo = RequestLogsRepository(session)
+        await _add_overflow_log(
+            logs_repo,
+            "req_slice_overflow",
+            source="subscription_overflow",
+            requested_at=now - timedelta(hours=1),
+            cost_usd=2.0,
+        )
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_slice_subscription",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=10,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            cost_usd=3.0,
+            requested_at=now - timedelta(hours=1),
+        )
+
+    payload = (await async_client.get("/api/dashboard/overview")).json()
+
+    assert payload["summary"]["cost"]["totalUsd"] == pytest.approx(5.0)
+    assert payload["summary"]["subscriptionOverflow"]["costUsd"] == pytest.approx(2.0)
+    assert payload["summary"]["metrics"]["requests"] == 2
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_keeps_the_overflow_tile_after_the_window_moves_on(async_client, db_setup):
+    """Post-drain / out-of-window installs keep the neutral empty state."""
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        await _designate_overflow(session)
+        logs_repo = RequestLogsRepository(session)
+        await _add_overflow_log(
+            logs_repo,
+            "req_overflow_ancient",
+            source="subscription_overflow",
+            requested_at=now - timedelta(days=40),
+            cost_usd=1.0,
+        )
+
+    payload = (await async_client.get("/api/dashboard/overview?timeframe=7d")).json()
+
+    assert payload["summary"]["subscriptionOverflow"] == {
+        "requests": 0,
+        "costUsd": pytest.approx(0.0),
+        "usageLessRequests": 0,
+        "livePins": 0,
+    }
+    # Still out of range at the widest timeframe, and still visible.
+    wide = (await async_client.get("/api/dashboard/overview?timeframe=30d")).json()
+    assert wide["summary"]["subscriptionOverflow"]["requests"] == 0
+    assert wide["summary"]["subscriptionOverflow"]["costUsd"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_shows_the_overflow_tile_for_a_live_pin_without_rows(async_client, db_setup):
+    async with SessionLocal() as session:
+        # De-designated but still draining: the drain deadline alone keeps the
+        # tile alive, which is the state a switched-off canary leaves behind.
+        await _designate_overflow(session, source_id=None, drain_until=utcnow() + timedelta(days=29))
+        session.add(_pin("thread:conv-only-pin", kind="thread", expires_in=timedelta(days=3)))
+        await session.commit()
+
+    payload = (await async_client.get("/api/dashboard/overview")).json()
+
+    assert payload["summary"]["subscriptionOverflow"] == {
+        "requests": 0,
+        "costUsd": pytest.approx(0.0),
+        "usageLessRequests": 0,
+        "livePins": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_overflow_slice_excludes_soft_deleted_rows(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        await _designate_overflow(session)
+        logs_repo = RequestLogsRepository(session)
+        await _add_overflow_log(
+            logs_repo,
+            "req_overflow_deleted",
+            source="subscription_overflow",
+            requested_at=now - timedelta(hours=1),
+            cost_usd=4.0,
+        )
+        await session.execute(
+            update(RequestLog).where(RequestLog.request_id == "req_overflow_deleted").values(deleted_at=now)
+        )
+        await session.commit()
+
+    payload = (await async_client.get("/api/dashboard/overview")).json()
+
+    # Excluded from the window slice, but the dispatch still happened, so the
+    # tile stays visible with its neutral state.
+    assert payload["summary"]["subscriptionOverflow"] == {
+        "requests": 0,
+        "costUsd": pytest.approx(0.0),
+        "usageLessRequests": 0,
+        "livePins": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_issues_no_overflow_statement_on_a_clean_install(async_client, db_setup):
+    """Query-count neutrality: a ship-dark poll costs exactly what it cost before the tile existed.
+
+    The tile's read is three bounded statements (the windowed aggregate, the
+    live thread-pin count and the existence probe). On an install that never
+    designated a source none of them may be issued -- an overview poll runs
+    every 30 s forever, so "invisible" has to mean free, not merely
+    unrendered. The gate itself must also be free: it reads the settings row
+    ``get_overview`` already loads, so the poll's ``dashboard_settings``
+    lookup count may not grow either.
+    """
+    statements: list[str] = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001, ANN202
+        statements.append(statement)
+
+    # Warm the poll once so the settings row exists and every cache is primed:
+    # what is measured below is the steady state, not first-boot.
+    assert (await async_client.get("/api/dashboard/overview")).status_code == 200
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        clean = await async_client.get("/api/dashboard/overview")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+
+    assert clean.status_code == 200
+    assert clean.json()["summary"]["subscriptionOverflow"] is None
+    clean_sql = [statement.lower() for statement in statements]
+    assert not [statement for statement in clean_sql if "model_source_pins" in statement]
+    assert not [statement for statement in clean_sql if "request_logs.source in" in statement]
+    # One settings lookup, as before the gate existed: the second caller in
+    # ``get_overview`` is served from the session identity map.
+    assert len([statement for statement in clean_sql if "from dashboard_settings" in statement]) == 1
+    clean_count = len(statements)
+
+    async with SessionLocal() as session:
+        await _designate_overflow(session)
+
+    # Same steady state, one designation later: the delta is exactly the three
+    # statements the tile costs, which is what makes the clean count above the
+    # pre-tile baseline.
+    assert (await async_client.get("/api/dashboard/overview")).status_code == 200
+    statements.clear()
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        designated = await async_client.get("/api/dashboard/overview")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+
+    assert designated.status_code == 200
+    # Still nothing to render -- but now the poll has to *ask*, and the three
+    # statements it asks with are exactly the cost the clean install above no
+    # longer pays. This is the residual the gate closes, measured end to end.
+    assert designated.json()["summary"]["subscriptionOverflow"] is None
+    designated_sql = [statement.lower() for statement in statements]
+    assert len([statement for statement in designated_sql if "model_source_pins" in statement]) == 1
+    assert len([statement for statement in designated_sql if "request_logs.source in" in statement]) == 2
+    assert len([statement for statement in designated_sql if "from dashboard_settings" in statement]) == 1
+    assert len(statements) == clean_count + 3

@@ -43,6 +43,9 @@ def to_request_log_entry(
     log_like = typing_cast(RequestLogLike, log)
     cost_breakdown = cost_breakdown_from_log(log_like, precision=6)
     return RequestLogEntry(
+        sticky_key_source=log.sticky_key_source if include_sensitive_metadata else None,
+        sticky_kind=log.sticky_kind if include_sensitive_metadata else None,
+        sticky_key_hash=log.sticky_key_hash if include_sensitive_metadata else None,
         requested_at=log.requested_at,
         conversation_id=log.conversation_id if include_sensitive_metadata else None,
         account_id=log.account_id,

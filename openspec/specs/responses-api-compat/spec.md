@@ -6451,6 +6451,32 @@ Disabling the existing sticky-session mapping cleanup switch MUST NOT disable
 operation transcript retention; that switch MAY skip sticky mapping
 maintenance while durable operation retention continues.
 
+The retention window itself is dashboard-managed. It MUST resolve as code
+default, then the deprecated environment alias, then a value stored in the
+dashboard, and both the startup one-shot purge and each scheduler pass MUST
+read it from the dashboard snapshot that pass already holds — once per pass,
+never inside a runtime lock and never per operation — so a dashboard change
+takes effect on the next tick on every replica without a restart.
+
+Because the spool is the replay source for durable bridge recovery, the
+effective window MUST cover every *configured* window in which a spooled
+operation can still be read: the bridge session reuse window, the
+stale-operation abandonment window, and the lifetime of a retry circuit that
+has already admitted a claim. That floor
+MUST be derived from those terms rather than fixed, because two of them are
+themselves operator-tunable, and the settings API MUST refuse an update that
+would leave the effective window below it, naming the binding term. A
+deployment can already be below the floor without any update having passed that
+check, because the environment alias alone decides the window while the
+dashboard column is NULL; startup MUST warn about that state (warn-only,
+naming the binding term and both values) so the first refusal is not a
+surprise. The floor is a steady-state bound on the configuration, not a
+retroactive one: a bridge
+session already open keeps the longer idle TTL it captured, so shortening a
+reuse window can still outlive the transcripts of sessions opened under the
+previous window — the same non-retroactive behaviour the abandoned-row
+retention derived from those windows already has.
+
 #### Scenario: Retention drains a small backlog
 
 - **WHEN** fewer operations are eligible than one scheduler-pass budget
@@ -6494,15 +6520,31 @@ maintenance while durable operation retention continues.
 - **THEN** the leader-gated scheduler still deletes bounded batches of expired
   operation transcript rows while skipping sticky mapping cleanup
 
-### Requirement: Fresh indefinite-recovery spool
+#### Scenario: Dashboard window applies without a restart
 
-Before dispatching a server-owned retry for a nonterminal operation, the system
-MUST atomically clear any partial event spool under the durable owner fence.
+- **GIVEN** the environment alias sets a seven-day window and an operator
+  stores a shorter window in the dashboard
+- **WHEN** the next leader-gated retention pass runs
+- **THEN** it cuts at the dashboard window, not the environment alias
+- **AND** no replica was restarted
 
-#### Scenario: Retry starts with a clean transcript
+#### Scenario: A window already below the floor is reported at startup
 
-- **WHEN** an anchored retry is dispatched after partial persistence
-- **THEN** old events and byte counts are cleared before new output is accepted
+- **GIVEN** the environment alias sets a window below the floor and no
+  dashboard value has been stored
+- **WHEN** the application starts
+- **THEN** it logs a warning naming the binding term, the effective window and
+  the floor
+- **AND** startup continues
+
+#### Scenario: Unset dashboard window keeps inheriting
+
+- **GIVEN** no dashboard value has been stored
+- **WHEN** a retention pass runs
+- **THEN** it cuts at the environment alias, or at the code default when the
+  alias is unset
+- **AND** the stored dashboard value remains unset after any settings save that
+  omits the field
 
 ### Requirement: Ordered deferred reasoning persistence
 
@@ -6610,36 +6652,6 @@ predicate MUST be rechecked in the deletion transaction.
 - **WHEN** a stale operation belongs to a session with a live lease
 - **THEN** retention leaves it intact
 
-### Requirement: Anchored indefinite recovery gate
-
-The server-indefinite recovery loop MUST be installed only for an eventless
-anchored continuation with a durable parent operation. Fresh first-turn
-requests and streams that already emitted downstream response events MUST
-terminate normally rather than being resent indefinitely.
-
-#### Scenario: Fresh request is not held indefinitely
-
-- **WHEN** a first-turn request loses its upstream connection
-- **THEN** the proxy returns its normal error path without an indefinite loop
-
-### Requirement: Retry reservation terminalization
-
-If reacquiring API-key usage limits for a recovery attempt fails, the proxy
-MUST settle the prior reservation and emit a terminal `response.failed` SSE
-event instead of aborting the already-started stream.
-
-#### Scenario: Quota failure produces terminal SSE
-
-- **WHEN** a recovery retry cannot reacquire its usage reservation
-- **THEN** the client receives `response.failed` and the prior reservation is settled
-
-#### Scenario: Unexpected admission failure produces terminal SSE
-
-- **WHEN** recovery admission raises an unexpected infrastructure error before
-  a replacement stream starts
-- **THEN** the client receives `response.failed` and the prior reservation is
-  settled instead of receiving a truncated stream
-
 ### Requirement: Failure spool/state ordering
 
 For an explicit deterministic failure, the proxy MUST persist the terminal SSE
@@ -6665,17 +6677,6 @@ disconnect was non-terminal.
 
 - **WHEN** the upstream closes after `response.created` but before completion
 - **THEN** the operation remains non-retryable
-
-### Requirement: Retry output stops indefinite recovery
-
-An indefinite recovery attempt MUST stop retrying once that attempt emits any
-downstream response event, even if the attempt later fails with a retryable
-transport error.
-
-#### Scenario: Retry output prevents a second attempt
-
-- **WHEN** a retry emits a data event and then times out
-- **THEN** the server stops the indefinite loop instead of appending another response
 
 ### Requirement: Preserve repeated event occurrences
 
@@ -6740,18 +6741,6 @@ sending it.
 
 - **WHEN** operation metadata makes the final frame exceed the configured limit
 - **THEN** the request is rejected or slimmed before any upstream send
-
-### Requirement: Fence same-session active operations
-
-Server-indefinite recovery MUST NOT reset or redispatch a nonterminal operation
-when another pending request in the same durable session still references that
-operation. Submitted and acknowledged operations MUST remain fail-closed;
-only an inactive `unknown` operation may enter a fresh recovery attempt.
-
-#### Scenario: Active same-session operation is not duplicated
-
-- **WHEN** a duplicate request finds a submitted operation still referenced by another pending request
-- **THEN** the proxy refuses a second dispatch and preserves the existing spool
 
 ### Requirement: Responses routes preserve the Ultrafast service tier
 
@@ -9091,30 +9080,6 @@ policy.
   historical tool-output omission notice
 - **AND** preserves the namespaced pair's output unchanged
 
-### Requirement: Eventless server-owned bridge recovery is bounded
-
-The proxy MUST retry server-owned HTTP bridge recovery only up to the fixed
-cap of 6 attempts (`HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS`; not a runtime
-setting) after consecutive eligible eventless failures for an anchored
-continuation. Once that budget is exhausted, the proxy MUST stop recovering
-and emit a terminal `response.failed` event.
-
-That terminal event MUST include a stable `response.id` even when upstream
-never emitted `response.created` or another response envelope before the
-failure. Public `/v1/responses` normalization depends on that envelope to
-synthesize the required leading `response.created` event without producing an
-SDK parser failure.
-
-#### Scenario: Exhausted eventless recovery terminates with one response id
-
-- **GIVEN** an anchored HTTP bridge continuation is eligible for server-owned
-  recovery
-- **AND** each upstream attempt fails before any downstream `response.*` event
-- **WHEN** the bridge reaches the fixed eventless recovery attempt cap
-- **THEN** it emits one terminal `response.failed` event instead of continuing
-  recovery indefinitely
-- **AND** that terminal event includes a stable `response.id`
-
 ### Requirement: Stale bridge retirement rechecks liveness after suspension
 
 Before closing and unregistering a stale HTTP bridge session, the service MUST re-sample pending request liveness after retry-circuit bookkeeping awaits. A response event, response id, or equivalent response-created signal newly observed after the caller's pre-suspension snapshot MUST prevent stale retirement. A session that remains eventless MUST still be retired. Retirement entered from the reader-failure funnel, or for a session that was already closed when its last admission waiter cancelled, MUST NOT be revived by post-suspension signals: its pending turns were already terminally failed and its reader is condemned, and the completed-response anchor can be moved by durable-anchor rehydration without any upstream evidence.
@@ -9954,14 +9919,15 @@ rewritten payload.
 
 ### Requirement: Per-request detached-session retire sweep bounds its lock wait
 
-The fail-safe sweep that reconsiders detached HTTP-bridge generations on every bridge request MUST bound how long it waits for any single detached session's `pending_lock`. When the bound elapses the sweep MUST skip that session for the current pass, emit a warning, leave the session tracked and its lock state untouched, and continue. Session lifecycle owners (drain, close, cooldown-suppression retirement) MUST keep waiting for the lock without a bound so retirement decisions stay authoritative.
+The fail-safe sweep that reconsiders detached HTTP-bridge generations on every bridge request MUST use one five-second monotonic deadline for its aggregate detached-session lock waits. Each retirement attempt MUST receive only the remaining time. Once the deadline expires, the sweep MUST stop starting attempts and emit one warning naming the number of unattempted sessions, if any. Timed-out and unattempted sessions MUST remain tracked with their lock state untouched for later sweeps and lifecycle cleanup. Session lifecycle owners (drain, close, cooldown-suppression retirement) MUST keep waiting for the lock without a bound so retirement decisions stay authoritative. Request cancellation MUST NOT bypass the shielded finalization sweep or transfer resource cleanup ownership.
 
 #### Scenario: Busy detached lock does not park the request path
 
 - **GIVEN** a detached session flagged `retire_after_drain` whose `pending_lock` is held by another task for longer than the bound
 - **WHEN** a request runs the fail-safe sweep
 - **THEN** the sweep returns after the bound without closing the session
-- **AND** a warning names the skipped session
+- **AND** if sessions remain unattempted when the deadline expires, one warning reports their count
+- **AND** the timed-out session remains tracked for later sweeps and lifecycle cleanup
 - **AND** the lock remains owned by its holder with no stranded waiter
 
 #### Scenario: Free detached lock still retires
@@ -9975,6 +9941,19 @@ The fail-safe sweep that reconsiders detached HTTP-bridge generations on every b
 - **GIVEN** a drain or close path calls the retire check without a bound while another task briefly holds the lock
 - **WHEN** the holder releases
 - **THEN** the retire check proceeds and retires the session
+
+#### Scenario: Several busy sessions share one deadline
+
+- **GIVEN** three detached sessions and a five-second sweep budget
+- **WHEN** the first retirement attempt consumes three seconds and the second consumes its remaining two seconds
+- **THEN** no third attempt starts and aggregate lock waiting is five seconds
+- **AND** the deferred sessions remain tracked and a later sweep can retire them
+
+#### Scenario: Cancelled request finalization uses the same deadline
+
+- **WHEN** a bridge request is cancelled while several detached sessions have busy locks
+- **THEN** shielded finalization uses one aggregate lock-wait deadline before cancellation propagates
+- **AND** deferred sessions retain their existing cleanup owners
 
 ### Requirement: Cancelled streamed responses do not re-cancel deferred startup work every loop iteration
 
@@ -10711,62 +10690,6 @@ Metrics SHALL NOT label raw request, conversation, session, account or API-key i
 - **THEN** its routing diagnostics distinguish that reason
 - **AND** admission counters MUST NOT be represented as successful WS connections
 
-### Requirement: Operation-fenced hard turns wait through cooldown within the client retry budget
-
-A hard turn-state HTTP bridge request arriving during retry-circuit cooldown MUST remain pending until cooldown expires only if an explicit server recovery mode is enabled, the request has not observed a response id or response event, and the bridge has a live durable session and owner epoch. The proxy MUST NOT dispatch upstream while waiting. After the wait, the request MUST pass through the existing durable operation-ledger admission before any `response.create` is sent. The durable operation ledger is always on; it is not a runtime setting.
-
-#### Scenario: One-shot hard turn waits before durable arbitration
-
-- **GIVEN** `server_anchored_replay_once` is enabled
-- **AND** a turn-state-only hard continuation has a live durable owner
-- **AND** its retry circuit is cooling down before submission
-- **WHEN** the request reaches bridge startup
-- **THEN** the proxy waits for the bounded cooldown instead of returning 503
-- **AND** it sends no upstream request during the wait
-- **AND** normal durable operation admission runs after cooldown
-
-#### Scenario: Missing durable fence remains fail closed
-
-- **GIVEN** a turn-state-only hard continuation has no durable session or owner
-  epoch
-- **WHEN** its retry circuit is cooling down
-- **THEN** the proxy does not wait or dispatch upstream
-- **AND** it returns the existing cooldown failure with a retry hint
-
-#### Scenario: Default mode remains fail closed
-
-- **GIVEN** ambiguous continuation recovery mode is `fail_closed`
-- **WHEN** any continuity-bound hard request arrives during cooldown
-- **THEN** the proxy preserves the existing immediate cooldown failure
-- **AND** it does not create or claim a durable recovery operation
-
-#### Scenario: Request budget expires while waiting
-
-- **GIVEN** an operation-fenced hard turn is allowed to wait through cooldown
-- **AND** its request budget expires before the cooldown does
-- **WHEN** the bounded wait reaches the request deadline
-- **THEN** the proxy releases the request reservation and returns a terminal
-  timeout
-- **AND** it does not submit `response.create` after the deadline
-
-#### Scenario: Cooldown waiter stays within the per-session queue limit
-
-- **GIVEN** an operation-fenced hard turn is eligible to wait through cooldown
-- **AND** the bridge session is already at its configured queue limit
-- **WHEN** the request reaches the cooldown wait point before submission
-- **THEN** the proxy rejects the request with the existing bridge queue full
-  error
-- **AND** it does not sleep or dispatch upstream
-
-#### Scenario: Durable ownership is renewed while the cooldown wait is pending
-
-- **GIVEN** an operation-fenced hard turn is waiting through startup cooldown
-- **AND** the cooldown exceeds one durable lease refresh cadence
-- **WHEN** the wait continues before submission
-- **THEN** the proxy renews and revalidates the durable owner lease before the
-  wait completes
-- **AND** it fails closed if durable ownership changes during the wait
-
 ### Requirement: Repeated zero-event idle failures poison dead anchors at the circuit threshold
 
 For hard HTTP bridge keys, repeated zero-event idle failures MUST use the
@@ -10830,4 +10753,23 @@ still awaiting I/O.
 - **WHEN** the cooldown expires and the next full-resend request is admitted as the probe
 - **THEN** the key is quarantined and the probe is planned without the dead anchor
 - **AND** the probe resends full history rather than the dead anchor
+
+### Requirement: Eventless bridge failures terminate with a stable response id
+
+When an anchored HTTP bridge continuation fails before any downstream response
+event, the proxy MUST emit one terminal `response.failed` event.
+
+That terminal event MUST include a stable `response.id` even when upstream
+never emitted `response.created` or another response envelope before the
+failure. Public `/v1/responses` normalization depends on that envelope to
+synthesize the required leading `response.created` event without producing an
+SDK parser failure.
+
+#### Scenario: Eventless failure terminates with one response id
+
+- **GIVEN** an anchored HTTP bridge continuation
+- **AND** its upstream attempt fails before any downstream `response.*` event
+- **WHEN** the bridge settles the turn
+- **THEN** it emits one terminal `response.failed` event
+- **AND** that terminal event includes a stable `response.id`
 

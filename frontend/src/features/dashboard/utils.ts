@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, Coins, DollarSign, Flame, MessageSquare, type LucideIcon } from "lucide-react";
+import { Activity, AlertTriangle, Coins, DollarSign, Flame, MessageSquare, Waypoints, type LucideIcon } from "lucide-react";
 
 import i18n from "@/i18n";
 import type {
@@ -847,6 +847,37 @@ export function buildDashboardView(
     trend: trendPointsToValues(trends.errorRate),
     trendColor: TREND_COLORS[4],
   });
+
+  // Subscription-overflow spend (#2123 WP-G): a *breakdown* of the estimated-cost
+  // tile above, not an addition to it. Absent entirely unless the backend
+  // reports overflow activity, so a default install gains no tile.
+  const overflow = overview.summary.subscriptionOverflow;
+  if (overflow) {
+    stats.push({
+      label: t("dashboard.stats.overflowCost", { timeframe: timeframeLabel }),
+      value: formatCurrency(overflow.costUsd),
+      meta:
+        overflow.requests === 0
+          ? t("dashboard.stats.overflowNone", {
+              timeframe: timeframeLabel,
+              pins: formatNumber(overflow.livePins),
+            })
+          : overflow.usageLessRequests > 0
+            ? t("dashboard.stats.overflowMetaUnpriced", {
+                requests: formatCompactNumber(overflow.requests),
+                pins: formatNumber(overflow.livePins),
+                unpriced: formatCompactNumber(overflow.usageLessRequests),
+              })
+            : t("dashboard.stats.overflowMeta", {
+                requests: formatCompactNumber(overflow.requests),
+                pins: formatNumber(overflow.livePins),
+              }),
+      icon: Waypoints,
+      // No sparkline: the slice has no per-bucket trend series behind it.
+      trend: [],
+      trendColor: TREND_COLORS[2],
+    });
+  }
 
   const rawPrimaryItems = buildRemainingItems(overview.accounts, primaryWindow, "primary", isDark);
   const secondaryUsageItems = buildRemainingItems(overview.accounts, secondaryWindow, "secondary", isDark);

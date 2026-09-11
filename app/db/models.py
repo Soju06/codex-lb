@@ -100,7 +100,15 @@ class ModelSourcePin(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     purge_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (Index("ix_model_source_pins_purge_at", "purge_at"),)
+    # ``purge_at`` serves the retention prune. The dashboard overview's live
+    # thread-pin count filters ``kind = 'thread' AND expires_at > now``, which
+    # ``purge_at`` cannot narrow (every live row has a future ``purge_at``), so
+    # it gets its own composite index -- an overview poll runs every 30 s and
+    # thread pins accumulate across the drain window.
+    __table_args__ = (
+        Index("ix_model_source_pins_purge_at", "purge_at"),
+        Index("ix_model_source_pins_kind_expires_at", "kind", "expires_at"),
+    )
 
 
 class Account(Base):
@@ -504,6 +512,10 @@ class RequestLog(Base):
         Index("idx_logs_conversation_id", "conversation_id"),
         Index("idx_logs_client_ip", "client_ip"),
     )
+
+    sticky_key_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    sticky_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    sticky_key_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(

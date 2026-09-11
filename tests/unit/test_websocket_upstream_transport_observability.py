@@ -212,6 +212,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
     assert service.request_log_calls == [
         {
             "account_id": "acc_bridge",
+            "affinity_observation": None,
             "api_key": None,
             "request_id": "resp_bridge_success",
             "archive_request_id": None,
@@ -353,6 +354,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
     assert service.request_log_calls == [
         {
             "account_id": "acc_bridge",
+            "affinity_observation": None,
             "api_key": None,
             "request_id": "resp_bridge_failure",
             "archive_request_id": None,
@@ -430,6 +432,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
     assert service.request_log_calls == [
         {
             "account_id": "acc_bridge",
+            "affinity_observation": None,
             "api_key": None,
             "request_id": "resp_bridge_pending_failure",
             "archive_request_id": None,

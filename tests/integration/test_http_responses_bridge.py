@@ -8648,7 +8648,10 @@ async def test_v1_responses_http_bridge_capacity_failure_writes_no_owner_request
         ),
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
-    assert response.status_code != 200
+    # ``capacity_exhausted_active_sessions`` is a local overload code, so this
+    # is the stable 429 contract rather than merely "not 200" — a broad check
+    # would also pass if the request failed for an unrelated reason.
+    assert response.status_code == 429
 
     service = get_proxy_service_for_app(app_instance)
     assert await service.drain_persistence_tasks(timeout_seconds=10)

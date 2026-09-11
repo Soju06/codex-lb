@@ -71,7 +71,7 @@ is exhausted.
   `owner_bound` branch of `failover_decision` before the walk is reached, so
   the burst-429 same-account backoff and its surfaced rejection are unchanged.
   Making anchored requests movable is a separate concern and a separate change
-  (`restore-anchored-cross-account-relocation`).
+  (`relocate-anchored-turns-across-accounts`).
 - Exactly one account-health write per attempted account per request.
 
 ## Impact

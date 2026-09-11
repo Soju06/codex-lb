@@ -256,23 +256,95 @@ def test_unparsable_revision_is_a_config_error(checker: ModuleType, tmp_path: Pa
     assert checker.main(["--versions-dir", str(versions), "--base-ref", ""]) == 2
 
 
-def test_branch_fork_against_base_ref_is_reported_without_git(checker: ModuleType, tmp_path: Path) -> None:
-    """The branch adds a revision under a parent the base ref has already built on."""
+def test_disconnected_cycle_is_rejected(checker: ModuleType, tmp_path: Path) -> None:
+    """One head and one base are not enough: a mutually-referencing pair hides between them."""
     versions = tmp_path / "versions"
-    head = _linear_fixture(checker, versions)
-    # Base ref advanced past `head` while the branch was open.
-    _write_revision(versions, "20260912_000000_landed_on_main", head)
-    _write_revision(versions, "20260912_010000_branch_revision", head)
-    base_ids = frozenset({"20260901_000000_fixture_base", head, "20260912_000000_landed_on_main"})
+    _linear_fixture(checker, versions)
+    _write_revision(versions, "20260912_000000_cycle_left", "20260912_010000_cycle_right")
+    _write_revision(versions, "20260912_010000_cycle_right", "20260912_000000_cycle_left")
 
     revisions = checker.load_graph(versions)
-    report = checker.check_branch_fork(revisions, base_ids, "origin/main")
+    assert len(checker.graph_heads(revisions)) == 1
+    errors = _errors(checker.run_all(versions_dir=versions, base_ref="")[0])
+    cycle = next(message for message in errors if message.startswith("alembic_revision_cycle"))
+    assert "20260912_000000_cycle_left,20260912_010000_cycle_right" in cycle
+    unreachable = next(message for message in errors if message.startswith("alembic_revision_unreachable"))
+    assert "20260912_000000_cycle_left,20260912_010000_cycle_right" in unreachable
+    assert checker.main(["--versions-dir", str(versions), "--base-ref", ""]) == 1
+
+
+def test_cycle_inside_the_reachable_lineage_is_rejected(checker: ModuleType, tmp_path: Path) -> None:
+    base = "20260901_000000_fixture_base"
+    versions = tmp_path / "versions"
+    _write_revision(versions, base, None)
+    _write_revision(versions, "20260912_000000_cycle_left", (base, "20260912_010000_cycle_right"))
+    _write_revision(versions, "20260912_010000_cycle_right", "20260912_000000_cycle_left")
+    _write_revision(versions, "20260912_020000_tip", "20260912_000000_cycle_left")
+
+    revisions = checker.load_graph(versions)
+    assert checker.graph_heads(revisions) == ("20260912_020000_tip",)
+    assert checker.unreachable_revisions(revisions) == ()
+    errors = checker.check_graph_shape(revisions).errors
+    cycle = next(message for message in errors if message.startswith("alembic_revision_cycle"))
+    assert "20260912_000000_cycle_left" in cycle
+    assert "20260912_010000_cycle_right" in cycle
+
+
+def test_self_referencing_revision_is_rejected(checker: ModuleType, tmp_path: Path) -> None:
+    versions = tmp_path / "versions"
+    _linear_fixture(checker, versions)
+    _write_revision(versions, "20260912_000000_self_parent", "20260912_000000_self_parent")
+
+    errors = checker.check_graph_shape(checker.load_graph(versions)).errors
+    assert any("20260912_000000_self_parent" in message for message in errors if "alembic_revision_cycle" in message)
+
+
+def test_lineage_without_a_base_is_rejected(checker: ModuleType, tmp_path: Path) -> None:
+    versions = tmp_path / "versions"
+    _write_revision(versions, "20260912_000000_left", "20260912_010000_right")
+    _write_revision(versions, "20260912_010000_right", "20260912_000000_left")
+
+    errors = checker.check_graph_shape(checker.load_graph(versions)).errors
+    assert any(message.startswith("alembic_base_count_invalid expected=1 actual=0") for message in errors)
+
+
+def _base_revision(checker: ModuleType, revision: str, down_revision: str | tuple[str, ...] | None):
+    if down_revision is None:
+        parents: tuple[str, ...] = ()
+    elif isinstance(down_revision, str):
+        parents = (down_revision,)
+    else:
+        parents = tuple(down_revision)
+    return checker.Revision(revision=revision, down_revisions=parents, filename=f"{revision}.py")
+
+
+def test_branch_fork_is_reported_from_the_branch_alone(checker: ModuleType, tmp_path: Path) -> None:
+    """The decisive case: the checkout does not contain the revision main added.
+
+    Only the base ref's own ``down_revision`` edges can show that the branch's
+    parent is no longer main's head, so the checkout below deliberately omits
+    ``landed_on_main``.
+    """
+    versions = tmp_path / "versions"
+    head = _linear_fixture(checker, versions)
+    _write_revision(versions, "20260912_010000_branch_revision", head)
+    base_revisions = [
+        _base_revision(checker, "20260901_000000_fixture_base", None),
+        _base_revision(checker, head, "20260901_000000_fixture_base"),
+        _base_revision(checker, "20260912_000000_landed_on_main", head),
+    ]
+
+    revisions = checker.load_graph(versions)
+    assert checker.check_graph_shape(revisions).errors == []  # one head on the branch alone
+    report = checker.check_branch_fork(revisions, base_revisions, "origin/main")
     assert len(report.errors) == 1
     message = report.errors[0]
     assert message.startswith(
         f"alembic_branch_forks_base revision=20260912_010000_branch_revision parent={head} base_ref=origin/main"
     )
+    assert "already builds on" in message
     assert "20260912_000000_landed_on_main" in message
+    assert "head: 20260912_000000_landed_on_main" in message
     assert "two Alembic heads" in message
 
 
@@ -281,9 +353,12 @@ def test_branch_revision_on_the_base_head_is_accepted(checker: ModuleType, tmp_p
     head = _linear_fixture(checker, versions)
     _write_revision(versions, "20260912_000000_branch_revision", head)
     _write_revision(versions, "20260912_010000_stacked_revision", "20260912_000000_branch_revision")
-    base_ids = frozenset({"20260901_000000_fixture_base", head})
+    base_revisions = [
+        _base_revision(checker, "20260901_000000_fixture_base", None),
+        _base_revision(checker, head, "20260901_000000_fixture_base"),
+    ]
 
-    report = checker.check_branch_fork(checker.load_graph(versions), base_ids, "origin/main")
+    report = checker.check_branch_fork(checker.load_graph(versions), base_revisions, "origin/main")
     assert report.errors == []
 
 
@@ -298,35 +373,44 @@ def test_merge_revision_is_exempt_from_the_branch_fork_check(checker: ModuleType
         "20260912_020000_merge_heads",
         ("20260912_000000_landed_on_main", "20260912_010000_other_head"),
     )
-    base_ids = frozenset(
-        {"20260901_000000_fixture_base", head, "20260912_000000_landed_on_main", "20260912_010000_other_head"}
-    )
+    base_revisions = [
+        _base_revision(checker, "20260901_000000_fixture_base", None),
+        _base_revision(checker, head, "20260901_000000_fixture_base"),
+        _base_revision(checker, "20260912_000000_landed_on_main", head),
+        _base_revision(checker, "20260912_010000_other_head", head),
+    ]
 
     revisions = checker.load_graph(versions)
-    assert checker.check_branch_fork(revisions, base_ids, "origin/main").errors == []
+    assert checker.check_branch_fork(revisions, base_revisions, "origin/main").errors == []
     assert checker.check_graph_shape(revisions).errors == []
 
 
-def test_stale_base_ref_does_not_report_a_fork(checker: ModuleType, tmp_path: Path) -> None:
-    """A parent that the base ref does not know yet means "fetch me", not "fork"."""
+def test_parent_unknown_to_the_base_ref_does_not_report_a_fork(checker: ModuleType, tmp_path: Path) -> None:
+    """A parent the base ref does not carry is branch-local work, not a fork."""
     versions = tmp_path / "versions"
     head = _linear_fixture(checker, versions)
-    _write_revision(versions, "20260912_000000_newer_main_revision", head)
-    _write_revision(versions, "20260912_010000_branch_revision", "20260912_000000_newer_main_revision")
-    stale_base_ids = frozenset({"20260901_000000_fixture_base", head})
+    _write_revision(versions, "20260912_000000_newer_revision", head)
+    _write_revision(versions, "20260912_010000_branch_revision", "20260912_000000_newer_revision")
+    base_revisions = [
+        _base_revision(checker, "20260901_000000_fixture_base", None),
+        _base_revision(checker, head, "20260901_000000_fixture_base"),
+    ]
 
-    report = checker.check_branch_fork(checker.load_graph(versions), stale_base_ids, "origin/main")
+    report = checker.check_branch_fork(checker.load_graph(versions), base_revisions, "origin/main")
     assert report.errors == []
 
 
-def test_base_ref_revision_ids_reads_this_repository(checker: ModuleType) -> None:
-    ids = checker.base_ref_revision_ids("HEAD")
-    assert ids is not None
-    assert {revision.revision for revision in checker.load_graph(VERSIONS_DIR)} <= ids
-    assert "__init__" not in ids
+def test_base_ref_revisions_reads_the_graph_out_of_git(checker: ModuleType) -> None:
+    """The git plumbing must reproduce the same edges as reading the working tree."""
+    base_revisions = checker.base_ref_revisions("HEAD")
+    assert base_revisions is not None
+    from_git = {revision.revision: revision.down_revisions for revision in base_revisions}
+    from_disk = {revision.revision: revision.down_revisions for revision in checker.load_graph(VERSIONS_DIR)}
+    assert from_git == from_disk
+    assert "__init__" not in from_git
 
 
 def test_missing_base_ref_skips_the_branch_fork_check(checker: ModuleType) -> None:
-    assert checker.base_ref_revision_ids("refs/heads/definitely-not-a-real-ref") is None
+    assert checker.base_ref_revisions("refs/heads/definitely-not-a-real-ref") is None
     _, summary = checker.run_all(versions_dir=VERSIONS_DIR, base_ref="refs/heads/definitely-not-a-real-ref")
     assert "base-ref check: skipped (ref unavailable)" in summary

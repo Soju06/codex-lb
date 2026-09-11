@@ -20,10 +20,12 @@ branch advances under an already-green head.
 
 Checks:
 
-1. The revision graph has exactly one head and exactly one base, and every
-   ``down_revision`` names a revision that exists (error). Same invariant as
-   ``alembic_head_count_invalid``, minus the database: ``make lint`` on a branch
-   that is merged/rebased onto current ``main`` fails before the push.
+1. The revision graph is one connected acyclic lineage: exactly one head, exactly
+   one base, no duplicate ids, no ``down_revision`` naming a revision that does
+   not exist, no cycle, and nothing the head does not descend from (error). Same
+   invariant as ``alembic_head_count_invalid`` plus the shapes the head and base
+   counts cannot see, minus the database: ``make lint`` on a branch that is
+   merged/rebased onto current ``main`` fails before the push.
 2. No two revisions share a ``YYYYMMDD_HHMMSS`` timestamp prefix (error,
    ratcheted -- see ``RATCHET_PREFIX``). The collision is the authoring-time
    fingerprint of the incident: two authors picking the same slot means either
@@ -41,12 +43,15 @@ Checks:
    fix (renaming the revision) is only free before the revision ships.
 5. Branch fork against a base ref (error, skipped when the ref is absent): a
    revision this checkout adds on top of ``--base-ref`` must descend from a head
-   of that ref, not from a revision the base ref has already built on. This is
-   the only check that sees the fork from the *branch alone*, before a rebase or
-   a merge ref brings both parents into one tree. Merge revisions (more than one
-   parent) are exempt: merging two heads is exactly how a fork is repaired.
-   Skipped in CI, where the checkout has no ``origin/main`` -- there the
-   ``pull_request`` merge ref makes check 1 equivalent.
+   of that ref, not from a revision the base ref has already built on. The base
+   ref's own ``down_revision`` edges are read out of git (two plumbing calls, no
+   network), because a branch that has not rebased does not contain the revision
+   ``main`` added -- only ``main``'s copy can prove the parent is no longer its
+   head. This is the only check that sees the fork from the *branch alone*,
+   before a rebase or a merge ref brings both parents into one tree. Merge
+   revisions (more than one parent) are exempt: merging two heads is exactly how
+   a fork is repaired. Skipped in CI, where the checkout has no ``origin/main``
+   -- there the ``pull_request`` merge ref makes check 1 equivalent.
 
 Exit codes: 0 = clean (warnings allowed), 1 = violations, 2 = config error.
 """
@@ -58,7 +63,7 @@ import ast
 import re
 import subprocess
 import sys
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -193,8 +198,49 @@ def graph_heads(revisions: Iterable[Revision]) -> tuple[str, ...]:
     return tuple(sorted(known - parents))
 
 
+def cyclic_revisions(revisions: Sequence[Revision]) -> tuple[str, ...]:
+    """Revision ids Alembic could never order: a cycle, or a self-reference.
+
+    Kahn peeling over the ``down_revision`` edges between *known* revisions
+    (dangling parents are reported separately, and would otherwise pin every
+    descendant here). Whatever cannot be peeled is in or below a cycle.
+    """
+    known = {revision.revision for revision in revisions}
+    parents = {
+        revision.revision: tuple(parent for parent in revision.down_revisions if parent in known)
+        for revision in revisions
+    }
+    children: dict[str, list[str]] = defaultdict(list)
+    indegree = {revision_id: len(revision_parents) for revision_id, revision_parents in parents.items()}
+    for revision_id, revision_parents in parents.items():
+        for parent in revision_parents:
+            children[parent].append(revision_id)
+    pending = deque(revision_id for revision_id, degree in indegree.items() if degree == 0)
+    while pending:
+        revision_id = pending.popleft()
+        for child in children.get(revision_id, ()):
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                pending.append(child)
+    return tuple(sorted(revision_id for revision_id, degree in indegree.items() if degree > 0))
+
+
+def unreachable_revisions(revisions: Sequence[Revision]) -> tuple[str, ...]:
+    """Revision ids no head descends from: a disconnected lineage Alembic never walks."""
+    parents = {revision.revision: revision.down_revisions for revision in revisions}
+    reachable: set[str] = set()
+    pending = list(graph_heads(revisions))
+    while pending:
+        revision_id = pending.pop()
+        if revision_id in reachable:
+            continue
+        reachable.add(revision_id)
+        pending.extend(parents.get(revision_id, ()))
+    return tuple(sorted(set(parents) - reachable))
+
+
 def check_graph_shape(revisions: Sequence[Revision]) -> Report:
-    """One head, one base, no dangling ``down_revision``, no duplicate ids."""
+    """One head, one base, one connected acyclic lineage, no dangling ids."""
     report = Report()
     by_id: dict[str, list[Revision]] = defaultdict(list)
     for revision in revisions:
@@ -230,10 +276,32 @@ def check_graph_shape(revisions: Sequence[Revision]) -> Report:
         report.error(f"{VERSIONS_RELATIVE}: the revision graph has no head (every revision has a descendant)")
 
     bases = sorted(revision.revision for revision in revisions if not revision.down_revisions)
-    if len(bases) > 1:
-        report.error(
-            f"alembic_base_count_invalid expected=1 actual={len(bases)} bases={','.join(bases)}: "
+    if len(bases) != 1:
+        detail = (
             "a second down_revision=None revision starts a disconnected lineage"
+            if len(bases) > 1
+            else "no revision has down_revision=None, so the lineage has no starting point (usually a cycle)"
+        )
+        report.error(
+            f"alembic_base_count_invalid expected=1 actual={len(bases)} bases={','.join(bases) or 'none'}: {detail}"
+        )
+
+    # Head and base counts alone accept a cycle and a disconnected component: a
+    # self-referencing or mutually-referencing pair is nobody's head and nobody's
+    # base, so it hides between the two counts while Alembic refuses to traverse it.
+    cyclic = cyclic_revisions(revisions)
+    if cyclic:
+        report.error(
+            f"alembic_revision_cycle revisions={','.join(cyclic)}: these revisions cannot be ordered because "
+            "their down_revision edges form a cycle (or a self-reference); Alembic cannot walk them during an "
+            "upgrade. Re-point each down_revision at the revision that really precedes it."
+        )
+    unreachable = unreachable_revisions(revisions)
+    if unreachable:
+        report.error(
+            f"alembic_revision_unreachable revisions={','.join(unreachable)}: no head descends from these "
+            f"revisions, so `alembic upgrade head` never applies them. Attach them to the lineage that ends at "
+            f"{','.join(heads) or 'the head'} or delete them."
         )
     return report
 
@@ -335,12 +403,13 @@ def check_prefix_ordering(revisions: Iterable[Revision], ratchet_prefix: str = R
     return report
 
 
-def _git(*args: str) -> str | None:
+def _git(*args: str, stdin: str | None = None) -> str | None:
     """Run git in the repository; ``None`` when git or the object is unavailable."""
     try:
         completed = subprocess.run(
             ("git", *args),
             cwd=ROOT,
+            input=stdin,
             capture_output=True,
             text=True,
             check=False,
@@ -352,63 +421,123 @@ def _git(*args: str) -> str | None:
     return completed.stdout
 
 
-def base_ref_revision_ids(base_ref: str) -> frozenset[str] | None:
-    """Revision ids present in ``base_ref``, or ``None`` when the ref is unavailable.
+def _blob_entries(base_ref: str) -> list[tuple[str, str]] | None:
+    """``(blob sha, filename)`` for every revision file in ``base_ref``."""
+    listing = _git("ls-tree", "-r", base_ref, "--", VERSIONS_RELATIVE)
+    if listing is None:
+        return None
+    entries: list[tuple[str, str]] = []
+    for line in listing.splitlines():
+        metadata, _, path = line.partition("\t")
+        fields = metadata.split()
+        if len(fields) != 3 or fields[1] != "blob" or not path:
+            continue
+        name = Path(path).name
+        if not name.endswith(".py") or name == "__init__.py":
+            continue
+        entries.append((fields[2], name))
+    return entries
 
-    Only the ids are needed (check 3 guarantees the filename stem *is* the id),
-    so this is a single ``git ls-tree`` and never reads a blob.
+
+def _blob_contents(entries: Sequence[tuple[str, str]]) -> dict[str, str] | None:
+    """Read every blob in one ``git cat-file --batch``; ``None`` if any is missing.
+
+    The batch stream is read as bytes because ``--batch`` headers size each blob
+    in bytes; each payload is decoded on its own.
+    """
+    if not entries:
+        return {}
+    try:
+        completed = subprocess.run(
+            ("git", "cat-file", "--batch"),
+            cwd=ROOT,
+            input="\n".join(sha for sha, _ in entries).encode("ascii") + b"\n",
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    batch = completed.stdout
+    contents: dict[str, str] = {}
+    position = 0
+    for sha, _ in entries:
+        newline = batch.find(b"\n", position)
+        if newline < 0:
+            return None
+        header = batch[position:newline].split()
+        if len(header) != 3 or header[0].decode("ascii", "replace") != sha:
+            return None
+        start = newline + 1
+        end = start + int(header[2])
+        try:
+            contents[sha] = batch[start:end].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        position = end + 1
+    return contents
+
+
+def base_ref_revisions(base_ref: str) -> tuple[Revision, ...] | None:
+    """The revision graph as ``base_ref`` has it, or ``None`` when it is unreadable.
+
+    The base ref's own ``down_revision`` edges are required, not just its ids: a
+    branch that has not rebased does not contain the revision ``main`` added, so
+    only ``main``'s copy can say that a parent is no longer ``main``'s head.
     """
     if _git("rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}") is None:
         return None
-    listing = _git("ls-tree", "-r", "--name-only", base_ref, "--", VERSIONS_RELATIVE)
-    if listing is None:
+    entries = _blob_entries(base_ref)
+    if not entries:
         return None
-    ids = {
-        Path(line).stem for line in listing.splitlines() if line.endswith(".py") and Path(line).name != "__init__.py"
-    }
-    return frozenset(ids) if ids else None
+    contents = _blob_contents(entries)
+    if contents is None:
+        return None
+    revisions: list[Revision] = []
+    for sha, name in entries:
+        source = contents.get(sha)
+        if source is None:
+            return None
+        try:
+            revisions.append(parse_revision(source, name))
+        except ValueError:
+            # History we do not control: degrade to "check skipped" rather than
+            # failing a branch over a file it did not touch.
+            return None
+    return tuple(revisions)
 
 
-def check_branch_fork(revisions: Sequence[Revision], base_revision_ids: frozenset[str], base_ref: str) -> Report:
+def check_branch_fork(revisions: Sequence[Revision], base_revisions: Sequence[Revision], base_ref: str) -> Report:
     """A revision this branch adds must descend from a head of ``base_ref``.
 
-    Uses only the base ref's id set: a revision in the current tree whose id the
-    base ref also carries is "base side", so ``parent`` is a base head exactly
-    when no base-side revision lists it as a parent. A parent that is missing
-    from the base ref is skipped rather than reported -- that is a stale local
-    ``origin/main``, not a fork.
+    Both graphs are needed. A parent that ``base_ref`` does not know is skipped
+    (it is a branch-local revision, or the ref is behind the checkout), and a
+    merge revision is exempt because merging two heads is the sanctioned repair.
     """
     report = Report()
-    children: dict[str, list[str]] = defaultdict(list)
-    for revision in revisions:
+    base_ids = {revision.revision for revision in base_revisions}
+    base_children: dict[str, list[str]] = defaultdict(list)
+    for revision in base_revisions:
         for parent in revision.down_revisions:
-            children[parent].append(revision.revision)
-    base_heads = tuple(
-        sorted(
-            revision_id
-            for revision_id in base_revision_ids
-            if not any(child in base_revision_ids for child in children.get(revision_id, ()))
-        )
-    )
+            base_children[parent].append(revision.revision)
+    base_heads = tuple(sorted(base_ids - set(base_children)))
     for revision in revisions:
-        if revision.revision in base_revision_ids:
+        if revision.revision in base_ids:
             continue
         if len(revision.down_revisions) != 1:
             # A merge revision legitimately names the heads it repairs, and a new
             # base revision (no parent) is caught by check_graph_shape instead.
             continue
         parent = revision.down_revisions[0]
-        if parent not in base_revision_ids:
-            continue
-        base_children = sorted(child for child in children.get(parent, ()) if child in base_revision_ids)
-        if not base_children:
+        if parent not in base_ids or parent not in base_children:
             continue
         report.error(
             f"alembic_branch_forks_base revision={revision.revision} parent={parent} base_ref={base_ref}: "
-            f"{base_ref} already builds on {parent} ({', '.join(base_children)}), so this branch's revision "
-            f"starts a second lineage and merging it produces two Alembic heads. Rebase onto {base_ref} "
-            f"(head{'s' if len(base_heads) != 1 else ''}: {', '.join(base_heads) or 'unknown'}) and re-point "
-            f"down_revision -- and re-stamp {revision.revision} if its timestamp is now in the past."
+            f"{base_ref} already builds on {parent} ({', '.join(sorted(base_children[parent]))}), so this "
+            f"branch's revision starts a second lineage and merging it produces two Alembic heads. Rebase onto "
+            f"{base_ref} (head{'s' if len(base_heads) != 1 else ''}: {', '.join(base_heads) or 'unknown'}) and "
+            f"re-point down_revision -- and re-stamp {revision.revision} if its timestamp is now in the past."
         )
     return report
 
@@ -416,7 +545,7 @@ def check_branch_fork(revisions: Sequence[Revision], base_revision_ids: frozense
 def run_all(
     versions_dir: Path = VERSIONS_DIR,
     base_ref: str = DEFAULT_BASE_REF,
-    base_revision_ids: frozenset[str] | None = None,
+    base_revisions: Sequence[Revision] | None = None,
     ratchet_prefix: str = RATCHET_PREFIX,
 ) -> tuple[list[Report], str]:
     revisions = load_graph(versions_dir)
@@ -429,11 +558,12 @@ def run_all(
     heads = graph_heads(revisions)
     base_note = "skipped (ref unavailable)"
     if base_ref:
-        if base_revision_ids is None:
-            base_revision_ids = base_ref_revision_ids(base_ref)
-        if base_revision_ids is not None:
-            reports.append(check_branch_fork(revisions, base_revision_ids, base_ref))
-            added = len({revision.revision for revision in revisions} - base_revision_ids)
+        if base_revisions is None:
+            base_revisions = base_ref_revisions(base_ref)
+        if base_revisions is not None:
+            reports.append(check_branch_fork(revisions, base_revisions, base_ref))
+            base_ids = {revision.revision for revision in base_revisions}
+            added = len({revision.revision for revision in revisions} - base_ids)
             base_note = f"{base_ref} (+{added} revision(s) on this checkout)"
     else:
         base_note = "disabled"

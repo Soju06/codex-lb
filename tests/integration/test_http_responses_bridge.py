@@ -14310,6 +14310,8 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
         "account-neutral",
         "forwarded-account-neutral",
         "owner-bound-tool-history",
+        "owner-bound-half-open-probe-return",
+        "owner-bound-proxy-half-open-probe-return",
         "forwarded-owner-bound-tool-history",
         "missing-prior-output",
         "transport-only",
@@ -14376,9 +14378,13 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         "account-neutral-newer-circuit-before-submit",
     }
     circuit_advances_during_admission = replay_case == "circuit-advances-during-admission"
+    proxy_half_open_probe_return = replay_case == "owner-bound-proxy-half-open-probe-return"
+    half_open_probe_return = replay_case == "owner-bound-half-open-probe-return" or proxy_half_open_probe_return
     transport_only = replay_case == "transport-only"
     owner_bound_replay = replay_case in {
         "owner-bound-tool-history",
+        "owner-bound-half-open-probe-return",
+        "owner-bound-proxy-half-open-probe-return",
         "forwarded-owner-bound-tool-history",
         "newer-circuit-before-submit",
         "inactive-unknown-owner-bound-journal",
@@ -14478,7 +14484,7 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
             cast(Any, service)._http_bridge_retry_circuits[session.key] = (
                 http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
                     consecutive_failures=2,
-                    cooldown_until=time.monotonic() + 60.0,
+                    cooldown_until=(time.monotonic() - 1.0 if half_open_probe_return else time.monotonic() + 60.0),
                     last_detail="stream_incomplete",
                     last_touched_monotonic=time.monotonic(),
                     # This fixture injects an in-memory circuit directly;
@@ -14672,6 +14678,10 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         "previous_response_id": first_response_id,
         "stream": True,
     }
+    if proxy_half_open_probe_return:
+        # Native clients resend history without an explicit anchor; the bridge
+        # injects the previous response ID before upstream rejects it as stale.
+        second_payload.pop("previous_response_id")
     expected_replay_input = proxy_module.ResponsesRequest.model_validate(second_payload).to_payload()["input"]
     if inactive_unknown_journal:
         failed_response = await async_client.post(
@@ -14811,8 +14821,26 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         if circuit_advances_during_admission:
             assert retained_circuit.consecutive_failures >= 3
         else:
+            # A verified full resend suppresses retry-circuit accounting for
+            # the stale-anchor recovery, including a client-supplied anchor.
             assert retained_circuit.consecutive_failures == 2
-        assert retained_circuit.cooldown_until > time.monotonic()
+        if not half_open_probe_return:
+            assert retained_circuit.cooldown_until > time.monotonic()
+        elif proxy_half_open_probe_return:
+            # Proxy-owned continuity loss returns the probe and leaves an
+            # elapsed marker so the next request can claim a fresh lease.
+            assert retained_circuit.cooldown_until <= time.monotonic()
+            assert retained_circuit.half_open_until == 0.0
+            assert retained_circuit.half_open_owner_session is None
+            assert retained_circuit.half_open_owner_token is None
+            assert json.loads(rejecting_upstream.sent_text[0])["previous_response_id"] == first_response_id
+        else:
+            # The client-supplied stale anchor is not proxy continuity loss:
+            # its safe full resend does not strike or return the active probe.
+            assert retained_circuit.cooldown_until == 0.0
+            assert retained_circuit.half_open_until > time.monotonic()
+            assert retained_circuit.half_open_owner_session is session
+            assert retained_circuit.half_open_owner_token is not None
         durable_clear_retry_circuit.assert_not_awaited()
         clear_http_bridge_quarantine.assert_called_once()
     else:
@@ -14846,6 +14874,26 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
         assert "previous_response_id" not in replay_payload
         assert replay_payload["input"] == expected_replay_input
     assert replay_connect_headers["x-request-trace"] == "keep-me"
+    if proxy_half_open_probe_return:
+        third_events = await _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            json_body={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": [
+                    *full_resend,
+                    *second_events[-1]["response"]["output"],
+                    {"role": "user", "content": [{"type": "input_text", "text": "third question"}]},
+                ],
+                "stream": True,
+            },
+            headers=session_headers,
+        )
+        assert third_events[-1]["type"] == "response.completed"
+        assert third_events[-1]["response"]["id"] == "resp_stale_owner_3"
+        assert connected_account_ids == [owner_chatgpt_account_id] * 3
+        assert alternate_upstream.sent_text == []
 
 
 @pytest.mark.asyncio

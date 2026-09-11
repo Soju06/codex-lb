@@ -331,4 +331,3 @@ leaves a 3.3x margin).
 - **WHEN** `UVICORN_TIMEOUT_KEEP_ALIVE` or `--timeout-keep-alive` is not an
   integer
 - **THEN** startup fails with an error naming the flag and variable
-

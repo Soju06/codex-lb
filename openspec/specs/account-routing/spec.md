@@ -1230,4 +1230,3 @@ When upstream answers a stream dispatch for a selected account with HTTP 429 who
 - **WHEN** the rejection is observed
 - **THEN** the burst cooldown for account A is engaged immediately, before the replacement dispatch or backoff wait
 - **AND** the deferred transient penalty, written after settlement, does not extend the cooldown deadline
-

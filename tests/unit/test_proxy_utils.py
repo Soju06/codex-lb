@@ -1377,6 +1377,43 @@ def test_account_selection_recovery_sleep_retries_hard_affinity_owner_briefly():
     assert _account_selection_recovery_sleep_seconds(selection) == 2.0
 
 
+@pytest.mark.asyncio
+async def test_account_selection_recovery_sleep_refuses_a_self_excluded_hard_affinity_owner():
+    """#2163: the selector reports that the hard ``CODEX_SESSION`` owner it
+    resolved is one of the caller's own ``exclude_account_ids``. That owner
+    cannot become selectable while the exclusion holds and a hard row never
+    spills, so the 2s owner-recovery window buys nothing: repeating it burns
+    the whole request budget (7200s on the HTTP bridge) before the same
+    failure surfaces. The wait is refused without sleeping once, and the same
+    ``hard_affinity_saturated`` without that proof keeps its recovery wait
+    (``test_account_selection_recovery_sleep_retries_hard_affinity_owner_briefly``)."""
+    selection = AccountSelection(
+        account=None,
+        error_message="Hard affinity owner account is unavailable",
+        error_code="hard_affinity_saturated",
+        hard_affinity_owner_excluded=True,
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    assert _account_selection_recovery_sleep_seconds(selection) is None
+    waited = await _sleep_for_account_selection_recovery(
+        selection,
+        request_id="req_self_excluded_hard_owner",
+        kind="http_bridge",
+        request_stage="reattach",
+        model="gpt-5.1",
+        max_sleep_seconds=7200.0,
+        scheduler=cast(Any, SimpleNamespace(sleep=fake_sleep)),
+        clock=REAL_CLOCK,
+    )
+
+    assert waited is False
+    assert sleeps == []
+
+
 def test_account_selection_recovery_sleep_ignores_generic_no_available_accounts():
     selection = AccountSelection(account=None, error_message="No available accounts", error_code="no_accounts")
 

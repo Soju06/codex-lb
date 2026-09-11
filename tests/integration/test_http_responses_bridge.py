@@ -487,9 +487,13 @@ class _ClosingBridgeUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
 
 
 class _PrecreatedCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    def __init__(self, response_id_prefix: str = "resp_bridge", *, close_code: int = 1011) -> None:
+        super().__init__(response_id_prefix)
+        self.close_code = close_code
+
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
-        await self._messages.put(_FakeUpstreamMessage("close", close_code=1011))
+        await self._messages.put(_FakeUpstreamMessage("close", close_code=self.close_code))
 
 
 class _PrecreatedOverloadUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
@@ -17050,6 +17054,10 @@ def _install_two_account_bridge_failover_with_hard_owner(
                     account=None,
                     error_message="Hard affinity owner account is unavailable",
                     error_code="hard_affinity_saturated",
+                    # The production selector reports that the hard owner it
+                    # resolved is one of this caller's own exclusions, so the
+                    # owner-recovery wait cannot clear it (#2163).
+                    hard_affinity_owner_excluded=True,
                 )
             return AccountSelection(account=owner, error_message=None, error_code=None)
         chosen = alternate if owner.id in excluded else owner
@@ -17316,6 +17324,128 @@ async def test_backend_responses_http_bridge_accepted_replay_moved_by_a_soft_row
     # handshake carries none of it.
     assert "x-codex-turn-state" not in connects[0][1]
     assert "x-codex-turn-state" not in connects[1][1], connects[1][1]["x-codex-turn-state"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["created_only", "model_fallback"])
+async def test_backend_responses_http_bridge_fails_a_self_excluded_hard_owner_replay_closed(
+    async_client,
+    monkeypatch,
+    shape,
+):
+    """#2163 (residual of #2150): the two replays that still exclude the
+    account they are moving off -- the created-only pre-created replay
+    (upstream died before ``response.created`` reached the client) and the
+    model-fallback replay (the account rejected the requested model) -- on a
+    native Codex session whose affinity resolves a raw legacy hard
+    ``CODEX_SESSION`` owner. That owner is the only account selection may
+    return, so the exclusion makes every re-selection report
+    ``hard_affinity_saturated``; the reconnect read that as a transient owner
+    outage and slept ``_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS`` per attempt
+    until the bridge request budget was spent (measured on the pre-fix tree
+    with the budget bounded to 15s and the sleep to 50ms: 294 and 295 saturated
+    re-selections over the full 15s; production defaults are 2s per attempt to
+    a 7200s budget, ~3600 attempts before the client sees anything).
+
+    The selector now reports that the saturation is this request's own
+    exclusion, so the wait is refused and the failure is immediate. The turn is
+    never handed to the alternate account: a resolved hard row is ownership
+    evidence, and the client's own retry reaches the owner unexcluded."""
+    legacy_session_key = f"sid-http-bridge-self-excluded-{shape}"
+    model = "gpt-5.3-codex-spark" if shape == "model_fallback" else "gpt-5.1"
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(enabled=True).model_copy(
+            update={"http_responses_session_bridge_request_budget_seconds": 15.0}
+        ),
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    monkeypatch.setattr(proxy_support, "_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS", 0.05)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS", 0.01)
+    owner_id = await _import_account(
+        async_client,
+        f"acc_self_excluded_owner_{shape}",
+        f"self-excluded-owner-{shape}@example.com",
+    )
+    alternate_id = await _import_account(
+        async_client,
+        f"acc_self_excluded_alternate_{shape}",
+        f"self-excluded-alternate-{shape}@example.com",
+    )
+    owner = await _get_account(owner_id)
+    alternate = await _get_account(alternate_id)
+    failing_upstream = (
+        _ErrorOnlyUpstreamWebSocket("resp_self_excluded_model_rejected")
+        if shape == "model_fallback"
+        else _PrecreatedCloseUpstreamWebSocket("resp_self_excluded_created_only", close_code=1006)
+    )
+    owner_second_upstream = _FakeBridgeUpstreamWebSocket("resp_self_excluded_owner_second")
+    alternate_upstream = _FakeBridgeUpstreamWebSocket("resp_self_excluded_alternate")
+    connect_account_ids, selection_exclusions, selection_legacy_keys = (
+        _install_two_account_bridge_failover_with_hard_owner(
+            monkeypatch,
+            owner=owner,
+            alternate=alternate,
+            legacy_session_key=legacy_session_key,
+            upstreams_by_account_header={
+                f"acc_self_excluded_owner_{shape}": [failing_upstream, owner_second_upstream],
+                f"acc_self_excluded_alternate_{shape}": [alternate_upstream],
+            },
+        )
+    )
+
+    started_at = time.monotonic()
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "Return exactly OK.",
+            "input": "self-excluded-hard-owner-replay",
+            "stream": True,
+        },
+        headers={"session_id": legacy_session_key},
+    )
+    body = response.text
+    elapsed_seconds = time.monotonic() - started_at
+
+    # The bound: ONE saturated re-selection, not one per recovery sleep until
+    # the request budget. 5s is two orders of magnitude below the 15s budget
+    # this test allows, so a reintroduced spin fails here instead of hanging.
+    saturated_selections = [excluded for excluded in selection_exclusions if owner.id in excluded]
+    assert len(saturated_selections) == 1, (
+        f"the reconnect must not spin on a self-excluded hard owner: {len(saturated_selections)} attempts "
+        f"in {elapsed_seconds:.2f}s"
+    )
+    assert elapsed_seconds < 5.0
+    assert selection_legacy_keys[-1] == legacy_session_key
+    # The hard owner keeps its turns: the excluded replay is not served by the
+    # alternate account, and the owner is not reconnected behind the client's
+    # back either -- the request fails closed on its first re-selection.
+    assert connect_account_ids == [f"acc_self_excluded_owner_{shape}"]
+    assert len(failing_upstream.sent_text) == 1
+    assert owner_second_upstream.sent_text == []
+    assert alternate_upstream.sent_text == []
+    if shape == "created_only":
+        # Nothing was visible downstream yet, so the selection failure is the
+        # response: a 503 instead of 7200s of keepalives and a 502.
+        assert response.status_code == 503
+        assert json.loads(body)["error"]["code"] == "hard_affinity_saturated"
+        return
+    # The model-fallback replay surfaces the upstream rejection that started
+    # it, which is the actionable error for a hard owner that cannot serve the
+    # requested model.
+    assert response.status_code == 200
+    events = [
+        event
+        for line in body.splitlines()
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+        if (event := json.loads(line[6:])).get("type") != "codex.keepalive"
+    ]
+    assert [event["type"] for event in events] == ["error"]
+    assert events[0]["error"]["code"] == "invalid_request_error"
+    assert events[0]["error"]["message"] == (
+        f"The '{model}' model is not supported when using Codex with a ChatGPT account."
+    )
 
 
 class _AcceptedOutputItemCapacityErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):

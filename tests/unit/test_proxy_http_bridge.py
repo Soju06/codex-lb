@@ -13146,6 +13146,106 @@ async def test_reconnect_http_bridge_session_retries_transient_file_pin_owner_sa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner_excluded_by_us", [True, False])
+async def test_reconnect_http_bridge_session_bounds_a_self_excluded_hard_owner_saturation(
+    monkeypatch: pytest.MonkeyPatch,
+    owner_excluded_by_us: bool,
+) -> None:
+    """#2163: the created-only and model-fallback replays of a fresh turn on a
+    hard ``session_header`` session exclude the failing account to move the
+    turn. When the session affinity resolves a raw legacy hard
+    ``CODEX_SESSION`` owner that account is the only one selection may return,
+    so every re-selection reports ``hard_affinity_saturated`` -- and the
+    reconnect used to read that as a transient owner outage and sleep
+    ``_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS`` per attempt until the bridge
+    request budget (7200s by default, ~3600 attempts) was spent.
+
+    The selector now proves the saturation is the caller's own exclusion, and
+    the recovery wait is refused: ONE attempt, no sleep, fail closed -- the
+    bound this test pins. A saturation without that proof keeps its single
+    recovery wait and its retry, so a briefly unavailable owner is unaffected."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-self-excluded-hard-owner", None),
+        key_value="sid-self-excluded-hard-owner",
+    )
+    assert session.key.strength == "hard"
+    # Abrupt 1006, not 1011: a 1011 close binds the reconnect to the session's
+    # account and already fails closed at
+    # ``_require_http_bridge_bound_account_not_excluded``. 1006 is the shape
+    # that reaches selection with the account excluded.
+    session.last_upstream_close_code = 1006
+    selections: list[dict[str, object]] = []
+    recovery_waits: list[proxy_service.AccountSelection] = []
+    recovery_sleeps: list[float] = []
+    alternate_account = cast(
+        Any, SimpleNamespace(id="acc-self-excluded-alternate", status=AccountStatus.ACTIVE, plan_type="plus")
+    )
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selections.append(kwargs)
+        if len(selections) == 1:
+            return proxy_service.AccountSelection(
+                account=None,
+                error_message="Hard affinity owner account is unavailable",
+                error_code="hard_affinity_saturated",
+                hard_affinity_owner_excluded=owner_excluded_by_us,
+            )
+        return proxy_service.AccountSelection(account=alternate_account, error_message=None)
+
+    async def recording_sleep(seconds: float) -> None:
+        recovery_sleeps.append(seconds)
+
+    async def sleep_for_recovery(selection: proxy_service.AccountSelection, **kwargs: Any) -> bool:
+        # The real recovery wait, on a scheduler that records instead of
+        # sleeping: the decision under test belongs to support, not to a stub.
+        recovery_waits.append(selection)
+        kwargs["scheduler"] = cast(Any, SimpleNamespace(sleep=recording_sleep))
+        return await proxy_support_module._sleep_for_account_selection_recovery(selection, **kwargs)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-self-excluded-hard-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    request_state.excluded_account_ids.add(session.account.id)
+    upstream = cast(Any, SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=_bridge_selection_settings())),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(http_bridge_mixin_module, "_sleep_for_account_selection_recovery", sleep_for_recovery)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=alternate_account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=upstream))
+
+    if owner_excluded_by_us:
+        with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+            await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.payload["error"]["code"] == "hard_affinity_saturated"
+        assert len(selections) == 1
+        assert session.account.id in cast(Any, selections[0]["exclude_account_ids"])
+        assert recovery_sleeps == []
+        assert session.closed is True
+        return
+
+    await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert len(selections) == 2
+    assert recovery_waits and recovery_waits[0].error_code == "hard_affinity_saturated"
+    assert recovery_sleeps == [proxy_support_module._HARD_AFFINITY_RECOVERY_SLEEP_SECONDS]
+    assert session.account is alternate_account
+    assert session.closed is False
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_maps_nonexistent_file_pin_owner_without_sleep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -29765,6 +29865,7 @@ async def test_http_bridge_reconnect_failure_keeps_reader_handoff_session_closed
             account=None,
             error_code="no_accounts",
             error_message="No active accounts available",
+            hard_affinity_owner_excluded=False,
         )
 
     monkeypatch.setattr(service, "_select_account_with_budget_for_stream", AsyncMock(side_effect=select_no_account))

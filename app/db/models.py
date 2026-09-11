@@ -1243,6 +1243,10 @@ class DashboardSettings(Base):
         server_default=text("'smart'"),
         nullable=False,
     )
+    # T3, tri-state: NULL inherits the environment value and then the ``shared``
+    # code default. Never seeded from the environment (configuration-tiers,
+    # "Environment values are fallbacks, never seeds").
+    thread_cache_identity_mode: Mapped[str | None] = mapped_column(String, nullable=True)
     proxy_account_response_create_limit: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
@@ -1669,6 +1673,8 @@ class ApiKey(Base):
         nullable=False,
     )
     transport_policy_override: Mapped[str | None] = mapped_column(String, nullable=True)
+    # NULL = follow the fleet (dashboard, then environment, then ``shared``).
+    thread_cache_identity_override: Mapped[str | None] = mapped_column(String, nullable=True)
     account_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

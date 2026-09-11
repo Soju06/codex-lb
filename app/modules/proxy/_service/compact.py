@@ -23,6 +23,12 @@ from app.core.clients.proxy import (
     push_compact_timeout_overrides,
 )
 from app.core.clients.proxy import compact_responses as core_compact_responses
+from app.core.clients.thread_cache_identity import (
+    ThreadCacheIdentity,
+)
+from app.core.clients.thread_cache_identity import (
+    effective_thread_cache_identity_mode as _effective_thread_cache_identity_mode,
+)
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
@@ -854,6 +860,10 @@ class _CompactMixin:
         resilience = bind_resilience_toggles(settings, startup_settings=base_settings)
         concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        # Resolved once per request: API-key override, then the fleet value.
+        thread_cache_identity_mode, thread_cache_identity_from_key = _effective_thread_cache_identity_mode(
+            api_key, settings
+        )
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_compact_request(
             payload,
@@ -886,6 +896,8 @@ class _CompactMixin:
             sticky_kind=affinity.kind.value if affinity.kind is not None else None,
             sticky_key_source=sticky_key_source,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
+            thread_cache_identity_mode=thread_cache_identity_mode,
+            thread_cache_identity_from_key=thread_cache_identity_from_key,
         )
         routing_strategy = _routing_strategy(settings)
         turn_state_owner_account_id: str | None = None
@@ -1192,6 +1204,14 @@ class _CompactMixin:
                                     "route_trace": route_trace,
                                     "chatgpt_account_id": account_id,
                                     "synthesize_routing_hint": True,
+                                    # ``target.id`` is the load-balancer account
+                                    # id; ``account_id`` above is the wire one.
+                                    # The scope token hashes the LB id in both
+                                    # the stream and compact paths.
+                                    "thread_cache_identity": ThreadCacheIdentity(
+                                        mode=thread_cache_identity_mode,
+                                        account_id=target.id,
+                                    ),
                                 },
                             ),
                             timeout=upstream_budget,

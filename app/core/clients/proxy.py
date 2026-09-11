@@ -62,6 +62,11 @@ from app.core.clients.native_egress import (
     discover_native_egress_client,
 )
 from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.clients.thread_cache_identity import (
+    ThreadCacheIdentity,
+    apply_thread_cache_identity,
+    scope_session_headers,
+)
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
@@ -3617,6 +3622,7 @@ async def stream_responses(
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
     synthesize_routing_hint: bool = False,
+    thread_cache_identity: ThreadCacheIdentity | None = None,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     # aclosing() at every hop lets a consumer's aclose() reach the upstream
@@ -3643,6 +3649,7 @@ async def stream_responses(
                 suppress_live_usage=suppress_live_usage,
                 native_egress_client=native_egress_client,
                 synthesize_routing_hint=synthesize_routing_hint,
+                thread_cache_identity=thread_cache_identity,
             )
         ) as upstream_events,
     ):
@@ -3675,6 +3682,7 @@ async def _stream_responses_with_session(
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
     synthesize_routing_hint: bool = False,
+    thread_cache_identity: ThreadCacheIdentity | None = None,
 ) -> AsyncGenerator[str, None]:
     settings = with_dashboard_overrides(get_settings())
     headers = apply_codex_installation_headers(
@@ -3725,6 +3733,12 @@ async def _stream_responses_with_session(
     )
     payload_dict = dict(payload.to_payload())
     apply_codex_installation_metadata(payload_dict, codex_installation_id)
+    # ``shared`` (the default) returns immediately, so the bytes below are
+    # unchanged. ``isolated`` must land here: above the http/websocket fork, so
+    # one call covers HTTP streaming, non-streaming HTTP and ``response.create``,
+    # and above ``payload_size_estimate_bytes`` so the transport decision sees
+    # the size actually sent.
+    apply_thread_cache_identity(payload_dict, thread_cache_identity)
     payload_dict = await _inline_input_image_urls(
         payload_dict,
         _as_image_fetch_session(client_session),
@@ -3800,6 +3814,11 @@ async def _stream_responses_with_session(
             if transport == "websocket"
             else CODEX_0150_RESPONSES_HTTP_WIRE_PROFILE
         ),
+    )
+    scope_session_headers(
+        upstream_headers,
+        thread_cache_identity,
+        replace=_replace_header_preserving_position,
     )
     remaining_request_timeout = _remaining_total_timeout(
         request_total_timeout,
@@ -4744,6 +4763,7 @@ async def compact_responses(
     chatgpt_account_id: str | None = None,
     allow_direct_egress: bool = True,
     synthesize_routing_hint: bool = False,
+    thread_cache_identity: ThreadCacheIdentity | None = None,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
         transport = _CompactCommandTransport(
@@ -4758,6 +4778,7 @@ async def compact_responses(
             chatgpt_account_id=chatgpt_account_id,
             allow_direct_egress=allow_direct_egress,
             synthesize_routing_hint=synthesize_routing_hint,
+            thread_cache_identity=thread_cache_identity,
         )
         return await transport.execute()
 
@@ -4775,6 +4796,7 @@ class _CompactCommandTransport:
     chatgpt_account_id: str | None = None
     allow_direct_egress: bool = False
     synthesize_routing_hint: bool = False
+    thread_cache_identity: ThreadCacheIdentity | None = None
 
     async def execute(self) -> CompactResponsePayload:
         settings = with_dashboard_overrides(get_settings())
@@ -4796,6 +4818,11 @@ class _CompactCommandTransport:
             accept="text/event-stream",
             routing_hint=(self.payload.model, self.payload.service_tier) if self.synthesize_routing_hint else None,
         )
+        scope_session_headers(
+            upstream_headers,
+            self.thread_cache_identity,
+            replace=_replace_header_preserving_position,
+        )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout()
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
@@ -4816,6 +4843,10 @@ class _CompactCommandTransport:
             payload_dict,
             preferred_order=native_header_order,
         )
+        # Strictly before the wire-budget check: a request sitting on the
+        # response.create byte ceiling must be validated against the size it is
+        # actually sent at, not the pre-injection size.
+        apply_thread_cache_identity(payload_dict, self.thread_cache_identity)
         try:
             validate_compact_input_wire_budget(payload_dict)
         except ClientPayloadError as exc:

@@ -80,20 +80,26 @@ describe("REQUEST_LOG_SOURCE_KINDS", () => {
     expect(new Set(mapped).size).toBe(EXPORTED_SOURCE_LITERALS.length);
   });
 
+  // The locale resources are flat maps whose keys contain dots, so assert
+  // against the key list rather than a `toHaveProperty` dot path.
   it.each(LOCALES)("has a chip label and tooltip for every kind in %s", (_locale, resource) => {
+    const keys = Object.keys(resource);
+
     for (const kind of REQUEST_LOG_SOURCE_KINDS) {
       // The detail dialog reuses the chip label key; the tooltip is chip-only.
-      expect(resource).toHaveProperty(`dashboard.requests.source.${kind}`);
-      expect(resource).toHaveProperty(`dashboard.requests.source.${kind}Title`);
+      expect(keys).toContain(`dashboard.requests.source.${kind}`);
+      expect(keys).toContain(`dashboard.requests.source.${kind}Title`);
     }
   });
 
   it.each(LOCALES)("has a Source filter option label for every kind in %s", (_locale, resource) => {
+    const keys = Object.keys(resource);
+
     for (const kind of REQUEST_LOG_SOURCE_KINDS) {
       // `dashboard-page.tsx` labels option `n` with the `n`th kind; the Python
       // guard checks the exact key that file passes to `t()`.
       const suffix = `${kind.charAt(0).toUpperCase()}${kind.slice(1)}`;
-      expect(resource).toHaveProperty(`dashboard.filters.source${suffix}`);
+      expect(keys).toContain(`dashboard.filters.source${suffix}`);
     }
   });
 });

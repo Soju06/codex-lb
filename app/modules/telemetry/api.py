@@ -5,11 +5,10 @@ import logging
 import platform
 from datetime import timedelta
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import __version__
-from app.core.auth.dashboard_access import DashboardPermission, DashboardPrincipal
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
     set_dashboard_error_format,
@@ -21,6 +20,7 @@ from app.modules.telemetry.consent import TELEMETRY_NOTICE_VERSION, ResolvedCons
 from app.modules.telemetry.schemas import (
     TelemetryConsentResponse,
     TelemetryConsentUpdate,
+    TelemetryNoticeAcknowledgement,
     TelemetryPreview,
     build_snapshot_envelope,
 )
@@ -41,7 +41,6 @@ router = APIRouter(
 @router.get("/telemetry", response_model=TelemetryConsentResponse)
 async def get_telemetry_consent(
     include_preview: bool = Query(default=False),
-    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     session: AsyncSession = Depends(get_session),
 ) -> TelemetryConsentResponse:
     store = TelemetryConsentStore(session)
@@ -54,7 +53,6 @@ async def get_telemetry_consent(
         store,
         consent,
         include_preview=include_preview or undecided_dialog_due or notice_upgrade_due,
-        acknowledge_notice=notice_upgrade_due and not include_preview and principal.can(DashboardPermission.WRITE),
     )
 
 
@@ -83,7 +81,27 @@ async def update_telemetry_consent(
             task.add_done_callback(_handle_opt_out_task_done)
         except Exception as exc:
             logger.debug("Unable to schedule anonymous telemetry opt-out", exc_info=exc)
-    return await _response(session, store, consent, include_preview=False, acknowledge_notice=False)
+    return await _response(session, store, consent, include_preview=False)
+
+
+@router.post("/telemetry/notice-ack", response_model=TelemetryConsentResponse)
+async def acknowledge_telemetry_notice(
+    payload: TelemetryNoticeAcknowledgement = Body(...),
+    _write_access=Depends(require_dashboard_write_access),
+    session: AsyncSession = Depends(get_session),
+) -> TelemetryConsentResponse:
+    if payload.notice_version > TELEMETRY_NOTICE_VERSION:
+        raise HTTPException(status_code=400, detail="Unsupported telemetry notice version")
+    store = TelemetryConsentStore(session)
+    await store.acknowledge_notice(payload.notice_version)
+    consent = await store.resolve()
+    return TelemetryConsentResponse(
+        notice_version=TELEMETRY_NOTICE_VERSION,
+        state=consent.state,
+        source=consent.source,
+        active=consent.active,
+        preview=None,
+    )
 
 
 async def _response(
@@ -92,7 +110,6 @@ async def _response(
     consent: ResolvedConsent,
     *,
     include_preview: bool,
-    acknowledge_notice: bool,
 ) -> TelemetryConsentResponse:
     preview: TelemetryPreview | None = None
     if include_preview:
@@ -108,8 +125,6 @@ async def _response(
                 identity.instance_id, (utcnow() - timedelta(days=1)).date()
             ),
         )
-        if acknowledge_notice:
-            await store.acknowledge_notice()
     return TelemetryConsentResponse(
         notice_version=TELEMETRY_NOTICE_VERSION,
         state=consent.state,

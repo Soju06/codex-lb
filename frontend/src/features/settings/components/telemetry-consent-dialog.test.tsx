@@ -29,6 +29,11 @@ function reinformedConsent(state: "enabled" | "disabled") {
 describe("TelemetryConsentDialog", () => {
   beforeEach(() => {
     useAuthStore.setState({ canWrite: true });
+    server.use(
+      http.post("/api/settings/telemetry/notice-ack", () =>
+        HttpResponse.json(createTelemetryConsent({ preview: null })),
+      ),
+    );
   });
 
   it("shows both transmitted bodies with both decision actions while undecided", async () => {
@@ -129,11 +134,16 @@ describe("TelemetryConsentDialog", () => {
     async (state) => {
       const user = userEvent.setup();
       let putCalled = false;
+      let ackCalled = false;
       server.use(
         http.get("/api/settings/telemetry", () => HttpResponse.json(reinformedConsent(state))),
         http.put("/api/settings/telemetry", () => {
           putCalled = true;
           return HttpResponse.json(reinformedConsent(state));
+        }),
+        http.post("/api/settings/telemetry/notice-ack", async ({ request }) => {
+          ackCalled = (await request.json()) !== undefined;
+          return HttpResponse.json(createTelemetryConsent({ state, source: "persisted", active: state === "enabled" }));
         }),
       );
 
@@ -162,6 +172,7 @@ describe("TelemetryConsentDialog", () => {
 
       await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
       expect(putCalled).toBe(false);
+      expect(ackCalled).toBe(true);
     },
   );
 

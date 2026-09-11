@@ -72,15 +72,18 @@ class TelemetryConsentStore:
         self._encryptor = encryptor or TokenEncryptor()
         self._repository = SettingsRepository(session)
 
-    async def acknowledge_notice(self) -> None:
+    async def acknowledge_notice(self, requested_version: int = TELEMETRY_NOTICE_VERSION) -> None:
         row = await self._repository.get_or_create()
-        row.telemetry_notice_version = TELEMETRY_NOTICE_VERSION
+        target = min(requested_version, TELEMETRY_NOTICE_VERSION)
+        if (row.telemetry_notice_version or 0) >= target:
+            return
+        row.telemetry_notice_version = target
         try:
             await self._repository.commit_refresh(row)
         except DashboardSettingsConflictError:
             await self._session.rollback()
             row = await self._repository.get_or_create()
-            if row.telemetry_notice_version is None or row.telemetry_notice_version < TELEMETRY_NOTICE_VERSION:
+            if (row.telemetry_notice_version or 0) < target:
                 raise
 
     async def notice_version(self) -> int:

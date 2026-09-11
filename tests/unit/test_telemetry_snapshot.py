@@ -231,6 +231,42 @@ async def test_day_excludes_warmups_like_reports_and_heartbeat(async_session, mo
     assert days[0].dimensions.global_.latency_ms.sample_count == 1
 
 
+@pytest.mark.asyncio
+async def test_day_query_selects_only_aggregation_scalars(async_session, monkeypatch) -> None:
+    now = datetime(2026, 9, 10, 12)
+    row = _request_log("selected", model="gpt-5.6-sol", useragent_group="codex_exec")
+    row.requested_at = now - timedelta(days=1)
+    async_session.add(row)
+    await async_session.commit()
+    captured = []
+    original_execute = async_session.execute
+
+    async def capture(statement, *args, **kwargs):
+        captured.append(statement)
+        return await original_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(async_session, "execute", capture)
+    await TelemetrySnapshotBuilder(async_session).build_day("instance", date(2026, 9, 9), today_utc=now.date())
+    selected = {column.key for column in captured[0].selected_columns}
+    assert selected == {
+        "model",
+        "useragent_group",
+        "transport",
+        "upstream_transport",
+        "service_tier",
+        "actual_service_tier",
+        "status",
+        "upstream_error_code",
+        "failure_phase",
+        "upstream_status_code",
+        "latency_ms",
+        "latency_first_token_ms",
+        "output_tokens",
+        "reasoning_tokens",
+    }
+    assert not selected & {"useragent", "error_message", "failure_detail", "failure_exception_type"}
+
+
 @pytest.fixture
 async def async_session() -> AsyncIterator[AsyncSession]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

@@ -243,6 +243,10 @@ class TelemetryConsentUpdate(TelemetryModel):
     enabled: bool
 
 
+class TelemetryNoticeAcknowledgement(TelemetryModel):
+    notice_version: int = Field(ge=0)
+
+
 class TelemetryConsentResponse(TelemetryModel):
     state: Literal["undecided", "enabled", "disabled"]
     source: Literal["env", "persisted", "default"]

@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import {
   addUpstreamProxyPoolMember,
+  acknowledgeTelemetryNotice,
   createUpstreamProxyEndpoint,
   createUpstreamProxyPool,
   deleteModelContextWindowOverride,
@@ -101,9 +102,20 @@ export function useTelemetryConsent(options?: { enabled?: boolean }) {
     },
   });
 
+  const acknowledgeTelemetryNoticeMutation = useMutation({
+    mutationFn: (noticeVersion: number) => acknowledgeTelemetryNotice(noticeVersion),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["settings", "telemetry"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("settings.telemetry.toasts.saveFailed"));
+    },
+  });
+
   return {
     telemetryConsentQuery,
     updateTelemetryConsentMutation,
+    acknowledgeTelemetryNoticeMutation,
   };
 }
 

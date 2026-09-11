@@ -9,7 +9,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Literal, cast, get_args
 
 from sqlalchemy import and_, case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,6 +68,22 @@ _MIB = 1024**2
 _GIB = 1024**3
 _REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 _ROUTING_POLICIES: frozenset[str] = frozenset(get_args(RoutingStrategy))
+_DAY_AGGREGATE_COLUMNS = (
+    RequestLog.model,
+    RequestLog.useragent_group,
+    RequestLog.transport,
+    RequestLog.upstream_transport,
+    RequestLog.service_tier,
+    RequestLog.actual_service_tier,
+    RequestLog.status,
+    RequestLog.upstream_error_code,
+    RequestLog.failure_phase,
+    RequestLog.upstream_status_code,
+    RequestLog.latency_ms,
+    RequestLog.latency_first_token_ms,
+    RequestLog.output_tokens,
+    RequestLog.reasoning_tokens,
+)
 _SAFE_UPSTREAM_ERROR_CODES = frozenset(
     {
         "authentication_error",
@@ -285,13 +301,13 @@ class TelemetrySnapshotBuilder:
         if utc_date >= today:
             raise ValueError("in-progress UTC day cannot be aggregated")
         result = await self._session.execute(
-            select(RequestLog).where(
+            select(*_DAY_AGGREGATE_COLUMNS).where(
                 RequestLog.requested_at >= start,
                 RequestLog.requested_at < end,
                 _normal_traffic_clause(),
             )
         )
-        rows = list(result.scalars())
+        rows = cast(list[RequestLog], list(result.all()))
         return _build_day_from_rows(instance_id, utc_date, rows)
 
     async def completed_days(
@@ -553,6 +569,7 @@ def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog
         "openai_compatible_http": "http",
         "http": "http",
     }
+    transport_map = {"websocket": "ws", "http": "http_bridge"}
     tiers = {"default", "flex", "priority"}
     families = {
         "codex-cli",
@@ -581,7 +598,7 @@ def _build_day_from_rows(instance_id: str, utc_date: date, rows: list[RequestLog
         dims["clients"][
             client_family(row.useragent_group) if client_family(row.useragent_group) in families else "other"
         ].append(row)
-        dims["transport"]["ws" if row.transport == "websocket" else "http_bridge"].append(row)
+        dims["transport"][transport_map.get(row.transport or "", "other")].append(row)
         dims["upstream_transport"][upstream_transport_map.get(row.upstream_transport or "", "other")].append(row)
         tier = row.actual_service_tier or row.service_tier or "default"
         dims["service_tier"][tier if tier in tiers else "other"].append(row)

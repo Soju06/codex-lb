@@ -1,7 +1,7 @@
 """Persist telemetry v2 notice and completed-day acknowledgement.
 
-Revision ID: 20260910_010000_expand_telemetry_v2
-Revises: 20260910_000000_request_logs_missing_cost_index
+Revision ID: 20260910_030000_expand_telemetry_v2
+Revises: 20260910_020000_add_dashboard_role_mappings
 Create Date: 2026-09-09
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "20260910_010000_expand_telemetry_v2"
-down_revision = "20260910_000000_request_logs_missing_cost_index"
+revision = "20260910_030000_expand_telemetry_v2"
+down_revision = "20260910_020000_add_dashboard_role_mappings"
 branch_labels = None
 depends_on = None
 

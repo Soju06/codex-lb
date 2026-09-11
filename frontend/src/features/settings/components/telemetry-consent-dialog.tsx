@@ -31,7 +31,11 @@ export function TelemetryConsentDialog() {
   const canWrite = useAuthStore((state) => state.canWrite);
   const [shown, setShown] = useState<ShownNotice | null>(null);
   const [dismissed, setDismissed] = useState(false);
-  const { telemetryConsentQuery, updateTelemetryConsentMutation } = useTelemetryConsent();
+  const {
+    telemetryConsentQuery,
+    updateTelemetryConsentMutation,
+    acknowledgeTelemetryNoticeMutation,
+  } = useTelemetryConsent();
 
   const consent = telemetryConsentQuery.data;
   // The backend attaches the preview bodies only while a dialog is due: on
@@ -49,11 +53,30 @@ export function TelemetryConsentDialog() {
 
   const { preview, undecided } = shown;
   const canDecide = canWrite && undecided;
-  const busy = updateTelemetryConsentMutation.isPending;
+  const busy = updateTelemetryConsentMutation.isPending || acknowledgeTelemetryNoticeMutation.isPending;
   // Dismissing without a decision (ESC, backdrop, close button) persists
   // nothing; the undecided dialog may reappear on the next dashboard entry.
   const decide = (enabled: boolean) => {
-    updateTelemetryConsentMutation.mutate({ enabled }, { onSuccess: () => setDismissed(true) });
+    updateTelemetryConsentMutation.mutate(
+      { enabled },
+      {
+        onSuccess: () => {
+          acknowledgeTelemetryNoticeMutation.mutate(consent?.notice_version ?? 0, {
+            onSuccess: () => setDismissed(true),
+          });
+        },
+      },
+    );
+  };
+
+  const acknowledge = () => {
+    if (!canWrite) {
+      setDismissed(true);
+      return;
+    }
+    acknowledgeTelemetryNoticeMutation.mutate(consent?.notice_version ?? 0, {
+      onSuccess: () => setDismissed(true),
+    });
   };
 
   return (
@@ -107,7 +130,7 @@ export function TelemetryConsentDialog() {
               </Button>
             </>
           ) : (
-            <Button type="button" variant="outline" onClick={() => setDismissed(true)}>
+            <Button type="button" variant="outline" disabled={busy} onClick={acknowledge}>
               {t("settings.telemetry.noticeDialog.acknowledge")}
             </Button>
           )}

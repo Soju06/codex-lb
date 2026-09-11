@@ -56,8 +56,10 @@ the actual send MUST regenerate that value at transmission time.
 
 The consent notice carries a version. When the transmitted payload schema gains fields, the
 notice version MUST be raised, and installations whose acknowledged notice version is lower MUST
-be shown the current exact payload preview once. That re-display MUST preserve any persisted
-consent decision rather than resetting consent to `undecided`.
+be shown the current exact payload preview once. The version MUST be recorded only by an explicit
+acknowledgement request after the preview has been shown; reading the preview MUST NOT acknowledge
+it. That re-display MUST preserve any persisted consent decision rather than resetting consent to
+`undecided`.
 
 The consent surface MUST disclose the collector's per-instance detail retention duration.
 
@@ -104,6 +106,12 @@ field and set it to `null` when the preview was not requested and is not dialog-
 - **WHEN** the service upgrades to a version whose notice version is higher
 - **THEN** the operator is shown the current exact payload preview once, the persisted `enabled`
   decision is retained, and the notice is not shown again after acknowledgement
+
+#### Scenario: Dropped preview response is not acknowledged
+
+- **GIVEN** an installation with a decided consent and an older acknowledged notice version
+- **WHEN** the preview response is dropped before the explicit acknowledgement request
+- **THEN** the next GET still returns the current exact payload preview
 
 #### Scenario: Consent surface states the retention duration
 

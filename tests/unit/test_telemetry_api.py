@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.core.auth.dashboard_access import guest_principal
-from app.core.auth.dependencies import validate_dashboard_session
+from app.core.auth.dependencies import require_dashboard_write_access, validate_dashboard_session
 from app.core.config.settings import get_settings
-from app.core.exceptions import DashboardSettingsConflictError
+from app.core.exceptions import DashboardPermissionError, DashboardSettingsConflictError
 from app.db.models import DashboardSettings
 from app.db.session import get_background_session
 from app.modules.settings.repository import SettingsRepository
@@ -53,12 +53,14 @@ async def test_concurrent_notice_acknowledgement_only_swallows_completed_notice_
         raise DashboardSettingsConflictError()
 
     monkeypatch.setattr(SettingsRepository, "commit_refresh", concurrent_acknowledgement)
-    response = await async_client.get("/api/settings/telemetry")
+    response = await async_client.post(
+        "/api/settings/telemetry/notice-ack", json={"notice_version": TELEMETRY_NOTICE_VERSION}
+    )
 
     assert conflicts == 1
     if winning_version >= TELEMETRY_NOTICE_VERSION:
         assert response.status_code == 200
-        assert response.json()["preview"] is not None
+        assert response.json()["preview"] is None
     else:
         assert response.status_code == 409
     assert await _notice_version() == winning_version
@@ -102,6 +104,7 @@ async def test_consent_api_get_preview_and_put_persists_without_restart(
     assert disabled["preview"] is None
     await asyncio.sleep(0)
     opt_out_sender.send_opt_out.assert_awaited_once()
+    await async_client.post("/api/settings/telemetry/notice-ack", json={"notice_version": TELEMETRY_NOTICE_VERSION})
 
     builder = Mock(side_effect=AssertionError("decided consent must not build a preview"))
     monkeypatch.setattr("app.modules.telemetry.api.TelemetrySnapshotBuilder", builder)
@@ -337,10 +340,12 @@ async def test_read_only_notice_preview_does_not_acknowledge_and_write_principal
     finally:
         app_instance.dependency_overrides.pop(validate_dashboard_session, None)
 
-    response = await async_client.get("/api/settings/telemetry")
+    response = await async_client.post(
+        "/api/settings/telemetry/notice-ack", json={"notice_version": TELEMETRY_NOTICE_VERSION}
+    )
     assert response.status_code == 200
     assert response.json()["state"] == "disabled"
-    assert response.json()["preview"] is not None
+    assert response.json()["preview"] is None
     assert await _notice_version() == 2
 
     response = await async_client.get("/api/settings/telemetry")
@@ -364,14 +369,14 @@ async def test_explicit_preview_never_acknowledges_unacknowledged_notice(async_c
     response = await async_client.get("/api/settings/telemetry")
     assert response.status_code == 200
     assert response.json()["preview"] is not None
-    assert await _notice_version() == 2
+    assert await _notice_version() == 0
 
 
 @pytest.mark.asyncio
 async def test_explicit_preview_after_acknowledgement_keeps_watermark(async_client, monkeypatch) -> None:
     monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
     get_settings.cache_clear()
-    await async_client.get("/api/settings/telemetry")
+    await async_client.post("/api/settings/telemetry/notice-ack", json={"notice_version": TELEMETRY_NOTICE_VERSION})
     assert await _notice_version() == 2
 
     response = await async_client.get("/api/settings/telemetry?include_preview=true")
@@ -399,7 +404,7 @@ async def test_undecided_default_dialog_remains_available_after_notice_acknowled
         assert response.json()["state"] == "undecided"
         assert response.json()["source"] == "default"
         assert response.json()["preview"] is not None
-        assert await _notice_version() == TELEMETRY_NOTICE_VERSION
+        assert await _notice_version() == 0
 
 
 @pytest.mark.asyncio
@@ -410,12 +415,13 @@ async def test_undecided_operator_enabling_after_preview_does_not_owe_another_no
     assert preview.status_code == 200
     assert preview.json()["state"] == "undecided"
     assert preview.json()["preview"] is not None
-    assert await _notice_version() == TELEMETRY_NOTICE_VERSION
+    assert await _notice_version() == 0
 
     decision = await async_client.put("/api/settings/telemetry", json={"enabled": True})
     assert decision.status_code == 200
     assert decision.json()["state"] == "enabled"
     assert decision.json()["source"] == "persisted"
+    await async_client.post("/api/settings/telemetry/notice-ack", json={"notice_version": TELEMETRY_NOTICE_VERSION})
 
     builder = Mock(side_effect=AssertionError("a decision at the current notice version must not build a preview"))
     monkeypatch.setattr("app.modules.telemetry.api.TelemetrySnapshotBuilder", builder)
@@ -423,7 +429,7 @@ async def test_undecided_operator_enabling_after_preview_does_not_owe_another_no
     assert response.status_code == 200
     assert response.json()["state"] == "enabled"
     assert response.json()["preview"] is None
-    assert await _notice_version() == TELEMETRY_NOTICE_VERSION
+    assert await _notice_version() == 2
     builder.assert_not_called()
 
 
@@ -446,10 +452,56 @@ async def test_enabled_operator_with_older_notice_sees_preview_once_without_rese
     assert response.json()["state"] == "enabled"
     assert response.json()["source"] == "persisted"
     assert response.json()["preview"] is not None
-    assert await _notice_version() == TELEMETRY_NOTICE_VERSION
+    assert await _notice_version() == 1
 
+    await async_client.post("/api/settings/telemetry/notice-ack", json={"notice_version": TELEMETRY_NOTICE_VERSION})
     response = await async_client.get("/api/settings/telemetry")
     assert response.status_code == 200
     assert response.json()["state"] == "enabled"
     assert response.json()["source"] == "persisted"
     assert response.json()["preview"] is None
+
+
+@pytest.mark.asyncio
+async def test_notice_ack_endpoint_records_version_and_get_then_is_cheap(async_client, monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+    preview = await async_client.get("/api/settings/telemetry")
+    assert preview.status_code == 200
+    assert preview.json()["preview"] is not None
+    assert await _notice_version() == 0
+    decision = await async_client.put("/api/settings/telemetry", json={"enabled": True})
+    assert decision.status_code == 200
+
+    acknowledged = await async_client.post(
+        "/api/settings/telemetry/notice-ack", json={"notice_version": TELEMETRY_NOTICE_VERSION}
+    )
+    assert acknowledged.status_code == 200
+    assert acknowledged.json()["preview"] is None
+    assert await _notice_version() == TELEMETRY_NOTICE_VERSION
+
+    response = await async_client.get("/api/settings/telemetry")
+    assert response.status_code == 200
+    assert response.json()["preview"] is None
+
+
+@pytest.mark.asyncio
+async def test_notice_ack_endpoint_rejects_read_only_and_future_version(
+    async_client, app_instance, monkeypatch
+) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+
+    async def deny_write_access():
+        raise DashboardPermissionError("read-only", code="read_only_access")
+
+    app_instance.dependency_overrides[require_dashboard_write_access] = deny_write_access
+    try:
+        response = await async_client.post("/api/settings/telemetry/notice-ack", json={"notice_version": 2})
+        assert response.status_code == 403
+    finally:
+        app_instance.dependency_overrides.pop(require_dashboard_write_access, None)
+
+    response = await async_client.post("/api/settings/telemetry/notice-ack", json={"notice_version": 3})
+    assert response.status_code == 400
+    assert await _notice_version() == 0

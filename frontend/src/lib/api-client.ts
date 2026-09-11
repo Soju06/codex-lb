@@ -246,6 +246,11 @@ export function get<T>(
   return request("GET", url, schema, options);
 }
 
+export function post(
+  url: string,
+  schema: null,
+  options?: RequestOptions,
+): Promise<void>;
 export function post<T>(
   url: string,
   schema: ZodType<T>,

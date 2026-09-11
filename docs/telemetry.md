@@ -17,18 +17,24 @@ view it later from Settings. The signed snapshot body has three fields:
 }
 ```
 
-The versioned `metrics` schema contains only these fields:
+The versioned heartbeat metrics contain `schema_version`, consent and instance descriptors,
+deployment details, feature flags, and the rolling `usage_7d` state. Account total, per-plan,
+and per-status counts are exact local row counts; API-key count, seven-day cost, and database
+size remain buckets. The rolling seven-day values are non-summable state, so they must not be
+added across heartbeat transmissions. Model names use the immutable bundled bootstrap allowlist;
+custom names become `other`.
 
-- `schema_version`, active `consent` (`undecided` or `enabled`), random `instance_id`, codex-lb
-  `version`, Python version, OS, architecture, and process uptime
-- `deploy`: deployment method, database backend and size bucket, replica count, and whether
-  trusted reverse-proxy headers are enabled
-- `accounts`: bucketed pool and plan counts, whether workspace accounts exist, routing policy,
-  limit warmup, and whether an egress proxy is used
-- `usage_7d`: request/success/token aggregates, bucketed cost, request-kind and transport/service
-  tier shares, allowlisted client families and model names, bucketed output-token averages,
-  latency percentiles, rate-limit ratio, and allowlisted upstream error codes
-- `features`: booleans for optional features plus bucketed API-key count and model-source count
+After the heartbeat, the sender can transmit one body for each completed UTC day in the seven-day
+calendar window `[today - 7 days, today)`. A day body has five independent marginal lists
+(`models`, `clients`, `transport`, `upstream_transport`, and `service_tier`) plus `global` and
+integer request-kind counts. Every entry has an exact request count and fixed sparse histograms
+for latency, time-to-first-token, and tokens-per-second. The latency/TTFT edges are
+`0, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, 102400, +inf`; TPS edges
+are `0, 5, 10, 20, 40, 80, 160, 320, 640, 1280, +inf`. Histogram `sample_count` equals the
+sum of bucket counts. Day errors contain independent exact maps for upstream error class,
+failure phase, HTTP status class (with `429` separate), and `success`/`error`/`cancelled`
+outcomes; values outside the allowlists become `other`. No cross-dimension cells or free-text
+failure data are sent.
 
 Registration sends `app_name`, `app_version`, `deployment_mode`, an intentionally empty
 `environment`, the random `instance_id`, coarse `os_arch`, and the Ed25519 `public_key` used to

@@ -9,7 +9,7 @@
 
 - [x] 2.1 Subscription HTTP stream/collect/compact/chat-completions
 - [x] 2.2 Source Responses: key policy without Astra schema restrictions
-- [x] 2.3 HTTP-bridge prepare uses payload.input after preparation
+- [x] 2.3 HTTP-bridge dispatch uses prepared input while completion bookkeeping retains the client prefix
 - [x] 2.4 Select the WebSocket Astra schema after recorded subscription ownership resolves, before admission
 
 ## 3. Verification
@@ -30,3 +30,4 @@
 - [x] 3.14 Validate subscription update shape before update key policy and preserve source/request-level policy behavior
 - [x] 3.15 Apply the existing HTTP continuation preparation to eligible pre-submit raw fallback and verify stream/collect, replay trimming and Ultra identity
 - [x] 3.16 Drop the local Astra effort enumeration, accept `disabled`/`none`, prepend only for enforced keys, and gate non-bridge HTTP trim on `gpt-6-astra`
+- [x] 3.17 Preserve anchored-delta client prefix metadata when preparation inserts a reset without trimming; verify the surviving ledger-publication race and subsequent full resend

@@ -64,6 +64,13 @@ anchors; repeated preparation SHALL be idempotent.
 - **AND** streaming and collected HTTP routes preserve the original full-resend item count and fingerprint for bridge completion bookkeeping
 - **AND** a subsequent full resend matching that stored prefix remains eligible for continuation anchoring and fresh-replay recovery
 
+#### Scenario: An anchored delta retains its client prefix
+
+- **GIVEN** an enforced-effort Astra continuation whose input needs no history trimming
+- **WHEN** preparation inserts a policy reset, including before a later operation-ledger anchor advance
+- **THEN** live and durable completion bookkeeping SHALL retain the client input count and fingerprint without the reset
+- **AND** a later client full resend SHALL still match that prefix and reuse the completed response
+
 #### Scenario: A pre-submit HTTP fallback retains continuation policy
 
 - **GIVEN** an anchored subscription Astra request uses an enforced-effort key without an applicable usage reservation

@@ -1298,8 +1298,9 @@ class _HTTPBridgeStreamingMixin:
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
         ) -> tuple[_WebSocketRequestState, str]:
             # Astra resets must not shift the client prefix used by later trimming.
+            client_input = request_payload.input
             request_payload = request_payload.model_copy()
-            prepare_astra_reasoning_policy_continuation(request_payload, api_key)
+            reset_inserted = prepare_astra_reasoning_policy_continuation(request_payload, api_key)
             validate_astra_request(request_payload, api_key)
             if bridge_uses_responses_lite:
                 request_state, text_data = self._prepare_http_bridge_request(
@@ -1320,6 +1321,10 @@ class _HTTPBridgeStreamingMixin:
                     request_id=request_id,
                     client_ip=client_ip,
                 )
+            if reset_inserted:
+                assert isinstance(client_input, list)
+                request_state.input_item_count = len(client_input)
+                request_state.input_full_fingerprint = _fingerprint_input_items(client_input)
             request_state.capacity_startup_wait_event = capacity_startup_wait_event
             request_state.capacity_startup_ready_event = capacity_startup_ready_event
             lifecycle = begin_bridge_lifecycle(request_state.api_key_reservation)

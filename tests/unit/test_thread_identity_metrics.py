@@ -188,16 +188,20 @@ async def test_turn_qualification_gap_prefix_and_attribution(async_session: Asyn
             _log("t2", conversation_id="conv-gap", minutes=1, input_tokens=11_000),
             # Beyond the gap: not a turn even though the prefix grows.
             _log("t3", conversation_id="conv-gap", minutes=1 + gap_minutes, input_tokens=12_000),
-            # Shrinking prefix: a new thread reusing the key, not a turn.
+            # Shrinking prefix on a client-supplied conversation id. This is a
+            # turn: Codex compacts a transcript mid-thread, which shrinks the
+            # prefix without starting a new thread, and the conversation id is
+            # the client's own thread identity either way.
             _log("p1", conversation_id="conv-prefix", minutes=0, input_tokens=20_000),
             _log("p2", conversation_id="conv-prefix", minutes=1, input_tokens=9_000, account_id="acc-b"),
             # An unattributed endpoint cannot prove a switch either way.
             _log("n1", conversation_id="conv-null", minutes=0),
             _log("n2", conversation_id="conv-null", minutes=1, account_id=None),
             _log("n3", conversation_id="conv-null", minutes=2, account_id="acc-b", input_tokens=11_000),
-            # Usage never landed, so the prefix comparison cannot be made.
-            # Coalescing the unknown size to zero would have qualified this
-            # pair in one direction and disqualified it in the other.
+            # Usage never landed on m1 and m3 -- the shape of a failed request.
+            # These still count: the thread id is the client's, and dropping
+            # failure-adjacent pairs would blind the metric precisely where
+            # switches happen, since a failure is what triggers the failover.
             _log("m1", conversation_id="conv-missing", minutes=0, input_tokens=None),
             _log("m2", conversation_id="conv-missing", minutes=1, input_tokens=10_000, account_id="acc-b"),
             _log("m3", conversation_id="conv-missing", minutes=2, input_tokens=None, account_id="acc-c"),
@@ -206,8 +210,57 @@ async def test_turn_qualification_gap_prefix_and_attribution(async_session: Asyn
 
     facets = await _aggregate(async_session)
 
-    assert facets[True].turns == 1
-    assert facets[True].account_switches == 0
+    # t1->t2, p1->p2, m1->m2, m2->m3. Excluded: t2->t3 (beyond the gap) and both
+    # conv-null pairs (an unattributed endpoint cannot prove a switch).
+    assert facets[True].turns == 4
+    assert facets[True].account_switches == 3
+
+
+async def test_keyed_turns_adjacent_to_a_failure_are_not_dropped(async_session: AsyncSession) -> None:
+    """A failed request records no usage; its neighbours must still count.
+
+    Requiring a measured prefix on both endpoints of a keyed pair deleted every
+    turn next to a failure, and a failure is the most common reason the next
+    turn lands on a different account -- so the switch rate was biased down
+    exactly where switches occur.
+    """
+
+    await _seed(
+        async_session,
+        [
+            _log("f1", conversation_id="conv-fail", minutes=0, input_tokens=10_000),
+            # The failed turn: no usage recorded.
+            _log("f2", conversation_id="conv-fail", minutes=1, input_tokens=None, account_id="acc-b"),
+            _log("f3", conversation_id="conv-fail", minutes=2, input_tokens=12_000, account_id="acc-c"),
+        ],
+    )
+
+    facets = await _aggregate(async_session)
+
+    assert facets[True].turns == 2
+    assert facets[True].account_switches == 2
+
+
+async def test_unkeyed_still_requires_a_non_shrinking_prefix(async_session: AsyncSession) -> None:
+    """Unkeyed rows are grouped by API key, so the prefix is the only separator.
+
+    Without a client thread id two unrelated threads on one API key would be
+    stitched together, which would invent switches that never happened.
+    """
+
+    await _seed(
+        async_session,
+        [
+            _log("u1", minutes=0, input_tokens=20_000),
+            # Shrinking prefix with no thread id: a different thread, not a turn.
+            _log("u2", minutes=1, input_tokens=9_000, account_id="acc-b"),
+        ],
+    )
+
+    facets = await _aggregate(async_session)
+
+    assert facets[False].turns == 0
+    assert facets[False].account_switches == 0
 
 
 async def test_switch_rate_counts_only_account_changes(async_session: AsyncSession) -> None:

@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Select, Subquery, and_, case, distinct, func, select
+from sqlalchemy import Select, Subquery, and_, case, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.logs import SUCCESS_STATUS
@@ -144,15 +144,29 @@ def per_request_stmt(scoped: Subquery) -> Select:
     # be known: a request whose usage never landed cannot prove either way,
     # and treating its unknown size as zero would qualify the pair in one
     # direction and disqualify it in the other.
+    # A shrinking prefix means the key was reused by a new thread, not that this
+    # one continued -- but only where the key is a reconstruction. Both sizes
+    # must be known for the comparison to mean anything.
+    prefix_continues = and_(
+        turns.c.input_tokens.is_not(None),
+        turns.c.previous_input_tokens.is_not(None),
+        turns.c.input_tokens >= turns.c.previous_input_tokens,
+    )
     is_turn = and_(
         turns.c.thread_key.is_not(None),
         turns.c.previous_epoch.is_not(None),
         turns.c.account_id.is_not(None),
         turns.c.previous_account_id.is_not(None),
         turns.c.requested_epoch - turns.c.previous_epoch < SWITCH_MAX_GAP_SECONDS,
-        turns.c.input_tokens.is_not(None),
-        turns.c.previous_input_tokens.is_not(None),
-        turns.c.input_tokens >= turns.c.previous_input_tokens,
+        # Keyed rows carry the client's own thread id, so the prefix heuristic
+        # adds nothing there and costs a great deal: a failed request records no
+        # usage, so requiring a measured prefix on BOTH endpoints deletes every
+        # pair adjacent to a failure -- and a failure is the single most common
+        # cause of the account switch this metric exists to count. Requiring it
+        # would bias the switch rate downward exactly where switches happen.
+        # Unkeyed rows are grouped by API key alone, so there the heuristic is
+        # the only thing separating two threads and it stays mandatory.
+        or_(turns.c.keyed == 1, prefix_continues),
     )
     is_cache_sample = and_(turns.c.status == SUCCESS_STATUS, turns.c.input_tokens > CACHE_MIN_INPUT_TOKENS)
     return select(

@@ -152,7 +152,7 @@ async def test_ingestor_throttles_identical_snapshots(monkeypatch: pytest.Monkey
     async def fake_ingest(item: live_ingest._QueuedSnapshot) -> None:
         assert item.account_id is not None
         writes.append((item.account_id, item.snapshot))
-        ingestor._last_write[item.account_id] = (live_ingest._fingerprint(item.snapshot), time.monotonic())
+        ingestor._last_write[item.account_id] = (item.snapshot, time.monotonic())
 
     monkeypatch.setattr(ingestor, "_ingest", fake_ingest)
     ingestor.start()
@@ -169,6 +169,17 @@ async def test_ingestor_throttles_identical_snapshots(monkeypatch: pytest.Monkey
         await ingestor.stop()
 
     assert [snap.primary.used_percent for _, snap in writes if snap.primary is not None] == [25.0, 90.0]
+
+
+def test_usage_policy_coalescing_preserves_exact_percentage_changes() -> None:
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=60.0)
+    account_id = "acc-precise-limit"
+    ingestor._last_write[account_id] = (_snapshot(primary_used=10.001), time.monotonic())
+
+    crossed_limit = _snapshot(primary_used=10.003)
+
+    assert ingestor._should_skip(account_id, crossed_limit, exact_usage=False) is True
+    assert ingestor._should_skip(account_id, crossed_limit, exact_usage=True) is False
 
 
 @pytest.mark.asyncio

@@ -1,3 +1,4 @@
+import { UsageQuotaBar } from "@/components/usage-quota-bar";
 import { ArrowDown, ArrowUp, ArrowUpDown, Clock, ExternalLink, List, Play, RotateCcw, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -18,7 +19,7 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
 import { cn } from "@/lib/utils";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
-import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
+import { getAccountDisplayStatus, normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatDateTimeInline,
   formatPercentNullable,
@@ -168,7 +169,10 @@ function compareAccountsBySort(a: AccountSummary, b: AccountSummary, sort: Accou
       result = compareText(accountTitle(a), accountTitle(b));
       break;
     case "status":
-      result = compareText(normalizeStatus(a.status), normalizeStatus(b.status));
+      result = compareText(
+        getAccountDisplayStatus(a.status, a.usageLimitState),
+        getAccountDisplayStatus(b.status, b.usageLimitState),
+      );
       break;
     case "plan":
       result = compareText(formatSlug(a.planType), formatSlug(b.planType));
@@ -257,7 +261,7 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
         <div key={quota.label} className="grid grid-cols-[2.75rem_minmax(3rem,auto)_minmax(2.75rem,0.45fr)_minmax(0,1fr)] items-center gap-2">
           <span className="text-muted-foreground">{localizedQuotaLabel(quota.label, t)}</span>
           <span className="font-medium tabular-nums text-foreground">{quota.percentLabel}</span>
-          <QuotaMeter percent={quota.percent} />
+          <QuotaMeter percent={quota.percent} cap={quota.label === "5h" ? account.effectiveLimitPrimary : quota.label === "Weekly" ? account.effectiveLimitSecondary : account.effectiveLimitMonthly} />
           <span className="inline-flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
             <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
             <span className="truncate">{quota.resetLabel}</span>
@@ -268,7 +272,8 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
   );
 }
 
-function QuotaMeter({ percent }: { percent: number | null }) {
+function QuotaMeter({ percent, cap }: { percent: number | null; cap?: number | null }) {
+  if (cap != null) return <UsageQuotaBar percent={percent} cap={cap} />;
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   return (
     <div
@@ -357,6 +362,7 @@ export function AccountList({
         </div>
         {sortedAccounts.map((account, index) => {
           const status = normalizeStatus(account.status);
+          const displayStatus = getAccountDisplayStatus(account.status, account.usageLimitState);
           const title = accountTitle(account);
           const emailSubtitle =
             account.displayName && account.displayName !== account.email
@@ -404,7 +410,7 @@ export function AccountList({
 	                  {showAccountId && emailSubtitle ? ` | ${t("dashboard.accountList.idShort", { id: compactId })}` : ""}
 	                </p>
               </div>
-              <StatusBadge status={status} />
+              <StatusBadge status={displayStatus} />
               <span className="text-xs text-muted-foreground">{formatSlug(account.planType)}</span>
               <AccountQuotaCells account={account} />
 	              <span className="font-medium tabular-nums">

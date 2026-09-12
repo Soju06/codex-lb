@@ -1,3 +1,4 @@
+import { UsageQuotaBar, UsageQuotaSummary } from "@/components/usage-quota-bar";
 import { lazy, Suspense } from "react";
 import { Clock, Flame, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -12,7 +13,6 @@ import type {
 } from "@/features/accounts/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
-import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatCompactNumber,
   formatCurrency,
@@ -43,10 +43,12 @@ export type AccountUsagePanelProps = {
 function QuotaRow({
   label,
   percent,
+  cap,
   resetAt,
 }: {
   label: string;
   percent: number | null;
+  cap?: number | null;
   resetAt: string | null | undefined;
 }) {
   const { t } = useTranslation();
@@ -71,16 +73,12 @@ function QuotaRow({
           {formatPercentNullable(percent, 1)}
         </span>
       </div>
-      <div className={cn("h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
-        <div
-          className={cn("h-full rounded-full transition-colors duration-500 ease-out", quotaBarColor(clamped))}
-          style={{ width: `${clamped}%` }}
-        />
-      </div>
+      <UsageQuotaBar percent={percent} cap={cap} />
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <Clock className="h-3 w-3 shrink-0" />
         <span>{t("accounts.usage.resetAt", { label: formatQuotaResetLabel(resetAt ?? null) })}</span>
       </div>
+      <UsageQuotaSummary percent={percent} cap={cap} />
     </div>
   );
 }
@@ -258,11 +256,11 @@ export function AccountUsagePanel({
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("accounts.usage.title")}</h3>
       <div className={cn("grid gap-4", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2")}>
         {monthlyOnly ? (
-          <QuotaRow label={t("common.quota.monthly")} percent={monthly} resetAt={account.resetAtMonthly} />
+          <QuotaRow label={t("common.quota.monthly")} percent={monthly} cap={account.effectiveLimitMonthly} resetAt={account.resetAtMonthly} />
         ) : (
           <>
-            {!weeklyOnly && <QuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} />}
-            <QuotaRow label={t("common.quota.weekly")} percent={secondary} resetAt={account.resetAtSecondary} />
+            {!weeklyOnly && <QuotaRow label="5h" percent={primary} cap={account.effectiveLimitPrimary} resetAt={account.resetAtPrimary} />}
+            <QuotaRow label={t("common.quota.weekly")} percent={secondary} cap={account.effectiveLimitSecondary} resetAt={account.resetAtSecondary} />
           </>
         )}
       </div>

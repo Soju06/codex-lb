@@ -44,6 +44,7 @@ PACE_ELIGIBLE_ACCOUNT_STATUSES = frozenset(
 class _PaceAccount:
     account_id: str
     full_credits: float
+    provider_full_credits: float
     remaining_credits: float
     reset_at_ms: float
     window_ms: float
@@ -130,15 +131,18 @@ def build_weekly_credit_pace(
             working_days=working_days,
         )
         expected_remaining_credits = full_credits * (1.0 - used_schedule_fraction)
-        account_rate = _recent_burn_rate_credits_per_hour(rows, full_credits, now)
+        provider_full_credits = float(summary.capacity_credits_secondary or full_credits)
+        reserved_credits = provider_full_credits - full_credits
+        account_rate = _recent_burn_rate_credits_per_hour(rows, provider_full_credits, now)
         smoothed_remaining_credits = _smoothed_remaining_credits(
             rows=rows,
-            full_credits=full_credits,
-            current_remaining_credits=actual_remaining_credits,
+            full_credits=provider_full_credits,
+            current_remaining_credits=actual_remaining_credits + reserved_credits,
             now=now,
             smoothing_window_minutes=smoothing_window_minutes,
         )
 
+        smoothed_remaining_credits = max(0.0, smoothed_remaining_credits - reserved_credits)
         total_full_credits += full_credits
         total_actual_remaining_credits += actual_remaining_credits
         total_smoothed_remaining_credits += smoothed_remaining_credits
@@ -156,6 +160,7 @@ def build_weekly_credit_pace(
             _PaceAccount(
                 account_id=summary.account_id,
                 full_credits=full_credits,
+                provider_full_credits=provider_full_credits,
                 remaining_credits=actual_remaining_credits,
                 reset_at_ms=effective_reset_at_ms,
                 window_ms=window_ms,
@@ -221,7 +226,7 @@ def build_weekly_credit_pace(
     add_pro_accounts = None
     if trailing_demand_used_percent_by_account is not None:
         trailing_demand_credits = sum(
-            account.full_credits
+            account.provider_full_credits
             * max(0.0, trailing_demand_used_percent_by_account.get(account.account_id, 0.0))
             / 100.0
             for account in pace_accounts
@@ -295,7 +300,7 @@ def _fleet_recent_burn_rate_credits_per_hour(
         for previous, current in zip(rows, rows[1:]):
             delta_percent = current.used_percent - previous.used_percent
             if delta_percent > 0:
-                total_burn_credits += account.full_credits * delta_percent / 100.0
+                total_burn_credits += account.provider_full_credits * delta_percent / 100.0
 
     if not considered_recorded_at:
         return None
@@ -368,6 +373,11 @@ def _weekly_timing(summary: AccountSummary, now_ms: float) -> tuple[float, float
 
     full_credits = float(raw_full_credits)
     remaining_credits = float(raw_remaining_credits)
+    cap = summary.effective_limit_secondary
+    if cap is not None:
+        usable_capacity = full_credits * cap / 100.0
+        remaining_credits = max(0.0, remaining_credits - (full_credits - usable_capacity))
+        full_credits = usable_capacity
     window_minutes = float(raw_window_minutes)
     reset_at_ms = naive_utc_to_epoch(reset_at) * 1000.0
     window_ms = window_minutes * 60_000.0

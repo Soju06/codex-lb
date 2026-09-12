@@ -17,15 +17,25 @@ import pytest
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import openai_error
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.db.models import AccountStatus
 from app.modules.api_keys.service import ApiKeyRequestUsageBudget
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _usage_policy_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def authorize_account_fresh(_self: LoadBalancer, _account_id: str) -> OwnerAuthorization:
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+
+    monkeypatch.setattr(LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
 
 class _RecordingVirtualScheduler(VirtualScheduler):
@@ -66,6 +76,15 @@ def _make_bridge_session(
 
 def _make_lease(lease_id: str) -> proxy_service.AccountLease:
     return proxy_service.AccountLease(lease_id=lease_id, account_id="acc-bridge", kind="stream", acquired_at=0.0)
+
+
+def _lease_balancer(**methods: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        authorize_account_fresh=AsyncMock(
+            return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+        ),
+        **methods,
+    )
 
 
 @pytest.mark.asyncio
@@ -140,7 +159,7 @@ async def test_next_turn_reacquires_stream_lease(monkeypatch: pytest.MonkeyPatch
     session = _make_bridge_session()
     assert session.account_lease is None
     lease = _make_lease("l3")
-    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock(return_value=lease)))
+    fake_self = SimpleNamespace(_load_balancer=_lease_balancer(acquire_account_lease=AsyncMock(return_value=lease)))
     # An unkeyed reacquire reads no settings: the balancer applies the snapshot
     # of its most recent request (C2-2 routing/overload).
     monkeypatch.setattr(
@@ -150,7 +169,11 @@ async def test_next_turn_reacquires_stream_lease(monkeypatch: pytest.MonkeyPatch
     )
 
     async with session.pending_lock:
-        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+        await mixin._ensure_http_bridge_session_stream_lease_locked(
+            fake_self,
+            session,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
+        )
 
     assert session.account_lease is lease
     fake_self._load_balancer.acquire_account_lease.assert_awaited_once_with(
@@ -174,7 +197,7 @@ async def test_reacquire_carries_turn_usage_budget_estimate() -> None:
     mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
     session = _make_bridge_session()
     lease = _make_lease("l10")
-    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock(return_value=lease)))
+    fake_self = SimpleNamespace(_load_balancer=_lease_balancer(acquire_account_lease=AsyncMock(return_value=lease)))
     budget = ApiKeyRequestUsageBudget(input_tokens=1200, output_tokens=300)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-budget-estimate",
@@ -191,7 +214,12 @@ async def test_reacquire_carries_turn_usage_budget_estimate() -> None:
     assert expected_tokens > 0.0
 
     async with session.pending_lock:
-        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session, request_state=request_state)
+        await mixin._ensure_http_bridge_session_stream_lease_locked(
+            fake_self,
+            session,
+            request_state=request_state,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
+        )
 
     assert session.account_lease is lease
     fake_self._load_balancer.acquire_account_lease.assert_awaited_once_with(
@@ -241,11 +269,14 @@ async def test_keyed_warm_session_reacquire_is_fair_share_gated_and_counted(
             "acc-bridge", kind="stream", estimated_tokens=0.0, api_key_id="key-other"
         )
     fake_self = SimpleNamespace(_load_balancer=balancer)
-
     hot_session = _make_bridge_session(api_key_id="key-hot")
     with pytest.raises(ProxyResponseError) as exc_info:
         async with hot_session.pending_lock:
-            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, hot_session)
+            await mixin._ensure_http_bridge_session_stream_lease_locked(
+                fake_self,
+                hot_session,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
+            )
 
     assert exc_info.value.status_code == 429
     assert exc_info.value.payload["error"]["code"] == "api_key_stream_fair_share"
@@ -259,7 +290,11 @@ async def test_keyed_warm_session_reacquire_is_fair_share_gated_and_counted(
     # its reacquire admits and is counted into the per-key map.
     light_session = _make_bridge_session(api_key_id="key-light")
     async with light_session.pending_lock:
-        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, light_session)
+        await mixin._ensure_http_bridge_session_stream_lease_locked(
+            fake_self,
+            light_session,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
+        )
 
     assert light_session.account_lease is not None
     assert light_session.account_lease.api_key_id == "key-light"
@@ -288,7 +323,7 @@ async def test_reacquire_with_snapshot_never_touches_settings_cache_under_lock(
         lambda: SimpleNamespace(get=settings_get),
     )
     acquire_account_lease = AsyncMock(return_value=_make_lease("l-snapshot"))
-    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=acquire_account_lease))
+    fake_self = SimpleNamespace(_load_balancer=_lease_balancer(acquire_account_lease=acquire_account_lease))
     session = _make_bridge_session(api_key_id="key-snap")
 
     async with session.pending_lock:
@@ -296,6 +331,7 @@ async def test_reacquire_with_snapshot_never_touches_settings_cache_under_lock(
             fake_self,
             session,
             fair_share_threshold_pct=37,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
             routing_tunables=RoutingTunables(),
         )
 
@@ -399,11 +435,7 @@ async def test_keyed_submit_with_held_lease_never_reads_settings(
 async def test_keyed_submit_resolves_fair_share_before_pending_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Issue #1971 product path: a stalled settings-cache refresh must stall
-    the submit BEFORE it acquires ``session.pending_lock``, so the session's
-    other work (interruption cleanup, queue bookkeeping) is never wedged
-    behind a hung DB query. The old in-lock resolve held the lock across the
-    stall — cleanup tasks piled up on it for days in production."""
+    """Issue #1971: DB-backed admission reads must not hold pending_lock."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(api_key_id="key-stall")
@@ -414,6 +446,7 @@ async def test_keyed_submit_resolves_fair_share_before_pending_lock(
 
     settings_blocked = asyncio.Event()
     release_settings = asyncio.Event()
+    usage_check_blocked = asyncio.Event()
 
     async def stalled_get() -> SimpleNamespace:
         settings_blocked.set()
@@ -424,6 +457,17 @@ async def test_keyed_submit_resolves_fair_share_before_pending_lock(
         http_bridge_request_submit_module,
         "_service_get_settings_cache",
         lambda: SimpleNamespace(get=stalled_get),
+    )
+
+    async def stalled_usage_check(_account_id: str) -> OwnerAuthorization:
+        usage_check_blocked.set()
+        await asyncio.Event().wait()
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+
+    monkeypatch.setattr(
+        service._load_balancer,
+        "authorize_account_fresh",
+        stalled_usage_check,
     )
 
     request_state = proxy_service._WebSocketRequestState(
@@ -456,6 +500,14 @@ async def test_keyed_submit_resolves_fair_share_before_pending_lock(
             lock_acquired = True
     assert lock_acquired, "submit held pending_lock across the stalled settings refresh"
 
+    release_settings.set()
+    await asyncio.wait_for(usage_check_blocked.wait(), timeout=1)
+    lock_acquired = False
+    with anyio.move_on_after(0.2):
+        async with session.pending_lock:
+            lock_acquired = True
+    assert lock_acquired, "submit held pending_lock across the stalled usage-policy read"
+
     submit_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(submit_task, timeout=1)
@@ -467,11 +519,15 @@ async def test_keyed_submit_resolves_fair_share_before_pending_lock(
 async def test_reacquire_denial_raises_local_cap_envelope() -> None:
     mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
     session = _make_bridge_session()
-    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock(return_value=None)))
+    fake_self = SimpleNamespace(_load_balancer=_lease_balancer(acquire_account_lease=AsyncMock(return_value=None)))
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async with session.pending_lock:
-            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+            await mixin._ensure_http_bridge_session_stream_lease_locked(
+                fake_self,
+                session,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
+            )
 
     assert exc_info.value.status_code == 429
     assert exc_info.value.payload["error"]["code"] == "account_stream_cap"
@@ -498,7 +554,7 @@ async def test_reacquire_racing_close_releases_fresh_lease() -> None:
 
     release_account_lease = AsyncMock()
     fake_self = SimpleNamespace(
-        _load_balancer=SimpleNamespace(
+        _load_balancer=_lease_balancer(
             acquire_account_lease=AsyncMock(side_effect=acquire_and_close),
             release_account_lease=release_account_lease,
         )
@@ -506,7 +562,11 @@ async def test_reacquire_racing_close_releases_fresh_lease() -> None:
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async with session.pending_lock:
-            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+            await mixin._ensure_http_bridge_session_stream_lease_locked(
+                fake_self,
+                session,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
+            )
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
@@ -532,7 +592,7 @@ async def test_reacquire_racing_close_defers_cancellation_until_release() -> Non
         await finish_release.wait()
 
     fake_self = SimpleNamespace(
-        _load_balancer=SimpleNamespace(
+        _load_balancer=_lease_balancer(
             acquire_account_lease=AsyncMock(side_effect=acquire_and_close),
             release_account_lease=AsyncMock(side_effect=release_account_lease),
         )
@@ -540,7 +600,11 @@ async def test_reacquire_racing_close_defers_cancellation_until_release() -> Non
 
     async def reacquire() -> None:
         async with session.pending_lock:
-            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+            await mixin._ensure_http_bridge_session_stream_lease_locked(
+                fake_self,
+                session,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
+            )
 
     reacquire_task = asyncio.create_task(reacquire())
     await release_started.wait()
@@ -563,10 +627,14 @@ async def test_reacquire_noop_when_lease_already_held() -> None:
     session = _make_bridge_session()
     lease = _make_lease("l4")
     session.account_lease = lease
-    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock()))
+    fake_self = SimpleNamespace(_load_balancer=_lease_balancer(acquire_account_lease=AsyncMock()))
 
     async with session.pending_lock:
-        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+        await mixin._ensure_http_bridge_session_stream_lease_locked(
+            fake_self,
+            session,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
+        )
 
     assert session.account_lease is lease
     fake_self._load_balancer.acquire_account_lease.assert_not_awaited()
@@ -644,6 +712,285 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
     assert session.account_lease is None
     assert session.queued_request_count == 0
     assert session.admission_waiter_count == 0
+
+
+@pytest.mark.asyncio
+async def test_turn_rechecks_usage_policy_after_prewarm_before_queue_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    lease = _make_lease("l-policy-race")
+    usage_gate = AsyncMock(
+        side_effect=[
+            OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.AVAILABLE),
+            OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED),
+        ]
+    )
+    acquire_account_lease = AsyncMock(return_value=lease)
+    release_account_lease = AsyncMock()
+    retire = AsyncMock(return_value=True)
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
+    monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-policy-race",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "account_usage_limit_reached"
+    assert usage_gate.await_count == 2
+    acquire_account_lease.assert_awaited_once()
+    release_account_lease.assert_awaited_once_with(lease)
+    assert session.account_lease is None
+    assert session.admission_waiter_count == 0
+    assert session.queued_request_count == 0
+    assert session.upstream_control.retire_after_drain is True
+    retire.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_prewarm_rechecks_owner_policy_at_dispatch_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    service._http_bridge_sessions[session.key] = session
+    usage_gate = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED)
+    )
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
+
+    async def acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **_kwargs: object,
+    ) -> None:
+        await response_create_gate.acquire()
+        state.response_create_gate = response_create_gate
+        state.response_create_gate_acquired = True
+
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", acquire_admission)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-policy-race",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._maybe_prewarm_http_bridge_session(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "account_usage_limit_reached"
+    usage_gate.assert_awaited_once_with(session.account.id)
+    send_text.assert_not_awaited()
+    assert session.pending_requests == deque()
+    assert session.prewarmed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("denied_state", "expected_code"),
+    [
+        (
+            OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED),
+            "account_usage_limit_reached",
+        ),
+        (
+            OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.DATA_UNAVAILABLE),
+            "account_usage_limit_reached",
+        ),
+        (OwnerAuthorization(OwnerAuthorizationKind.OWNER_UNAVAILABLE), "previous_response_owner_unavailable"),
+    ],
+)
+async def test_owner_policy_denial_wins_over_queue_full(
+    monkeypatch: pytest.MonkeyPatch,
+    denied_state: OwnerAuthorization,
+    expected_code: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(queued_request_count=1)
+    session.account_lease = _make_lease("l-policy-queue-full")
+    usage_gate = AsyncMock(return_value=denied_state)
+    retire = AsyncMock(return_value=False)
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-policy-queue-full",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=1,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == expected_code
+    usage_gate.assert_awaited_once_with(session.account.id)
+    assert session.queued_request_count == 1
+    assert session.admission_waiter_count == 0
+    assert session.upstream_control.retire_after_drain is True
+    retire.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_owner_policy_read_failure_has_stable_product_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.account_lease = _make_lease("l-policy-read-failure")
+    monkeypatch.setattr(
+        service._load_balancer,
+        "authorize_account_fresh",
+        AsyncMock(return_value=OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-policy-read-failure",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "account_usage_limit_authorization_failed"
+    assert session.queued_request_count == 0
+    assert session.admission_waiter_count == 0
+    assert session.upstream_control.retire_after_drain is False
+
+
+@pytest.mark.asyncio
+async def test_owner_policy_read_cancellation_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.account_lease = _make_lease("l-policy-read-cancel")
+    monkeypatch.setattr(
+        service._load_balancer,
+        "authorize_account_fresh",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-policy-read-cancel",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert session.queued_request_count == 0
+    assert session.admission_waiter_count == 0
+
+
+@pytest.mark.asyncio
+async def test_turn_fails_closed_when_pinned_owner_is_missing() -> None:
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    session = _make_bridge_session()
+    acquire_account_lease = AsyncMock()
+    fake_self = SimpleNamespace(
+        _load_balancer=SimpleNamespace(
+            acquire_account_lease=acquire_account_lease,
+        )
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async with session.pending_lock:
+            await mixin._ensure_http_bridge_session_stream_lease_locked(
+                fake_self,
+                session,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.OWNER_UNAVAILABLE),
+            )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    acquire_account_lease.assert_not_awaited()
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+    assert session.account_lease is None
 
 
 @pytest.mark.asyncio
@@ -856,6 +1203,63 @@ async def test_prewarm_failure_retires_closed_session_after_last_waiter(
     assert session.admission_waiter_count == 0
     assert session.account_lease is None
     assert session.key not in service._http_bridge_sessions
+
+
+@pytest.mark.asyncio
+async def test_prewarm_policy_denial_retires_session_after_last_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    service._http_bridge_sessions[session.key] = session
+    lease = _make_lease("l-prewarm-policy-denial")
+    session.account_lease = lease
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service._durable_bridge, "lookup_retry_circuit", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+
+    async def deny_during_prewarm(*_args: object, **_kwargs: object) -> None:
+        session.upstream_control.reconnect_requested = True
+        session.upstream_control.retire_after_drain = True
+        raise ProxyResponseError(
+            503,
+            openai_error("account_usage_limit_reached", "Account usage limit reached."),
+        )
+
+    monkeypatch.setattr(
+        service,
+        "_maybe_prewarm_http_bridge_session",
+        AsyncMock(side_effect=deny_during_prewarm),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-policy-denial",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError):
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert [awaited.args for awaited in release_account_lease.await_args_list] == [(lease,), (None,)]
+    cast(AsyncMock, session.upstream.close).assert_awaited_once()
+    assert session.admission_waiter_count == 0
+    assert session.account_lease is None
+    assert session.closed is True
+    assert session.upstream_close_attempted is True
 
 
 @pytest.mark.asyncio

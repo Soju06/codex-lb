@@ -1,13 +1,16 @@
+import { UsageQuotaBar } from "@/components/usage-quota-bar";
 import { cn } from "@/lib/utils";
 import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 
 type MiniQuotaBarProps = {
   percent: number | null;
+  cap?: number | null;
   testId: string;
   "aria-label"?: string;
 };
 
-export function MiniQuotaBar({ percent, testId, "aria-label": ariaLabel }: MiniQuotaBarProps) {
+export function MiniQuotaBar({ percent, cap, testId, "aria-label": ariaLabel }: MiniQuotaBarProps) {
+  if (cap != null) return <UsageQuotaBar percent={percent} cap={cap} />;
   if (percent === null) {
     return <div aria-hidden="true" data-testid={testId} className="h-1 flex-1 overflow-hidden rounded-full bg-muted" />;
   }

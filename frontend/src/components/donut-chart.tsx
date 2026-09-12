@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 
@@ -18,6 +18,7 @@ export type DonutChartItem = {
   isEmail?: boolean;
   value: number;
   color?: string;
+  hatched?: boolean;
 };
 
 export type DonutChartProps = {
@@ -110,6 +111,7 @@ function formatUsedPercent(percent: number): string {
 
 export function DonutChart({ items, total, centerValue, title, subtitle, safeLine, centerLayout = "remaining" }: DonutChartProps) {
   const { t } = useTranslation();
+  const reservePatternId = useId().replaceAll(":", "");
   const isDark = useThemeStore((s) => s.theme === "dark");
   const blurred = usePrivacyStore((s) => s.blurred);
   const reducedMotion = useReducedMotion();
@@ -135,7 +137,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
       id: item.id ?? item.label,
       name: item.label,
       value: Math.max(0, item.value),
-      fill: item.color,
+      fill: item.hatched ? "url(#" + reservePatternId + ")" : item.color,
     })),
     ...(consumed > 0
       ? [{ id: "__consumed__", name: "__consumed__", value: consumed, fill: consumedColor }]
@@ -183,6 +185,12 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
         <div className="flex shrink-0 flex-col items-center gap-2">
           <div className="relative h-[152px] w-[152px] overflow-visible">
             <PieChart width={CHART_SIZE} height={CHART_SIZE} margin={{ top: CHART_MARGIN, right: CHART_MARGIN, bottom: CHART_MARGIN, left: CHART_MARGIN }}>
+             <defs>
+               <pattern id={reservePatternId} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                 <rect width="6" height="6" fill={isDark ? "#666" : "#aaa"} />
+                 <line x1="0" y1="0" x2="0" y2="6" stroke={isDark ? "#aaa" : "#666"} strokeWidth="2" />
+               </pattern>
+             </defs>
              <Pie
                data={chartData}
                cx={PIE_CX}

@@ -33,6 +33,7 @@ import app.core.metrics.prometheus as prometheus_module
 import app.modules.proxy._service.websocket.overflow as ws_overflow
 import app.modules.proxy.service as proxy_service
 from app.core.clock import clock_for, scheduler_for
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.affinity import _codex_backend_identity
 from app.modules.proxy.load_balancer import AccountSelection
@@ -50,6 +51,7 @@ from app.modules.proxy.model_source_pins import (
     thread_pin_key,
 )
 from app.modules.proxy.overflow import OVERFLOW_OUTCOMES, WS_BOUNCE_CODE
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 from tests.unit.test_proxy_utils import (
     _make_account,
@@ -1198,6 +1200,11 @@ async def test_reused_socket_pinned_turn_is_bounced_with_reservation_released_an
     store.install(monkeypatch)
     service, request_logs = _session_service(monkeypatch)
     account = _make_account("acc_ws_overflow_reuse")
+    monkeypatch.setattr(
+        service._load_balancer,
+        "authorize_account_fresh",
+        AsyncMock(return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)),
+    )
     upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_turn_one"))
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202

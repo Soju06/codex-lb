@@ -68,6 +68,8 @@ class StatesBuilder(Protocol):
         latest_primary: Mapping[str, UsageHistory | AdditionalUsageHistory],
         latest_secondary: Mapping[str, UsageHistory | AdditionalUsageHistory],
         latest_monthly: Mapping[str, UsageHistory],
+        standard_latest_primary: Mapping[str, UsageHistory] | None = None,
+        standard_latest_secondary: Mapping[str, UsageHistory] | None = None,
         runtime: dict[str, RuntimeState],
         now: float | None = None,
         routing_policy_override: str | None = None,
@@ -235,6 +237,8 @@ def _observe_selection_states(
         latest_primary=selection_inputs.latest_primary,
         latest_secondary=selection_inputs.latest_secondary,
         latest_monthly=selection_inputs.latest_monthly,
+        standard_latest_primary=selection_inputs.standard_latest_primary,
+        standard_latest_secondary=selection_inputs.standard_latest_secondary,
         runtime=runtime_snapshot,
         now=owner._clock.time(),
         routing_policy_override=selection_inputs.routing_policy_override,
@@ -341,7 +345,7 @@ async def run_opportunistic_admission(
         return OpportunisticAdmissionOutcome(
             account=None,
             error_message=result.error_message,
-            error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
+            error_code=result.error_code or OPPORTUNISTIC_BURN_WINDOW_CLOSED,
         )
     account = account_map.get(result.account.account_id)
     if account is None:

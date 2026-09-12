@@ -1549,6 +1549,14 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
     fetched: list[str | None] = []
     fetch_started = asyncio.Event()
     release_fetch = asyncio.Event()
+    refresh_finished = asyncio.Event()
+    run_refresh = usage_updater_module._run_requested_refresh
+
+    async def tracked_refresh(account_id):
+        await run_refresh(account_id)
+        refresh_finished.set()
+
+    monkeypatch.setattr(usage_updater_module, "_run_requested_refresh", tracked_refresh)
 
     async def fake_fetch_usage(*, access_token, account_id, route=None, allow_direct_egress=True):
         fetched.append(account_id)
@@ -1593,21 +1601,12 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
         stale_generation = selection_cache.generation
 
         release_fetch.set()
-        # The refresh is a tracked background task: poll briefly for its row instead of a
-        # scheduler tick (USAGE_REFRESH_INTERVAL_SECONDS).
-        latest = None
-        deadline = time.monotonic() + 5.0
-        while latest is None and time.monotonic() < deadline:
-            latest = await latest_primary_row()
-            if latest is None:
-                await asyncio.sleep(0.02)
+        await asyncio.wait_for(refresh_finished.wait(), timeout=5)
+        latest = await latest_primary_row()
         assert latest is not None, "a streamed usage_limit_reached must request an immediate usage refresh"
         assert latest.used_percent == 100.0
         assert latest.reset_at == reset_at
 
-        deadline = time.monotonic() + 5.0
-        while selection_cache.generation == stale_generation and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
         assert selection_cache.generation > stale_generation, "the written row must invalidate the selection cache"
         assert selection_cache._cache == {}
 

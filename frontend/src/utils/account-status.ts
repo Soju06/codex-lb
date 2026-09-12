@@ -1,4 +1,5 @@
 export type DashboardAccountStatus = "active" | "paused" | "limited" | "exceeded" | "reauth" | "deactivated";
+export type AccountDisplayStatus = DashboardAccountStatus | "limitReached" | "usageUnavailable";
 
 export function quotaBarColor(percent: number): string {
   if (percent >= 70) return "bg-emerald-500";
@@ -29,6 +30,23 @@ export function normalizeStatus(status: string): DashboardAccountStatus {
     return "deactivated";
   }
   return "active";
+}
+
+export function getAccountDisplayStatus(
+  status: string,
+  usageLimitState?: string | null,
+): AccountDisplayStatus {
+  const normalized = normalizeStatus(status);
+  if (normalized !== "active") {
+    return normalized;
+  }
+  if (usageLimitState === "reached") {
+    return "limitReached";
+  }
+  if (usageLimitState === "data_unavailable") {
+    return "usageUnavailable";
+  }
+  return normalized;
 }
 
 function isHardBlockedStatus(status: string): boolean {

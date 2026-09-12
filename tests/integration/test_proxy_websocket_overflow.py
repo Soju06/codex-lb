@@ -251,14 +251,15 @@ class _FakeUpstreamWebSocket:
         self.sent_text: list[str] = []
         self.closed = False
         self._messages: asyncio.Queue[_FakeUpstreamMessage] = asyncio.Queue()
-        for event in (
-            {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
-            {"type": "response.completed", "response": {"id": response_id, "status": "completed"}},
-        ):
-            self._messages.put_nowait(_FakeUpstreamMessage(json.dumps(event, separators=(",", ":"))))
+        self.response_id = response_id
 
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
+        for event in (
+            {"type": "response.created", "response": {"id": self.response_id, "status": "in_progress"}},
+            {"type": "response.completed", "response": {"id": self.response_id, "status": "completed"}},
+        ):
+            self._messages.put_nowait(_FakeUpstreamMessage(json.dumps(event, separators=(",", ":"))))
 
     async def send_bytes(self, data: bytes) -> None:
         del data
@@ -273,10 +274,21 @@ class _FakeUpstreamWebSocket:
         self.closed = True
 
 
-def _attach_fake_subscription_upstream(monkeypatch: pytest.MonkeyPatch, upstream: _FakeUpstreamWebSocket) -> None:
+def _attach_fake_subscription_upstream(monkeypatch: pytest.MonkeyPatch, upstream: _FakeUpstreamWebSocket) -> Account:
     """An accepted session whose first turn is served by a fake subscription upstream; nothing dials ChatGPT."""
 
-    account = SimpleNamespace(id="acct_ws_overflow_subscription", security_work_authorized=False)
+    account = Account(
+        id="acct_ws_overflow_subscription",
+        chatgpt_account_id="acct_ws_overflow_subscription",
+        email="ws-overflow@example.com",
+        plan_type="plus",
+        access_token_encrypted=b"access",
+        refresh_token_encrypted=b"refresh",
+        id_token_encrypted=b"id",
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        security_work_authorized=False,
+    )
 
     async def select_account(self, *args, request_state, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
         del self, args, request_state, kwargs
@@ -288,6 +300,13 @@ def _attach_fake_subscription_upstream(monkeypatch: pytest.MonkeyPatch, upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_websocket_connect_account", select_account)
     monkeypatch.setattr(proxy_module.ProxyService, "_try_open_websocket_connect_attempt", open_attempt)
+    return account
+
+
+async def _persist_subscription_account(account: Account) -> None:
+    async with SessionLocal() as session:
+        session.add(account)
+        await session.commit()
 
 
 # --- handshake: 426 only on evidence ----------------------------------------------------------------------
@@ -524,7 +543,7 @@ def test_reused_socket_pinned_turn_is_bounced_with_reservation_released_and_row_
 
     thread_id = "thr_ws_reused_pinned"
     upstream = _FakeUpstreamWebSocket("resp_ws_overflow_turn_one")
-    _attach_fake_subscription_upstream(monkeypatch, upstream)
+    account = _attach_fake_subscription_upstream(monkeypatch, upstream)
     released: list[str] = []
     real_release = proxy_module.ProxyService._release_websocket_request_state_reservation
 
@@ -537,6 +556,7 @@ def test_reused_socket_pinned_turn_is_bounced_with_reservation_released_and_row_
     with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
         assert client.portal is not None
         source_id = _designate(client, app_instance, "ws-overflow-reused")
+        client.portal.call(_persist_subscription_account, account)
 
         with client.websocket_connect(_CODEX_WS, headers=_native_headers(thread_id)) as websocket:
             websocket.send_text(json.dumps(_response_create("first turn on the subscription")))
@@ -619,7 +639,7 @@ def test_recorded_subscription_owner_is_never_bounced_by_an_anchor(app_instance,
 
     previous_response_id = "resp_subscription_owned_ws"
     upstream = _FakeUpstreamWebSocket("resp_ws_owned_completed")
-    _attach_fake_subscription_upstream(monkeypatch, upstream)
+    account = _attach_fake_subscription_upstream(monkeypatch, upstream)
 
     async def recorded_owner(
         self, *, previous_response_id, api_key, session_id=None, surface, request_state=None, **kwargs
@@ -632,6 +652,7 @@ def test_recorded_subscription_owner_is_never_bounced_by_an_anchor(app_instance,
     with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
         assert client.portal is not None
         source_id = _designate(client, app_instance, "ws-overflow-owned")
+        client.portal.call(_persist_subscription_account, account)
         client.portal.call(
             _upsert_pins,
             utcnow(),

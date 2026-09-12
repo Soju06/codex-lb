@@ -10861,6 +10861,11 @@ Steering configuration snapshots SHALL be retained only for downstream Astra Web
 - **WHEN** upstream reports response.steer.pending with required tool input
 - **THEN** the proxy preserves that notification and allows the matching explicit anchored response.create to continue on the same connection without replaying the steer
 
+#### Scenario: A pending notification is the first acknowledgment
+- **GIVEN** a submitted steer has not yet received response.steer.accepted and the parent's terminal names no pending call
+- **WHEN** upstream reports response.steer.pending with required tool input as the first notification for that steer
+- **THEN** the proxy SHALL correlate it to the oldest unacknowledged submission, record its identity and required input, and allow the matching explicit anchored response.create to continue
+
 #### Scenario: Explicit tool continuation normalizes its parent before ownership lookup
 - **GIVEN** an accepted steer awaiting required tool input and a response.create whose previous_response_id has surrounding whitespace
 - **AND** reservation operations succeed

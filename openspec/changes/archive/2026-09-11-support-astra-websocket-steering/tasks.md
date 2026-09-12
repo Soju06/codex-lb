@@ -44,3 +44,4 @@
 - [x] 3.29 Reset elapsed windows of newly applicable limits before steering reconciliation; prove admission against the fresh window on the WebSocket route
 - [x] 3.30 Re-reserve an existing reservation item in the live window when its limit window advanced; prove the additional steer is admitted and settles once on the WebSocket route
 - [x] 3.31 Retire a steering parent when its automatic successor is assigned while queued steers remain unacknowledged; prove late successors are suppressed, unrelated creates are never claimed, and acknowledged steers consume no history
+- [x] 3.32 Correlate a first response.steer.pending to the oldest unacknowledged submission; prove the required tool input is recorded and the anchored tool result continues

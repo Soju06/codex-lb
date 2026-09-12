@@ -561,6 +561,42 @@ async def test_pending_steering_continues_with_required_results_once(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_pending_as_first_acknowledgment_records_required_input(monkeypatch):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    result = {"type": "function_call_output", "call_id": "call_1", "output": "saved result"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (steer, saw("response.created", "r1")),
+            (create(parent="r1", input_items=[result]), saw("response.steer.pending")),
+        ]
+    )
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                # The parent terminal carries no pending call; only the pending acknowledgment names it.
+                response("response.completed", "r1"),
+                {
+                    "type": "response.steer.pending",
+                    "steer": {"id": "s1", "previous_response_id": "r1"},
+                    "reason": "waiting_for_required_input",
+                    "required_input": [{"type": "function_call_output", "call_id": "call_1"}],
+                },
+                {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+            ],
+            [response("response.created", "r2", parent="r1"), response("response.completed", "r2", parent="r1")],
+        ]
+    )
+    _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream)
+    assert len(reservations) == 3
+    assert [value[0] for value in settled] == ["res_0", "res_2"]
+    assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0] is not None] == ["res_1"]
+    assert upstream.sent[-1]["input"] == [result]
+    assert sum(item["type"] == "response.steer" for item in upstream.sent) == 1
+
+
+@pytest.mark.asyncio
 async def test_failed_explicit_continuation_prepare_keeps_placeholder(monkeypatch):
     from app.core.clients.proxy import ProxyResponseError
     from app.core.errors import openai_error

@@ -681,23 +681,26 @@ async def process_websocket_steering_event(
             (item for item in continuation.submissions if isinstance(steer_id, str) and item.id == steer_id), None
         )
         event_type = payload.get("type")
-        if submission is None and event_type in {"response.steer.accepted", "response.steer.failed"}:
+        if submission is None and event_type in {
+            "response.steer.accepted",
+            "response.steer.pending",
+            "response.steer.failed",
+        }:
             submission = next(
                 (
                     item
                     for item in continuation.submissions
-                    if item.id is None and (event_type == "response.steer.accepted" or item.input == steer.get("input"))
+                    if item.id is None and (event_type != "response.steer.failed" or item.input == steer.get("input"))
                 ),
                 None,
             )
         if submission is None:
             return
-        if event_type == "response.steer.accepted":
+        if event_type in {"response.steer.accepted", "response.steer.pending"}:
             submission.acknowledged = True
             if isinstance(steer_id, str):
                 submission.id = steer_id
-        elif event_type == "response.steer.pending":
-            submission.acknowledged = True
+        if event_type == "response.steer.pending":
             required = payload.get("required_input")
             if payload.get("reason") == "waiting_for_required_input" and isinstance(required, list):
                 continuation.required_input = required

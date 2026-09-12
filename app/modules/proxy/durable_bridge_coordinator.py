@@ -148,7 +148,11 @@ class DurableBridgeSessionCoordinator:
                     # replay. Carry that target through every conflict and
                     # handoff path instead of falling back to the session's
                     # mutable latest_response_id.
-                    snapshot = replace(retained_snapshot, latest_response_id=target_response_id)
+                    snapshot = (
+                        retained_snapshot
+                        if retained_snapshot.continuity_abandoned
+                        else replace(retained_snapshot, latest_response_id=target_response_id)
+                    )
                 else:
                     snapshot = await repository.resolve_alias(
                         alias_kind=alias_kind,
@@ -298,7 +302,10 @@ class DurableBridgeSessionCoordinator:
             if retained_alias is None:
                 return None
             snapshot, target_response_id = retained_alias
-            return replace(_to_lookup(snapshot), latest_response_id=target_response_id)
+            lookup = _to_lookup(snapshot)
+            if lookup.continuity_abandoned:
+                return lookup
+            return replace(lookup, latest_response_id=target_response_id)
 
     async def lookup_sessions(self, *, session_ids: Sequence[str]) -> list[DurableBridgeLookup]:
         """Batch-load durable session snapshots for ownership reconciliation."""

@@ -2419,7 +2419,6 @@ class _HTTPBridgeMixin(
             session.last_upstream_close_code = None
             session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
             _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
-            session.reconnect_admission_in_progress = False
         except BaseException:
             await abort_selected_handoff()
             raise

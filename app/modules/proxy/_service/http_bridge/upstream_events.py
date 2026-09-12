@@ -1176,13 +1176,15 @@ def _schedule_http_bridge_recovery_settlement_retry(
     session: Any,
     **kwargs: Any,
 ) -> None:
-    _schedule_http_bridge_background_cleanup(
+    retry_task = _schedule_http_bridge_background_cleanup(
         service,
         _retry_http_bridge_recovery_settlement(service, session, **kwargs),
         name=f"http-bridge-recovery-settlement-{_hash_identifier(kwargs['request_fingerprint'])}",
         error_message="HTTP bridge recovery settlement retry failed",
         attribute=("_http_bridge_recovery_session_id", kwargs["session_id"]),
     )
+    if retry_task is not None:
+        setattr(retry_task, "_http_bridge_owner_epoch", kwargs["owner_epoch"])
 
 
 async def _retry_denied_http_bridge_anchor_clear(
@@ -1350,7 +1352,7 @@ def _schedule_denied_http_bridge_anchor_clear_retry(
     )
     if instance_id is None:
         return
-    _schedule_http_bridge_background_cleanup(
+    retry_task = _schedule_http_bridge_background_cleanup(
         service,
         _retry_denied_http_bridge_anchor_clear(
             service,
@@ -1365,6 +1367,9 @@ def _schedule_denied_http_bridge_anchor_clear_retry(
         name=f"http-bridge-denied-anchor-clear-{_hash_identifier(response_id)}",
         error_message="HTTP bridge denied-anchor clear retry failed",
     )
+    if retry_task is not None and owner_epoch is not None:
+        setattr(retry_task, "_http_bridge_recovery_session_id", session_id)
+        setattr(retry_task, "_http_bridge_owner_epoch", owner_epoch)
 
 
 T = TypeVar("T")
@@ -1605,6 +1610,7 @@ def _record_http_bridge_response_output(
             request_state.response_output_items_complete = False
             request_state.response_output_items_event_invalid = True
             return
+    indexed_output: list[JsonValue] | None = None
     if output and request_state.response_output_items_by_index:
         indexed_output = [
             request_state.response_output_items_by_index[index]
@@ -1626,6 +1632,10 @@ def _record_http_bridge_response_output(
             request_state.response_output_items_complete = False
             request_state.response_output_items_event_invalid = True
             return
+        # Indexed done events are byte-accounted as they arrive. Terminal
+        # echoes may differ in unindexed metadata, so retain the indexed form
+        # as the canonical bounded transcript after reconciliation.
+        output = indexed_output
     if output == [] and request_state.response_output_items_by_index:
         if not request_state.response_output_items_event_invalid:
             request_state.response_output_items = [
@@ -3042,6 +3052,8 @@ async def _cancel_http_bridge_reader_child(
     label: str,
     scheduler_owner: Any,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    owner_session_id: str | None = None,
+    owner_epoch: int | None = None,
 ) -> bool:
     if task is None:
         return True
@@ -3059,12 +3071,44 @@ async def _cancel_http_bridge_reader_child(
                 task,
                 label=label,
                 cleanup_tasks=cleanup_tasks,
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
                 scheduler=scheduler_for(scheduler_owner),
             )
         )
     except Exception:
         logger.debug("Failed to cancel HTTP bridge reader child label=%s", label, exc_info=True)
         return task.done()
+
+
+async def _cancel_http_bridge_reader_child_compat(
+    task: asyncio.Task[Any] | None,
+    *,
+    label: str,
+    scheduler_owner: Any,
+    cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    owner_session_id: str | None = None,
+    owner_epoch: int | None = None,
+) -> bool:
+    """Invoke reader cancellation while tolerating legacy test facades."""
+    try:
+        return await _cancel_http_bridge_reader_child(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            scheduler_owner=scheduler_owner,
+            owner_session_id=owner_session_id,
+            owner_epoch=owner_epoch,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return await _cancel_http_bridge_reader_child(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            scheduler_owner=scheduler_owner,
+        )
 
 
 async def _clear_durable_http_bridge_response_anchor(
@@ -3539,18 +3583,40 @@ async def _retire_denied_http_bridge_anchor(
 class _HTTPBridgeUpstreamEventsMixin:
     def _spawn_http_bridge_upstream_reader(self: Any, session: "_HTTPBridgeSession") -> asyncio.Task[None]:
         """Start the per-session upstream reader on the owner's scheduler."""
+        reader = scheduler_for(self).create_task(self._relay_http_bridge_upstream_messages(session))
+        setattr(reader, "_http_bridge_recovery_session_id", session.durable_session_id)
+        setattr(reader, "_http_bridge_owner_epoch", session.durable_owner_epoch)
+        return reader
 
-        return scheduler_for(self).create_task(self._relay_http_bridge_upstream_messages(session))
-
-    async def _cancel_http_bridge_previous_reader(self: Any, old_reader: asyncio.Task[Any]) -> bool:
+    async def _cancel_http_bridge_previous_reader(
+        self: Any,
+        old_reader: asyncio.Task[Any],
+    ) -> bool:
         """Cancel and drain a replaced upstream reader before a reconnect."""
 
-        return await _await_cancelled_task(
-            old_reader,
-            label="http bridge upstream reader",
-            cleanup_tasks=self._background_cleanup_tasks,
-            scheduler=scheduler_for(self),
-        )
+        owner_session_id = getattr(old_reader, "_http_bridge_recovery_session_id", None)
+        owner_epoch = getattr(old_reader, "_http_bridge_owner_epoch", None)
+
+        try:
+            return await _await_cancelled_task(
+                old_reader,
+                label="http bridge upstream reader",
+                cleanup_tasks=self._background_cleanup_tasks,
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
+                scheduler=scheduler_for(self),
+            )
+        except TypeError as exc:
+            # Keep compatibility with legacy test doubles/facades that expose
+            # the pre-epoch cancellation signature.
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            return await _await_cancelled_task(
+                old_reader,
+                label="http bridge upstream reader",
+                cleanup_tasks=self._background_cleanup_tasks,
+                scheduler=scheduler_for(self),
+            )
 
     async def _await_http_bridge_registry_wait(self: Any, future: asyncio.Future[T], *, timeout: float) -> T:
         """Await a shared inflight/capacity registry future with a bounded timeout.
@@ -3936,11 +4002,13 @@ class _HTTPBridgeUpstreamEventsMixin:
             # instead of re-observing the same exception forever.
             receive_task = None
             receive_operation_attempt_generations = None
-            await _cancel_http_bridge_reader_child(
+            await _cancel_http_bridge_reader_child_compat(
                 wakeup_task,
                 label="HTTP bridge reader wakeup after receive exception",
                 cleanup_tasks=self._background_cleanup_tasks,
                 scheduler_owner=self,
+                owner_session_id=session.durable_session_id,
+                owner_epoch=session.durable_owner_epoch,
             )
             wakeup_task = None
             retry_method = self._retry_http_bridge_precreated_request
@@ -4093,11 +4161,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                             # before its forced retirement.
                             force_retire = False
                             if receive_task is not None:
-                                receive_cancelled = await _cancel_http_bridge_reader_child(
+                                receive_cancelled = await _cancel_http_bridge_reader_child_compat(
                                     receive_task,
                                     label="HTTP bridge upstream receive after missing response.created",
                                     cleanup_tasks=self._background_cleanup_tasks,
                                     scheduler_owner=self,
+                                    owner_session_id=session.durable_session_id,
+                                    owner_epoch=session.durable_owner_epoch,
                                 )
                                 if receive_task.done() and not receive_task.cancelled():
                                     # A response (or a typed receive failure)
@@ -4196,11 +4266,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                         reader_failure_retry_circuit_attempt_selection = retry_circuit_attempt_selection
                     if receive_task is not None:
-                        receive_cancelled = await _cancel_http_bridge_reader_child(
+                        receive_cancelled = await _cancel_http_bridge_reader_child_compat(
                             receive_task,
                             label="HTTP bridge upstream receive after timeout",
                             cleanup_tasks=self._background_cleanup_tasks,
                             scheduler_owner=self,
+                            owner_session_id=session.durable_session_id,
+                            owner_epoch=session.durable_owner_epoch,
                         )
                         if not receive_cancelled:
                             raise RuntimeError("HTTP bridge upstream receive did not cancel after timeout")
@@ -4407,17 +4479,21 @@ class _HTTPBridgeUpstreamEventsMixin:
             # swapping ``session.upstream``.
             if session.upstream is relay_upstream:
                 session.closed = True
-            await _cancel_http_bridge_reader_child(
+            await _cancel_http_bridge_reader_child_compat(
                 wakeup_task,
                 label="HTTP bridge reader wakeup wait",
                 cleanup_tasks=self._background_cleanup_tasks,
                 scheduler_owner=self,
+                owner_session_id=session.durable_session_id,
+                owner_epoch=session.durable_owner_epoch,
             )
-            await _cancel_http_bridge_reader_child(
+            await _cancel_http_bridge_reader_child_compat(
                 receive_task,
                 label="HTTP bridge upstream receive",
                 cleanup_tasks=self._background_cleanup_tasks,
                 scheduler_owner=self,
+                owner_session_id=session.durable_session_id,
+                owner_epoch=session.durable_owner_epoch,
             )
 
     async def _process_http_bridge_upstream_text(

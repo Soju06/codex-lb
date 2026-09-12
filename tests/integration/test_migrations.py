@@ -3540,6 +3540,10 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
     repair_head = "20260911_040000_repair_http_bridge_recovery_columns"
     alias_table = "http_bridge_session_aliases"
     alias_column = "target_response_id"
+    indexes_to_repair = {
+        "idx_http_bridge_operations_session_state_created",
+        "idx_http_bridge_operations_response_state",
+    }
     columns_to_repair = {
         "rebind_claim_id",
         "transcript_version",
@@ -3554,6 +3558,8 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
     engine = create_async_engine(db_url, future=True)
     try:
         async with engine.begin() as conn:
+            for index in indexes_to_repair:
+                await conn.execute(text(f"DROP INDEX {index}"))
             for column in columns_to_repair:
                 await conn.execute(text(f"ALTER TABLE http_bridge_operations DROP COLUMN {column}"))
             await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN {alias_column}"))
@@ -3565,8 +3571,12 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
             aliases_before = await conn.run_sync(
                 lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
             )
+            indexes_before = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_indexes("http_bridge_operations")}
+            )
         assert columns_to_repair.isdisjoint(before)
         assert alias_column not in aliases_before
+        assert indexes_to_repair.isdisjoint(indexes_before)
 
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == repair_head
@@ -3578,7 +3588,11 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
             aliases_after = await conn.run_sync(
                 lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
             )
+            indexes_after = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_indexes("http_bridge_operations")}
+            )
         assert columns_to_repair <= after
         assert alias_column in aliases_after
+        assert indexes_to_repair <= indexes_after
     finally:
         await engine.dispose()

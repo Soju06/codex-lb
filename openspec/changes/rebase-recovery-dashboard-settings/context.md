@@ -5,8 +5,10 @@ stream/bridge budgets and Codex session prewarming, HTTP continuation
 promotion, native HTTP terminal completion, pinned automation claim budgets,
 topology-bound settings tier classification, and constantized core/bridge tunables.
 Main's 34 removed tunables stay removed; this branch retains its ten opt-in
-transcript/recovery controls, for 106 environment settings. The settings budget,
-tier registry, and generated reference agree on that inventory.
+transcript/recovery controls, for 106 environment settings. They are fleet-wide
+T3 behaviour tunables with explicit `MIGRATING=backlog` entries until a follow-up
+dashboard migration provides nullable homes and cache-backed provenance. The
+settings budget, tier registry, and generated reference agree on that inventory.
 The release branch differs from main only in release version metadata; the
 feature PR retains main's version metadata because beta publication belongs to
 the canonical release branch.

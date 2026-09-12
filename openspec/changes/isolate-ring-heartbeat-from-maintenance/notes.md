@@ -1,11 +1,20 @@
-## PR #2133 review follow-up
+## PR #2133 current-head review follow-up
+
+- Periodic-owner drainage and `mark_stale()` now consume one absolute deadline derived from the remaining process-shutdown budget. Their existing per-step caps remain, but they cannot add together past that deadline.
+- The bridge-ring delta spec now explicitly requires bridge-disabled `/health/ready` to return HTTP 200 after a successful database probe regardless of bridge schema, registration, lookup-error, or membership state; the health regression exercises those conditions.
+- A product-path lifespan regression now uses the real ring service and separate SQLite request/background pools, blocks the wired durable-maintenance callback past its deadline, exhausts the request pool, and verifies the persisted `BridgeRingMember.last_heartbeat_at` advances without overlapping maintenance work.
+- Rebased without conflicts onto `origin/main@82567556f9f75ea13986667fc5282f035b7ca8d2`; `git range-diff` reports the first seven feature commits patch-equivalent to the reviewed pre-rebase stack, while the eighth differs only by this post-rebase verification note.
+- Current follow-up validation after that rebase: 120 periodic/ring/health/metrics/cap tests, 85 file-backed bridge lifecycle tests, 86 database-session tests, 69 graceful-shutdown/drain-bound tests, 50 lifespan tests with the one current-main baseline failure deselected, and 10 selected HTTP bridge maintenance tests passed in isolated SQLite databases. Repository Ruff/formatting (`1287 files already formatted`), `ty`, proxy architecture, cancellation-safety, proxy timing-seam, strict change validation, and all 65 repository specs passed.
+- No production environment, database, container, or deployment was mutated while addressing these comments.
+
+## Earlier PR #2133 review follow-up
 
 - Stale-marking now depends only on registration and heartbeat stopping; an active maintenance owner still suppresses the SQLite clean marker but cannot prevent deliberate ring expiry after the bounded drain.
 - Kept the existing empty-ring readiness exemption. A stricter single-replica policy is deferred, not authorized by this PR; heartbeat-age diagnostics remain.
 - Registration and periodic shutdown share one monotonic deadline, without an additive 100ms grace. Periodic cancellation begins without waiting for registration to settle.
 - Fixed the gauge-observation race, added metric-label and idle-pass isolation assertions, clarified the health schema change, and moved architecture rationale out of the normative spec.
 - Validation: 115 lifecycle/readiness/lifespan/periodic tests and 14 selected metrics/maintenance tests passed; full lint (including architecture, cancellation, and timing guards), type checking, strict change validation and all 58 repository specs passed.
-- No production changes were made while addressing these comments.
+- No production environment, database, container, or deployment was mutated while addressing these comments.
 
 ## Integration baseline
 
@@ -21,15 +30,15 @@ Passing:
 - 79 file-backed SQLite durable bridge-ring lifecycle tests.
 - 77 database-session tests.
 - 9 focused HTTP bridge maintenance/reconciliation tests.
-- All 51 `tests/unit/test_otel.py` lifespan and shutdown tests.
+- 50 `tests/unit/test_otel.py` lifespan and shutdown tests passed after the later current-main baseline failure below was deselected.
 - 5 health integration/E2E tests.
 - 16 of 17 `tests/integration/test_health_and_errors.py` tests; the sole failure is the unchanged missing-built-dashboard-assets case below.
 - 980 of 981 `tests/unit/test_proxy_http_bridge.py` tests; the sole failure is the unchanged missing `file_account_pins` fixture case below.
-- Repository Ruff lint and formatting (`1025 files already formatted`).
+- Repository Ruff lint and formatting (`1272 files already formatted`).
 - Repository `uv run ty check`.
 - Cancellation-safety architecture check.
 - Strict validation for `isolate-ring-heartbeat-from-maintenance`.
-- Repository-wide OpenSpec validation: 58 passed, 0 failed.
+- Repository-wide OpenSpec validation: 65 passed, 0 failed.
 - Pi review session `f017948d-2a42-4305-bbe3-06f6aa2e818e`; four concrete findings were fixed and the final re-review reported no actionable issues.
 
 Current-main baseline failures reproduced or confirmed separately:
@@ -38,7 +47,7 @@ Current-main baseline failures reproduced or confirmed separately:
 - `tests/integration/test_health_and_errors.py::test_assets_js_served_as_javascript_despite_poisoned_registry` requires a frontend build and fails with `built dashboard assets missing`.
 - `tests/unit/test_proxy_http_bridge.py::test_stream_via_http_bridge_fails_closed_before_file_affinity_when_previous_response_owner_misses` reaches a real SQLite file-pin repository without the `file_account_pins` fixture table.
 
-The six historical `tests/unit/test_otel.py` database-mocking failures are resolved on current main; they are no longer listed as baselines.
+The six historical `tests/unit/test_otel.py` database-mocking failures are resolved on current main. The later `tests/unit/test_otel.py::test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_resource_close` failure reproduces on unmodified current main and is the only lifespan baseline excluded from the current follow-up run.
 
 ## Verification still blocked
 

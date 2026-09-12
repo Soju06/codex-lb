@@ -164,7 +164,7 @@ export function ApiKeyInfo({
 							<div key={limit.id} className="space-y-1 pl-2">
 								<div className="flex items-center justify-between gap-2 text-xs tabular-nums">
 									<span className="text-muted-foreground">
-										{t(`apis.keyInfo.limitTypes.${limit.limitType}`, { defaultValue: LIMIT_TYPE_LABEL[limit.limitType] })} ({limit.limitWindow},{" "}
+										{t(`apis.keyInfo.limitTypes.${limit.limitType}`, { defaultValue: LIMIT_TYPE_LABEL[limit.limitType] })} ({t(`apiKeys.limitWindows.${limit.limitWindow}`)},{" "}
 										{modelFilter})
 									</span>
 									<span className="font-medium">

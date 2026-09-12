@@ -1,8 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { addDays, format } from "date-fns";
 import { describe, expect, it, vi } from "vitest";
 
+import i18n from "@/i18n";
 import { ExpiryPicker } from "./expiry-picker";
 
 describe("ExpiryPicker", () => {
@@ -92,5 +93,33 @@ describe("ExpiryPicker", () => {
     // "No expiration" appears in both the trigger and the popover option
     const allMatches = await screen.findAllByText("No expiration");
     expect(allMatches.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("localizes calendar navigation and day selection in Japanese", async () => {
+    await i18n.changeLanguage("ja");
+    try {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<ExpiryPicker value={null} onChange={onChange} />);
+
+      await user.click(screen.getByRole("button", { name: "有効期限なし" }));
+      await user.click(await screen.findByRole("button", { name: "日付を指定..." }));
+      expect(screen.getByRole("button", { name: "前の月へ" })).toBeInTheDocument();
+      expect(screen.getByLabelText("日曜日", { selector: "th" })).toHaveTextContent("日");
+
+      // Move to a future month so the test does not depend on today's date.
+      await user.click(screen.getByRole("button", { name: "次の月へ" }));
+      const day = screen.getByRole("button", { name: /年\d+月15日/ });
+      await user.click(day);
+
+      expect(onChange).toHaveBeenCalledOnce();
+      const selected = onChange.mock.calls[0][0] as Date;
+      expect(selected.getDate()).toBe(15);
+      expect([selected.getHours(), selected.getMinutes(), selected.getSeconds()]).toEqual([23, 59, 59]);
+      expect(screen.queryByRole("button", { name: "次の月へ" })).not.toBeInTheDocument();
+    } finally {
+      cleanup();
+      await i18n.changeLanguage("en");
+    }
   });
 });

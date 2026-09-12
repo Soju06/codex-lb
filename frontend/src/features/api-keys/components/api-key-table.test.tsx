@@ -1,8 +1,9 @@
-import { screen, within } from "@testing-library/react";
+import { cleanup, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { ApiKeyTable } from "@/features/api-keys/components/api-key-table";
+import i18n from "@/i18n";
 import { createApiKey, createDefaultApiKeys } from "@/test/mocks/factories";
 import { renderWithProviders } from "@/test/utils";
 
@@ -45,6 +46,40 @@ describe("ApiKeyTable", () => {
     const secondRow = rows[2];
     expect(within(secondRow).getByText("Disabled")).toBeInTheDocument();
     expect(within(secondRow).getByText("No Limit")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["daily", "日次"],
+    ["weekly", "週次"],
+    ["monthly", "月次"],
+    ["5h", "5h"],
+    ["7d", "7d"],
+  ] as const)("localizes the %s limit period in Japanese while preserving amounts", async (limitWindow, label) => {
+    await i18n.changeLanguage("ja");
+    try {
+      const key = createApiKey();
+      const limit = { ...key.limits[0], limitWindow, currentValue: 10, maxValue: 100 };
+      renderWithProviders(
+        <ApiKeyTable
+          keys={[createApiKey({ limits: [
+            limit,
+            { ...limit, id: 2, limitType: "cost_usd", currentValue: 1_000_000, maxValue: 10_000_000 },
+            { ...limit, id: 3, limitType: "credits" },
+          ] })]}
+          busy={false}
+          onEdit={vi.fn()}
+          onDelete={vi.fn()}
+          onRegenerate={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByRole("cell", {
+        name: `トークン: 10/100 ${label} | コスト: $1.00/$10.00 ${label} | クレジット: 10/100 ${label}`,
+      })).toBeInTheDocument();
+    } finally {
+      cleanup();
+      await i18n.changeLanguage("en");
+    }
   });
 
   it("renders traffic class labels in the traffic column", () => {

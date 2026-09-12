@@ -457,6 +457,7 @@ class HttpBridgeOperationEventBatcher:
         """Persist one queued batch under flush and ownership locks, fencing failed writes from successors."""
         operation_lock = await self._operation_lock_for(operation_id)
         acquired = False
+        batch: list[_PendingOperationEvent] = []
         try:
             try:
                 await operation_lock.acquire()
@@ -520,11 +521,26 @@ class HttpBridgeOperationEventBatcher:
                         max_bytes=self._max_bytes,
                     )
                 if not persisted:
+                    failed_batch = batch
+                    batch = []
                     async with self._lock:
-                        self._drop_failed_batch_locked(operation_id, batch[0])
-            except Exception:
+                        self._drop_failed_batch_locked(operation_id, failed_batch[0])
+                else:
+                    # The durable append completed; do not requeue this batch
+                    # if cancellation arrives while final bookkeeping runs.
+                    batch = []
+            except asyncio.CancelledError:
+                # Consume cancellation long enough to restore the dequeued
+                # events and let the inflight bookkeeping in ``finally`` run.
                 async with self._lock:
-                    self._drop_failed_batch_locked(operation_id, batch[0])
+                    self._requeue_batch_locked(operation_id, batch)
+                batch = []
+                raise
+            except Exception:
+                failed_batch = batch
+                batch = []
+                async with self._lock:
+                    self._drop_failed_batch_locked(operation_id, failed_batch[0])
                 logger.debug(
                     "Dropping failed HTTP bridge transcript event batch operation_id=%s",
                     operation_id,
@@ -540,10 +556,35 @@ class HttpBridgeOperationEventBatcher:
                             completion_event.set()
                     else:
                         self._inflight_flushes[operation_id] = remaining
+        except asyncio.CancelledError:
+            # Cancellation can arrive after _take_batch() has released events
+            # from the bounded queue but before the durable append completes.
+            # Put that batch back so a terminal drain cannot finalize an
+            # incomplete spool while silently losing the dequeued events.
+            if batch:
+                async with self._lock:
+                    self._requeue_batch_locked(operation_id, batch)
+            raise
         finally:
             if acquired:
                 operation_lock.release()
             await self._release_operation_lock_user(operation_id)
+
+    def _requeue_batch_locked(self, operation_id: str, batch: list[_PendingOperationEvent]) -> None:
+        """Restore a dequeued batch after cancellation while its operation lock is held."""
+        if (
+            not batch
+            or operation_id in self._dropped_operations
+            or (
+                operation_id not in self._contexts
+                and operation_id not in self._closing_operations
+                and operation_id not in self._operation_generations
+            )
+        ):
+            return
+        self._pending.setdefault(operation_id, [])[:0] = batch
+        self._pending_count += len(batch)
+        self._pending_bytes += sum(len(item.event_text.encode("utf-8")) for item in batch)
 
     def _drop_failed_batch_locked(self, operation_id: str, owner: _PendingOperationEvent) -> None:
         """Drop queued data only if the failed writer still owns the current recovery generation."""

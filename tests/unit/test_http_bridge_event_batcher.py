@@ -652,6 +652,42 @@ async def test_cancellation_resistant_terminal_append_does_not_extend_delivery_b
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("spool_format", ["rows_v1", "chunks_v2"])
+async def test_cancelled_pending_flush_requeues_dequeued_batch(spool_format: str) -> None:
+    """Cancelling the flusher after dequeue keeps events available for terminal draining."""
+    durable = _BlockingBatchAppendDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+        spool_format=spool_format,
+    )
+    try:
+        # Keep the background flusher out of this race; the explicit flush
+        # task below must be the caller that dequeues the batch.
+        batcher._task = asyncio.create_task(asyncio.sleep(60.0))
+        await _enqueue(batcher, "pending")
+        flush_task = asyncio.create_task(batcher.flush_pending_operation(operation_id="op-1"))
+        await asyncio.wait_for(durable.batch_started.wait(), timeout=1.0)
+
+        flush_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flush_task
+
+        assert batcher._pending_count == 1
+        assert batcher._pending_bytes == len("pending".encode("utf-8"))
+        assert await batcher.pending_operation_ids() == {"op-1"}
+
+        durable.release_batch.set()
+        assert await asyncio.wait_for(batcher.flush_pending_operation(operation_id="op-1"), timeout=1.0) is True
+        assert batcher._pending_count == 0
+        assert batcher._pending_bytes == 0
+    finally:
+        durable.release_batch.set()
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_timed_out_terminal_append_schedules_bounded_generation_cleanup() -> None:
     """A timed-out nonzero generation keeps only a bounded late-event fence."""
     durable = _CancellationResistantTerminalDurableBridge()

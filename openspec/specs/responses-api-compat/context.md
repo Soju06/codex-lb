@@ -206,15 +206,27 @@ without the rejected anchor.
 ## Previous-response replay owner fencing
 
 Removing a stale continuation anchor does not make every retained body
-portable. Encrypted reasoning, account-scoped items, file references, and
-durable bridge operation identities remain owned by the account that first
-received them. The proxy records that dispatch owner and requires it on later
-HTTP streaming, HTTP bridge, and direct WebSocket selections.
+portable. Encrypted reasoning and other retained input establish a dispatch
+owner once an upstream attempt is accepted or has an ambiguous outcome. File
+references, continuation state, and durable bridge operation identities remain
+independently owned. The proxy requires established owners on later HTTP
+streaming, HTTP bridge, and direct WebSocket selections.
 
-For example, if account A first receives encrypted reasoning and then returns a
+For example, if account A receives encrypted reasoning and returns a
 pre-visible Trusted Access or authentication failure, account B must never
 receive the retained ciphertext. One forced token refresh may replay the body
-on account A; permanent failure or owner unavailability fails closed.
+on account A; permanent failure or owner unavailability fails closed. A
+classified pre-visible rate-limit or quota rejection is narrower: it does not
+establish the pending dispatch owner, so the exact unchanged ciphertext may be
+retried on account B when no independent owner exists.
+
+Controlled upstream probes have accepted valid encrypted reasoning across
+distinct subscription identities while rejecting modified ciphertext. That is
+compatibility evidence, not a documented cryptographic, account-portability, or
+policy guarantee. Cross-account submission may be observable upstream, and the
+behavior may change; the proxy therefore limits it to the existing classified
+pre-visible failover path rather than treating encrypted input as generally
+portable.
 
 Verified recovery installs a replacement body and updates owner state
 atomically. A canonical account-neutral replacement clears the owner and may

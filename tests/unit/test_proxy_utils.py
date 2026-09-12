@@ -55854,6 +55854,9 @@ async def test_stream_responses_owner_bound_coded_429_surfaces_without_same_acco
         )
         yield  # pragma: no cover - makes this an async generator
 
+    # Establish an independent file owner; the rejected first dispatch alone
+    # no longer establishes ownership under release-previsible-429-payload-owner.
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=account.id))
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
     caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
 

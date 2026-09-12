@@ -99,6 +99,8 @@ from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.helpers import (
+    _QUOTA_CODES,
+    _RATE_LIMIT_CODES,
     _apply_error_metadata,
     _is_account_model_unsupported_error,
     _normalize_error_code,
@@ -136,6 +138,21 @@ _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR = "_codex_lb_post_refresh_transient_exhau
 # replica-local burst cooldown, never ``record_error``), but every surfaced
 # pre-visible failure is penalized once by construction.
 _STREAM_HEALTH_RECORDED_ATTR = "_codex_lb_stream_health_recorded"
+
+
+def _failure_allows_payload_owner_reselection(exc: BaseException) -> bool:
+    """Return whether a pre-visible rejection proves this account cannot own the payload."""
+    if isinstance(exc, _RetryableStreamError):
+        return exc.code in (_RATE_LIMIT_CODES | _QUOTA_CODES)
+    if not isinstance(exc, ProxyResponseError):
+        return False
+    if is_confirmed_pre_dispatch_transport_error(exc):
+        return True
+    if exc.status_code != 429:
+        return False
+    error = _parse_openai_error(exc.payload)
+    code = _normalize_error_code(error.code if error else None, error.type if error else None)
+    return code in (_RATE_LIMIT_CODES | _QUOTA_CODES)
 
 
 def _resolve_http_downstream_transport(policy: str, *, payload: ResponsesRequest, headers: Mapping[str, str]) -> str:
@@ -2323,10 +2340,7 @@ class _StreamingRetryMixin:
                                     if register_payload_owner:
                                         payload_replay_required_account_id = account.id
                                 except BaseException as exc:
-                                    if register_payload_owner and not (
-                                        isinstance(exc, ProxyResponseError)
-                                        and is_confirmed_pre_dispatch_transport_error(exc)
-                                    ):
+                                    if register_payload_owner and not _failure_allows_payload_owner_reselection(exc):
                                         payload_replay_required_account_id = account.id
                                     raise
                             finally:

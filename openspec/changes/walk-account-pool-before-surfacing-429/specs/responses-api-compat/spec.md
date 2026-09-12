@@ -33,18 +33,25 @@ Message matching MUST be punctuation-insensitive and MUST NOT depend on the HTTP
 
 ### Requirement: Model-capacity rejections do not exclude the account from the pool walk
 
-A rejection whose message says the selected model is at capacity describes the requested model, not the selected account. When the proxy decides whether a pre-visible failure justifies excluding the selected account for the remainder of the request, a model-capacity rejection MUST NOT justify that exclusion, even when the envelope also carries a rate-limit or quota error code that keeps the stronger health classification required by "Model-capacity messages are retryable transient failures".
+A rejection whose message says the selected model is at capacity describes the requested model, not the selected account. When the proxy decides whether a pre-visible failure justifies excluding the selected account for the remainder of the request, a model-capacity rejection MUST NOT justify that exclusion — but only for a failure class whose account-health write leaves the account selectable.
+
+A rejection that benches the account is the opposite case and MUST still exclude it. A `rate_limit` or `quota` classification persists a status and a reset deadline, so selection will not offer that account again regardless of what the walk decides; reporting it as "do not exclude" would hand the walk a candidate selection cannot use, and would make the two answers contradict each other for the one envelope that carries both a benching code and the capacity message. The health write is the authority on whether an account is benched; the capacity carve-out applies to the walkable classes it leaves alone.
 
 The account-health write, the persisted status, the reset deadline and the model-capacity replay wait are unchanged by this requirement: it governs account selection only.
 
 The exclusion answer the classifier reports MUST be the selection predicate, not an exhaustion predicate. It is true for every pre-visible failure the walk may move away from — `rate_limit`, `quota` and `retryable_transient` alike, which includes the code-less burst 429 that "An unbound burst rejection walks instead of surfacing" requires to be excluded — and false only when the rejection is a model-capacity one. A field that answers "was this account exhaustion" instead collapses the burst rejection and the capacity rejection to the same value and cannot drive the walk. A message that asserts the usage limit MUST take precedence over a model-capacity match when both appear in one envelope, because the usage limit is account-scoped.
 
-#### Scenario: Capacity rejection under a rate-limit code does not rotate the pool
+#### Scenario: Capacity on a walkable class does not rotate the pool
 
 - **GIVEN** a pool of several selectable accounts and a request that is not owner-bound
-- **WHEN** the selected account returns an envelope whose code is `rate_limit_exceeded` and whose message says the selected model is at capacity
-- **THEN** the account keeps the rate-limit health classification it has today
-- **AND** the request does not exclude that account and walk the remaining pool for a condition no account can serve
+- **WHEN** the selected account returns a `retryable_transient` rejection whose message says the selected model is at capacity
+- **THEN** the account is not excluded, and the pool is not walked for a condition no account can serve
+
+#### Scenario: A benching code excludes even under a capacity message
+
+- **WHEN** the selected account returns an envelope whose code is `rate_limit_exceeded` or a quota code, and whose message also says the selected model is at capacity
+- **THEN** the account keeps the rate-limit or quota health classification it has today, which benches it
+- **AND** it is excluded for the remainder of the request, because selection will not offer a benched account and the two answers must not contradict each other
 
 #### Scenario: Usage limit wins when both messages appear
 

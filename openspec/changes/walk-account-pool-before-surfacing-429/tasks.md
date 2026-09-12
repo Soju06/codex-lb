@@ -11,7 +11,10 @@
   to `ClassifiedFailure` — the SELECTION predicate, not an exhaustion one. True
   for every walkable class (`rate_limit`, `quota`, `retryable_transient`,
   which includes the code-less burst 429), false only for a model-capacity
-  rejection, with a usage-limit message outranking a capacity match. Naming it
+  rejection **on a class whose health write leaves the account selectable** — a
+  `rate_limit` or `quota` classification benches the account, so it excludes even
+  under a capacity message — with a usage-limit message outranking a capacity
+  match. Naming it
   after exhaustion collapses the burst 429 and the capacity 429 to the same
   value and cannot drive the walk. Account selection reads this field; account
   health keeps reading `failure_class`. Do not add a second public classifier.
@@ -80,8 +83,10 @@
 - [ ] `tests/unit/test_failover_foundation.py`: keep
   `test_rate_limit_code_takes_precedence_over_capacity_message` passing
   unchanged; add the usage-limit-message truth table; assert
-  `excludes_account` is `False` for a capacity message under a rate-limit code,
-  `True` for a usage-limit message, and `True` for a code-less burst 429; assert `is_upstream_burst_rejection` is
+  `excludes_account` is `True` for a capacity message under a benching code (the
+  health write benches it, so the two answers must agree), `False` for a capacity
+  message on a walkable class, `True` for a usage-limit message, and `True` for a
+  code-less burst 429; assert `is_upstream_burst_rejection` is
   `False` for a usage-limit-message 429 and `True` for a model-capacity 429;
   cover the deprecated `candidates_remaining` shim.
 - [ ] `tests/integration/test_proxy_transient_retry.py`: A 429 -> B 429 -> C 200
@@ -99,7 +104,7 @@
 - [ ] `tests/simulation/test_proxy_turn_lifecycle_property.py`: for any sequence
   of per-account failures, dispatches are bounded, the excluded set is strictly
   monotone, and there is exactly one health write per attempted account.
-- [ ] Confirm `[settings_fields].max` is unchanged at 96 and no new
+- [ ] Confirm the `[settings_fields]` ratchet does not move and no new
   `CODEX_LB_*` name is introduced.
 - [ ] `openspec validate --specs`, `uv run ruff check`,
   `codex review --base origin/main`.

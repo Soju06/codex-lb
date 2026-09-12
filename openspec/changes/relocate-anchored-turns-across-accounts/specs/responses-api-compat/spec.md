@@ -40,13 +40,15 @@ The rebuild MUST walk the `parent_response_id` chain from the anchor and assembl
 
 A turn counts as settled, and so as material for the rebuild, only when its spool carries a terminal event that reports an answer. A terminal event that reports a failure MUST NOT make a failed turn read as an answered one in the rebuilt conversation. The rebuilt input MUST then be joined to the client's current turn. The join MUST NOT delete, reorder or alter any item the client sent. A rebuild that drops a client item because its content coincides with an item already in the chain is a worse failure than refusing to rebuild at all: the user's message is gone, the result still satisfies every structural predicate, and nothing downstream can detect it.
 
-**The anchor decides the shape, not the input.** A request carrying `previous_response_id` is a continuation by the wire contract: its `input` is that turn's delta, whatever the delta happens to contain, and the chain supplies everything before it. A request carrying no anchor is not a continuation at all — it is the full-resend case, served by the client's own body, which does not use the chain. There is no third case to adjudicate and no boundary to search for.
+**Self-containment decides, and it is decided for every stored request, not once for the join.** The proxy MUST classify each input — every turn's stored request in the chain, and the client's current turn — with the predicates it already ships for exactly this question, and MUST NOT invent a new one:
 
-The proxy MUST NOT derive the shape by inspecting the input: a client may legitimately restate a history that contains no model-authored item, and any predicate that reads "no assistant turns" as "this is a delta" will join the chain to a full resend and double the conversation. Content comparison MAY verify a boundary the anchor already established. It MUST NOT discover one.
+- an input that carries a **self-contained full history** supersedes everything before it. It is the conversation as of that point, so the accumulator is replaced rather than appended to. This is true whether or not the request also carries `previous_response_id`: an anchored full resend is an established shape this proxy already verifies, and a rule that treats the anchor as proof of a delta will join the chain to it and double the conversation;
+- an input that is **not self-contained and does not restate prior output** is that turn's delta and is appended unchanged;
+- any other input — one that restates part of the prior output without carrying the whole history — MUST refuse the rebuild. Its boundary is only recoverable by matching content, which is forbidden above.
 
-The rebuild MUST be told which anchor it is rebuilding, and MUST verify that the chain it was handed terminates at that anchor. A chain that is internally consistent but belongs to a different conversation MUST be refused; internal parent links alone do not prove the chain is this request's history.
+The anchor MUST NOT be used as the discriminator. The proxy injects anchors onto requests that did not arrive with one, so its presence on the wire proves nothing about what the input contains.
 
-The shapes of the turns inside the chain are not a gate. A parent turn that was itself a full resend is ordinary material, and requiring every chain turn to look like a delta would permanently disable relocation for any thread whose first recorded turn was a resend.
+Applying the rule per stored request is what makes a chain turn that restated the conversation harmless: it supersedes at its own position instead of being concatenated onto the history it restates. The shapes of the turns inside the chain are therefore not a gate that refuses relocation — they are an input to the join, and a chain whose root was a full resend rebuilds correctly.
 
 The rebuilt body MUST satisfy the same strict account-neutral predicate a client-supplied full resend must satisfy. The proxy MUST fail closed — leaving today's owner-unavailable behaviour intact — when the transcript is unavailable or incomplete, when any turn lacks a stored request body or a complete event spool, when the parent chain is broken or cyclic, when a terminal response event is missing, when the current input is a scalar string that cannot carry prior context, when a tool call is unsettled, when a declared tool is not portable, or when any account-owned state survives projection.
 
@@ -79,12 +81,25 @@ The rebuild requires durable operation material — a stored request body, a com
 - **THEN** every item the client sent appears in the result
 - **AND** the coincidence does not shorten the client's turn
 
-#### Scenario: A resend with no assistant turns is still a resend
+#### Scenario: An anchored full resend is still a resend
 
-- **GIVEN** an unanchored request whose restated history contains no model-authored item
+- **GIVEN** a request carrying `previous_response_id` whose input is also a self-contained full history
 - **WHEN** relocation is evaluated
-- **THEN** it is treated as a full resend, not as a continuation delta
-- **AND** the durable chain is not joined to it
+- **THEN** it supersedes the chain rather than being appended to it
+- **AND** no turn appears twice
+
+#### Scenario: A chain turn that restated the conversation supersedes at its own position
+
+- **GIVEN** a chain whose second turn stored a self-contained full history rather than a delta
+- **WHEN** the rebuild walks the chain
+- **THEN** that turn replaces what the walk had accumulated, and the turns after it append as usual
+- **AND** the rebuilt conversation contains no turn twice
+
+#### Scenario: A partial restatement refuses
+
+- **GIVEN** an input that restates part of the prior output without carrying the whole history
+- **WHEN** the join is classified
+- **THEN** the rebuild refuses rather than appending the restated portion a second time
 
 #### Scenario: A chain that is not this anchor's history is refused
 

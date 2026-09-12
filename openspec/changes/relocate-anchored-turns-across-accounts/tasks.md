@@ -17,15 +17,20 @@
   `responses_payload_is_account_neutral_fresh_replay`. Closed vocabulary for
   `decline_reason`. No lenient fallback projection.
 - [ ] `app/modules/proxy/replay_safety.py`: add the pure transcript rebuild —
-  parent-chain assembly oldest first (the order the repository returns), prefix-overlap dedupe against the client
-  suffix. **Delete the content-matching overlap search.** Three rounds of it
+  parent-chain assembly oldest first (the order the repository returns), with each
+  turn superseding or appending per the classification above. There is no
+  prefix-overlap dedupe. **Delete the content-matching overlap search.** Three rounds of it
   produced three different ways to delete a message the client had just sent,
   because content equality cannot tell a restatement from a coincidence.
-  The anchor is the shape signal: `previous_response_id` present means the input
-  IS the delta, absent means full resend. Do not write a content predicate for
-  this — one that reads "no assistant turns" as "delta" joins the chain to a full
-  resend and doubles the conversation. Pass the anchor into the rebuild and make
-  it verify the chain terminates there. Terminal-output extraction from the spooled SSE with the
+  Classify every input — each chain turn's stored request AND the client's turn —
+  with the predicates already shipped for this question:
+  `responses_input_items_are_self_contained_fresh_replay` (supersede) and
+  `responses_input_suffix_retains_prior_output` (refuse). Do NOT invent a new
+  discriminator and do NOT use `previous_response_id`: the proxy injects anchors
+  itself, and anchored full resends are a shape this repo already verifies
+  (`openspec/specs/responses-api-compat/spec.md:1214`, `:2741`). Still pass the
+  anchor into the rebuild so it can verify the chain terminates there — that is
+  a separate job from classifying the join. Terminal-output extraction from the spooled SSE with the
   `response.output_item.done` fallback when `response.incomplete` omits
   `response.output`. Keep the module free of persistence imports by accepting
   transcript turns structurally. Use one overlap routine, not two.
@@ -79,6 +84,9 @@
   `get_replayable_transcript` returns `None` after a reset.
 - [ ] `tests/unit/test_proxy_errors.py`: restore the classification cases the
   #2336 archive removed, in the new shape.
+- [ ] Guard the chain walk against a repeated `response_id`: the spec requires
+  failing closed on a broken or cyclic parent chain, and the projection has no
+  seen-id set of its own.
 - [ ] Fix the chain-order statement everywhere it is repeated: the repository
   returns turns oldest first (`turns.reverse()` before return), and any test
   name or comment saying "oldest last" is wrong even where the code is right.

@@ -1349,7 +1349,7 @@ class HttpBridgeOperationEventBatcher:
         async with self._lock:
             pending_operation_ids = tuple(self._pending)
         pending_flush_tasks = tuple(
-            asyncio.create_task(
+            self._scheduler.create_task(
                 self.flush_pending_operation(operation_id=operation_id),
                 name=f"http-bridge-close-flush-{operation_id}",
             )

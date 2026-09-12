@@ -77,7 +77,10 @@ is exhausted.
 ## Impact
 
 - Affected capabilities: `account-routing` (three ADDED, one MODIFIED),
-  `responses-api-compat` (two ADDED, one MODIFIED).
+  `responses-api-compat` (two ADDED, one MODIFIED), `usage-refresh-policy`
+  (one MODIFIED — the immediate-refresh trigger becomes the classification
+  rather than the literal `usage_limit_reached` code, without widening to
+  throttling or quota codes).
 - **Clients** that today receive one account's 429 while other accounts are
   usable now receive a served response. A client that receives a 429 now
   receives it because the pool is exhausted, and it carries `error.resets_at`.

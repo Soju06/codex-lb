@@ -1911,8 +1911,7 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
     await site.start()
     origin_port = runner.addresses[0][1]
     monkeypatch.setenv("CODEX_LB_UPSTREAM_BASE_URL", f"http://127.0.0.1:{origin_port}")
-    monkeypatch.setenv("CODEX_LB_UPSTREAM_STREAM_TRANSPORT", "http")
-    monkeypatch.setenv("CODEX_LB_MAX_SSE_EVENT_BYTES", "1024")
+    monkeypatch.setattr(proxy_client_module, "MAX_SSE_EVENT_BYTES", 1024)
     get_settings.cache_clear()
     monkeypatch.setattr(proxy_module, "get_settings", get_settings)
     monkeypatch.setattr(proxy_module.ProxyService, "_persist_request_log", delayed_persist)
@@ -1956,6 +1955,8 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
                             if event["type"] == "response.failed"
                         )
                         assert failure["response"]["id"] == anchor_id
+                        if delivery_point == "oversized":
+                            assert failure["response"]["error"]["code"] == "stream_event_too_large"
                         await asyncio.wait_for(persist_started.wait(), 5)
                         attempts = len(origin_accounts)
                         followup = await client.post(

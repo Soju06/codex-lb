@@ -4267,7 +4267,7 @@ class _HTTPBridgeRequestSubmitMixin:
             reallocate_sticky=True,
         )
         if previous_affinity_observation is not None:
-            request_state.affinity_observation = AffinityObservation.from_policy(
+            request_state.affinity_observation = AffinityObservation.retaining_source(
                 previous_affinity_observation.source, request_state.affinity_policy
             )
         replacement_session_affinity = replace(

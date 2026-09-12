@@ -139,6 +139,12 @@ if PROMETHEUS_AVAILABLE:
         ["outcome"],
         registry=REGISTRY,
     )
+    prompt_cache_key_derivation_total = Counter(
+        "codex_lb_prompt_cache_key_derivation_total",
+        "Total prompt-cache key resolutions by derivation outcome",
+        ["outcome"],
+        registry=REGISTRY,
+    )
     bridge_prompt_cache_locality_miss_total = Counter(
         "codex_lb_bridge_prompt_cache_locality_miss_total",
         "Total prompt-cache bridge locality misses tolerated via gateway-safe handling",
@@ -493,6 +499,7 @@ else:
     circuit_breaker_state: GaugeLike | None = None
     accounts_total: GaugeLike | None = None
     bridge_instance_mismatch_total: CounterLike | None = None
+    prompt_cache_key_derivation_total: CounterLike | None = None
     bridge_prompt_cache_locality_miss_total: CounterLike | None = None
     bridge_soft_local_rebind_total: CounterLike | None = None
     bridge_owner_forward_total: CounterLike | None = None
@@ -612,6 +619,7 @@ __all__ = [
     "model_source_usage_estimated_total",
     "pool_exhaustion_probe_declined_total",
     "prometheus_client",
+    "prompt_cache_key_derivation_total",
     "proxy_phase_latency_seconds",
     "rate_limit_hits_total",
     "request_duration_seconds",

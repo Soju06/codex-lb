@@ -711,7 +711,8 @@ async def test_unrelated_cleanup_failure_preserves_existing_backlog_retry(monkey
 @pytest.mark.asyncio
 async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     """_cleanup_once should purge prompt-cache entries by affinity TTL.
-    STICKY_THREAD is never purged here. CODEX_SESSION is only ever purged
+    STICKY_THREAD is never purged here, by any predicate: see
+    TestNoStickyThreadKeyPrefixSweep. CODEX_SESSION is only ever purged
     via the separate, account-status-gated purge_stale_hard_codex_session_mappings
     call (see test_sticky_repository.py), never by this TTL-based path."""
     dashboard_settings = SimpleNamespace(
@@ -732,6 +733,7 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=5)
+    sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     sticky_repo.purge_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=2)
@@ -797,6 +799,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=0)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
@@ -860,6 +863,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=1)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
@@ -939,6 +943,7 @@ async def test_cleanup_once_gates_abandoned_purge_on_prompt_cache_reuse_ttl(monk
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=0)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
@@ -1101,3 +1106,71 @@ async def test_a_failing_rate_limit_sweep_does_not_cost_the_rest_of_the_pass(mon
         await scheduler._cleanup_once()
 
     bridge_repo.purge_operation_spool_batch.assert_awaited_once()
+
+
+class TestNoStickyThreadKeyPrefixSweep:
+    """A proxy-derived prompt-cache key is never a `sticky_thread` row.
+
+    The derivation only runs with `openai_cache_affinity` enabled, and that is
+    the branch that classifies the mapping as `prompt_cache`; the
+    `sticky_thread` branch is reachable only with cache affinity off, where the
+    derivation supplies no sticky key. So a key-prefix sweep of `sticky_thread`
+    can never match a derived key of either shape, while it *can* match a
+    client-supplied key and delete it from the kind that has no TTL by design.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cleanup_pass_never_purges_sticky_thread_by_key_prefix(self, monkeypatch) -> None:
+        dashboard_settings = SimpleNamespace(
+            openai_cache_affinity_max_age_seconds=600,
+            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
+        )
+        settings_repo = AsyncMock()
+        settings_repo.get_or_create = AsyncMock(return_value=dashboard_settings)
+        monkeypatch.setattr(
+            cleanup_scheduler,
+            "get_settings",
+            lambda: SimpleNamespace(
+                http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+            ),
+        )
+
+        sticky_repo = AsyncMock()
+        sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
+        sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=5)
+        sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=7)
+        sticky_repo.purge_before = AsyncMock(return_value=0)
+        bridge_repo = AsyncMock()
+        bridge_repo.purge_closed_before = AsyncMock(return_value=0)
+        bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+        bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
+        bridge_repo.purge_operation_spool_batch = AsyncMock(return_value=_purge_batch(0))
+        ring_service = AsyncMock()
+        ring_service.purge_stale_before = AsyncMock(return_value=0)
+
+        class FakeSession:
+            async def __aenter__(self):
+                return AsyncMock()
+
+            async def __aexit__(self, *args):
+                pass
+
+        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=60, enabled=True)
+        with (
+            patch.object(cleanup_scheduler, "get_background_session", FakeSession),
+            patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
+            patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
+            patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+            patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+            patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
+            patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
+        ):
+            await scheduler._cleanup_once()
+
+        sticky_repo.purge_prompt_cache_before.assert_awaited_once()
+        sticky_repo.purge_before_for_key_prefix.assert_not_awaited()
+
+    def test_scheduler_exposes_no_sticky_thread_prefix_sweep(self) -> None:
+        scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
+        assert not hasattr(scheduler, "_sweep_legacy_derived_sticky_threads")
+        assert not hasattr(scheduler, "_purge_expired_anchored_sticky_threads")

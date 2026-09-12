@@ -105,15 +105,23 @@ models.
 
 The production implementation adds a company admission layer before forwarding:
 observed health and cooldown, then a rolling 24-hour local token budget, then
-the existing Responses concurrency control. It derives state from persisted
-request logs; no periodic inference probes consume tokens. A 429 or credential
-failure triggers a 60-second cooldown, as do three consecutive qualifying
-server/transport failures. Client cancellations and ordinary validation errors
-do not make the source unhealthy. After cooldown, the next request can establish
-recovery; a successful response restores healthy status.
+the existing Responses concurrency control. A two-hour scheduler probes each
+enabled company model and hides models whose last probe failed, exceeded the
+latency threshold, or became stale. A 429 or credential failure triggers a
+60-second cooldown, as do three consecutive qualifying server/transport
+failures. Client cancellations and ordinary validation errors do not make the
+source unhealthy. After cooldown, the next request can establish recovery; a
+successful response restores healthy status.
 
 The optional local budget defaults to unlimited. It rejects new requests once
 reported input plus output tokens reach the configured limit. This is a soft
 limit: missing upstream usage and concurrent in-flight requests can exceed it.
 The dashboard exposes these limitations alongside successes, errors and latency.
 The contract is part of [model-source-routing](../../openspec/specs/model-source-routing/spec.md); production evidence is in [company source governance verification](../../openspec/changes/archive/2026-09-10-add-company-source-governance/verification.md).
+
+Local macOS upgrades can use `scripts/local_launchagent_cutover.py`. The
+one-shot harness rejects execution as a KeepAlive LaunchAgent, validates the
+candidate executable before stopping the current service, allows a bounded
+startup window, and restores the saved plist when bootstrap or health checks
+fail. Its unit tests cover delayed startup, bootstrap failure, health timeout,
+rollback verification, and the KeepAlive regression.

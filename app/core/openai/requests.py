@@ -855,12 +855,8 @@ def _normalize_configuration_update_efforts(payload: MutableJsonObject) -> None:
         if not is_json_mapping(item_reasoning):
             continue
         item_effort = item_reasoning.get("effort")
-        if isinstance(item_effort, str):
-            normalized = item_effort.strip().lower()
-            items[index] = {
-                **item,
-                "reasoning": {**item_reasoning, "effort": "max" if normalized == "ultra" else normalized},
-            }
+        if isinstance(item_effort, str) and item_effort.strip().lower() == "ultra":
+            items[index] = {**item, "reasoning": {**item_reasoning, "effort": "max"}}
 
 
 _UNSUPPORTED_UPSTREAM_FIELDS = {

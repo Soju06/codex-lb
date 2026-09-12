@@ -15,7 +15,10 @@ from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
         (ResponsesCompactRequest, "to_payload"),
     ],
 )
-@pytest.mark.parametrize(("effort", "wire_effort"), [("low", "low"), (" Ultra ", "max")])
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [("low", "low"), (" Ultra ", "max"), ("VendorModeV2", "VendorModeV2"), (" Low ", " Low ")],
+)
 @pytest.mark.parametrize(
     "vendor_fields",
     [

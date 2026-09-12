@@ -570,7 +570,7 @@ def _astra_client_update_efforts(payload: ResponsesRequest) -> tuple[str, ...]:
         reasoning = item.get("reasoning")
         effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
         if isinstance(effort, str) and effort.strip():
-            efforts.append(effort.strip().lower())
+            efforts.append(effort)
     return tuple(efforts)
 
 

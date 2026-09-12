@@ -32,3 +32,4 @@
 - [x] 3.16 Drop the local Astra effort enumeration, accept `disabled`/`none`, prepend only for enforced keys, and gate non-bridge HTTP trim on `gpt-6-astra`
 - [x] 3.17 Preserve anchored-delta client prefix metadata when preparation inserts a reset without trimming; verify the surviving ledger-publication race and subsequent full resend
 - [x] 3.18 Record that an enforced reset makes automatic truncation or compaction continuations fail closed while allowed-list keys complete them
+- [x] 3.19 Forward non-Ultra configuration-update efforts verbatim at subscription serialization and keep the client's exact strings for late-anchor restoration; cover HTTP and WebSocket routes

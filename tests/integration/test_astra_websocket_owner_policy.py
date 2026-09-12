@@ -386,13 +386,18 @@ def test_websocket_owner_publication_keeps_schema_and_routing_consistent(
 
 
 @pytest.mark.parametrize("path", _PATHS)
-@pytest.mark.parametrize("effort, wire_effort", [("ultra", "max"), ("low", "low")])
+@pytest.mark.parametrize(
+    "effort, wire_effort, allowed",
+    [("ultra", "max", ["low", "ultra"]), ("low", "low", ["low", "ultra"]), ("VendorModeV2", "VendorModeV2", None)],
+    ids=["ultra", "low", "upstream-owned"],
+)
 def test_websocket_subscription_owner_preserves_valid_update(
-    app_instance, source_and_subscription_owner, monkeypatch, path, effort, wire_effort
+    app_instance, source_and_subscription_owner, monkeypatch, path, effort, wire_effort, allowed
 ):
     client, key, account_id = source_and_subscription_owner
-    updated = client.patch("/api/api-keys/" + key["id"], json={"allowedReasoningEfforts": ["low", "ultra"]})
-    assert updated.status_code == 200
+    if allowed is not None:
+        updated = client.patch("/api/api-keys/" + key["id"], json={"allowedReasoningEfforts": allowed})
+        assert updated.status_code == 200
     messages = _websocket_response_batch("resp_astra_owner_completed")
     messages[-1].text = json.dumps(
         {

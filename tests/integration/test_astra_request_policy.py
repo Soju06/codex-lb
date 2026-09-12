@@ -206,6 +206,22 @@ async def test_astra_explicit_compaction_with_updates_stays_on_responses(async_c
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
+async def test_astra_upstream_owned_update_effort_is_forwarded_verbatim(async_client, monkeypatch, endpoint):
+    await _import_account(async_client, "astra-vendor-effort", "astra-vendor-effort@example.com")
+    forwarded = []
+
+    async def fake_stream(payload, *args, **kwargs):
+        forwarded.append(payload.to_payload())
+        yield _completed_event("resp_astra_vendor_effort")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post(endpoint, json=_payload("VendorModeV2"))
+    assert response.status_code == 200
+    assert len(forwarded) == 1
+    assert forwarded[0]["input"][0]["reasoning"]["effort"] == "VendorModeV2"
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
 async def test_astra_anchored_continuation_resets_inherited_reasoning(async_client, monkeypatch, endpoint):
     await _import_account(async_client, "astra-anchor-policy", "astra-anchor@example.com")
     settings = await async_client.put(

@@ -27,6 +27,12 @@ validated before upstream connection or send, using client-plane values.
 - **WHEN** a request has request-level low reasoning and a high configuration_update between conversation messages
 - **THEN** the forwarded request retains low at request level and high in that input item
 
+#### Scenario: Upstream-owned update efforts are forwarded verbatim
+
+- **WHEN** a subscription Astra configuration_update carries a string effort other than ultra, including mixed case or surrounding whitespace
+- **THEN** subscription wire serialization SHALL forward that string unchanged on the HTTP and WebSocket routes
+- **AND** a late HTTP-bridge anchor SHALL restore the client's exact effort strings before re-serialization
+
 #### Scenario: Explicit compaction retains configuration history
 
 - **WHEN** a subscription Astra Responses request contains configuration updates and one terminal compaction_trigger

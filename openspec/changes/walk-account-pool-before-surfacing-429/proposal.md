@@ -87,7 +87,7 @@ is exhausted.
 - **Operators**: no new setting. `MAX_ACCOUNT_ATTEMPTS_CEILING` is a module
   constant beside `BURST_SAME_ACCOUNT_MAX_RETRIES`, following the precedent
   those constants set ("the Settings ratchet is full and this is a transport
-  invariant, not an operator knob"). `[settings_fields].max` is unchanged at 96.
+  invariant, not an operator knob"). The `[settings_fields]` ratchet does not move.
 - **Upstream load**: a request that previously stopped at three accounts may
   now attempt more. It is bounded by the same request deadline as before, and
   each attempt is a request that would otherwise have been a client-visible

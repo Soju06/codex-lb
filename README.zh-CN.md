@@ -65,7 +65,7 @@ nix run github:Soju06/codex-lb
 将任意 OpenAI 兼容客户端指向 codex-lb 即可。以 Codex CLI 为例，`~/.codex/config.toml`：
 
 ```toml
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 

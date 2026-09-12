@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Collection, Iterable, Literal
 
 from app.core.balancer.types import FailureClass, UpstreamError
-from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
+from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY, capacity_for_plan
 from app.core.utils.retry import backoff_seconds, parse_retry_after
 from app.db.models import AccountStatus
 
@@ -85,8 +85,29 @@ CAPACITY_PLAN_ALIASES = {
     "go": "free",
     "free_workspace": "free",
     "quorum": "free",
-    "unknown": "free",
 }
+
+
+def resolve_capacity_plan_type(plan_type: str | None) -> str | None:
+    """Normalize a stored plan and resolve aliases used by capacity routing."""
+    normalized = (plan_type or "").strip().lower()
+    if not normalized:
+        return None
+    return CAPACITY_PLAN_ALIASES.get(normalized, normalized)
+
+
+def capacity_for_routing_plan(plan_type: str | None, status: AccountStatus, window: str) -> float | None:
+    """Resolve capacity aliases only for rate-limit recovery."""
+    effective_plan = resolve_capacity_plan_type(plan_type) if status == AccountStatus.RATE_LIMITED else plan_type
+    return capacity_for_plan(effective_plan, window)
+
+
+def recovery_primary_used(*, plan_type: str | None, primary_used: float | None) -> float | None:
+    """Drop primary usage when the recovery plan has no primary capacity."""
+    if capacity_for_routing_plan(plan_type, AccountStatus.RATE_LIMITED, "primary") == 0.0:
+        return None
+    return primary_used
+
 
 HEALTH_TIER_HEALTHY = 0
 HEALTH_TIER_DRAINING = 1
@@ -446,8 +467,7 @@ def _prefer_earlier_reset_candidates(
 
 
 def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
-    normalized = (plan_type or "").strip().lower()
-    resolved_plan = CAPACITY_PLAN_ALIASES.get(normalized, normalized or UNKNOWN_PLAN_FALLBACK)
+    resolved_plan = resolve_capacity_plan_type(plan_type) or UNKNOWN_PLAN_FALLBACK
     return PLAN_CAPACITY_CREDITS_SECONDARY.get(
         resolved_plan,
         PLAN_CAPACITY_CREDITS_SECONDARY[UNKNOWN_PLAN_FALLBACK],

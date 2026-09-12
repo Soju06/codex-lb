@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Protocol, cast
 
-from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
+from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS, resolve_capacity_plan_type
 from app.core.plan_types import normalize_account_plan_type
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
@@ -426,7 +426,7 @@ def _confirmed_free_monthly_reset_recovery(
 ) -> bool:
     if account.status != AccountStatus.RATE_LIMITED:
         return False
-    if normalize_account_plan_type(account.plan_type) != "free":
+    if resolve_capacity_plan_type(account.plan_type) != "free":
         return False
     if account.reset_at is None or account.blocked_at is None:
         return False
@@ -483,7 +483,7 @@ async def _resolve_monthly_reset_evidence(
             )
         if (
             account.status != AccountStatus.RATE_LIMITED
-            or normalize_account_plan_type(account.plan_type) != "free"
+            or resolve_capacity_plan_type(account.plan_type) != "free"
             or account.reset_at is None
             or account.blocked_at is None
         ):
@@ -537,7 +537,12 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
 ) -> UsageHistory | None:
-    if monthly_entry is not None and capacity_for_plan(account.plan_type, "monthly") is not None:
+    capacity_plan = (
+        resolve_capacity_plan_type(account.plan_type)
+        if account.status == AccountStatus.RATE_LIMITED
+        else account.plan_type
+    )
+    if monthly_entry is not None and capacity_for_plan(capacity_plan, "monthly") is not None:
         return monthly_entry
     return secondary_entry
 

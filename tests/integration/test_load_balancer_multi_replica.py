@@ -420,6 +420,56 @@ async def _seed_free_accounts_with_monthly_usage(*accounts_with_usage: tuple[Acc
 
 
 @pytest.mark.asyncio
+async def test_selection_keeps_unknown_plan_primary_exhaustion_rate_limited(db_setup, monkeypatch):
+    """An unrecognized plan is not proof of Free-plan quota semantics."""
+    now = int(time.time())
+    blocked_at = now - 130
+    reset_at = now + 1200
+    monkeypatch.setattr("time.time", lambda: now)
+
+    limited = _make_account(
+        "unknown_plan_limited",
+        status=AccountStatus.RATE_LIMITED,
+        blocked_at=blocked_at,
+        reset_at=reset_at,
+        plan_type="unknown",
+    )
+    healthy = _make_account("unknown_plan_healthy")
+    await _seed_accounts_with_usage((healthy, 20.0, 10.0))
+
+    recorded_at = datetime.fromtimestamp(now - 2, timezone.utc).replace(tzinfo=None)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(limited)
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=limited.id,
+            used_percent=100.0,
+            window="primary",
+            reset_at=now + 3600,
+            window_minutes=43200,
+            recorded_at=recorded_at,
+        )
+        await usage_repo.add_entry(
+            account_id=limited.id,
+            used_percent=10.0,
+            window="monthly",
+            reset_at=now + 30 * 24 * 3600,
+            window_minutes=43200,
+            recorded_at=recorded_at,
+        )
+
+    balancer = LoadBalancer(_repo_factory)
+    balancer._runtime[limited.id] = RuntimeState(cooldown_until=now - 1, blocked_at=float(blocked_at))
+    selection = await balancer.select_account(routing_strategy="fill_first")
+
+    assert selection.account is not None
+    assert selection.account.id == healthy.id
+    row = await _fetch_account(limited.id)
+    assert row.status == AccountStatus.RATE_LIMITED
+    assert row.reset_at == reset_at
+
+
+@pytest.mark.asyncio
 async def test_peer_replica_holds_free_plan_rate_limited_account_despite_fresh_monthly_quota(db_setup):
     """Regression (codex P1): on a zero-primary-capacity plan (free) the
     recovery rewrite in ``_state_from_account`` flipped ``status_seed`` to

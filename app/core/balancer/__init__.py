@@ -23,6 +23,7 @@ from app.core.balancer.logic import (
     TrafficClass,
     UsageWeightedOrder,
     account_status_for_permanent_failure,
+    capacity_for_routing_plan,
     configure_replica_salt,
     evaluate_health_tier,
     failover_decision,
@@ -31,6 +32,8 @@ from app.core.balancer.logic import (
     handle_rate_limit,
     plausible_rate_limit_reset_at,
     pool_usage_exhaustion,
+    recovery_primary_used,
+    resolve_capacity_plan_type,
     select_account,
 )
 
@@ -60,6 +63,7 @@ __all__ = [
     "UsageWeightedOrder",
     "account_status_for_permanent_failure",
     "configure_replica_salt",
+    "capacity_for_routing_plan",
     "evaluate_health_tier",
     "failover_decision",
     "handle_permanent_failure",
@@ -67,5 +71,7 @@ __all__ = [
     "handle_rate_limit",
     "plausible_rate_limit_reset_at",
     "pool_usage_exhaustion",
+    "resolve_capacity_plan_type",
+    "recovery_primary_used",
     "select_account",
 ]

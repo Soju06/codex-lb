@@ -1576,6 +1576,7 @@ async def _close_http_bridge_session_resources(
     *,
     turn_state_lock_held: bool = False,
     release_durable_session: bool = True,
+    drain_terminal_finalizers: bool = False,
 ) -> None:
     session.closed = True
     durable_session_id = getattr(session, "durable_session_id", None)
@@ -1594,11 +1595,51 @@ async def _close_http_bridge_session_resources(
         logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
     finally:
         session.account_lease = None
-    # Keep the durable bridge lease until pending terminal events have been
-    # appended and their asynchronous spool finalizers have committed. The
-    # finalizer is owner-fenced and would otherwise lose the lease during
-    # shutdown, leaving a complete transcript marked incomplete.
     durable_release_succeeded = durable_owner_epoch is None
+
+    async def release_durable_session_and_cleanup() -> None:
+        """Release the durable owner and retire process-local denial state when it is safe."""
+        nonlocal durable_release_succeeded
+        if durable_release_allowed:
+            try:
+                released = await service._durable_bridge.release_live_session(
+                    session_id=durable_session_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=durable_owner_epoch,
+                    draining=shutdown_state.is_bridge_drain_active(),
+                )
+                # Fenced releases return the current owner snapshot, while a
+                # missing row returns None. Only an ownerless snapshot (or a
+                # missing row) means this generation no longer owns a durable lease.
+                durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
+            except Exception:
+                logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
+        # Closing a generation retires its process-local denial slot as well as
+        # its routing aliases. Keep pinned requests fenced; the owner helper marks
+        # those entries superseded and lets their final pin release remove them.
+        # A deliberately retained lease or a failed/fenced release still belongs
+        # to a live durable owner, so its fence must remain for a successor.
+        if durable_release_succeeded:
+            owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
+            pending_denied_response_ids = tuple(getattr(session, "denied_proxy_injected_anchor_cleanup_pending", ()))
+            _forget_http_bridge_denied_anchor_fence_owner(
+                service,
+                owner_key,
+                owner_epoch=durable_owner_epoch,
+                preserve_response_ids=pending_denied_response_ids,
+            )
+            _retire_http_bridge_denied_anchor_predecessors_after_durable_clear(
+                service,
+                owner_key,
+                owner_epoch=durable_owner_epoch,
+                preserve_response_ids=pending_denied_response_ids,
+            )
+
+    # Preserve the historical fast close path for ordinary session retirement;
+    # only the shutdown path defers release until terminal finalizers drain.
+    if not drain_terminal_finalizers:
+        await release_durable_session_and_cleanup()
+
     upstream_reader = session.upstream_reader
     if upstream_reader is not None:
         if upstream_reader is asyncio.current_task():
@@ -1632,47 +1673,17 @@ async def _close_http_bridge_session_resources(
             api_key=None,
             response_create_gate=response_create_gate,
         )
-    event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
-    drain_terminal_finalizers = getattr(event_batcher, "drain_terminal_finalizers", None)
-    if callable(drain_terminal_finalizers):
-        try:
-            await drain_terminal_finalizers()
-        except Exception:
-            logger.warning("Failed to drain HTTP bridge terminal finalizers before lease release", exc_info=True)
-    if durable_release_allowed:
-        try:
-            released = await service._durable_bridge.release_live_session(
-                session_id=durable_session_id,
-                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                owner_epoch=durable_owner_epoch,
-                draining=shutdown_state.is_bridge_drain_active(),
-            )
-            # Fenced releases return the current owner snapshot, while a
-            # missing row returns None. Only an ownerless snapshot (or a
-            # missing row) means this generation no longer owns a durable lease.
-            durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
-        except Exception:
-            logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
-    # Closing a generation retires its process-local denial slot as well as
-    # its routing aliases. Keep pinned requests fenced; the owner helper marks
-    # those entries superseded and lets their final pin release remove them.
-    # A deliberately retained lease or a failed/fenced release still belongs
-    # to a live durable owner, so its fence must remain for a successor.
-    if durable_release_succeeded:
-        owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
-        pending_denied_response_ids = tuple(getattr(session, "denied_proxy_injected_anchor_cleanup_pending", ()))
-        _forget_http_bridge_denied_anchor_fence_owner(
-            service,
-            owner_key,
-            owner_epoch=durable_owner_epoch,
-            preserve_response_ids=pending_denied_response_ids,
-        )
-        _retire_http_bridge_denied_anchor_predecessors_after_durable_clear(
-            service,
-            owner_key,
-            owner_epoch=durable_owner_epoch,
-            preserve_response_ids=pending_denied_response_ids,
-        )
+    if drain_terminal_finalizers:
+        event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+        drain_finalizers = getattr(event_batcher, "drain_terminal_finalizers", None)
+        if callable(drain_finalizers):
+            try:
+                await drain_finalizers()
+            except Exception:
+                logger.warning("Failed to drain HTTP bridge terminal finalizers before lease release", exc_info=True)
+        # Keep the durable bridge lease until pending terminal events have been
+        # appended and their asynchronous spool finalizers have committed.
+        await release_durable_session_and_cleanup()
     _log_http_bridge_event(
         "close",
         session.key,
@@ -1689,6 +1700,7 @@ async def _close_http_bridge_session(
     *,
     turn_state_lock_held: bool = False,
     release_durable_session: bool = True,
+    drain_terminal_finalizers: bool = False,
 ) -> None:
     # Direct close callers can be cancelled just like the bounded background
     # wrapper. Keep the resource owner alive until its reader, socket, and
@@ -1707,6 +1719,7 @@ async def _close_http_bridge_session(
                 session,
                 turn_state_lock_held=turn_state_lock_held,
                 release_durable_session=release_durable_session,
+                drain_terminal_finalizers=drain_terminal_finalizers,
             ),
             name=f"http-bridge-resource-close-{_hash_identifier(session.key.affinity_key)}",
         )

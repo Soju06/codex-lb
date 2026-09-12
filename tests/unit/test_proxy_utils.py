@@ -13968,7 +13968,11 @@ def test_sticky_key_for_responses_request_derives_when_payload_key_is_whitespace
         {
             "model": "gpt-5.1",
             "instructions": "hi",
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "hi"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "again"}]},
+            ],
             "stream": True,
             "prompt_cache_key": "   ",
         }

@@ -43649,6 +43649,61 @@ async def test_closing_http_bridge_session_drains_its_existing_finalizer_on_norm
 
 
 @pytest.mark.asyncio
+async def test_closing_http_bridge_session_does_not_drain_an_unrelated_finalizer() -> None:
+    """A session close waits only for terminal finalizers owned by that session."""
+    session = _denied_anchor_session()
+    unrelated_session_id = "durable-http-bridge-unrelated-finalizer"
+    matching_release = asyncio.Event()
+    unrelated_release = asyncio.Event()
+
+    async def matching_finalizer() -> None:
+        await matching_release.wait()
+
+    async def unrelated_finalizer() -> None:
+        await unrelated_release.wait()
+
+    matching_task = asyncio.create_task(matching_finalizer(), name="matching-terminal-finalizer")
+    unrelated_task = asyncio.create_task(unrelated_finalizer(), name="unrelated-terminal-finalizer")
+    setattr(matching_task, "_http_bridge_session_id", session.durable_session_id)
+    setattr(unrelated_task, "_http_bridge_session_id", unrelated_session_id)
+
+    async def drain_finalizers(*, session_id: str | None = None) -> None:
+        assert session_id == session.durable_session_id
+        matching_release.set()
+        await matching_task
+
+    release_live_session = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id=None, owner_epoch=session.durable_owner_epoch)
+    )
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(release_live_session=release_live_session),
+        _fail_pending_websocket_requests=AsyncMock(),
+        _http_bridge_operation_event_batcher=SimpleNamespace(
+            _terminal_finalize_tasks={matching_task, unrelated_task},
+            drain_terminal_finalizers=drain_finalizers,
+        ),
+    )
+
+    try:
+        await http_bridge_helpers_module._close_http_bridge_session_resources(
+            service,
+            session,
+            turn_state_lock_held=True,
+        )
+
+        assert matching_task.done()
+        assert not unrelated_task.done()
+        release_live_session.assert_awaited_once()
+    finally:
+        unrelated_release.set()
+        await asyncio.gather(unrelated_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_closing_http_bridge_session_defers_release_for_detached_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

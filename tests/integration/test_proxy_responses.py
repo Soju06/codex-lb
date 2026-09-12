@@ -23,7 +23,14 @@ from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.time import utcnow
-from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
+from app.db.models import (
+    Account,
+    AccountStatus,
+    ApiKeyUsageReservation,
+    DashboardSettings,
+    RequestLog,
+    StickySessionKind,
+)
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
@@ -664,6 +671,122 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
     assert event["response"]["id"] == "resp_stream_failover"
     assert captured_account_ids[0] == invalidated_account_id
     assert captured_account_ids[1] != invalidated_account_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deterministic_failover", [False, True])
+async def test_proxy_responses_post_refresh_token_revoked_settles_then_marks_reauth(
+    async_client, monkeypatch, deterministic_failover
+):
+    account_ids: dict[str, str] = {}
+    for suffix in ("a", "b"):
+        raw_account_id = f"acc_stream_revoked_{suffix}"
+        email = f"stream-revoked-{suffix}@example.com"
+        response = await async_client.post(
+            "/api/accounts/import",
+            files={
+                "auth_json": (
+                    "auth.json",
+                    json.dumps(_make_auth_json(raw_account_id, email)),
+                    "application/json",
+                )
+            },
+        )
+        assert response.status_code == 200
+        account_ids[raw_account_id] = generate_unique_account_id(raw_account_id, email)
+
+    response = await async_client.put(
+        "/api/settings",
+        json={"apiKeyAuthEnabled": True, "deterministicFailoverEnabled": deterministic_failover},
+    )
+    assert response.status_code == 200
+    response = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "stream-revoked-key",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000}],
+        },
+    )
+    assert response.status_code == 200
+    key_id = response.json()["id"]
+    key = response.json()["key"]
+    attempts: list[str] = []
+    attempt_tokens: list[str] = []
+    refreshes: list[tuple[str, bool]] = []
+    health_writes: list[tuple[str, str]] = []
+    mark_permanent_failure = proxy_module.LoadBalancer.mark_permanent_failure
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del timeout_seconds
+        refreshes.append((account.id, force))
+        if force:
+            account.access_token_encrypted = self._encryptor.encrypt("refreshed-access-token")
+        return account
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del payload, headers, kwargs
+        attempts.append(account_id)
+        attempt_tokens.append(access_token)
+        async with SessionLocal() as session:
+            reservation = (
+                await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id))
+            ).scalar_one()
+            assert reservation.status == "reserved"
+        if account_id == attempts[0]:
+            raise proxy_module.ProxyResponseError(
+                401, {"error": {"code": "token_revoked", "message": "Token was revoked"}}
+            )
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_stream_revoked_recovered",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    async def record_health_after_settlement(self, account, error_code):
+        async with SessionLocal() as session:
+            reservation = (
+                await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id))
+            ).scalar_one()
+            assert reservation.status == "finalized"
+        health_writes.append((account.id, error_code))
+        await mark_permanent_failure(self, account, error_code)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", record_health_after_settlement)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        events = list(_iter_sse_events([line async for line in response.aiter_lines() if line]))
+
+    assert events[-1]["type"] == "response.completed"
+    assert events[-1]["response"]["id"] == "resp_stream_revoked_recovered"
+    assert not any(event["type"] in {"error", "response.failed"} for event in events)
+    assert len(attempts) == 3
+    assert attempts[0] == attempts[1]
+    assert attempts[2] != attempts[0]
+    assert attempt_tokens == ["access-token", "refreshed-access-token", "access-token"]
+    failed_id = account_ids[attempts[0]]
+    recovered_id = account_ids[attempts[2]]
+    assert refreshes == [(failed_id, False), (failed_id, True), (recovered_id, False)]
+    assert health_writes == [(failed_id, "token_revoked")]
+    async with SessionLocal() as session:
+        failed_account = await session.get(Account, failed_id)
+        recovered_account = await session.get(Account, recovered_id)
+        assert failed_account is not None and recovered_account is not None
+        assert failed_account.status == AccountStatus.REAUTH_REQUIRED
+        assert failed_account.deactivation_reason == "Authentication token revoked - re-login required"
+        assert recovered_account.status == AccountStatus.ACTIVE
+        reservation = (
+            await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id))
+        ).scalar_one()
+        assert reservation.status == "finalized"
+        assert reservation.input_tokens == 2
+        assert reservation.output_tokens == 1
 
 
 @pytest.mark.asyncio

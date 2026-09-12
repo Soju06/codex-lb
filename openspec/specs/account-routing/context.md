@@ -178,3 +178,17 @@ short windows, or evaluated for a quota the plan does not have.
 Settlement is discarded if newer replica-local runtime activity arrives while
 that snapshot is loading, preventing an older probe success from clearing a
 later failure.
+
+## Revoked-token refresh and settlement
+
+The streaming retry loop's outer HTTP 401 handler owns forced refresh. Its
+inner pre-visible transport handler re-raises a 401 without recording health
+or making a generic failover decision. This keeps both deterministic failover
+settings on the same authentication recovery path.
+
+For example, account A returns `token_revoked`, its refreshed access token is
+retried on A, and A returns `token_revoked` again. Movable work then completes on
+B. The shared API-key reservation is finalized before A is marked
+`reauth_required`; a token recovered by refresh alone does not incur a health
+penalty. This does not change the no-replay boundary for accepted WebSocket
+response IDs or the requirement to preserve request ownership.

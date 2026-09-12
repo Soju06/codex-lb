@@ -724,6 +724,7 @@ _IMAGE_ERROR_TYPE_STATUS: Final[dict[str, int]] = {
 # override before the type-based mapping above.
 _IMAGE_ERROR_CODE_STATUS: Final[dict[str, int]] = {
     "content_policy_violation": 400,
+    "token_revoked": 401,
     "rate_limit_exceeded": 429,
     "insufficient_quota": 429,
 }
@@ -10406,7 +10407,12 @@ def _status_for_error(error_value: OpenAIError | None) -> int:
         return 503
     if error_value and error_value.code in {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota"}:
         return 429
-    if error_value and error_value.code in {"invalid_api_key", "invalid_authentication", "token_invalidated"}:
+    if error_value and error_value.code in {
+        "invalid_api_key",
+        "invalid_authentication",
+        "token_invalidated",
+        "token_revoked",
+    }:
         return 401
     if error_value and error_value.code == "invalid_request_error":
         return 400

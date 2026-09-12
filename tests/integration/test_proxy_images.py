@@ -305,6 +305,42 @@ async def test_images_generations_no_accounts_returns_5xx(async_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route_prefix", ["/v1", "/backend-api/codex"])
+@pytest.mark.parametrize("operation", ["generations", "edits"])
+@pytest.mark.parametrize("event_type", ["response.failed", "error"])
+async def test_images_revoked_token_without_error_type_returns_401(
+    async_client, monkeypatch, route_prefix, operation, event_type
+):
+    async def exhausted_stream(self, payload, headers, **kwargs):
+        del self, payload, headers, kwargs
+        error = {"code": "token_revoked", "message": "Token was revoked"}
+        if event_type == "response.failed":
+            yield _sse({"type": event_type, "response": {"status": "failed", "error": error}})
+        else:
+            yield _sse({"type": event_type, "error": error})
+
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_responses", exhausted_stream)
+
+    path = f"{route_prefix}/images/{operation}"
+    payload = {"model": "gpt-image-2", "prompt": "a red circle"}
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    if operation == "generations":
+        response = await async_client.post(path, json=payload)
+    elif route_prefix == "/v1":
+        response = await async_client.post(
+            path, data=payload, files={"image": ("source.png", image_bytes, "image/png")}
+        )
+    else:
+        image_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        response = await async_client.post(path, json={**payload, "images": [{"image_url": image_url}]})
+
+    assert response.status_code == 401, response.text
+    assert response.json() == {
+        "error": {"code": "token_revoked", "message": "Token was revoked", "type": "server_error"}
+    }
+
+
+@pytest.mark.asyncio
 async def test_images_generations_returns_envelope_on_success(async_client, monkeypatch, caplog):
     await _import_account(async_client, "acc_images_basic", "img-basic@example.com")
 

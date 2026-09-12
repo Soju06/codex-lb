@@ -83,6 +83,17 @@ keeps `requires_openai_auth = true` does not activate the actor-authorized path.
 - Route-level validation and upstream errors remain governed by the normative
   requirements in [spec.md](./spec.md).
 
+### Revoked-token terminal errors
+
+The Images collector defaults a missing upstream error type to `server_error`.
+The route's code-to-status override therefore maps `token_revoked` to HTTP 401
+independently of that type. For example, a terminal `response.failed` event with
+`{"code":"token_revoked","message":"Token was revoked"}` returns HTTP 401 and
+preserves that code and message on non-streaming generation and edit requests,
+including the Codex aliases. This happens after the existing Responses routing
+and failover pipeline; it does not add another retry policy or rewrite the
+collector's error envelope.
+
 ## Example user flow
 
 1. Choose the Codex-backed authentication path documented in the README, or

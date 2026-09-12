@@ -3251,3 +3251,57 @@ async def test_http_bridge_terminal_append_phase_migration_upgrade_and_downgrade
             assert column not in await conn.run_sync(_columns)
     finally:
         await engine.dispose()
+
+
+# begin bridge continuity abandonment
+
+
+@pytest.mark.asyncio
+async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds both nullable retirement markers to ``http_bridge_sessions``;
+    downgrade drops them; a final walk to head proves the revision sits on a single-head graph."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'bridge-abandonment.sqlite'}"
+    revision = "20260911_060000_add_bridge_session_continuity_abandonment"
+    columns_added = ("continuity_abandoned_at", "continuity_abandonment_scope")
+    # Read the parent from the graph, not from a literal: a rebase onto a
+    # newer main re-chains ``down_revision``.
+    parent_revision = ScriptDirectory.from_config(_build_alembic_config(db_url)).get_revision(revision).down_revision
+    assert isinstance(parent_revision, str)
+
+    async def _columns(engine) -> dict[str, dict[str, object]]:
+        async with engine.connect() as conn:
+            result = await conn.execute(text("PRAGMA table_info(http_bridge_sessions)"))
+            return {row[1]: {"notnull": row[3], "default": row[4]} for row in result.fetchall()}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        before = await _columns(engine)
+        assert all(column not in before for column in columns_added)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        after = await _columns(engine)
+        for column in columns_added:
+            # Nullable without a default: an existing row keeps hard ownership
+            # until a writer retires it, which is what makes the rollout safe.
+            assert after[column] == {"notnull": 0, "default": None}
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        reverted = await _columns(engine)
+        assert all(column not in reverted for column in columns_added)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        final = await _columns(engine)
+        assert all(column in final for column in columns_added)
+    finally:
+        await engine.dispose()
+
+
+# end bridge continuity abandonment

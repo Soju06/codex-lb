@@ -205,6 +205,8 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         upstream_stream_transport=settings.upstream_stream_transport,
         prohibit_fast_mode=settings.prohibit_fast_mode,
         http_downstream_transport_policy=settings.http_downstream_transport_policy,
+        thread_cache_identity_mode=settings.thread_cache_identity_mode,
+        thread_cache_identity_mode_override=settings.thread_cache_identity_mode_override,
         proxy_account_response_create_limit=settings.proxy_account_response_create_limit,
         proxy_account_response_create_limit_environment_value=(
             getattr(
@@ -1203,6 +1205,8 @@ async def update_settings(
                 http_downstream_transport_policy=(
                     payload.http_downstream_transport_policy or current.http_downstream_transport_policy
                 ),
+                thread_cache_identity_mode=_dashboard_value(payload, "thread_cache_identity_mode"),
+                clear_thread_cache_identity_mode=_clears_dashboard_value(payload, "thread_cache_identity_mode"),
                 proxy_account_response_create_limit=(
                     payload.proxy_account_response_create_limit
                     if "proxy_account_response_create_limit" in payload.model_fields_set
@@ -1574,6 +1578,7 @@ async def update_settings(
             "upstream_stream_transport",
             "prohibit_fast_mode",
             "http_downstream_transport_policy",
+            "thread_cache_identity_mode",
             "proxy_account_response_create_limit",
             "proxy_account_stream_limit",
             "proxy_account_stream_recovery_reserve",

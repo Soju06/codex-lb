@@ -69,6 +69,9 @@ class SettingsRepository:
             proxy_account_stream_limit=None,
             proxy_account_stream_recovery_reserve=None,
             proxy_api_key_fair_share_congestion_threshold_pct=None,
+            # Thread cache identity: same tri-state rule, seeded NULL.
+            # NULL inherits the environment value and then ``shared``.
+            thread_cache_identity_mode=None,
             # C2-2 routing/overload: same tri-state rule, seeded NULL.
             proxy_overload_isolation_seconds=None,
             proxy_account_error_rate_weighting_enabled=None,
@@ -152,6 +155,8 @@ class SettingsRepository:
         upstream_stream_transport: str | None = None,
         prohibit_fast_mode: bool | None = None,
         http_downstream_transport_policy: str | None = None,
+        thread_cache_identity_mode: str | None = None,
+        clear_thread_cache_identity_mode: bool = False,
         proxy_account_response_create_limit: int | None = None,
         clear_proxy_account_response_create_limit: bool = False,
         proxy_account_stream_limit: int | None = None,
@@ -308,6 +313,10 @@ class SettingsRepository:
             settings.proxy_api_key_fair_share_congestion_threshold_pct = (
                 proxy_api_key_fair_share_congestion_threshold_pct
             )
+        if clear_thread_cache_identity_mode:
+            settings.thread_cache_identity_mode = None
+        elif thread_cache_identity_mode is not None:
+            settings.thread_cache_identity_mode = thread_cache_identity_mode
         # C2-2 routing/overload
         if clear_proxy_overload_isolation_seconds:
             settings.proxy_overload_isolation_seconds = None

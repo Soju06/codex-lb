@@ -10,6 +10,7 @@ from app.modules.shared.schemas import DashboardModel
 _DEFAULT_WEEKLY_PACE_WORKING_DAYS = "0,1,2,3,4,5,6"
 _WEEKLY_PACE_SMOOTHING_MINUTES = (15, 30, 60, 120, 240)
 _HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN = r"^(smart|always_http|always_websocket|pinned)$"
+_THREAD_CACHE_IDENTITY_MODE_PATTERN = r"^(shared|isolated)$"
 
 
 def _normalize_weekly_pace_working_days(value: str | None) -> str | None:
@@ -58,6 +59,10 @@ class DashboardSettingsResponse(DashboardModel):
     upstream_stream_transport: str = Field(pattern=r"^(auto|http|websocket)$")
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
+    # Effective mode; ``provenance.thread_cache_identity_mode`` says whether it
+    # came from the dashboard column, the environment or the code default.
+    thread_cache_identity_mode: str = Field(pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN)
+    thread_cache_identity_mode_override: str | None = Field(default=None, pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN)
     proxy_account_response_create_limit: int = Field(ge=0)
     proxy_account_response_create_limit_environment_value: int = Field(ge=0)
     proxy_account_response_create_limit_override: int | None = Field(default=None, ge=0)
@@ -240,6 +245,12 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     http_downstream_transport_policy: str | None = Field(
         default=None,
         pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN,
+    )
+    # Tri-state like the caps below: omitted = unchanged, null = inherit the
+    # environment value or the ``shared`` code default, value = store.
+    thread_cache_identity_mode: str | None = Field(
+        default=None,
+        pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN,
     )
     proxy_account_response_create_limit: int | None = Field(default=None, ge=0)
     proxy_account_stream_limit: int | None = Field(default=None, ge=0)

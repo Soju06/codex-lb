@@ -85,6 +85,9 @@ async def test_settings_data_reports_provenance_for_every_inheritable_setting(
     settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
 
     assert settings.provenance == {
+        # Thread cache identity: NULL column and a stub startup-settings object
+        # without the field, so it falls back to the ``shared`` code default.
+        "thread_cache_identity_mode": InheritableValue("shared", "default", "shared", "shared"),
         "proxy_account_response_create_limit": InheritableValue(4, "default", 4, 4),
         "proxy_account_stream_limit": InheritableValue(12, "env", 12, 8),
         "proxy_account_stream_recovery_reserve": InheritableValue(3, "dashboard", 1, 1),

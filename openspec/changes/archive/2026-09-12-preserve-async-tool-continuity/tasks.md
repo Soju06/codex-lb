@@ -22,4 +22,4 @@
 - [x] 3.8 Reject blank async call IDs in the shared account-neutral proof and verify real WebSocket stale-anchor cross-account recovery.
 - [x] 3.9 Integrate current main's shared WebSocket anchor retirement, clearing async state on both retirement paths with failing-first regression coverage.
 - [x] 3.10 Verify current-main replay contracts and real transport continuity.
-- [ ] 3.11 Run the full local gate on the integrated candidate.
+- [x] 3.11 Run the full local gate on the integrated candidate.

@@ -107,22 +107,35 @@ showed that inspecting the input for *shape* fails the same way: a predicate
 that reads "no model-authored items" as "this is a delta" classified a full
 resend as a delta and doubled the conversation at the public entry point.
 
-Naming the anchor as the signal was the fifth attempt and it was also wrong, for
-two reasons the fifth review measured. The proxy injects anchors onto requests
-that did not arrive with one, so the anchor on the wire says nothing about what
-the input holds. And an anchored full resend is not a contradiction in terms —
-it is a shape this repository already ships verification for, in
-`openspec/specs/responses-api-compat/spec.md:1214` and `:2741`. The rule defined
-that shape out of existence and the implementation dutifully doubled it.
+Six revisions of this join failed the same way, and five of them failed because
+this document told the implementation to classify something that cannot be
+classified. `previous_response_id` cannot say what the input holds, because the
+proxy injects anchors itself and because anchored full resends are a shape this
+repository already verifies. "No model-authored items" cannot say it either, and
+neither can structural self-containment —
+`responses_input_items_are_self_contained_fresh_replay` answers whether an input
+references state we do not hold, not whether it is the whole conversation, and
+reading it as completeness inverts the verdict for the full resends Codex
+actually sends.
 
-The discriminator this codebase already had is self-containment, and the
-predicates for it were sitting in the same module the whole time:
-`responses_input_items_are_self_contained_fresh_replay` and
-`responses_input_suffix_retains_prior_output`. Applied per stored request rather
-than once for the join, they answer every shape: a self-contained history
-supersedes, a clean delta appends, a partial restatement refuses. The chain turn
-that restated the conversation stops being a special case, because it supersedes
-at its own position.
+The reason every rule failed is that the question has no answer. A client that
+re-sends its last exchange plus a new turn is byte-identical to a client whose
+conversation genuinely began at that exchange. Nothing in the request separates
+them.
+
+The asymmetry does. The chain is our own reconstruction of turns the client is
+not sending; the client's input is what it is sending now. Where they overlap,
+the client's copy is authoritative, so the overlap comes off **the chain**.
+Dropping a chain turn the client just re-supplied costs nothing — the turn is
+still in the dispatched body, in the client's words. Dropping a client item
+costs a message the user wrote, silently, past every structural check. So the
+join discards from the chain, never from the client, and needs no view about
+what the client meant: both readings of an ambiguous input produce the same
+correct conversation.
+
+The overlap must be anchored at the accumulated tail. A match in the middle of
+the chain is a coincidence, and coincidences must not shorten anything — that is
+the one case where content comparison would still be guessing.
 
 ## Why the zero-event precondition is the real fence
 

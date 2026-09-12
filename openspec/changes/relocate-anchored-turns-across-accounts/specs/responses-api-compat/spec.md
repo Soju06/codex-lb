@@ -40,23 +40,15 @@ The rebuild MUST walk the `parent_response_id` chain from the anchor and assembl
 
 A turn counts as settled, and so as material for the rebuild, only when its spool carries a terminal event that reports an answer. A terminal event that reports a failure MUST NOT make a failed turn read as an answered one in the rebuilt conversation. The rebuilt input MUST then be joined to the client's current turn. The join MUST NOT delete, reorder or alter any item the client sent. A rebuild that drops a client item because its content coincides with an item already in the chain is a worse failure than refusing to rebuild at all: the user's message is gone, the result still satisfies every structural predicate, and nothing downstream can detect it.
 
-**Self-containment decides, and it is decided for every stored request, not once for the join.** The proxy MUST classify each input — every turn's stored request in the chain, and the client's current turn — with the predicates it already ships for exactly this question, and MUST NOT invent a new one:
+**The client's items are inviolable; the chain's are not.** That asymmetry decides the join, and it is the only thing that needs to.
 
-- an input that carries a **self-contained full history** supersedes everything before it. It is the conversation as of that point, so the accumulator is replaced rather than appended to. This is true whether or not the request also carries `previous_response_id`: an anchored full resend is an established shape this proxy already verifies, and a rule that treats the anchor as proof of a delta will join the chain to it and double the conversation;
-- an input that is **not self-contained and does not restate prior output** is that turn's delta and is appended unchanged;
-- any other input — one that restates part of the prior output without carrying the whole history — MUST refuse the rebuild. Its boundary is only recoverable by matching content, which is forbidden above.
+The chain is the proxy's own reconstruction of turns the client is not currently sending. The client's input is what the client is sending right now. When the two overlap, the client's copy is authoritative — so the proxy MUST drop the overlapping portion **from the chain** and MUST keep every item the client sent. Dropping a chain turn the client has just re-supplied loses nothing; dropping a client item loses something no downstream check can detect.
 
-The anchor MUST NOT be used as the discriminator. The proxy injects anchors onto requests that did not arrive with one, so its presence on the wire proves nothing about what the input contains.
+The join is therefore: walk the chain oldest first; where the client's input matches the **tail** of what the walk has accumulated, discard that tail; append the client's input verbatim and last. The overlap MUST be anchored at the accumulated tail — a match anywhere else is a coincidence, not a restatement, and MUST NOT shorten anything. Apply the same rule to each chain turn's stored request as the walk accumulates it, so a parent turn that restated the conversation replaces what it restates instead of repeating it.
 
-Applying the rule per stored request is what makes a chain turn that restated the conversation harmless: it supersedes at its own position instead of being concatenated onto the history it restates. The shapes of the turns inside the chain are therefore not a gate that refuses relocation — they are an input to the join, and a chain whose root was a full resend rebuilds correctly.
+The proxy MUST NOT attempt to classify the client's intent. Whether the input is a full resend, a continuation delta, a rolling window of recent turns, or a coincidence is not knowable from the request: a client that re-sends its last exchange plus a new turn is byte-identical to one whose conversation genuinely began at that exchange. Any rule that decides between them — from `previous_response_id`, from the presence of model-authored items, from structural self-containment — will be wrong for one of them. The tail-overlap rule needs no such decision, because both readings produce the same correct conversation.
 
-The rebuilt body MUST satisfy the same strict account-neutral predicate a client-supplied full resend must satisfy. The proxy MUST fail closed — leaving today's owner-unavailable behaviour intact — when the transcript is unavailable or incomplete, when any turn lacks a stored request body or a complete event spool, when the parent chain is broken or cyclic, when a terminal response event is missing, when the current input is a scalar string that cannot carry prior context, when a tool call is unsettled, when a declared tool is not portable, or when any account-owned state survives projection.
-
-The proxy MUST NOT substitute a lenient projection when the strict predicate declines. An unclassifiable body MUST keep the request owner-bound.
-
-A relocation performed under this requirement MUST NOT consume the one-shot recovery budget defined by "Fenced one-shot recovery dispatch", because definitive evidence proves the operation was never accepted.
-
-The rebuild requires durable operation material — a stored request body, a complete event spool and a parent link for every turn in the chain. A transport that does not record that material has nothing to rebuild from and MUST keep today's fail-closed behaviour; it MUST NOT relocate on partial context, and it MUST NOT report the absence of a transcript as a rebuild failure. Today only the HTTP session bridge records it.
+`responses_input_items_are_self_contained_fresh_replay` MUST NOT be read as "this input carries the whole conversation". It answers a different question — whether the input references state the proxy does not hold — and using it as a completeness test inverts the outcome for the shapes Codex actually sends.
 
 #### Scenario: A delta continuation survives its exhausted owner
 
@@ -69,43 +61,31 @@ The rebuild requires durable operation material — a stored request body, a com
 
 #### Scenario: A client full resend is not doubled
 
-- **GIVEN** the client resent its whole history rather than a delta
-- **WHEN** relocation is evaluated
-- **THEN** the client's own body is the authority and the durable chain is not joined to it
+- **GIVEN** the client's input restates the whole conversation the chain reconstructs
+- **WHEN** the join runs
+- **THEN** the overlapping chain tail is discarded and the client's body is dispatched
 - **AND** no turn appears twice
+
+#### Scenario: A rolling window keeps everything
+
+- **GIVEN** a four-turn chain and a client that sends the last exchange plus a new turn
+- **WHEN** the join runs
+- **THEN** the three earlier turns survive from the chain, the restated exchange survives from the client, and the new turn is last
+- **AND** no item the client sent is missing
 
 #### Scenario: A coincidental content match never costs the client a message
 
-- **GIVEN** a continuation delta whose first item happens to be byte-identical to the first item of the rebuilt chain, while being genuinely new content the user just sent
-- **WHEN** the rebuilt body is assembled
-- **THEN** every item the client sent appears in the result
-- **AND** the coincidence does not shorten the client's turn
+- **GIVEN** a client turn whose first item is byte-identical to an item in the middle of the chain, while being new content
+- **WHEN** the join runs
+- **THEN** nothing is discarded, because the match is not at the accumulated tail
+- **AND** every item the client sent is dispatched
 
-#### Scenario: An anchored full resend is still a resend
+#### Scenario: A chain turn that restated the conversation replaces what it restates
 
-- **GIVEN** a request carrying `previous_response_id` whose input is also a self-contained full history
-- **WHEN** relocation is evaluated
-- **THEN** it supersedes the chain rather than being appended to it
-- **AND** no turn appears twice
-
-#### Scenario: A chain turn that restated the conversation supersedes at its own position
-
-- **GIVEN** a chain whose second turn stored a self-contained full history rather than a delta
-- **WHEN** the rebuild walks the chain
-- **THEN** that turn replaces what the walk had accumulated, and the turns after it append as usual
+- **GIVEN** a chain whose later turn stored a request repeating earlier turns
+- **WHEN** the walk accumulates it
+- **THEN** the repeated tail is replaced rather than appended
 - **AND** the rebuilt conversation contains no turn twice
-
-#### Scenario: A partial restatement refuses
-
-- **GIVEN** an input that restates part of the prior output without carrying the whole history
-- **WHEN** the join is classified
-- **THEN** the rebuild refuses rather than appending the restated portion a second time
-
-#### Scenario: A chain that is not this anchor's history is refused
-
-- **GIVEN** a transcript whose parent links are internally consistent but whose newest turn is not the anchor the client sent
-- **WHEN** the rebuild verifies it
-- **THEN** it refuses rather than rebuilding another conversation's history
 
 #### Scenario: The byte bound is a whole-transcript bound
 

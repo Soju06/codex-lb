@@ -762,7 +762,9 @@ async def test_context_discarded_during_terminal_drain_requires_settlement(
 
 
 @pytest.mark.asyncio
-async def test_close_turns_cancelled_terminal_append_into_settlement_required() -> None:
+async def test_close_turns_cancelled_terminal_append_into_settlement_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     durable = _StalledTerminalDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(
         durable,
@@ -784,6 +786,10 @@ async def test_close_turns_cancelled_terminal_append_into_settlement_required() 
     )
 
     await asyncio.wait_for(durable.append_started.wait(), timeout=1.0)
+    # Model process shutdown having no remaining drain time so close() owns
+    # cancellation of the stalled append instead of waiting forever in the
+    # standalone no-deadline path.
+    monkeypatch.setattr(shutdown_state, "remaining_drain_timeout_seconds", lambda: 0.0)
     await asyncio.wait_for(batcher.close(), timeout=1.0)
     result = await asyncio.wait_for(append_task, timeout=1.0)
 
@@ -1047,8 +1053,10 @@ async def test_close_owns_terminal_finalize_pending_past_bound(caplog: pytest.Lo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_remaining", [None, 1.0])
 async def test_terminal_append_caller_stays_tracked_until_finalizer_handoff(
     monkeypatch: pytest.MonkeyPatch,
+    shutdown_remaining: float | None,
 ) -> None:
     """Shutdown tracking covers the caller window between append completion and finalizer scheduling."""
     durable = _BlockingTerminalAppendDurableBridge()
@@ -1058,9 +1066,9 @@ async def test_terminal_append_caller_stays_tracked_until_finalizer_handoff(
         flush_interval_seconds=60.0,
         terminal_append_timeout_seconds=1.0,
     )
-    # Model an active graceful-shutdown drain so close() has a bounded window
-    # in which to let this already-admitted caller hand off its result.
-    monkeypatch.setattr(shutdown_state, "remaining_drain_timeout_seconds", lambda: 1.0)
+    # Exercise both the standalone close path (no process deadline) and an
+    # active graceful-shutdown drain with a bounded handoff window.
+    monkeypatch.setattr(shutdown_state, "remaining_drain_timeout_seconds", lambda: shutdown_remaining)
     try:
         append_task = asyncio.create_task(
             batcher.append_terminal_event(

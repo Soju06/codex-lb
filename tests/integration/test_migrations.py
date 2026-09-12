@@ -3538,6 +3538,8 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-column-repair.sqlite'}"
     deployed_head = "20260911_030000_add_local_login_policy"
     repair_head = "20260911_040000_repair_http_bridge_recovery_columns"
+    alias_table = "http_bridge_session_aliases"
+    alias_column = "target_response_id"
     columns_to_repair = {
         "rebind_claim_id",
         "transcript_version",
@@ -3554,12 +3556,17 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
         async with engine.begin() as conn:
             for column in columns_to_repair:
                 await conn.execute(text(f"ALTER TABLE http_bridge_operations DROP COLUMN {column}"))
+            await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN {alias_column}"))
 
         async with engine.connect() as conn:
             before = await conn.run_sync(
                 lambda sync: {item["name"] for item in sa_inspect(sync).get_columns("http_bridge_operations")}
             )
+            aliases_before = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
+            )
         assert columns_to_repair.isdisjoint(before)
+        assert alias_column not in aliases_before
 
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == repair_head
@@ -3568,6 +3575,10 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
             after = await conn.run_sync(
                 lambda sync: {item["name"] for item in sa_inspect(sync).get_columns("http_bridge_operations")}
             )
+            aliases_after = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
+            )
         assert columns_to_repair <= after
+        assert alias_column in aliases_after
     finally:
         await engine.dispose()

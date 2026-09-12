@@ -37,8 +37,8 @@
   returns `None` and the probe reports a healthy pool. Instead carry the
   per-account exclusion evidence the walk already has to the terminal decision
   and let it prove exhaustion directly. Keep the `_request_usage_refresh` gate
-  move (classification, not `code == USAGE_LIMIT_REACHED`), and check whether
-  `openspec/specs/usage-refresh-policy/spec.md` needs a MODIFIED entry for it.
+  move (classification, not `code == USAGE_LIMIT_REACHED`); the
+  `usage-refresh-policy` delta in this change folder covers it.
 - [ ] Terminal rendering must skip the probe for the two bounds whose answer the
   pool's state cannot give: a `non_retryable` failure surfaces as itself and an
   exhausted budget yields `upstream_request_timeout`. Consult the probe at most

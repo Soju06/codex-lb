@@ -505,6 +505,21 @@ class CacheIsolationProbeService:
             (account for account in accounts if _is_selectable(account) and account.status == AccountStatus.ACTIVE),
             key=lambda account: account.id,
         )
-        if not eligible:
+        # Upstream identifies a caller by `chatgpt_account_id`, the Team/Business
+        # WORKSPACE identity: two seats of one workspace are one account there.
+        # Including both would let a same-account cache hit be reported as
+        # `cross_account_sharing`, which is the probe's headline claim — and it
+        # would make an after-isolation re-run read as a failure. Keep the first
+        # seat of each workspace; a row with no workspace id is its own group.
+        deduped: list[Account] = []
+        seen_workspaces: set[str] = set()
+        for account in eligible:
+            workspace = account.chatgpt_account_id
+            if workspace is not None:
+                if workspace in seen_workspaces:
+                    continue
+                seen_workspaces.add(workspace)
+            deduped.append(account)
+        if not deduped:
             return None, []
-        return eligible[0], eligible[1 : 1 + other_account_count]
+        return deduped[0], deduped[1 : 1 + other_account_count]

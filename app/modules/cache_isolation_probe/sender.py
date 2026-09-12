@@ -123,7 +123,16 @@ class CacheProbeSender:
                 "parallel_tool_calls": False,
                 "stream": True,
                 "store": False,
+                # `max_output_tokens` is stripped by `_UNSUPPORTED_UPSTREAM_FIELDS`
+                # before egress, so it cannot bound this call. It is kept because
+                # it states the intent for any model source that does honour it,
+                # and the real bound comes from the two fields below: the probe
+                # only needs `usage.input_tokens_details.cached_tokens` off the
+                # terminal frame, so every output token is waste. Without them a
+                # 28k-token prompt runs an uncapped generation, up to ten per run.
                 "max_output_tokens": CACHE_PROBE_MAX_OUTPUT_TOKENS,
+                "reasoning": {"effort": "low"},
+                "text": {"verbosity": "low"},
             }
         )
         headers = {

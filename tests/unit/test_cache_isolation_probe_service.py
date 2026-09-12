@@ -40,11 +40,17 @@ _HIT_TOKENS = 28_032
 _MISS_TOKENS = 0
 
 
-def _account(account_id: str, *, status: AccountStatus = AccountStatus.ACTIVE, alias: str | None = None) -> Account:
+def _account(
+    account_id: str,
+    *,
+    status: AccountStatus = AccountStatus.ACTIVE,
+    alias: str | None = None,
+    workspace: str | None = None,
+) -> Account:
     encryptor = TokenEncryptor()
     return Account(
         id=account_id,
-        chatgpt_account_id=f"workspace-{account_id}",
+        chatgpt_account_id=workspace if workspace is not None else f"workspace-{account_id}",
         email=f"{account_id}@example.com",
         alias=alias,
         plan_type="plus",
@@ -55,6 +61,37 @@ def _account(account_id: str, *, status: AccountStatus = AccountStatus.ACTIVE, a
         status=status,
         deactivation_reason=None,
     )
+
+
+def test_seats_of_one_workspace_are_never_treated_as_separate_accounts() -> None:
+    """Upstream identifies a caller by workspace, so two seats are one account.
+
+    Including both would let a same-account cache hit be reported as
+    ``cross_account_sharing`` — the probe's headline claim — and would make an
+    after-isolation re-run read as a failure.
+    """
+
+    service = CacheIsolationProbeService.__new__(CacheIsolationProbeService)
+    accounts = [
+        _account("a1", workspace="ws-shared"),
+        _account("a2", workspace="ws-shared"),
+        _account("a3", workspace="ws-other"),
+    ]
+
+    seed, others = service._choose_accounts(accounts, 5)
+
+    assert seed is not None and seed.id == "a1"
+    assert [account.id for account in others] == ["a3"]
+
+
+def test_accounts_without_a_workspace_id_are_each_their_own_group() -> None:
+    service = CacheIsolationProbeService.__new__(CacheIsolationProbeService)
+    accounts = [_account("b1", workspace=None), _account("b2", workspace=None)]
+
+    seed, others = service._choose_accounts(accounts, 5)
+
+    assert seed is not None and seed.id == "b1"
+    assert [account.id for account in others] == ["b2"]
 
 
 class _StubSender:

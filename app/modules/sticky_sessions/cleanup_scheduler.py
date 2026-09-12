@@ -58,6 +58,23 @@ _STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS = 6 * 3600
 # Keep each pass large enough to outpace steady-state expiry, but small enough
 # that a historical backlog is resumed across scheduler ticks instead of
 # monopolizing the database in one drain-all loop.
+# No key-prefix sweep of the `sticky_thread` kind exists, deliberately.
+#
+# A prompt-cache key derived by the proxy -- the retired content-hash shape
+# (`{model_class}-{api_key_id[:12]}-{hash}`) and the current thread-anchored
+# `v2t-` shape alike -- is only ever produced when `openai_cache_affinity` is
+# enabled, and that is exactly the branch that classifies the mapping as
+# PROMPT_CACHE (see `_sticky_key_for_responses_request` /
+# `_sticky_key_for_compact_request`: the STICKY_THREAD branch is `elif
+# sticky_threads_enabled`, reachable only with cache affinity off, where the
+# derivation supplies no sticky key at all). So a derived key can never be
+# written as a `sticky_thread` row, and `purge_prompt_cache_before` already
+# retires every derived row of either shape at the freshness window.
+#
+# A `sticky_thread` row whose key starts with `std-`/`codex-`/`mini-` is
+# therefore necessarily *client-supplied*, and `sticky_thread` has no TTL by
+# design. Deleting those rows by key prefix silently drops a client's soft
+# locality because its key text happens to look like a retired proxy shape.
 _OPERATION_RETENTION_BATCH_SIZE = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
 _OPERATION_RETENTION_MAX_BATCHES = 4
 _OPERATION_RETENTION_TIME_BUDGET_SECONDS = 5.0
@@ -391,6 +408,9 @@ class StickySessionCleanupScheduler:
 
                     if self.enabled:
                         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
+                        # Retires every proxy-derived prompt-cache mapping, of
+                        # either key shape: see the module note above on why no
+                        # `sticky_thread` key-prefix sweep belongs here.
                         deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                         if deleted_count > 0:
                             logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)

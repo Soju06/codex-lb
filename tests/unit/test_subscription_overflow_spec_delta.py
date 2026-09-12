@@ -302,12 +302,33 @@ def test_the_drill_entry_point_is_documented_and_exists() -> None:
 
 
 def test_the_stall_drill_no_longer_promises_a_timeout_for_a_dropped_connection() -> None:
-    """A dropped SYN answers ``502 model_source_unreachable``; only a connected-but-silent source times out."""
+    """A dropped SYN answers ``502 model_source_unreachable``; only a connected-but-silent source times out.
+
+    Both error codes appearing in a document proves nothing -- they would appear
+    just as well with the two shapes swapped, which is the mistake this test
+    exists to catch. So each mention of the shape is read together with the code
+    that follows it, up to the next one.
+    """
+
+    shapes = (
+        ("drops the SYN", "model_source_unreachable"),
+        ("drops the connection attempt", "model_source_unreachable"),
+        ("accepts TCP and then stays silent", "model_source_timeout"),
+        ("accepts the connection and then sends nothing", "model_source_timeout"),
+    )
+    codes = re.compile(r"model_source_(?:unreachable|timeout)")
 
     for path in (_ROUTING_DOC, _ROUTING_DELTA):
         text = _read(path)
-        assert "model_source_unreachable" in text, path
-        assert "model_source_timeout" in text, path
+        seen = 0
+        for shape, expected in shapes:
+            for match in re.finditer(re.escape(shape), text):
+                answer = codes.search(text, match.end())
+                assert answer is not None, (path, shape)
+                assert answer.group() == expected, (path, shape, answer.group())
+                seen += 1
+        # Each document states both shapes, so neither can drift out silently.
+        assert seen >= 2, (path, seen)
 
 
 def test_dashboard_staged_notice_is_gone_from_the_component_and_every_locale() -> None:

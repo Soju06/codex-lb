@@ -22,9 +22,10 @@ guard then holds three things together:
 * **The assertion is still there.** Each rehearsed clause names snippets that
   must appear in the body of the drill the table names for it (whitespace
   normalised, so reformatting is not a failure). Delete the assertion and the
-  clause is uncovered -- and so does parking it in a comment or a string, since
-  the body is matched with those blanked out (``_executable_source``). Text
-  that looks like an assertion is not one.
+  clause is uncovered -- and so does parking it out of the way, in a comment,
+  in a string statement, or in a string that is assigned or passed somewhere:
+  all three are blanked before matching (``_executable_source``). Text that
+  looks like an assertion is not one.
 * **And the drill still runs.** The body is only half of it: an assertion in a
   drill that never executes rehearses nothing either, and the body is where a
   switched-off drill looks exactly like a working one. So the marks that reach
@@ -77,6 +78,7 @@ from __future__ import annotations
 import ast
 import io
 import re
+import textwrap
 import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -402,6 +404,22 @@ def _char_column(line: str, byte_column: int) -> int:
     return len(line.encode("utf-8")[:byte_column].decode("utf-8"))
 
 
+def _holds_an_assertion(literal: str) -> bool:
+    """Is this string literal an assertion in disguise -- a rehearsal parked where it cannot run?"""
+
+    try:
+        text = ast.literal_eval(literal)
+    except (ValueError, SyntaxError):  # an f-string, or anything else not a constant
+        return False
+    if not isinstance(text, str) or "assert" not in text:
+        return False
+    try:
+        parsed = ast.parse(textwrap.dedent(text))
+    except SyntaxError:
+        return False
+    return any(isinstance(statement, ast.Assert) for statement in parsed.body)
+
+
 def _executable_source(source: str) -> str:
     """``source`` with the text that cannot run blanked out, at unchanged offsets.
 
@@ -409,11 +427,19 @@ def _executable_source(source: str) -> str:
     against is verbatim source, so text that only looks like an assertion
     covers it just as well: ``# assert await _pin_rows() == []`` still contains
     ``assert await _pin_rows() == []``, and so does a bare string statement
-    holding the same line. Both are how an assertion gets switched off in
-    practice, and both used to leave the build green with the rehearsal gone.
-    Comments and string-expression statements are therefore blanked -- to
-    spaces, not deleted, so every surviving character keeps its position and
-    the drill reads exactly as it did.
+    holding the same line -- or, one keystroke further, ``parked = "assert
+    await _pin_rows() == []"``. All of them are how an assertion gets switched
+    off in practice, and all of them used to leave the build green with the
+    rehearsal gone.
+
+    So three things are blanked: comments, string-expression statements
+    (docstrings included), and any string literal whose *contents* are
+    themselves ``assert`` statements, wherever that literal sits. The last rule
+    is deliberately narrow -- a drill's ordinary literals (``"response headers
+    within 20s"``, a JSON fragment) do not parse as assertions and are left
+    alone, because mapped snippets quote them. Blanking is to spaces, not
+    deletion, so every surviving character keeps its position and the drill
+    reads exactly as it did.
     """
 
     lines = source.splitlines()
@@ -427,7 +453,7 @@ def _executable_source(source: str) -> str:
             lines[row - 1] = line[:first] + " " * (last - first) + line[last:]
 
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
-        if token.type == tokenize.COMMENT:
+        if token.type == tokenize.COMMENT or (token.type == tokenize.STRING and _holds_an_assertion(token.string)):
             blank(token.start[0], token.start[1], token.end[0], token.end[1])
     for node in ast.walk(ast.parse(source)):
         # A string alone as a statement -- a docstring, or an assertion parked in one -- runs nothing.
@@ -532,12 +558,14 @@ def _dotted(node: ast.expr) -> tuple[str, ...]:
     return tuple(reversed(parts))
 
 
-def _marks(expr: ast.expr) -> set[str]:
-    """Every ``*.mark.<name>`` mentioned anywhere inside ``expr``.
+def _marks(expr: ast.expr, roots: frozenset[str] = frozenset({"mark"})) -> set[str]:
+    """Every ``<mark root>.<name>`` mentioned anywhere inside ``expr``.
 
     Anywhere, not just at the top: ``pytest.mark.skip`` and
     ``pytest.mark.skip(reason=...)`` are the same switch, and so is a mark
     smuggled into a case list as ``pytest.param(..., marks=pytest.mark.xfail)``.
+    ``roots`` is what ``pytest.mark`` is called here -- ``mark`` on its own,
+    plus whatever ``from pytest import mark as pm`` bound it to.
     """
 
     names: set[str] = set()
@@ -545,50 +573,73 @@ def _marks(expr: ast.expr) -> set[str]:
         if not isinstance(node, ast.Attribute):
             continue
         parts = _dotted(node)
-        if "mark" in parts and parts.index("mark") + 1 < len(parts):
-            names.add(parts[parts.index("mark") + 1])
+        index = next((position for position, part in enumerate(parts) if part in roots), None)
+        if index is not None and index + 1 < len(parts):
+            names.add(parts[index + 1])
     return names
 
 
-def _module_marks(module: ast.Module) -> set[str]:
+def _module_marks(module: ast.Module, roots: frozenset[str]) -> set[str]:
     """Marks from a module-level ``pytestmark``, which reach every test in the file.
 
-    Every form pytest honours: the plain assignment, the annotated one
-    (``pytestmark: list = [...]``) and an append to it. Only the name matters to
-    pytest, so only the name is looked for here.
+    Every form pytest honours, because pytest reads the attribute and not the
+    statement that made it: the plain assignment, the annotated one
+    (``pytestmark: list = [...]``), an augmented one, and a mutating call on the
+    list (``pytestmark.append(pytest.mark.skip)``, ``.extend``, ``.insert``).
     """
 
     names: set[str] = set()
     for node in module.body:
         if isinstance(node, ast.Assign):
             targets: list[ast.expr] = list(node.targets)
+            value: ast.expr | None = node.value
         elif isinstance(node, ast.AnnAssign | ast.AugAssign):
-            targets = [node.target]
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            # ``pytestmark.append(...)``: the call's own dotted name starts with
+            # the list it mutates, and its arguments are the marks it adds.
+            call = node.value
+            if _dotted(call.func)[:1] != ("pytestmark",):
+                continue
+            for argument in call.args:
+                names |= _marks(argument, roots)
+            continue
         else:
             continue
         if not any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in targets):
             continue
-        if node.value is not None:
-            names |= _marks(node.value)
+        if value is not None:
+            names |= _marks(value, roots)
     return names
 
 
-def _pytest_aliases(module: ast.Module) -> tuple[set[str], dict[str, str]]:
-    """What ``pytest`` and its escape hatches are called in this module.
+@dataclass(frozen=True)
+class _Aliases:
+    """What ``pytest``, ``pytest.mark`` and the calls that end a test are named in this module."""
 
-    ``import pytest as pt`` and ``from pytest import skip as stop`` are both
-    ordinary Python, and both hide a ``skip`` from a matcher that only knows the
-    spelling ``pytest.skip``. Resolve the names instead of assuming them.
+    modules: frozenset[str]
+    marks: frozenset[str]
+    calls: dict[str, str]
+
+
+def _pytest_aliases(module: ast.Module) -> _Aliases:
+    """Resolve those names instead of assuming them.
+
+    ``import pytest as pt``, ``from pytest import mark as pm`` and ``from
+    pytest import skip as stop`` are all ordinary Python, and each hides a
+    switch from a matcher that only knows the spelling ``pytest.mark.skip``.
     """
 
     modules = {"pytest"}
+    marks = {"mark"}
     calls: dict[str, str] = {}
     for node in ast.walk(module):
         if isinstance(node, ast.Import):
             modules |= {alias.asname or alias.name for alias in node.names if alias.name == "pytest"}
         elif isinstance(node, ast.ImportFrom) and node.module == "pytest":
+            marks |= {alias.asname or alias.name for alias in node.names if alias.name == "mark"}
             calls |= {alias.asname or alias.name: alias.name for alias in node.names if alias.name in _ESCAPE_CALLS}
-    return modules, calls
+    return _Aliases(modules=frozenset(modules), marks=frozenset(marks), calls=calls)
 
 
 def _first_statement(node: ast.AsyncFunctionDef | ast.FunctionDef) -> ast.stmt | None:
@@ -602,7 +653,7 @@ def _first_statement(node: ast.AsyncFunctionDef | ast.FunctionDef) -> ast.stmt |
     return None
 
 
-def _escape_call(node: ast.AST, modules: set[str], calls: dict[str, str]) -> str | None:
+def _escape_call(node: ast.AST, aliases: _Aliases) -> str | None:
     """``pytest.skip(...)`` and friends anywhere in the drill: a test may end itself at any depth."""
 
     for child in ast.walk(node):
@@ -614,14 +665,14 @@ def _escape_call(node: ast.AST, modules: set[str], calls: dict[str, str]) -> str
         if len(parts) == 1:
             # A bare name: whatever this module imported from pytest under it,
             # or the two spellings that mean nothing else inside a test.
-            imported = calls.get(parts[0])
+            imported = aliases.calls.get(parts[0])
             if imported in _ESCAPE_CALLS:
                 suffix = "" if imported == parts[0] else f" (pytest.{imported})"
                 return f"{parts[0]}(){suffix}"
             if imported is None and parts[0] in ("skip", "xfail"):
                 return f"{parts[0]}()"
             continue
-        if parts[0] in modules and parts[-1] in _ESCAPE_CALLS:
+        if parts[0] in aliases.modules and parts[-1] in _ESCAPE_CALLS:
             return f"{'.'.join(parts)}()"
     return None
 
@@ -629,8 +680,7 @@ def _escape_call(node: ast.AST, modules: set[str], calls: dict[str, str]) -> str
 def _switched_off(
     node: ast.AsyncFunctionDef | ast.FunctionDef,
     module_marks: set[str],
-    modules: set[str],
-    calls: dict[str, str],
+    aliases: _Aliases,
 ) -> str | None:
     """Why this drill never reaches its assertions, or ``None`` if it does.
 
@@ -650,11 +700,11 @@ def _switched_off(
     promise only sometimes.
     """
 
-    marks = module_marks | {mark for decorator in node.decorator_list for mark in _marks(decorator)}
+    marks = module_marks | {mark for decorator in node.decorator_list for mark in _marks(decorator, aliases.marks)}
     off = sorted(marks & _OFF_SWITCH_MARKS)
     if off:
         return " and ".join(f"a pytest.mark.{mark} mark applies to it" for mark in off)
-    escape = _escape_call(node, modules, calls)
+    escape = _escape_call(node, aliases)
     if escape:
         return f"it calls {escape}"
     first = _first_statement(node)
@@ -691,16 +741,16 @@ def _drills(suite: str) -> dict[str, _Drill]:
     """
 
     module = ast.parse(suite)
-    module_marks = _module_marks(module)
-    modules, calls = _pytest_aliases(module)
+    aliases = _pytest_aliases(module)
+    module_marks = _module_marks(module, aliases.marks)
     drills: dict[str, _Drill] = {}
     for node in module.body:
         if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and _DRILL_TEST_NAME.match(node.name):
             segment = ast.get_source_segment(suite, node)
-            own_marks = {mark for decorator in node.decorator_list for mark in _marks(decorator)}
+            own_marks = {mark for decorator in node.decorator_list for mark in _marks(decorator, aliases.marks)}
             drills[node.name] = _Drill(
                 body=_executable_source(segment) if segment else "",
-                switched_off=_switched_off(node, module_marks, modules, calls),
+                switched_off=_switched_off(node, module_marks, aliases),
                 selected=_SUITE_MARKER in module_marks | own_marks,
             )
     return drills
@@ -1081,6 +1131,35 @@ def test_guard_catches_an_assertion_parked_in_a_string() -> None:
     )
 
 
+def test_guard_catches_an_assertion_parked_in_a_value() -> None:
+    """And one keystroke further: a string that is assigned, or passed, runs nothing either.
+
+    Blanking only *statement* strings left this open -- ``parked = "assert
+    await _pin_rows() == []"`` kept the text in the body and covered the clause.
+    A literal whose contents parse as ``assert`` statements is blanked wherever
+    it sits, which is narrow enough that the drills' ordinary literals (the ones
+    mapped snippets quote) survive.
+    """
+
+    _assert_both_disconnect_clauses_uncovered(
+        DRILL_SUITE.replace(
+            _SWITCHED_OFF_DISCONNECT,
+            '    parked = "assert await _pin_rows() == []"\n'
+            '    _note("assert get_source_bulkhead().in_flight(scene.source_id) == 0")\n',
+            1,
+        )
+    )
+
+
+def test_a_literal_a_mapped_assertion_quotes_survives_the_blanking() -> None:
+    """The narrowness matters: several clauses map to assertions *about* a string."""
+
+    quoting = 'assert "response headers within 20s" in header_error["message"]'
+    assert quoting in DRILL_SUITE
+
+    assert _normalized(quoting) in _normalized(_executable_source(DRILL_SUITE))
+
+
 _SILENT_HEADERS_DRILL = "test_drill_silent_headers_send_nothing_and_leave_no_pin"
 _SILENT_HEADERS_DEF = f"async def {_SILENT_HEADERS_DRILL}("
 _STALL_DRILL = "test_drill_stall_fails_closed_and_opens_the_breaker"
@@ -1184,6 +1263,8 @@ def test_a_drill_that_leaves_before_it_asserts_is_switched_off(body: str, reason
         pytest.param('@pytest.mark.skip(reason="x")', "a pytest.mark.skip mark applies to it", id="called"),
         pytest.param('@pytest.mark.skipif(True, reason="x")', "a pytest.mark.skipif mark applies to it", id="skipif"),
         pytest.param("@mark.xfail", "a pytest.mark.xfail mark applies to it", id="imported-mark"),
+        pytest.param("@pm.skip", "a pytest.mark.skip mark applies to it", id="aliased-mark"),
+        pytest.param("@pt.mark.skip", "a pytest.mark.skip mark applies to it", id="aliased-module"),
         pytest.param(
             '@pytest.mark.parametrize("n", [pytest.param(1, marks=pytest.mark.skip)])',
             "a pytest.mark.skip mark applies to it",
@@ -1195,7 +1276,8 @@ def test_a_mark_that_reaches_a_drill_switches_it_off(decorator: str, reason: str
     """Bare or called, on the drill or on one of its cases, and whatever ``mark`` was imported as."""
 
     suite = (
-        f"import pytest\nfrom pytest import mark\n\npytestmark = pytest.mark.{_SUITE_MARKER}\n\n\n"
+        "import pytest\nimport pytest as pt\nfrom pytest import mark\nfrom pytest import mark as pm\n\n"
+        f"pytestmark = pytest.mark.{_SUITE_MARKER}\n\n\n"
         f"{decorator}\ndef test_drill_x() -> None:\n    assert x == 1\n"
     )
 
@@ -1207,15 +1289,23 @@ def test_a_mark_that_reaches_a_drill_switches_it_off(decorator: str, reason: str
     [
         pytest.param(f"pytestmark = [pytest.mark.{_SUITE_MARKER}, pytest.mark.skip]", id="plain"),
         pytest.param(f"pytestmark: list = [pytest.mark.{_SUITE_MARKER}, pytest.mark.skip]", id="annotated"),
-        pytest.param(f"pytestmark = [pytest.mark.{_SUITE_MARKER}]\npytestmark += [pytest.mark.skip]", id="appended"),
+        pytest.param(f"pytestmark = [pytest.mark.{_SUITE_MARKER}]\npytestmark += [pytest.mark.skip]", id="augmented"),
+        pytest.param(
+            f"pytestmark = [pytest.mark.{_SUITE_MARKER}]\npytestmark.append(pytest.mark.skip)", id="append-call"
+        ),
+        pytest.param(
+            f"pytestmark = [pytest.mark.{_SUITE_MARKER}]\npytestmark.extend([pytest.mark.skip])", id="extend-call"
+        ),
+        pytest.param(f"from pytest import mark as pm\n\npytestmark = [pm.{_SUITE_MARKER}, pm.skip]", id="aliased-mark"),
     ],
 )
 def test_a_module_wide_skip_switches_every_drill_off(assignment: str) -> None:
     """``pytestmark`` is the one switch that is nowhere near the drill it disables.
 
-    pytest reads the module attribute, so every way of writing it counts: the
-    annotated assignment and the append were both invisible to the first cut of
-    this check, and both really do skip the drills.
+    pytest reads the module *attribute*, so every way of arriving at it counts:
+    the annotated assignment, the augmented one and a mutating call on the list
+    were all invisible to the first cut of this check, and all of them really do
+    skip the drills.
     """
 
     suite = f"import pytest\n\n{assignment}\n\n\ndef test_drill_x() -> None:\n    assert x == 1\n"

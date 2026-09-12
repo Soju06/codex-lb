@@ -32,3 +32,5 @@
       despite a stale monthly row
 - [x] 4.10 Unit: a sibling recorded by the same fetch still vetoes
 - [x] 4.11 Unit: an unrecognized plan still honors a reported exhausted sibling
+- [x] 4.12 Unit: a sibling lagging the anchored row at all is stale (pins the
+      boundary against reintroducing a grace period)

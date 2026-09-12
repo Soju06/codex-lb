@@ -11,6 +11,7 @@ import pytest
 
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
+from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.load_balancer import effective_routing_tunables
 
@@ -2073,3 +2074,53 @@ async def test_reconcile_keeps_unknown_plan_blocked_when_a_reported_sibling_is_e
         weekly_reset_at,
         blocked_at,
     )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_treats_a_slightly_lagging_sibling_as_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Liveness is exactly "written by the same fetch", with no grace period.
+
+    One usage fetch stamps every window it reports with a single captured
+    timestamp, so a sibling that lags the anchored window's newest row at all
+    was not part of that fetch. Pinning the boundary at a small lag keeps a
+    tolerance from being reintroduced.
+    """
+
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    weekly_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_pro_lagging_sibling",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="pro",
+        reset_at=weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
+    lagging_sibling = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=100.0,
+        reset_at=int(now + 2 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(naive_utc_to_epoch(after.recorded_at) - 1),
+        window_minutes=10_080,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={account.id: after},
+            secondary={account.id: lagging_sibling},
+        ),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 1
+    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)

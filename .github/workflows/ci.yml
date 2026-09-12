@@ -86,10 +86,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Validate canonical OpenSpec capabilities
         run: npx --yes @fission-ai/openspec@1.11.0 validate --specs
+
+      - name: Strictly validate changed OpenSpec folders
+        run: python3 .github/scripts/validate_changed_openspec.py
 
   frontend-lint:
     name: Frontend lint (eslint)

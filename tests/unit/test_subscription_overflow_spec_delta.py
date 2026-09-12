@@ -5,6 +5,15 @@ deltas quote the closed enums, error codes, hint texts and request-log labels
 that ``app/modules/proxy/overflow.py`` defines; these tests fail when either
 side drifts, the way ``tests/unit/test_metrics.py`` does for the
 ``codex_lb_model_source_*`` metric names.
+
+The closed enums -- the request-log ``source`` values, the metric ``route``
+labels and the dispatch kinds -- are discovered from ``overflow.py`` by import
+(``tests/unit/_overflow_constants.py``) rather than spelled here, so a value
+added to the authority grows the expected set instead of slipping past guards
+that only knew the values which existed when they were written. The removal
+direction is covered by comparing the delta's own prose enumerations of the
+closed ``route`` and dispatch-``kind`` sets against the discovered enum, so a
+retired label cannot stay advertised by the normative spec either.
 """
 
 from __future__ import annotations
@@ -17,6 +26,14 @@ from typing import get_args
 import pytest
 
 from app.modules.proxy import overflow
+from tests.unit._overflow_constants import (
+    BACKEND_MODULE,
+    DISPATCH_KIND_PREFIX,
+    ROUTE_PREFIX,
+    SOURCE_PREFIX,
+    discovery_error,
+    overflow_constants,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHANGE = REPO_ROOT / "openspec/changes/add-subscription-overflow-model-source"
@@ -35,13 +52,58 @@ _BACKTICKED = re.compile(r"`([^`\n]+)`")
 # observability delta may not quote any such token that the enum lacks.
 _OUTCOME_SHAPE = re.compile(r"^(dispatched|bounced|declined|pinned|pin_commit|decision)_[a-z_]+$")
 
+# ``route`` labels and dispatch kinds are ordinary words, so they have no shape
+# the outcome regex above could match on. The delta enumerates them in prose
+# instead -- "closed `route` set `a`, `b`, `c`", "`kind` `a`, `b` or `c`" -- and
+# each such run is compared to the discovered enum in both directions.
+# The connectors are comma-anchored on purpose. A bare ``and`` before a backticked
+# token starts a new clause in this delta ("... `compact` and `outcome` in the closed
+# set"), so absorbing it would misread the live spec; a run cut short by an
+# unrecognised connector still fails the comparison whenever the dropped token is a
+# live label.
+_ENUMERATED_RUN = re.compile(r"`[a-z0-9_]+`(?:(?:, |, and |, or | or )`[a-z0-9_]+`)*")
+_ROUTE_ENUMERATION = re.compile(r"`route`(?: set| in) (?=`)")
+_KIND_ENUMERATION = re.compile(r"(?:for direct source routing and |`kind` (?=`))")
+
+# The closed enums the deltas and the docs must keep naming, read off the authority.
+SOURCE_LITERALS = overflow_constants(SOURCE_PREFIX)
+ROUTE_LABELS = overflow_constants(ROUTE_PREFIX)
+DISPATCH_KINDS = overflow_constants(DISPATCH_KIND_PREFIX)
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _rel(path: Path) -> str:
+    return path.relative_to(REPO_ROOT).as_posix()
+
+
 def _backticked(path: Path) -> set[str]:
     return set(_BACKTICKED.findall(_read(path)))
+
+
+def _enumerations(text: str, anchor: re.Pattern[str]) -> list[set[str]]:
+    """Every backticked run the delta enumerates right after ``anchor``."""
+    runs: list[set[str]] = []
+    for match in anchor.finditer(text):
+        run = _ENUMERATED_RUN.match(text, match.end())
+        assert run is not None, text[match.start() : match.end() + 80]
+        runs.append(set(_BACKTICKED.findall(run.group(0))))
+    return runs
+
+
+@pytest.mark.parametrize("prefix", [SOURCE_PREFIX, ROUTE_PREFIX, DISPATCH_KIND_PREFIX])
+def test_discovered_enums_are_trustworthy(prefix: str) -> None:
+    """Sanity-check the authority before comparing the deltas against it.
+
+    Every enum expectation below is discovered by name prefix, so an empty,
+    duplicated or unexported set would make those comparisons pass vacuously
+    instead of failing.
+    """
+    error = discovery_error(prefix, overflow_constants(prefix))
+
+    assert error is None, error
 
 
 def test_observability_delta_names_exactly_the_closed_outcome_enum() -> None:
@@ -69,24 +131,71 @@ def test_observability_delta_names_the_routes_and_metrics() -> None:
     quoted = _backticked(_OBSERVABILITY_DELTA)
     text = _read(_OBSERVABILITY_DELTA)
 
-    for route in (
-        overflow.ROUTE_CODEX_RESPONSES,
-        overflow.ROUTE_V1_RESPONSES,
-        overflow.ROUTE_WEBSOCKET_HANDSHAKE,
-        overflow.ROUTE_WEBSOCKET,
-        overflow.ROUTE_COMPACT,
-    ):
+    for route in sorted(ROUTE_LABELS.values()):
         assert route in quoted, route
     assert overflow.OVERFLOW_TOTAL_METRIC in text
     assert overflow.BREAKER_STATE_METRIC in text
-    for kind in (overflow.DISPATCH_KIND_FRESH, overflow.DISPATCH_KIND_PINNED, overflow.DISPATCH_KIND_ANCHOR):
+    for kind in sorted(DISPATCH_KINDS.values()):
         assert kind in quoted, kind
-    assert overflow.REQUEST_LOG_SOURCE_FRESH in quoted
-    assert overflow.REQUEST_LOG_SOURCE_PINNED in quoted
     # The design's separate overflow result counter was folded into the dispatch
     # counter; naming it would also trip the model-source metric drift guard's
     # successor regex once it covers the overflow prefix.
     assert "codex_lb_subscription_overflow_source_result_total" not in text
+
+
+def test_observability_delta_enumerates_exactly_the_closed_route_and_kind_sets() -> None:
+    """The other direction: the delta may not advertise a label the runtime cannot emit.
+
+    Discovery grows the expected set when a label is *added*. A retired
+    ``ROUTE_*`` / ``DISPATCH_KIND_*`` constant would just shrink the loops above,
+    leaving the normative delta enumerating a value the metric can no longer
+    carry -- so each prose enumeration is compared to the enum as a set.
+    """
+    text = _read(_OBSERVABILITY_DELTA)
+
+    for family, anchor, expected in (
+        ("`route`", _ROUTE_ENUMERATION, set(ROUTE_LABELS.values())),
+        ("dispatch `kind`", _KIND_ENUMERATION, set(DISPATCH_KINDS.values())),
+    ):
+        runs = _enumerations(text, anchor)
+
+        assert runs, (
+            f"{_rel(_OBSERVABILITY_DELTA)} no longer enumerates the closed {family} set in a shape "
+            f"this guard can read; the reverse check would pass vacuously"
+        )
+        for run in runs:
+            assert run == expected, {
+                "family": family,
+                "in_spec_only": sorted(run - expected),
+                "in_code_only": sorted(expected - run),
+            }
+
+
+def test_enumeration_parser_reads_the_connectors_the_delta_uses() -> None:
+    """The run must not stop early on a comma connector, nor swallow the next clause."""
+    oxford = _enumerations(
+        "the closed `route` set `a`, `b`, and `retired` and the closed `outcome` set", _ROUTE_ENUMERATION
+    )
+
+    assert oxford == [{"a", "b", "retired"}], oxford
+    # The delta's second enumeration really ends this way; a bare ``and`` before a
+    # backticked token starts a new clause and must not join the run.
+    clause = _enumerations("with `route` in `a`, `b` and `outcome` in the closed set", _ROUTE_ENUMERATION)
+
+    assert clause == [{"a", "b"}], clause
+
+
+def test_request_log_source_values_are_quoted_in_every_normative_surface() -> None:
+    """Both normative deltas and the operator docs name every attributable ``source`` value."""
+    for path in (_ROUTING_DELTA, _OBSERVABILITY_DELTA, _ROUTING_DOC):
+        quoted = _backticked(path)
+        missing = sorted(value for value in SOURCE_LITERALS.values() if value not in quoted)
+
+        assert missing == [], (
+            f"{_rel(path)} does not quote the request-log `source` value(s) {missing} that "
+            f"{BACKEND_MODULE} defines; every attributable source value must be named in the "
+            f"normative deltas and the operator docs"
+        )
 
 
 @pytest.mark.parametrize(
@@ -105,7 +214,7 @@ def test_compat_delta_quotes_every_overflow_error_code(code: str) -> None:
     assert code in _backticked(_COMPAT_DELTA), code
 
 
-def test_routing_delta_quotes_the_row_and_pin_failure_codes() -> None:
+def test_routing_delta_quotes_the_pin_failure_codes_and_the_job_headers() -> None:
     quoted = _backticked(_ROUTING_DELTA)
 
     for token in (
@@ -115,8 +224,6 @@ def test_routing_delta_quotes_the_row_and_pin_failure_codes() -> None:
         overflow.UNSUPPORTED_INPUT_CODE,
         overflow.MODEL_SOURCE_UNAVAILABLE_CODE,
         overflow.MODEL_SOURCE_BUSY_CODE,
-        overflow.REQUEST_LOG_SOURCE_FRESH,
-        overflow.REQUEST_LOG_SOURCE_PINNED,
         overflow.SUBAGENT_HEADER,
         overflow.MEMGEN_HEADER,
         *sorted(overflow.BACKGROUND_ALLOWLIST),

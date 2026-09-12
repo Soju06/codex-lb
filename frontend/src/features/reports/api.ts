@@ -1,5 +1,9 @@
 import { get } from "@/lib/api-client";
-import { ReportsResponseSchema, ReportsOptionsResponseSchema } from "./schemas";
+import {
+  ReportsResponseSchema,
+  ReportsOptionsResponseSchema,
+  ThreadIdentityResponseSchema,
+} from "./schemas";
 
 export type ReportsParams = {
   startDate?: string;
@@ -38,4 +42,12 @@ export function getReports(params: ReportsParams = {}) {
 
 export function getReportsOptions(params: Omit<ReportsParams, "model" | "useragent"> = {}) {
   return get(`/api/reports/options${reportQuery(params)}`, ReportsOptionsResponseSchema);
+}
+
+// Thread identity is deliberately scoped by the date range alone: an account
+// or model filter would change what "accounts per conversation" means.
+export function getThreadIdentity(
+  params: Pick<ReportsParams, "startDate" | "endDate" | "timezone"> = {},
+) {
+  return get(`/api/reports/thread-identity${reportQuery(params)}`, ThreadIdentityResponseSchema);
 }

@@ -41229,8 +41229,13 @@ async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quota(monkeypatch):
+@pytest.mark.parametrize("deterministic_failover_enabled", [True, False])
+async def test_stream_previsible_quota_replay_respects_deterministic_failover(
+    monkeypatch,
+    deterministic_failover_enabled: bool,
+):
     settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = deterministic_failover_enabled
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     owner_account = _make_account("acc_stream_replay_owner")
@@ -41299,10 +41304,17 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
 
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": session_id})]
 
-    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
-    assert len(selection_calls) >= 2
-    assert [streamed.previous_response_id for streamed in streamed_payloads] == [previous_response_id, None]
-    assert streamed_payloads[1].input == full_input
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    if deterministic_failover_enabled:
+        assert terminal["type"] == "response.completed"
+        assert len(selection_calls) >= 2
+        assert [streamed.previous_response_id for streamed in streamed_payloads] == [previous_response_id, None]
+        assert streamed_payloads[1].input == full_input
+    else:
+        assert terminal["type"] == "response.failed"
+        assert terminal["response"]["error"]["code"] == "usage_limit_reached"
+        assert len(selection_calls) == 1
+        assert [streamed.previous_response_id for streamed in streamed_payloads] == [previous_response_id]
 
 
 @pytest.mark.asyncio

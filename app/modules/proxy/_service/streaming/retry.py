@@ -110,7 +110,11 @@ from app.modules.proxy.helpers import (
 )
 from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
-from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_suffix_retains_prior_output,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -193,6 +197,40 @@ def _verified_cross_transport_fresh_replay(
     if not responses_payload_is_account_neutral_fresh_replay(fresh_payload.to_replay_safety_payload()):
         return None
     return fresh_payload
+
+
+def _project_unanchored_account_neutral_replay(payload: ResponsesRequest) -> ResponsesRequest | None:
+    """Strip response-owned bookkeeping from an otherwise self-contained request."""
+
+    if payload.previous_response_id not in (None, "") or payload.conversation not in (None, ""):
+        return None
+    input_value = payload.input
+    if not isinstance(input_value, list) or not input_value or extract_input_file_ids(input_value):
+        return None
+    last_assistant_index: int | None = None
+    for index in range(len(input_value) - 1, -1, -1):
+        item = input_value[index]
+        if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "assistant":
+            last_assistant_index = index
+            break
+    if last_assistant_index is None or last_assistant_index == 0:
+        return None
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        cast(list[Any], input_value),
+        stored_count=last_assistant_index,
+    )
+    if projection is None:
+        return None
+    if not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    ):
+        return None
+    projected = payload.model_copy(update={"input": projection.input_items})
+    if not responses_payload_is_account_neutral_fresh_replay(projected.to_replay_safety_payload()):
+        return None
+    return projected
 
 
 def _effective_http_downstream_transport_policy(
@@ -946,6 +984,32 @@ class _StreamingRetryMixin:
             affinity = replace(affinity, reallocate_sticky=True)
             logger.info(
                 "cross_transport_verified_fresh_replay request_id=%s outcome=%s account_id=%s",
+                request_id,
+                outcome,
+                account_id,
+            )
+            return True
+
+        def _move_previsible_quota_rejection_from_soft_owner(*, account_id: str, outcome: str) -> bool:
+            """Make a rejected full resend portable without crossing hard ownership."""
+
+            nonlocal affinity, payload, payload_replay_required_account_id
+            if (
+                payload_replay_required_account_id != account_id
+                or require_preferred_account
+                or file_preferred_account_id is not None
+                or turn_state_owner_account_id is not None
+                or routing_strategy == "single_account"
+            ):
+                return False
+            projected = _project_unanchored_account_neutral_replay(payload)
+            if projected is None:
+                return False
+            payload = projected
+            payload_replay_required_account_id = None
+            affinity = replace(affinity, reallocate_sticky=True)
+            logger.info(
+                "previsible_quota_account_neutral_replay request_id=%s outcome=%s account_id=%s",
                 request_id,
                 outcome,
                 account_id,
@@ -2627,6 +2691,15 @@ class _StreamingRetryMixin:
                                     http_status=tex.status_code,
                                 )
                                 if resilience.deterministic_failover_enabled:
+                                    if (
+                                        not settlement.downstream_visible
+                                        and attempt < max_attempts - 1
+                                        and classified["failure_class"] in ("rate_limit", "quota")
+                                    ):
+                                        _move_previsible_quota_rejection_from_soft_owner(
+                                            account_id=account.id,
+                                            outcome="owner_previsible_status_quota_rejection",
+                                        )
                                     action = failover_decision(
                                         failure_class=classified["failure_class"],
                                         downstream_visible=settlement.downstream_visible,
@@ -2717,10 +2790,18 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     excluded_account_ids.add(account.id)
-                                    _move_verified_fresh_replay_from_owner(
+                                    verified_owner_replay_moved = _move_verified_fresh_replay_from_owner(
                                         account_id=account.id,
                                         outcome="owner_previsible_failure",
                                     )
+                                    if not verified_owner_replay_moved and classified["failure_class"] in (
+                                        "rate_limit",
+                                        "quota",
+                                    ):
+                                        _move_previsible_quota_rejection_from_soft_owner(
+                                            account_id=account.id,
+                                            outcome="owner_previsible_quota_rejection",
+                                        )
                                     break
                                 await proxy._handle_stream_error(
                                     account,
@@ -2870,10 +2951,23 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
-                    _move_verified_fresh_replay_from_owner(
+                    failure_class = classify_upstream_failure(
+                        error_code=exc.code,
+                        error=exc.error,
+                        http_status=None,
+                        phase="first_event",
+                    )["failure_class"]
+                    if not resilience.deterministic_failover_enabled and failure_class in ("rate_limit", "quota"):
+                        break
+                    verified_owner_replay_moved = _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
                     )
+                    if not verified_owner_replay_moved and failure_class in ("rate_limit", "quota"):
+                        _move_previsible_quota_rejection_from_soft_owner(
+                            account_id=account.id,
+                            outcome="owner_previsible_retryable_quota_rejection",
+                        )
                     continue
                 except _TerminalStreamError:
                     if settlement.settlement_order_required:
@@ -3436,10 +3530,18 @@ class _StreamingRetryMixin:
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
-                                _move_verified_fresh_replay_from_owner(
+                                verified_owner_replay_moved = _move_verified_fresh_replay_from_owner(
                                     account_id=account.id,
                                     outcome="owner_post_refresh_failure",
                                 )
+                                if not verified_owner_replay_moved and classified["failure_class"] in (
+                                    "rate_limit",
+                                    "quota",
+                                ):
+                                    _move_previsible_quota_rejection_from_soft_owner(
+                                        account_id=account.id,
+                                        outcome="owner_post_refresh_quota_rejection",
+                                    )
                                 excluded_account_ids.add(account.id)
                                 continue
                             health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)

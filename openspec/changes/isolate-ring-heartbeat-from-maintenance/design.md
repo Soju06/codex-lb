@@ -64,7 +64,7 @@ The registration loop keeps its existing exponential retry. Periodic workers do 
 
 The health query will return active members plus the probed replica's own row even when that row is stale. `BridgeRingInfo` gains nullable `heartbeat_age_seconds`, computed from one captured UTC instant and clamped to zero for future-skewed timestamps. The active-ring fingerprint and size continue to use only fresh rows.
 
-Readiness retains the existing empty-ring exemption after registration. A stale single replica therefore remains routable while its heartbeat age and inactive membership remain visible. Tightening that policy is deferred to a separate owner-approved change, as requested in PR #2133. Registration-incomplete and ring-metadata-error precedence, bridge-disabled readiness, and `/health/live` remain unchanged.
+Readiness retains the existing empty-ring exemption after registration. A stale single replica therefore remains routable while its heartbeat age and inactive membership remain visible. Tightening that policy is deferred to a separate owner-approved change, as requested in PR #2133. Registration-incomplete and ring-metadata-error precedence remain unchanged. When the bridge is disabled, a non-draining replica with a successful database probe remains ready regardless of bridge schema, registration, or ring state; `/health/live` remains independent of ring state.
 
 Alternatives rejected:
 
@@ -85,9 +85,9 @@ Failure logs include consecutive failure count and last-success age; the first s
 
 ### D6. Shutdown cancels periodic owners before stale-marking
 
-The registration/periodic coordinator remains rooted by lifespan. Shutdown cancels registration and starts periodic cleanup immediately under one monotonic deadline, with no additive grace period. Once registration and heartbeat have stopped, lifespan attempts `mark_stale()` even if maintenance remains active: those maintenance owners cannot write the ring row. Full drainage is still required for the SQLite clean marker. Process-level ring supervisors use their own lifecycle primitives rather than request-scoped timing seams; their allowances remain explicit in the architecture guard.
+The registration/periodic coordinator remains rooted by lifespan. Shutdown cancels registration and starts periodic cleanup immediately under the remaining process shutdown deadline, with no additive grace period. Periodic drainage and `mark_stale()` share that one absolute deadline. Once registration and heartbeat have stopped, lifespan attempts `mark_stale()` with the remaining time even if maintenance remains active: those maintenance owners cannot write the ring row. Full drainage is still required for the SQLite clean marker. Process-level ring supervisors use their own lifecycle primitives rather than request-scoped timing seams; their allowances remain explicit in the architecture guard.
 
-Partial startup is handled explicitly: shutdown may cancel registration before any periodic owner exists. All cleanup paths are idempotent, and no phase shares an `AsyncSession` with another task. A registration or periodic owner that does not settle inside the shutdown bound suppresses the SQLite clean-shutdown marker, so the next startup does not trust a teardown that raced live database work.
+Partial startup is handled explicitly: shutdown may cancel registration before any periodic owner exists. All cleanup paths are idempotent, and no phase shares an `AsyncSession` with another task. Stale-marking is observed with `asyncio.wait()` rather than cancellation-waiting `wait_for()` so a database session close cannot overrun the process deadline; a late task remains strongly owned, receives cancellation, and suppresses the SQLite clean marker. Any registration or periodic owner that does not settle inside the shutdown bound does the same, so the next startup does not trust a teardown that raced live database work.
 
 ## Risks / Trade-offs
 

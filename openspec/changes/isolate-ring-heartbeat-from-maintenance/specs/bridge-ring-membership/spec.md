@@ -39,13 +39,15 @@ Each registered replica MUST refresh its ring row via an upsert heartbeat every 
 - **WHEN** graceful shutdown begins
 - **THEN** the runtime cancels and drains the heartbeat and maintenance owners within the existing shutdown bounds
 - **AND** it stops registration and heartbeat renewal before aging the shared ring row for shutdown
-- **AND** a remaining maintenance owner MUST NOT prevent stale-marking once both ring writers have stopped
+- **AND** periodic drainage and stale-marking consume one shared absolute shutdown deadline without starting an additive timeout
+- **AND** a remaining maintenance owner MUST NOT prevent stale-marking once both ring writers have stopped and shared deadline time remains
+- **AND** a stale-mark operation that exceeds the deadline remains strongly owned, receives cancellation, and suppresses the SQLite clean-shutdown marker
 - **AND** if any registration or periodic owner remains active after the bound, the runtime withholds the SQLite clean-shutdown marker
 
 ## ADDED Requirements
 
 ### Requirement: Heartbeat diagnostics preserve readiness policy
-When the HTTP Responses session bridge is enabled and bridge registration has completed, `/health/ready` MUST preserve the empty-active-ring exemption. Absence from a nonempty active ring MUST remain unready. Liveness MUST remain independent of ring membership, and bridge-disabled deployments MUST retain their existing readiness behavior.
+When the HTTP Responses session bridge is enabled and bridge registration has completed, `/health/ready` MUST preserve the empty-active-ring exemption. Absence from a nonempty active ring MUST remain unready. Liveness MUST remain independent of ring membership. When the bridge is disabled, a non-draining replica whose database probe succeeds MUST return HTTP 200 from `/health/ready` regardless of bridge schema readiness, registration state, ring lookup errors, or ring membership.
 
 #### Scenario: Single replica ages out of an empty ring
 - **GIVEN** bridge registration completed for the only replica
@@ -58,6 +60,13 @@ When the HTTP Responses session bridge is enabled and bridge registration has co
 - **GIVEN** bridge registration completed and the probed replica has a fresh ring heartbeat
 - **WHEN** `/health/ready` checks infrastructure readiness
 - **THEN** ring membership does not make the probe fail
+
+#### Scenario: Bridge-disabled readiness ignores ring state
+- **GIVEN** the HTTP Responses session bridge is disabled
+- **AND** the replica is not draining and its database probe succeeds
+- **WHEN** `/health/ready` is requested
+- **THEN** the probe returns HTTP 200 with status `ok`
+- **AND** bridge schema readiness, registration state, ring lookup errors, and ring membership do not make the probe fail
 
 #### Scenario: Liveness ignores stale membership
 - **GIVEN** the probed replica is absent from the active ring

@@ -2156,3 +2156,53 @@ async def test_reconcile_recovers_a_short_window_reset_while_the_long_window_is_
 
     assert recovered == 1
     assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recovers_when_the_primary_slot_carries_a_weekly_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A weekly row in the primary slot is a long window, not the short window.
+
+    Upstream delivers a weekly quota through the primary slot for some accounts
+    (`should_use_weekly_primary`). Reading that row as the 5h short window would
+    let a spent weekly window withhold a long-window recovery, which is exactly
+    the case this guard is scoped to stay out of.
+    """
+
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    long_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_pro_weekly_primary_slot",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="pro",
+        reset_at=long_reset_at,
+        blocked_at=blocked_at,
+    )
+    before, after = _long_window_block(account.id, now=now, long_reset_at=long_reset_at)
+    weekly_row_in_primary_slot = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=100.0,
+        reset_at=int(now + 2 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=10_080,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={account.id: weekly_row_in_primary_slot},
+            secondary={account.id: after},
+        ),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 1
+    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)

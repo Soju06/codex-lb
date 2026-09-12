@@ -13,7 +13,7 @@ from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
 from app.core.plan_types import normalize_account_plan_type
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
-from app.core.usage import capacity_for_plan
+from app.core.usage import capacity_for_plan, is_primary_window_minutes
 from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
@@ -464,8 +464,12 @@ def _short_window_blocks_recovery(entry: UsageHistory | None, *, account: Accoun
     duplicate ``apply_usage_quota`` and the weekly-shape normalization that own
     that question.
 
-    Two exclusions:
+    Three exclusions:
 
+    * A primary-slot row is only the short window when it reports a short
+      window's duration. Upstream also delivers a weekly quota through the
+      primary slot (``should_use_weekly_primary``), and that row is a long
+      window wearing the short window's slot.
     * A slot known to carry zero capacity for the plan is not a window. The Free
       primary row is a normalization artifact of the monthly-only payload, not a
       live 5h window, and mirrors the monthly percentage. An *unknown* capacity
@@ -479,6 +483,8 @@ def _short_window_blocks_recovery(entry: UsageHistory | None, *, account: Accoun
     """
 
     if entry is None or entry.used_percent < 100.0:
+        return False
+    if entry.window_minutes is not None and not is_primary_window_minutes(entry.window_minutes):
         return False
     capacity = capacity_for_plan(account.plan_type, "primary")
     if capacity is not None and capacity <= 0:

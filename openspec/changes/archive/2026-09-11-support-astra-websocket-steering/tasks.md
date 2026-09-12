@@ -43,3 +43,4 @@
 - [x] 3.28 Reject new steers for a retired parent before admission or dispatch; prove delayed first acknowledgment and failure cannot claim a retry, while explicit creates and other parents retain their lifecycles and accounting
 - [x] 3.29 Reset elapsed windows of newly applicable limits before steering reconciliation; prove admission against the fresh window on the WebSocket route
 - [x] 3.30 Re-reserve an existing reservation item in the live window when its limit window advanced; prove the additional steer is admitted and settles once on the WebSocket route
+- [x] 3.31 Retire a steering parent when its automatic successor is assigned while queued steers remain unacknowledged; prove late successors are suppressed, unrelated creates are never claimed, and acknowledged steers consume no history

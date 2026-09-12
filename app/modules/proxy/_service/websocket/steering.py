@@ -274,7 +274,19 @@ def assign_websocket_created_request_state(
         request_state.request_text = None
         request_state.fresh_upstream_request_text = None
         request_state.fresh_upstream_request_is_retry_safe = False
-    control.steering_continuations.pop(request_state.steering_parent_response_id, None)
+    parent_key = request_state.steering_parent_response_id
+    if (
+        parent_key is not None
+        and len(continuation.submissions) > 1
+        and not all(item.acknowledged for item in continuation.submissions)
+    ):
+        # Upstream acknowledges a steer before the successor it caused, so an
+        # unacknowledged queued frame may still be processed after this successor
+        # started and produce a late successor of its own. Retire the parent now
+        # so that late successor is suppressed instead of FIFO-matched.
+        control.rejected_steering_parent_ids.add(parent_key)
+        retire_steering_history_if_full(control)
+    control.steering_continuations.pop(parent_key, None)
     return request_state
 
 
@@ -680,9 +692,12 @@ async def process_websocket_steering_event(
             )
         if submission is None:
             return
-        if event_type == "response.steer.accepted" and isinstance(steer_id, str):
-            submission.id = steer_id
+        if event_type == "response.steer.accepted":
+            submission.acknowledged = True
+            if isinstance(steer_id, str):
+                submission.id = steer_id
         elif event_type == "response.steer.pending":
+            submission.acknowledged = True
             required = payload.get("required_input")
             if payload.get("reason") == "waiting_for_required_input" and isinstance(required, list):
                 continuation.required_input = required

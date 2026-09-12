@@ -16,6 +16,7 @@ from app.core.clients.websocket_dispatch import current_websocket_send_callback
 from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.websocket import mixin as websocket_mixin
 from tests.unit.test_proxy_utils import (
     _make_account,
     _make_proxy_settings,
@@ -1526,3 +1527,159 @@ async def test_automatic_successor_cannot_claim_registered_unsent_replacement(mo
     ]
     assert [call.args[0].reservation_id for call in released.await_args_list if call.args[0]] == ["res_1"]
     assert all(state.response_create_admission is None and not state.response_create_gate_acquired for state in states)
+
+
+@pytest.mark.asyncio
+async def test_successor_created_before_queued_steer_is_acknowledged_retires_parent(monkeypatch):
+    first = {"type": "response.steer", "previous_response_id": "r1", "input": "First correction"}
+    second = {**first, "input": "Second correction"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (first, saw("response.created", "r1")),
+            (second, saw("response.steer.accepted")),
+            (create(input_items="Unrelated"), saw("response.created", "r2")),
+        ]
+    )
+    socket.finish_when = lambda event: saw("response.completed", "r3")([event])
+    # The second frame's write returns before the reader sees the successor the first steer caused.
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [{"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}}],
+            [response("response.incomplete", "r1"), response("response.created", "r2", parent="r1")],
+            [
+                {
+                    "type": "response.steer.failed",
+                    "steer": {"id": "s2", "previous_response_id": "r1"},
+                    "error": {"code": "response_already_started", "message": "Rejected"},
+                },
+                response("response.created", "r-late", parent="r1"),
+                response("response.completed", "r-late", parent="r1"),
+                response("response.completed", "r2", parent="r1"),
+                response("response.created", "r3"),
+                response("response.completed", "r3"),
+            ],
+        ]
+    )
+    _, reservations, settled, released, logs = await run_socket(monkeypatch, socket, upstream)
+    assert [frame["type"] for frame in upstream.sent] == [
+        "response.create",
+        "response.steer",
+        "response.steer",
+        "response.create",
+    ]
+    assert len(reservations) == 3
+    assert [(value[0], value[3]) for value in settled] == [("res_0", "r1"), ("res_1", "r2"), ("res_2", "r3")]
+    released.assert_not_awaited()
+    assert {row["request_id"] for row in logs.calls} == {"r1", "r2", "r3"}
+    assert not any(event.get("response", {}).get("id") == "r-late" for event in socket.sent)
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_queued_steers_do_not_consume_correlation_history(monkeypatch):
+    first = {"type": "response.steer", "previous_response_id": "r1", "input": "First correction"}
+    second = {**first, "input": "Second correction"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (first, saw("response.created", "r1")),
+            (second, saw("response.steer.accepted")),
+        ]
+    )
+    socket.finish_when = lambda event: saw("response.completed", "r2")([event])
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [{"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}}],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s2", "previous_response_id": "r1"}},
+                response("response.completed", "r1"),
+                response("response.created", "r2", parent="r1"),
+                response("response.completed", "r2", parent="r1"),
+            ],
+        ]
+    )
+    controls = []
+    original_assign = websocket_mixin.assign_websocket_created_request_state
+
+    def assign(payload, **kwargs):
+        controls.append(kwargs["control"])
+        return original_assign(payload, **kwargs)
+
+    monkeypatch.setattr(websocket_mixin, "assign_websocket_created_request_state", assign)
+    _, _, settled, _, _ = await run_socket(monkeypatch, socket, upstream)
+    assert [(value[0], value[3]) for value in settled] == [("res_0", "r1"), ("res_1", "r2")]
+    assert controls and all(control.rejected_steering_parent_ids == set() for control in controls)
+
+
+@pytest.mark.asyncio
+async def test_successor_created_during_queued_steer_dispatch_keeps_correlation(monkeypatch):
+    first = {"type": "response.steer", "previous_response_id": "r1", "input": "First correction"}
+    second = {**first, "input": "Second correction"}
+    socket = ScriptedSocket(
+        [
+            (create(), lambda _: True),
+            (first, saw("response.created", "r1")),
+            (second, saw("response.steer.accepted")),
+            (create(input_items="Unrelated"), saw("response.created", "r2")),
+        ]
+    )
+    socket.finish_when = lambda event: saw("response.completed", "r3")([event])
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [{"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}}],
+            [],
+            [
+                {
+                    "type": "response.steer.failed",
+                    "steer": {"id": "s2", "previous_response_id": "r1"},
+                    "error": {"code": "response_already_started", "message": "Rejected"},
+                },
+                response("response.created", "r-late", parent="r1"),
+                response("response.completed", "r-late", parent="r1"),
+                response("response.completed", "r2", parent="r1"),
+                response("response.created", "r3"),
+                response("response.completed", "r3"),
+            ],
+        ]
+    )
+    successor_created = asyncio.Event()
+
+    def configure(service, _account):
+        original_process = service._process_upstream_websocket_text
+
+        async def process(text, **kwargs):
+            value = await original_process(text, **kwargs)
+            if saw("response.created", "r2")([json.loads(text)]):
+                successor_created.set()
+            return value
+
+        monkeypatch.setattr(service, "_process_upstream_websocket_text", process)
+
+    original_send = upstream.send_text
+
+    async def send(text: str) -> None:
+        await original_send(text)
+        frame = json.loads(text)
+        if frame.get("type") == "response.steer" and frame["input"] == "Second correction":
+            # The first steer's automatic successor starts while this frame is still being written.
+            for event in (response("response.incomplete", "r1"), response("response.created", "r2", parent="r1")):
+                upstream.messages.put_nowait(SimpleNamespace(kind="text", text=json.dumps(event)))
+            await asyncio.wait_for(successor_created.wait(), timeout=2)
+
+    monkeypatch.setattr(upstream, "send_text", send)
+    service, reservations, settled, released, logs = await run_socket(
+        monkeypatch, socket, upstream, configure=configure
+    )
+    assert [frame["type"] for frame in upstream.sent] == [
+        "response.create",
+        "response.steer",
+        "response.steer",
+        "response.create",
+    ]
+    assert len(reservations) == 3
+    assert [(value[0], value[3]) for value in settled] == [("res_0", "r1"), ("res_1", "r2"), ("res_2", "r3")]
+    released.assert_not_awaited()
+    assert {row["request_id"] for row in logs.calls} == {"r1", "r2", "r3"}

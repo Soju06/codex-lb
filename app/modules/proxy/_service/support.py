@@ -1578,6 +1578,7 @@ class _WebSocketSteerSubmission:
     request_usage_budget: ApiKeyRequestUsageBudget
     request_service_tier: str | None
     id: str | None = None
+    acknowledged: bool = False
 
 
 @dataclass(slots=True)

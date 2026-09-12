@@ -217,7 +217,9 @@ The proxy SHALL stop starting new steering admissions when retained rejected-par
 
 When expiry removes a steering continuation's owned request from pending work, the proxy SHALL discard that continuation and its submissions and retain a parent-ID tombstone within the existing history limit. Cleanup SHALL preserve any newer replacement owner and SHALL leave reservation finalization to the existing expiry path.
 
-A parent-ID tombstone SHALL reject new response.steer admissions for that parent on the same upstream connection with response_not_found before reserving usage or dispatching upstream. This restriction SHALL apply after expiry or final rejection and SHALL NOT prevent explicit response.create requests, already admitted work, or steering against other owned parents. The tombstone SHALL remain until its upstream connection closes.
+A parent-ID tombstone SHALL reject new response.steer admissions for that parent on the same upstream connection with response_not_found before reserving usage or dispatching upstream. This restriction SHALL apply after expiry, final rejection, or assignment of an automatic successor while queued steers remain unacknowledged, and SHALL NOT prevent explicit response.create requests, already admitted work, or steering against other owned parents. The tombstone SHALL remain until its upstream connection closes.
+
+When an automatic successor is assigned to a steering continuation that still holds more than one submission and at least one of them has not been acknowledged by upstream with response.steer.accepted or response.steer.pending, the proxy SHALL retire that parent as a tombstone at assignment. Later automatic successors naming that parent SHALL be suppressed rather than matched to unrelated pending work. Later acknowledgments or rejections of those submissions SHALL NOT recreate ownership or release the started successor; their reservation increments SHALL reconcile at the successor's terminal settlement. Successors whose queued steers were all acknowledged before assignment SHALL NOT consume correlation history.
 
 #### Scenario: Expired steering releases input while retaining late-response correlation
 - **GIVEN** accepted steers expire without creating their successors
@@ -226,6 +228,12 @@ A parent-ID tombstone SHALL reject new response.steer admissions for that parent
 - **AND** late steering notifications SHALL NOT recreate ownership, and late created/terminal events SHALL follow the existing tombstone suppression policy
 - **AND** a new steer for the retired parent SHALL be rejected locally while an explicit create or a steer for another owned parent MAY proceed before connection retirement begins
 - **AND** accumulated expiry tombstones SHALL trigger rotation after admitted work drains, preserving unrelated responses and exactly-once reservation cleanup
+
+#### Scenario: A successor starts before a queued steer is acknowledged
+- **GIVEN** a first steer has been acknowledged and a second admitted steer has not
+- **WHEN** the first steer's automatic successor is created, whether before or after the second frame's local write returns
+- **THEN** the parent SHALL retire as a tombstone at assignment and a later automatic successor for it SHALL be suppressed
+- **AND** unrelated creates SHALL keep their own responses and settle once, and no tombstone SHALL be recorded when every queued steer was acknowledged before the successor
 
 #### Scenario: Late acknowledgment cannot claim a same-parent retry
 - **GIVEN** a steering lifecycle retires before its acknowledgment arrives

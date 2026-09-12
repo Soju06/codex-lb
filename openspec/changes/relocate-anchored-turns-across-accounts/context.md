@@ -90,6 +90,24 @@ of work with its own failure modes, not a variation on this one.
 The honest reading of this change is: it fixes the bridge lane, and it makes the
 shape of the WebSocket fix obvious.
 
+## Why the join refuses instead of deduplicating
+
+The first three implementations of this rebuild all tried to find the boundary
+between the chain and the client's turn by comparing item content, and all three
+found a way to delete a message the user had just sent — a leading match that
+was a coincidence, then a tail-anchored match that was a coincidence, then the
+same class again through a different path. The failure is quiet by construction:
+the shortened conversation satisfies every structural predicate, the strict
+account-neutral projection accepts it, and no downstream check can notice that
+the user's words are missing.
+
+Content equality cannot distinguish "the client is restating this turn" from
+"the client happened to send the same words again". So the requirement no longer
+asks it to. The shape of the client's input decides — delta, full resend, or
+neither — and the third case refuses. Refusing costs a conversation that could
+have been recovered; guessing costs a message the user actually wrote, silently.
+The first is the failure this change already has today.
+
 ## Why the zero-event precondition is the real fence
 
 The claim budget stops *concurrent* duplicates. The zero-event check stops the

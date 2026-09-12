@@ -30,8 +30,10 @@ guard then holds three things together:
   switched-off drill looks exactly like a working one. So the marks that reach
   each drill are read too (``_switched_off``): a ``skip``/``skipif``/``xfail``
   on it, or on one of its parametrised cases, or on the module's
-  ``pytestmark``; a ``pytest.skip()``/``pytest.xfail()`` anywhere in it; a body
-  that opens with a ``return``, a ``raise`` or a ``pass``. Any of those and
+  ``pytestmark`` however that is written; a ``pytest.skip()``/``pytest.xfail()``
+  anywhere in it, under whatever name the module imported ``pytest`` or the
+  call itself as; a body that opens with a ``return``, a ``raise`` or a
+  ``pass``. Any of those and
   every clause the drill covers is reported uncovered, by name. The drill must
   also carry the ``overflow_drill`` marker, because that -- not its path -- is
   what the runbook's one command selects.
@@ -549,16 +551,44 @@ def _marks(expr: ast.expr) -> set[str]:
 
 
 def _module_marks(module: ast.Module) -> set[str]:
-    """Marks from a module-level ``pytestmark``, which reach every test in the file."""
+    """Marks from a module-level ``pytestmark``, which reach every test in the file.
+
+    Every form pytest honours: the plain assignment, the annotated one
+    (``pytestmark: list = [...]``) and an append to it. Only the name matters to
+    pytest, so only the name is looked for here.
+    """
 
     names: set[str] = set()
     for node in module.body:
-        if not isinstance(node, ast.Assign):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign | ast.AugAssign):
+            targets = [node.target]
+        else:
             continue
-        if not any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets):
+        if not any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in targets):
             continue
-        names |= _marks(node.value)
+        if node.value is not None:
+            names |= _marks(node.value)
     return names
+
+
+def _pytest_aliases(module: ast.Module) -> tuple[set[str], dict[str, str]]:
+    """What ``pytest`` and its escape hatches are called in this module.
+
+    ``import pytest as pt`` and ``from pytest import skip as stop`` are both
+    ordinary Python, and both hide a ``skip`` from a matcher that only knows the
+    spelling ``pytest.skip``. Resolve the names instead of assuming them.
+    """
+
+    modules = {"pytest"}
+    calls: dict[str, str] = {}
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            modules |= {alias.asname or alias.name for alias in node.names if alias.name == "pytest"}
+        elif isinstance(node, ast.ImportFrom) and node.module == "pytest":
+            calls |= {alias.asname or alias.name: alias.name for alias in node.names if alias.name in _ESCAPE_CALLS}
+    return modules, calls
 
 
 def _first_statement(node: ast.AsyncFunctionDef | ast.FunctionDef) -> ast.stmt | None:
@@ -572,21 +602,36 @@ def _first_statement(node: ast.AsyncFunctionDef | ast.FunctionDef) -> ast.stmt |
     return None
 
 
-def _escape_call(node: ast.AST) -> str | None:
+def _escape_call(node: ast.AST, modules: set[str], calls: dict[str, str]) -> str | None:
     """``pytest.skip(...)`` and friends anywhere in the drill: a test may end itself at any depth."""
 
     for child in ast.walk(node):
         if not isinstance(child, ast.Call):
             continue
         parts = _dotted(child.func)
-        if not parts or parts[-1] not in _ESCAPE_CALLS:
+        if not parts:
             continue
-        if "pytest" in parts or parts in (("skip",), ("xfail",)):
-            return ".".join(parts)
+        if len(parts) == 1:
+            # A bare name: whatever this module imported from pytest under it,
+            # or the two spellings that mean nothing else inside a test.
+            imported = calls.get(parts[0])
+            if imported in _ESCAPE_CALLS:
+                suffix = "" if imported == parts[0] else f" (pytest.{imported})"
+                return f"{parts[0]}(){suffix}"
+            if imported is None and parts[0] in ("skip", "xfail"):
+                return f"{parts[0]}()"
+            continue
+        if parts[0] in modules and parts[-1] in _ESCAPE_CALLS:
+            return f"{'.'.join(parts)}()"
     return None
 
 
-def _switched_off(node: ast.AsyncFunctionDef | ast.FunctionDef, module_marks: set[str]) -> str | None:
+def _switched_off(
+    node: ast.AsyncFunctionDef | ast.FunctionDef,
+    module_marks: set[str],
+    modules: set[str],
+    calls: dict[str, str],
+) -> str | None:
     """Why this drill never reaches its assertions, or ``None`` if it does.
 
     ``ast.get_source_segment`` returns the ``def`` without its decorators -- by
@@ -609,9 +654,9 @@ def _switched_off(node: ast.AsyncFunctionDef | ast.FunctionDef, module_marks: se
     off = sorted(marks & _OFF_SWITCH_MARKS)
     if off:
         return " and ".join(f"a pytest.mark.{mark} mark applies to it" for mark in off)
-    escape = _escape_call(node)
+    escape = _escape_call(node, modules, calls)
     if escape:
-        return f"it calls {escape}()"
+        return f"it calls {escape}"
     first = _first_statement(node)
     if first is None:
         return "its body is empty"
@@ -647,6 +692,7 @@ def _drills(suite: str) -> dict[str, _Drill]:
 
     module = ast.parse(suite)
     module_marks = _module_marks(module)
+    modules, calls = _pytest_aliases(module)
     drills: dict[str, _Drill] = {}
     for node in module.body:
         if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and _DRILL_TEST_NAME.match(node.name):
@@ -654,7 +700,7 @@ def _drills(suite: str) -> dict[str, _Drill]:
             own_marks = {mark for decorator in node.decorator_list for mark in _marks(decorator)}
             drills[node.name] = _Drill(
                 body=_executable_source(segment) if segment else "",
-                switched_off=_switched_off(node, module_marks),
+                switched_off=_switched_off(node, module_marks, modules, calls),
                 selected=_SUITE_MARKER in module_marks | own_marks,
             )
     return drills
@@ -1156,15 +1202,67 @@ def test_a_mark_that_reaches_a_drill_switches_it_off(decorator: str, reason: str
     assert _drills(suite)["test_drill_x"].switched_off == reason
 
 
-def test_a_module_wide_skip_switches_every_drill_off() -> None:
-    """``pytestmark`` is the one switch that is nowhere near the drill it disables."""
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        pytest.param(f"pytestmark = [pytest.mark.{_SUITE_MARKER}, pytest.mark.skip]", id="plain"),
+        pytest.param(f"pytestmark: list = [pytest.mark.{_SUITE_MARKER}, pytest.mark.skip]", id="annotated"),
+        pytest.param(f"pytestmark = [pytest.mark.{_SUITE_MARKER}]\npytestmark += [pytest.mark.skip]", id="appended"),
+    ],
+)
+def test_a_module_wide_skip_switches_every_drill_off(assignment: str) -> None:
+    """``pytestmark`` is the one switch that is nowhere near the drill it disables.
+
+    pytest reads the module attribute, so every way of writing it counts: the
+    annotated assignment and the append were both invisible to the first cut of
+    this check, and both really do skip the drills.
+    """
+
+    suite = f"import pytest\n\n{assignment}\n\n\ndef test_drill_x() -> None:\n    assert x == 1\n"
+
+    drill = _drills(suite)["test_drill_x"]
+
+    assert drill.switched_off == "a pytest.mark.skip mark applies to it"
+    assert drill.selected
+
+
+@pytest.mark.parametrize(
+    ("imports", "call", "reason"),
+    [
+        pytest.param("import pytest", 'pytest.skip("x")', "it calls pytest.skip()", id="dotted"),
+        pytest.param("import pytest as pt", 'pt.skip("x")', "it calls pt.skip()", id="aliased-module"),
+        pytest.param("from pytest import skip", 'skip("x")', "it calls skip()", id="imported-name"),
+        pytest.param(
+            "from pytest import skip as stop", 'stop("x")', "it calls stop() (pytest.skip)", id="aliased-name"
+        ),
+        pytest.param(
+            "from pytest import importorskip",
+            'importorskip("nonexistent")',
+            "it calls importorskip()",
+            id="import-or-skip",
+        ),
+    ],
+)
+def test_a_drill_that_skips_itself_under_any_name_is_switched_off(imports: str, call: str, reason: str) -> None:
+    """``pytest.skip`` is a spelling, not the mechanism; the mechanism is whatever name pytest was bound to."""
 
     suite = (
-        f"import pytest\n\npytestmark = [pytest.mark.{_SUITE_MARKER}, pytest.mark.skip]\n\n\n"
-        "def test_drill_x() -> None:\n    assert x == 1\n"
+        f"import pytest\n{imports}\n\npytestmark = pytest.mark.{_SUITE_MARKER}\n\n\n"
+        f"def test_drill_x() -> None:\n    {call}\n    assert x == 1\n"
     )
 
-    assert _drills(suite)["test_drill_x"].switched_off == "a pytest.mark.skip mark applies to it"
+    assert _drills(suite)["test_drill_x"].switched_off == reason
+
+
+def test_a_local_helper_is_not_mistaken_for_a_pytest_escape() -> None:
+    """The other direction: a call this module never imported from pytest is just a call."""
+
+    suite = (
+        f"import pytest\n\npytestmark = pytest.mark.{_SUITE_MARKER}\n\n\n"
+        "def test_drill_x() -> None:\n    stub.exit()\n    helper.importorskip()\n    assert x == 1\n"
+    )
+
+    assert _drills(suite)["test_drill_x"].switched_off is None
 
 
 def test_a_drill_outside_the_marker_is_not_the_drill_the_runbook_runs() -> None:

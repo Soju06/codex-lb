@@ -13,7 +13,7 @@ from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
 from app.core.plan_types import normalize_account_plan_type
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
-from app.core.usage import capacity_for_plan, is_primary_window_minutes
+from app.core.usage import capacity_for_plan, default_window_minutes
 from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
@@ -448,6 +448,14 @@ async def reconcile_recoverable_account_statuses(
     return recovered
 
 
+def _is_long_window_minutes(window_minutes: int | None) -> bool:
+    """Return whether a duration is one of the recognized long quota windows."""
+
+    if window_minutes is None:
+        return False
+    return any(window_minutes == default_window_minutes(window) for window in ("secondary", "monthly"))
+
+
 def _short_window_blocks_recovery(entry: UsageHistory | None, *, account: Account, now: float) -> bool:
     """Return whether the account's short window would immediately re-block it.
 
@@ -466,10 +474,13 @@ def _short_window_blocks_recovery(entry: UsageHistory | None, *, account: Accoun
 
     Three exclusions:
 
-    * A primary-slot row is only the short window when it reports a short
-      window's duration. Upstream also delivers a weekly quota through the
-      primary slot (``should_use_weekly_primary``), and that row is a long
-      window wearing the short window's slot.
+    * A primary-slot row is not the short window when it reports a *recognized
+      long* window's duration. Upstream also delivers a weekly quota through
+      the primary slot (``should_use_weekly_primary``), and that row is a long
+      window wearing the short window's slot. Only recognized long durations
+      are excluded: an unfamiliar duration is treated as the short window, so
+      an upstream change to the short window's length keeps the account
+      blocked rather than silently disabling this guard.
     * A slot known to carry zero capacity for the plan is not a window. The Free
       primary row is a normalization artifact of the monthly-only payload, not a
       live 5h window, and mirrors the monthly percentage. An *unknown* capacity
@@ -484,7 +495,7 @@ def _short_window_blocks_recovery(entry: UsageHistory | None, *, account: Accoun
 
     if entry is None or entry.used_percent < 100.0:
         return False
-    if entry.window_minutes is not None and not is_primary_window_minutes(entry.window_minutes):
+    if _is_long_window_minutes(entry.window_minutes):
         return False
     capacity = capacity_for_plan(account.plan_type, "primary")
     if capacity is not None and capacity <= 0:
@@ -580,6 +591,7 @@ async def _resolve_reset_evidence(
         if account.status != AccountStatus.RATE_LIMITED or account.reset_at is None or account.blocked_at is None:
             continue
         since = datetime.fromtimestamp(account.blocked_at, timezone.utc).replace(tzinfo=None)
+        anchored: list[_ResetEvidence] = []
         for window in _RESET_EVIDENCE_WINDOWS:
             history = await usage_repo.history_since(account.id, window, since)
             persisted = _latest_confirmed_reset_transition_after_baseline(
@@ -588,10 +600,13 @@ async def _resolve_reset_evidence(
                 reset_at_tolerance_seconds=_BLOCK_RESET_MATCH_TOLERANCE_SECONDS,
             )
             if persisted is not None:
-                # The baseline deadline match makes at most one window the
-                # anchor for this block, so the first hit is the answer.
-                evidence[account.id] = persisted
-                break
+                anchored.append(persisted)
+        # Two slots whose deadlines fall within the match tolerance would both
+        # anchor this block, and picking either one guesses which window the 429
+        # came from. Guessing wrong skips the short-window guard, so an
+        # ambiguous anchor is no anchor and the persisted cooldown stands.
+        if len(anchored) == 1:
+            evidence[account.id] = anchored[0]
     return evidence
 
 

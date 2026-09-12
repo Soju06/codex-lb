@@ -1785,7 +1785,11 @@ async def test_reconcile_ignores_reset_evidence_from_an_unanchored_window(
 
 @pytest.mark.asyncio
 async def test_resolve_reset_evidence_anchors_a_paid_block_to_its_primary_window() -> None:
-    """The anchored lookup searches every quota slot, not just the monthly one."""
+    """The anchored lookup searches every quota slot, not just the monthly one.
+
+    Every slot is searched rather than stopping at the first hit, because a
+    second matching slot would make the anchor ambiguous.
+    """
 
     now = 1_700_000_000.0
     blocked_at = int(now - 2 * 24 * 3600)
@@ -1807,7 +1811,7 @@ async def test_resolve_reset_evidence_anchors_a_paid_block_to_its_primary_window
         after_monthly={},
     )
 
-    assert usage_repo.history_windows == ["primary"]
+    assert usage_repo.history_windows == ["primary", "secondary", "monthly"]
     resolved = evidence[account.id]
     assert resolved.window == "primary"
     assert (resolved.baseline.reset_at, resolved.after.used_percent) == (weekly_reset_at, 0.0)
@@ -2206,3 +2210,95 @@ async def test_reconcile_recovers_when_the_primary_slot_carries_a_weekly_window(
 
     assert recovered == 1
     assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
+
+
+@pytest.mark.asyncio
+async def test_resolve_reset_evidence_rejects_an_ambiguous_anchor() -> None:
+    """Two slots matching the same deadline anchor nothing.
+
+    The deadline match is what identifies which window the 429 came from. If two
+    windows reset within the match tolerance of the persisted marker, picking
+    either one guesses, and guessing "short window" skips the guard that keeps a
+    spent short window from being released. Ambiguity means no exception.
+    """
+
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    shared_reset_at = int(now + 3 * 24 * 3600)
+    account = _make_account(
+        "acc_ambiguous_anchor",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="pro",
+        reset_at=shared_reset_at,
+        blocked_at=blocked_at,
+    )
+    primary_before, primary_after = _weekly_block(account.id, now=now, weekly_reset_at=shared_reset_at)
+    # The long window's deadline lands inside the five-second match tolerance.
+    secondary_before, secondary_after = _long_window_block(account.id, now=now, long_reset_at=shared_reset_at + 2)
+    usage_repo = StubHistoryUsageRepository(
+        history={
+            "primary": [primary_before, primary_after],
+            "secondary": [secondary_before, secondary_after],
+        }
+    )
+
+    evidence = await refresh_scheduler_module._resolve_reset_evidence(
+        accounts=[account],
+        usage_repo=cast(Any, usage_repo),
+        before_monthly={},
+        after_monthly={},
+    )
+
+    assert account.id not in evidence
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_account_blocked_for_an_unfamiliar_short_window_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only recognized long durations are excluded from the short-window guard.
+
+    If upstream changes the short window's length, an unfamiliar duration must
+    keep withholding recovery rather than silently disabling the guard.
+    """
+
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    long_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_plus_unfamiliar_short_window",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="plus",
+        reset_at=long_reset_at,
+        blocked_at=blocked_at,
+    )
+    before, after = _long_window_block(account.id, now=now, long_reset_at=long_reset_at)
+    exhausted_60_minute_window = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=100.0,
+        reset_at=int(now + 1800),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=60,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={account.id: exhausted_60_minute_window},
+            secondary={account.id: after},
+        ),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        long_reset_at,
+        blocked_at,
+    )

@@ -4,6 +4,8 @@
 - [x] 1.2 Rename `_MonthlyResetEvidence` to `_ResetEvidence` and expose its window
 - [x] 1.3 Search every quota-window slot for the anchored post-block transition
 - [x] 1.4 Drop the Free-plan gate from the anchored lookup
+- [x] 1.5 Require a unique anchoring slot; a deadline matching two slots does not
+      identify the blocked window
 
 ## 2. Recovery predicate
 

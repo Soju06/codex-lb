@@ -50,6 +50,24 @@ contextless recovery fences MUST release their bookkeeping after bounded retenti
 - **THEN** generation and operation-lock bookkeeping are released
 - **AND** superseded contexts from the previous attempt do not prevent cleanup
 
+#### Scenario: Cancellation resolves an ordinary append outcome
+
+- **WHEN** shutdown cancellation arrives while a dequeued ordinary batch is
+  being appended durably
+- **THEN** the batcher MUST await the append outcome before deciding whether to
+  restore the batch
+- **AND** a successfully committed batch MUST NOT be requeued or persisted a
+  second time
+
+#### Scenario: Close drains a restored ordinary batch
+
+- **WHEN** a flusher cancellation restores a dequeued ordinary batch to the
+  in-memory queue
+- **THEN** `close()` MUST drain that batch through the durable writer before it
+  returns
+- **AND** close MUST NOT leave the operation's pending counters or event data
+  stranded in memory
+
 ### Requirement: Normalizable text extensions retain streaming parity
 
 Public Responses MUST preserve successful completion when an upstream text-bearing

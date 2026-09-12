@@ -134,6 +134,26 @@ class _BlockingBatchAppendDurableBridge(_FakeDurableBridge):
         return result
 
 
+class _CancelBeforeBatchAppendDurableBridge(_FakeDurableBridge):
+    """Cancel the first batch write before it reaches durable storage."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_next = True
+
+    async def append_operation_events(self, *, events, max_bytes: int) -> bool:
+        if self.cancel_next:
+            self.cancel_next = False
+            raise asyncio.CancelledError
+        return await super().append_operation_events(events=events, max_bytes=max_bytes)
+
+    async def append_operation_event_chunk(self, *, events, max_bytes: int) -> bool:
+        if self.cancel_next:
+            self.cancel_next = False
+            raise asyncio.CancelledError
+        return await super().append_operation_event_chunk(events=events, max_bytes=max_bytes)
+
+
 class _StalledTerminalDurableBridge(_FakeDurableBridge):
     def __init__(self) -> None:
         super().__init__()
@@ -654,7 +674,7 @@ async def test_cancellation_resistant_terminal_append_does_not_extend_delivery_b
 @pytest.mark.asyncio
 @pytest.mark.parametrize("spool_format", ["rows_v1", "chunks_v2"])
 async def test_cancelled_pending_flush_requeues_dequeued_batch(spool_format: str) -> None:
-    """Cancelling the flusher after dequeue keeps events available for terminal draining."""
+    """A cancelled caller waits for the durable append outcome before restoring a batch."""
     durable = _BlockingBatchAppendDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(
         durable,
@@ -671,20 +691,46 @@ async def test_cancelled_pending_flush_requeues_dequeued_batch(spool_format: str
         await asyncio.wait_for(durable.batch_started.wait(), timeout=1.0)
 
         flush_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await flush_task
-
-        assert batcher._pending_count == 1
-        assert batcher._pending_bytes == len("pending".encode("utf-8"))
-        assert await batcher.pending_operation_ids() == {"op-1"}
-
         durable.release_batch.set()
-        assert await asyncio.wait_for(batcher.flush_pending_operation(operation_id="op-1"), timeout=1.0) is True
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(flush_task, timeout=1.0)
+
+        # The append completed successfully while the caller was cancelled;
+        # it must not be written a second time by a later drain.
         assert batcher._pending_count == 0
         assert batcher._pending_bytes == 0
+        assert await batcher.pending_operation_ids() == {"op-1"}
+        batches = durable.batches if spool_format == "rows_v1" else durable.chunk_batches
+        assert batches == [["pending"]]
     finally:
         durable.release_batch.set()
         await batcher.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spool_format", ["rows_v1", "chunks_v2"])
+async def test_close_drains_batch_requeued_after_durable_cancellation(spool_format: str) -> None:
+    """Close persists an ordinary batch restored after a pre-write cancellation."""
+    durable = _CancelBeforeBatchAppendDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+        spool_format=spool_format,
+    )
+    batcher._task = asyncio.create_task(asyncio.sleep(60.0))
+    await _enqueue(batcher, "pending")
+    flush_task = asyncio.create_task(batcher.flush_pending_operation(operation_id="op-1"))
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(flush_task, timeout=1.0)
+
+    assert batcher._pending_count == 1
+    await batcher.close()
+
+    batches = durable.batches if spool_format == "rows_v1" else durable.chunk_batches
+    assert batches == [["pending"]]
+    assert batcher._pending_count == 0
+    assert batcher._pending_bytes == 0
 
 
 @pytest.mark.asyncio

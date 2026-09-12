@@ -6,6 +6,7 @@ import sqlalchemy as sa
 from alembic import op
 
 from app.db.alembic.http_bridge_migration_ownership import (
+    OWNERSHIP_TABLE,
     ensure_ownership_table,
     mark_created,
 )
@@ -51,6 +52,16 @@ _INDEX_OWNER_REVISIONS = {
     "idx_http_bridge_operations_response_state": "20260821_010000_add_http_bridge_complete_transcript",
 }
 _ALIAS_COLUMN_OWNER_REVISION = "20260827_000000_add_http_bridge_retained_alias_target"
+
+# Databases repaired by the first version of this revision may still carry
+# revision-local markers.  Reattribute those rows before Alembic descends into
+# the historical owner revisions; otherwise their downgrades cannot tell that
+# the repaired objects are present and leave them behind below their owner.
+_LEGACY_MARKER_OWNERS = (
+    *[("column", name, owner) for name, owner in _COLUMN_OWNER_REVISIONS.items()],
+    *[("index", name, owner) for name, owner in _INDEX_OWNER_REVISIONS.items()],
+    ("column", _ALIAS_COLUMN, _ALIAS_COLUMN_OWNER_REVISION),
+)
 
 
 def _columns(bind, table: str) -> set[str]:
@@ -104,11 +115,47 @@ def upgrade() -> None:
         mark_created(bind, _INDEX_OWNER_REVISIONS.get(name, revision), "index", name)
 
 
+def _rehome_legacy_markers(bind) -> None:
+    """Move markers from the old repair revision to each historical owner."""
+    if not sa.inspect(bind).has_table(OWNERSHIP_TABLE):
+        return
+    table = sa.table(
+        OWNERSHIP_TABLE,
+        sa.column("revision", sa.String(128)),
+        sa.column("object_type", sa.String(32)),
+        sa.column("object_name", sa.String(128)),
+    )
+    for object_type, object_name, owner_revision in _LEGACY_MARKER_OWNERS:
+        legacy_marker = sa.and_(
+            table.c.revision == revision,
+            table.c.object_type == object_type,
+            table.c.object_name == object_name,
+        )
+        if bind.execute(sa.select(table.c.revision).where(legacy_marker)).first() is None:
+            continue
+        owner_marker = sa.and_(
+            table.c.revision == owner_revision,
+            table.c.object_type == object_type,
+            table.c.object_name == object_name,
+        )
+        if bind.execute(sa.select(table.c.revision).where(owner_marker)).first() is None:
+            bind.execute(
+                sa.insert(table).values(
+                    revision=owner_revision,
+                    object_type=object_type,
+                    object_name=object_name,
+                )
+            )
+        bind.execute(sa.delete(table).where(legacy_marker))
+
+
 def downgrade() -> None:
     """Preserve parent-owned objects restored by this compatibility repair.
 
     The repaired objects belong to migrations at or below the parent stamp.
-    Some databases also carry the old repair's revision-local ownership
-    markers, so consulting those markers here could still delete persisted
-    columns and indexes. Leave the schema untouched on downgrade.
+    Databases upgraded by the first implementation may still carry
+    revision-local markers; move those markers to their historical owners
+    before Alembic continues into those revisions.  The repair itself never
+    removes schema objects.
     """
+    _rehome_legacy_markers(op.get_bind())

@@ -34,3 +34,14 @@ historical owning revisions in the ownership registry.
 - **THEN** markers are moved to the historical owning revisions
 - **AND** downgrading through those owners removes only objects beyond the
   requested historical target
+
+#### Scenario: Direct historical downgrade rehomes legacy markers
+
+- **GIVEN** a database stamped by the original repair still records restored
+  objects under the repair revision
+- **WHEN** an operator downgrades directly to a historical revision below one
+  of those objects' owners
+- **THEN** the repair downgrade MUST move each legacy marker to its historical
+  owner before Alembic invokes that owner's downgrade
+- **AND** the historical downgrade MUST remove only objects beyond the target
+  revision

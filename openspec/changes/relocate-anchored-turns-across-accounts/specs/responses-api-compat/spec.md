@@ -36,7 +36,13 @@ The verdict MUST decline, before consulting any evidence, when downstream-visibl
 
 When an anchored continuation cannot be served by its owner account and the evidence is definitive — an upstream quota or usage-limit rejection, or a confirmed pre-dispatch transport failure, in both cases with no response event emitted and no downstream-visible output — the proxy MUST attempt to rebuild the turn's full conversation from the durable operation spool and dispatch it to another account without the anchor.
 
-The rebuild MUST walk the `parent_response_id` chain from the anchor and assemble the turns oldest first, matching the order the durable repository returns them in, and for each turn MUST combine the stored request body with the stored terminal response output. A rebuild that assembles the chain in any other order MUST be rejected: a chronologically reversed conversation satisfies every structural predicate and fails silently. It MUST be bounded by a maximum turn count and a maximum byte size. The rebuilt input MUST then be joined to the client's current turn, and any prefix the client resent that the rebuilt chain already contains MUST be deduplicated so the conversation is not doubled.
+The rebuild MUST walk the `parent_response_id` chain from the anchor and assemble the turns oldest first, matching the order the durable repository returns them in, and for each turn MUST combine the stored request body with the stored terminal response output. A rebuild that assembles the chain in any other order MUST be rejected: a chronologically reversed conversation satisfies every structural predicate and fails silently. It MUST be bounded by a maximum turn count and by a maximum byte size measured across the whole transcript, not per turn; a per-turn reading of the bound multiplies the worst case by the turn limit.
+
+A turn counts as settled, and so as material for the rebuild, only when its spool carries a terminal event that reports an answer. A terminal event that reports a failure MUST NOT make a failed turn read as an answered one in the rebuilt conversation. The rebuilt input MUST then be joined to the client's current turn. The join MUST NOT delete, reorder or alter any item the client sent. A rebuild that drops a client item because its content coincides with an item already in the chain is a worse failure than refusing to rebuild at all: the user's message is gone, the result still satisfies every structural predicate, and nothing downstream can detect it.
+
+The proxy MUST therefore establish which shape the client sent rather than infer it from content equality. When the client's input is a continuation delta, the chain supplies the history and the delta is appended unchanged. When it is a full resend, the client's own body is the authority and the chain is not used. When the input is provably neither — a partial restatement whose boundary cannot be established without matching content — the proxy MUST refuse to rebuild and keep today's fail-closed behaviour.
+
+Content comparison MAY be used to *verify* a boundary the shape already established. It MUST NOT be used to *discover* one.
 
 The rebuilt body MUST satisfy the same strict account-neutral predicate a client-supplied full resend must satisfy. The proxy MUST fail closed — leaving today's owner-unavailable behaviour intact — when the transcript is unavailable or incomplete, when any turn lacks a stored request body or a complete event spool, when the parent chain is broken or cyclic, when a terminal response event is missing, when the current input is a scalar string that cannot carry prior context, when a tool call is unsettled, when a declared tool is not portable, or when any account-owned state survives projection.
 
@@ -57,10 +63,36 @@ The rebuild requires durable operation material — a stored request body, a com
 
 #### Scenario: A client full resend is not doubled
 
-- **GIVEN** the client resent a prefix that the rebuilt durable chain already contains
+- **GIVEN** the client resent its whole history rather than a delta
+- **WHEN** relocation is evaluated
+- **THEN** the client's own body is the authority and the durable chain is not joined to it
+- **AND** no turn appears twice
+
+#### Scenario: A coincidental content match never costs the client a message
+
+- **GIVEN** a continuation delta whose first item happens to be byte-identical to the first item of the rebuilt chain, while being genuinely new content the user just sent
 - **WHEN** the rebuilt body is assembled
-- **THEN** the overlapping prefix appears exactly once
-- **AND** every item after the verified overlap is preserved
+- **THEN** every item the client sent appears in the result
+- **AND** the coincidence does not shorten the client's turn
+
+#### Scenario: An unestablishable boundary refuses rather than guesses
+
+- **GIVEN** a client input that is neither a recognised continuation delta nor a recognised full resend
+- **WHEN** relocation is evaluated
+- **THEN** no rebuild is produced and the request keeps today's fail-closed behaviour
+
+#### Scenario: The byte bound is a whole-transcript bound
+
+- **GIVEN** a chain whose turns are individually within the byte bound but whose total exceeds it
+- **WHEN** the rebuild walks the chain
+- **THEN** it refuses, rather than admitting every turn because each one fits
+
+#### Scenario: A failed turn is not rebuilt as an answered one
+
+- **GIVEN** a turn whose spool ends in a terminal event reporting failure rather than an answer
+- **WHEN** the rebuild reaches that turn
+- **THEN** it is not treated as settled material
+- **AND** the rebuild fails closed rather than presenting the failure as the assistant's answer
 
 #### Scenario: An incomplete spool fails closed
 

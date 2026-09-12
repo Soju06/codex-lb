@@ -18,9 +18,11 @@
   `decline_reason`. No lenient fallback projection.
 - [ ] `app/modules/proxy/replay_safety.py`: add the pure transcript rebuild —
   parent-chain assembly oldest first (the order the repository returns), prefix-overlap dedupe against the client
-  suffix — compare items AFTER the account-neutral projection, not before, or
-  the spool's item ids and reasoning items make identical turns compare unequal
-  and the conversation is doubled — terminal-output extraction from the spooled SSE with the
+  suffix. **Delete the content-matching overlap search.** Three rounds of it
+  produced three different ways to delete a message the client had just sent,
+  because content equality cannot tell a restatement from a coincidence.
+  Establish the shape first — continuation delta, full resend, or neither — and
+  refuse the third case. Terminal-output extraction from the spooled SSE with the
   `response.output_item.done` fallback when `response.incomplete` omits
   `response.output`. Keep the module free of persistence imports by accepting
   transcript turns structurally. Use one overlap routine, not two.
@@ -48,7 +50,10 @@
 - [ ] Unfenced lane (case ①): definitive evidence rolls back rather than claims;
   assert in tests that it never decrements the recovery budget.
 - [ ] Constants, not settings: the relocation transcript caps, the ambiguity
-  window and the one-shot bound are module constants. Confirm
+  window and the one-shot bound are module constants. Bind the byte cap as a
+  WHOLE-TRANSCRIPT bound with a test that fails when it is read per turn, and
+  bind which SSE event types count as a settled terminal with a test that fails
+  when a failure terminal is admitted — both survived mutation in round 3. Confirm
   `[settings_fields].max` stays 96.
 - [ ] New `tests/unit/test_replay_relocation.py`: the decision table —
   transports x sources x evidence x ownership facts, asserting `movable`,

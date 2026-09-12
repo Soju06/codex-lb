@@ -80,8 +80,8 @@ An enabled HTTP bridge keeps the original client body for continuation
 bookkeeping and prepares a separate copy for dispatch. If session creation
 fails before submission, the eligible raw-HTTP retry must prepare that original
 body again, using the same trim-then-validate order as a disabled bridge. For
-example, an anchored Low request without usage limits must forward a leading
-Low update even after a WebSocket connect failure. This completes the new
+example, an anchored request with enforced Low and no usage limits must forward
+a leading Low update even after a WebSocket connect failure. This completes the new
 continuation policy across the existing fallback; it does not change which
 failures are eligible for replay or who owns a usage reservation.
 
@@ -110,8 +110,8 @@ them. Passing the prepared body also keeps source overrides and tool filtering
 inside the existing estimate, before a reservation is acquired. Its cap,
 remaining-quota and settlement rules do not change.
 
-Subscription update shape validation precedes update key-policy checks, so an
-unsupported effort returns the promised 400 even on a restricted owner-bound
+Subscription update shape validation precedes update key-policy checks, so a
+malformed effort returns the promised 400 even on a restricted owner-bound
 continuation once its existing request-level and continuation policy permits
 processing the explicit updates. A valid but forbidden effort still returns 403. This ordering is
 limited to subscription configuration updates; the baseline's request-level
@@ -120,6 +120,34 @@ policy ordering and source-owned schemas remain intact.
 Key allows `low` only. Request input contains
 `configuration_update` with `high`. The proxy returns
 `reasoning_effort_not_allowed` before any upstream send.
+
+## Current upstream integration
+
+The baseline at `1330855e` retains fail-closed ambiguous-continuation handling
+and has removed the unused server-owned recovery modes, including
+`server_indefinite_recovery` (#2336). The durable recovery-dispatch claim and
+its `expected_recovery_dispatch_count` fence that #2366 retired were restored
+by #2383. This policy change neither reinstates the removed modes nor uses the
+restored claim. Late anchor preparation on surviving owner-forward and
+operation-ledger paths still preserves policy errors and client-history
+bookkeeping.
+
+On the source-dispatch route, configuration-update policy validation runs
+inside the admission latch so a failure cannot leak a claimed slot; a
+saturated source therefore answers 503 `model_source_busy` before a 400/403
+policy refusal.
+
+The client-prefix retention for an inserted reset applies to the client-facing
+bridge dispatch path. Server-owned recovery retries that re-prepare an already
+shaped payload in place (owner-forward and local terminal-error retries with a
+reservation) still record the prepared count; that pre-existing path is left
+for a follow-up and is not covered by the delta requirement.
+
+Source dispatch now owns admission slots and settlement. Validate configuration
+updates and estimate the prepared source body inside the existing cleanup
+boundary, including admission claims already acquired by overflow routing.
+Preserve source overflow attribution,
+telemetry stripping, and slot release on payload or reservation errors.
 
 ## Related
 

@@ -110,8 +110,8 @@ validated before upstream connection or send, using client-plane values.
 
 #### Scenario: Late policy resets preserve client continuation state
 
-- **GIVEN** a restricted-key Astra request receives a proxy-owned anchor after initial preparation
-- **WHEN** the proxy adds the required leading configuration update
+- **GIVEN** an enforced-effort Astra request receives a proxy-owned anchor after initial preparation
+- **WHEN** the proxy adds the enforced leading configuration update
 - **THEN** persisted input counts and fingerprints SHALL continue to describe the original client history
 - **AND** a subsequent full resend SHALL retain prefix matching and session anchoring
 

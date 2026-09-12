@@ -38,8 +38,9 @@ continuation MUST match the fresh-request path: do not synthesize
 `medium` and do not 403 from that fake default.
 
 Fingerprint HTTP-bridge client history separately from the prepared wire
-payload. When Astra continuation preparation inserts a reset, retain the
-original input count and fingerprint even when no history trim is needed.
+payload. When Astra continuation preparation on the client-facing dispatch
+path inserts a reset, retain the original input count and fingerprint even
+when no history trim is needed.
 The wire payload and usage estimate include the reset; client-prefix metadata
 does not. Do not globally rewrite non-Astra fingerprinting.
 

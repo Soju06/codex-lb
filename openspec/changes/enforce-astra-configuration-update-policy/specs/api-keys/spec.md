@@ -66,10 +66,17 @@ anchors; repeated preparation SHALL be idempotent.
 
 #### Scenario: An anchored delta retains its client prefix
 
-- **GIVEN** an enforced-effort Astra continuation whose input needs no history trimming
+- **GIVEN** an enforced-effort Astra continuation on the client-facing bridge dispatch path whose input needs no history trimming
 - **WHEN** preparation inserts a policy reset, including before a later operation-ledger anchor advance
 - **THEN** live and durable completion bookkeeping SHALL retain the client input count and fingerprint without the reset
 - **AND** a later client full resend SHALL still match that prefix and reuse the completed response
+
+#### Scenario: An enforced reset rejects automatic truncation or compaction continuations
+
+- **GIVEN** an API key with an enforced reasoning effort
+- **WHEN** a client-anchored or proxy-anchored Astra continuation carries automatic truncation or automatic compaction
+- **THEN** the proxy SHALL fail that continuation closed with the existing invalid_request_error naming the offending parameter, because the injected reset is a configuration update
+- **AND** an allowed-list key without an enforced effort SHALL complete the same continuation without a reset
 
 #### Scenario: A pre-submit HTTP fallback retains continuation policy
 
@@ -98,7 +105,7 @@ anchors; repeated preparation SHALL be idempotent.
 
 #### Scenario: A late continuation-policy rejection terminates an open stream
 
-- **WHEN** HTTP-bridge recovery adds an anchor and Astra policy rejects the reconstructed request after HTTP streaming has started
+- **WHEN** late HTTP-bridge anchor injection adds a session anchor and Astra policy rejects the reconstructed request after HTTP streaming has started
 - **THEN** the proxy SHALL emit exactly one terminal response.failed event with the policy error code, type, message and parameter
 - **AND** the proxy SHALL release any reservation it still owns without dispatching the rejected request
-- **AND** this behavior SHALL also apply when the policy rejection occurs during a server-owned recovery attempt
+- **AND** the proxy SHALL preserve the upstream baseline's fail-closed handling of ambiguous continuations without reinstating removed server-owned recovery modes

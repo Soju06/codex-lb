@@ -1,7 +1,7 @@
 ## 1. Policy
 
 - [x] 1.1 Validate configuration_update items against allowed/enforced efforts
-- [x] 1.2 Prepend an allowed leading update on anchored restricted-key continuations
+- [x] 1.2 Prepend a leading enforced-effort update on anchored continuations; allowed-list keys do not synthesize resets
 - [x] 1.3 Reject unsupported Astra update shapes, adjacent updates, compact, auto truncation/compaction
 - [x] 1.4 Map Ultra to Max only at subscription to_payload serialization
 
@@ -20,7 +20,7 @@
 - [x] 3.4 Preserve original HTTP full-resend bookkeeping while validating the trimmed continuation; prove streaming and collect routes retain durable prefix matching on a later resend
 - [x] 3.5 Real-route subscription-owner regression and source/subscription/key-policy compatibility controls on canonical and equivalent sockets
 - [x] 3.6 Validate the selected WebSocket continuation and its preserved stale-anchor full-resend fallback after subscription ownership overrides a model source
-- [x] 3.7 Preserve terminal SSE policy errors and reservation cleanup after late HTTP-bridge anchor injection, including recovery attempts
+- [x] 3.7 Preserve terminal SSE policy errors and reservation cleanup after late HTTP-bridge anchor injection without reinstating removed recovery modes
 - [x] 3.8 Keep schema selection and owner routing consistent across concurrent owner publication, and re-resolve on the next request
 - [x] 3.9 Validate update ordering after subscription input normalization, including deduplication and serialization, preserving valid separated updates
 - [x] 3.10 Preserve source configuration updates without reasoning changes while enforcing explicit efforts on restricted keys
@@ -31,3 +31,4 @@
 - [x] 3.15 Apply the existing HTTP continuation preparation to eligible pre-submit raw fallback and verify stream/collect, replay trimming and Ultra identity
 - [x] 3.16 Drop the local Astra effort enumeration, accept `disabled`/`none`, prepend only for enforced keys, and gate non-bridge HTTP trim on `gpt-6-astra`
 - [x] 3.17 Preserve anchored-delta client prefix metadata when preparation inserts a reset without trimming; verify the surviving ledger-publication race and subsequent full resend
+- [x] 3.18 Record that an enforced reset makes automatic truncation or compaction continuations fail closed while allowed-list keys complete them

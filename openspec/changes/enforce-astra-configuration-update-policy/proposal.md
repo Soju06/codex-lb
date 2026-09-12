@@ -46,10 +46,17 @@ None.
 ## Impact
 
 - Code: `app/modules/proxy/request_policy.py`, `app/core/openai/requests.py`,
-  `app/modules/proxy/api.py`, HTTP-bridge prepare path, exception mapping.
+  `app/modules/proxy/api.py`, `app/modules/proxy/api_key_usage.py`,
+  `app/modules/proxy/_service/websocket/mixin.py`,
+  `app/modules/proxy/_service/support.py`, HTTP-bridge prepare path,
+  exception mapping.
 - Tests: `tests/unit/test_astra_request_policy.py`,
   `tests/unit/test_astra_inherited_policy.py`,
+  `tests/unit/test_astra_serialization.py`, `tests/unit/test_proxy_errors.py`,
   `tests/integration/test_astra_request_policy.py`,
   `tests/integration/test_astra_inherited_policy.py`,
-  `tests/integration/test_astra_source_policy.py`.
+  `tests/integration/test_astra_source_policy.py`,
+  `tests/integration/test_astra_late_policy_errors.py`,
+  `tests/integration/test_astra_http_bridge_history.py`,
+  `tests/integration/test_astra_websocket_owner_policy.py`.
 - No settings, schema, migration, or dashboard changes.

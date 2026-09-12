@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -15,8 +16,10 @@ from app.modules.proxy.continuity import (
     make_http_bridge_account_neutral_replay_key,
 )
 from app.modules.proxy.replay_safety import (
+    RELOCATION_TRANSCRIPT_MAX_BYTES,
     RELOCATION_TRANSCRIPT_MAX_TURNS,
     _replay_prefix_overlap,
+    _terminal_response_output_items,
     project_durable_transcript_for_account_neutral_fresh_replay,
     project_responses_input_for_account_neutral_fresh_replay,
     responses_input_suffix_matches_pending_tool_calls,
@@ -158,6 +161,86 @@ def test_account_neutral_fresh_replay_accepts_self_contained_payloads(
     payload: dict[str, JsonValue],
 ) -> None:
     assert responses_payload_is_account_neutral_fresh_replay(payload) is True
+
+
+def _corpus_assistant_message_contents() -> list[list[JsonValue]]:
+    """Every assistant message body the recorded request corpus carries, as recorded."""
+
+    corpus = json.loads(
+        (pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "passthrough_request_corpus.json").read_text()
+    )
+    return [
+        item["content"]
+        for case in corpus
+        for item in case["payload"].get("input", [])
+        if isinstance(item, dict) and item.get("role") == "assistant"
+    ]
+
+
+def test_account_neutral_fresh_replay_accepts_the_recorded_assistant_content_shape() -> None:
+    contents = _corpus_assistant_message_contents()
+
+    assert contents, "the corpus no longer records an assistant message"
+    for content in contents:
+        # Recorded, not authored. Every ``output_text`` part the Responses API
+        # produces carries an annotations array -- the same shape the terminal
+        # SSE output a durable rebuild reads back carries (see the
+        # ``response.output_item.done`` item in
+        # tests/unit/test_proxy_api_responses_contract.py) -- so refusing the
+        # field at all refuses every real conversation.
+        assert [cast(Any, part).get("annotations") for part in content] == [[]]
+        message: JsonValue = {"type": "message", "role": "assistant", "status": "completed", "content": content}
+
+        assert responses_payload_is_account_neutral_fresh_replay({"input": [message]}) is True
+
+
+@pytest.mark.parametrize(
+    ("annotations", "expected"),
+    [
+        # Absent entirely: the pre-annotation shape stays accepted.
+        (None, True),
+        ([], True),
+        ([{"type": "url_citation", "url": "https://example.test/a", "start_index": 0, "end_index": 1}], False),
+        ([{"type": "file_citation", "file_id": "file_owner_scoped", "filename": "notes.md", "index": 3}], False),
+    ],
+)
+def test_account_neutral_fresh_replay_admits_only_an_empty_annotation_list(
+    annotations: list[JsonValue] | None,
+    expected: bool,
+) -> None:
+    part: dict[str, JsonValue] = {"type": "output_text", "text": "old answer"}
+    if annotations is not None:
+        part["annotations"] = annotations
+    payload: dict[str, JsonValue] = {
+        "input": [{"type": "message", "role": "assistant", "status": "completed", "content": [part]}]
+    }
+
+    assert responses_payload_is_account_neutral_fresh_replay(payload) is expected
+
+
+@pytest.mark.parametrize(
+    ("annotations", "expected"),
+    [([], True), ([{"type": "url_citation", "url": "https://example.test/a"}], False)],
+)
+def test_full_resend_retained_output_reads_annotations_the_same_way(
+    annotations: list[JsonValue],
+    expected: bool,
+) -> None:
+    # The client-resend path shares the content-part predicate, so the widening
+    # must move both together and no further: a cited answer stays owner-bound
+    # on the path that was already live.
+    input_items: list[JsonValue] = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "old answer", "annotations": annotations}],
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+
+    assert responses_input_suffix_retains_prior_output(input_items, stored_count=1) is expected
 
 
 def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() -> None:
@@ -2647,13 +2730,29 @@ def _user_item(text: str) -> dict[str, JsonValue]:
     return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
 
 
-def _assistant_item(text: str, *, item_id: str | None = None) -> dict[str, JsonValue]:
+def _assistant_item(
+    text: str,
+    *,
+    item_id: str | None = None,
+    annotations: list[JsonValue] | None = None,
+    phase: str | None = None,
+) -> dict[str, JsonValue]:
+    # ``annotations`` is on every ``output_text`` part the Responses API emits
+    # (see tests/fixtures/passthrough_request_corpus.json), so it is present by
+    # default here rather than being an opt-in variant.
+    part: dict[str, JsonValue] = {
+        "type": "output_text",
+        "text": text,
+        "annotations": [] if annotations is None else annotations,
+    }
     item: dict[str, JsonValue] = {
         "type": "message",
         "role": "assistant",
         "status": "completed",
-        "content": [{"type": "output_text", "text": text}],
+        "content": [part],
     }
+    if phase is not None:
+        item["phase"] = phase
     return item if item_id is None else {"id": item_id, **item}
 
 
@@ -2809,11 +2908,21 @@ def test_durable_rebuild_dedupes_a_single_item_overlap_from_either_join(
     assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
 
 
-def test_durable_rebuild_dedupes_a_single_leading_item_a_later_turn_restates() -> None:
+def test_durable_rebuild_dedupes_a_chain_turn_that_restated_the_conversation() -> None:
+    # A client that anchors *and* restates: turn two carries the whole thread so
+    # far, item ids and reasoning included, plus its own new message.
     transcript = (
-        _transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),
         _transcript_turn(
-            [_user_item("first"), _user_item("second")],
+            [_user_item("first")],
+            [_reasoning_item("rs_1"), _assistant_item("answer", item_id="msg_1")],
+        ),
+        _transcript_turn(
+            [
+                _user_item("first"),
+                _reasoning_item("rs_1"),
+                _assistant_item("answer", item_id="msg_1"),
+                _user_item("second"),
+            ],
             [_assistant_item("second answer", item_id="msg_2")],
             response_id="resp_2",
         ),
@@ -2838,6 +2947,76 @@ def test_durable_rebuild_keeps_a_repeated_message_that_no_overlap_covers() -> No
 
     assert rebuilt is not None
     assert rebuilt["input"] == [_user_item("ping"), _assistant_item("pong"), _user_item("ping")]
+
+
+def test_durable_rebuild_keeps_a_new_turn_whose_first_message_repeats_the_thread_opening() -> None:
+    # "go" here is the user's own new message; it only happens to read the same
+    # as the message that opened the thread. Deleting it would send the
+    # replacement account a conversation the user never wrote.
+    transcript = (
+        _transcript_turn([_user_item("go")], [_assistant_item("ok", item_id="msg_1")]),
+        _transcript_turn([_user_item("next")], [_assistant_item("done", item_id="msg_2")], response_id="resp_2"),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("go"), _user_item("again")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [
+        _user_item("go"),
+        _assistant_item("ok"),
+        _user_item("next"),
+        _assistant_item("done"),
+        _user_item("go"),
+        _user_item("again"),
+    ]
+
+
+@pytest.mark.parametrize("client_turn_length", [1, 2, 3])
+def test_durable_rebuild_keeps_a_repeated_opening_whatever_the_new_turn_is_shaped_like(
+    client_turn_length: int,
+) -> None:
+    # The same coincidence at three lengths: an overlap rule anchored anywhere
+    # but the chain's end deletes the repeat for some of them and not others,
+    # which is how the deletion stayed invisible.
+    transcript = (
+        _transcript_turn([_user_item("go")], [_assistant_item("ok", item_id="msg_1")]),
+        _transcript_turn([_user_item("next")], [_assistant_item("done", item_id="msg_2")], response_id="resp_2"),
+    )
+    client_turn = [_user_item("go"), _user_item("again"), _user_item("and again")][:client_turn_length]
+
+    rebuilt = _rebuild(transcript, client_turn)
+
+    assert rebuilt is not None
+    assert cast(list[JsonValue], rebuilt["input"])[4:] == client_turn
+
+
+def test_durable_rebuild_dedupes_a_restatement_whose_key_order_differs_from_the_spool() -> None:
+    # The spool holds the frame the proxy sent upstream; the client serializes
+    # the same items in its own key order. Compared as text without a canonical
+    # ordering the two never match, the dedupe finds nothing, and the whole
+    # conversation is delivered twice with every duplicate individually valid.
+    reordered_user: dict[str, JsonValue] = {
+        "content": [{"text": "first", "type": "input_text"}],
+        "role": "user",
+        "type": "message",
+    }
+    reordered_assistant: dict[str, JsonValue] = {
+        "content": [{"annotations": [], "text": "answer", "type": "output_text"}],
+        "role": "assistant",
+        "status": "completed",
+        "type": "message",
+    }
+    transcript = (
+        _transcript_turn(
+            [_user_item("first")],
+            [_reasoning_item("rs_1"), _assistant_item("answer", item_id="msg_1")],
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [reordered_user, reordered_assistant, _user_item("second")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
 
 
 def test_durable_rebuild_falls_back_to_item_events_when_an_incomplete_terminal_omits_output() -> None:
@@ -2872,6 +3051,42 @@ def test_durable_rebuild_prefers_the_terminal_output_over_accumulated_items() ->
     assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
 
 
+def test_durable_rebuild_prefers_the_terminal_output_when_an_item_frame_never_reached_the_spool() -> None:
+    # The two sources are not interchangeable. An item frame the bridge
+    # suppressed downstream (a duplicated tool call, a deferred reasoning
+    # prelude) never reaches the spool, while the terminal response.output still
+    # lists the item -- so the accumulated frames can be a strict subset and are
+    # a fallback for terminals that omit output, never a competing answer.
+    commentary = _assistant_item("thinking out loud", item_id="msg_1", phase="commentary")
+    final_answer = _assistant_item("answer", item_id="msg_2", phase="final_answer")
+    transcript = (
+        _TranscriptTurn(
+            operation=_TranscriptOperation(
+                request_text=_request_frame({"model": "gpt-5.4", "input": [_user_item("first")]}),
+            ),
+            events=(
+                _sse_block({"type": "response.output_item.done", "item": final_answer}),
+                _sse_block(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_1", "output": [commentary, final_answer]},
+                    }
+                ),
+            ),
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("second")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [
+        _user_item("first"),
+        _assistant_item("thinking out loud", phase="commentary"),
+        _assistant_item("answer", phase="final_answer"),
+        _user_item("second"),
+    ]
+
+
 def test_durable_rebuild_refuses_a_turn_with_no_terminal_marker() -> None:
     transcript = (
         _TranscriptTurn(
@@ -2885,6 +3100,174 @@ def test_durable_rebuild_refuses_a_turn_with_no_terminal_marker() -> None:
     )
 
     assert _rebuild(transcript, [_user_item("second")]) is None
+
+
+# Characters ``str.splitlines`` breaks on that the SSE wire format does not:
+# vertical tab, form feed, the file/group/record separators, NEL, LINE
+# SEPARATOR and PARAGRAPH SEPARATOR. Every one is legal unescaped inside a JSON
+# string, so a model answer containing one must not cost the turn its terminal.
+_NON_SSE_LINE_BREAKS = ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ")
+
+
+@pytest.mark.parametrize("line_break", _NON_SSE_LINE_BREAKS)
+def test_durable_rebuild_reads_a_terminal_whose_answer_contains_a_non_sse_line_break(line_break: str) -> None:
+    answer = f"café{line_break}done"
+    transcript = (
+        _TranscriptTurn(
+            operation=_TranscriptOperation(
+                request_text=_request_frame({"model": "gpt-5.4", "input": [_user_item("first")]}),
+            ),
+            # The spool stores the upstream frame as written, so a non-ASCII
+            # answer keeps its UTF-8 and its separators unescaped.
+            events=(
+                "event: response.completed\ndata: "
+                + json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_1", "output": [_assistant_item(answer, item_id="msg_1")]},
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\n\n",
+            ),
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("second")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _assistant_item(answer), _user_item("second")]
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r\n", "\r"])
+def test_terminal_output_joins_a_multi_line_data_field_with_line_feeds(terminator: str) -> None:
+    payload = json.dumps(
+        {"type": "response.completed", "response": {"id": "resp_1", "output": [_assistant_item("answer")]}},
+        separators=(",", ":"),
+    )
+    split_at = payload.index('"response"')
+    block = (
+        f"event: response.completed{terminator}"
+        f"data: {payload[:split_at]}{terminator}"
+        f"data: {payload[split_at:]}{terminator}{terminator}"
+    )
+
+    # Only a parser that rejoins the field can decode it, and only one that
+    # honours CR-only framing can find the second line at all.
+    assert _terminal_response_output_items((block,)) == [_assistant_item("answer")]
+
+
+def test_durable_rebuild_carries_the_empty_annotation_list_every_output_text_part_has() -> None:
+    transcript = (_transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),)
+
+    rebuilt = _rebuild(transcript, [_user_item("second")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
+    assert cast(Any, cast(list[JsonValue], rebuilt["input"])[1])["content"][0]["annotations"] == []
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        {"type": "file_citation", "file_id": "file_owner_scoped", "filename": "notes.md", "index": 3},
+        {"type": "container_file_citation", "container_id": "cntr_owner", "file_id": "cfile_owner"},
+        # No identifier the account-scoped walk would recognize: only the
+        # annotation check itself stands between this and a relocated body.
+        {"type": "url_citation", "url": "https://example.test/a", "title": "a", "start_index": 0, "end_index": 1},
+    ],
+)
+def test_durable_rebuild_refuses_a_populated_annotation_list(annotation: dict[str, JsonValue]) -> None:
+    transcript = (
+        _transcript_turn(
+            [_user_item("first")],
+            [_assistant_item("answer", item_id="msg_1", annotations=[annotation])],
+        ),
+    )
+
+    assert _rebuild(transcript, [_user_item("second")]) is None
+
+
+def test_durable_rebuild_strips_a_response_owned_developer_id_from_the_chain() -> None:
+    # The Responses-Lite bundle and the developer instruction the owner account
+    # minted an id for. The rebuild is the dispatched body, so nothing in it may
+    # keep a response-owned id -- the strict predicate refuses every one.
+    lite_bundle: dict[str, JsonValue] = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "shell"}],
+    }
+    stored_developer: dict[str, JsonValue] = {
+        "type": "message",
+        "id": "msg_stored_response_owned",
+        "role": "developer",
+        "content": [{"type": "input_text", "text": "stored response-owned control"}],
+    }
+    transcript = (
+        _transcript_turn(
+            [lite_bundle, stored_developer, _user_item("first")],
+            [_assistant_item("answer", item_id="msg_1")],
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("second")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [
+        lite_bundle,
+        {key: value for key, value in stored_developer.items() if key != "id"},
+        _user_item("first"),
+        _assistant_item("answer"),
+        _user_item("second"),
+    ]
+
+
+def test_durable_rebuild_projects_the_clients_own_turn_before_joining_it() -> None:
+    # The client's current frame restates the owner's items exactly as it
+    # received them -- the reasoning item and the minted message id included.
+    # Unprojected, that suffix neither matches the chain nor survives the strict
+    # predicate.
+    transcript = (
+        _transcript_turn(
+            [_user_item("old question")],
+            [_reasoning_item("rs_owner"), _assistant_item("old answer", item_id="msg_owner")],
+        ),
+    )
+
+    rebuilt = _rebuild(
+        transcript,
+        [
+            _user_item("old question"),
+            _reasoning_item("rs_owner"),
+            _assistant_item("old answer", item_id="msg_owner"),
+            _user_item("next question"),
+        ],
+    )
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [
+        _user_item("old question"),
+        _assistant_item("old answer"),
+        _user_item("next question"),
+    ]
+
+
+def test_durable_rebuild_refuses_a_chain_that_assembles_no_conversation() -> None:
+    # An incomplete turn whose only output was reasoning, resumed by a frame
+    # that carries only the encrypted reasoning back. Everything on both sides
+    # is response-owned bookkeeping the projection removes, so the join yields
+    # nothing -- and an empty input is not the conversation the anchor stood
+    # for, it is the thread silently dropped.
+    transcript = (
+        _transcript_turn(
+            [_reasoning_item("rs_0")],
+            [_reasoning_item("rs_1")],
+            terminal_type="response.incomplete",
+        ),
+    )
+
+    assert _rebuild(transcript, [_reasoning_item("rs_1")]) is None
 
 
 @pytest.mark.parametrize(
@@ -2997,15 +3380,23 @@ def _chain_of_turns(turn_count: int) -> tuple[object, ...]:
     )
 
 
+def test_the_relocation_transcript_caps_are_the_values_the_change_states() -> None:
+    # Written out rather than derived: every other cap assertion builds its
+    # fixture from these constants, so without a literal here the caps only
+    # ever assert themselves and could be widened without a failing test.
+    assert RELOCATION_TRANSCRIPT_MAX_TURNS == 128
+    assert RELOCATION_TRANSCRIPT_MAX_BYTES == 8 * 1024 * 1024
+
+
 def test_durable_rebuild_accepts_a_chain_at_the_turn_cap() -> None:
-    rebuilt = _rebuild(_chain_of_turns(RELOCATION_TRANSCRIPT_MAX_TURNS), [_user_item("next")])
+    rebuilt = _rebuild(_chain_of_turns(128), [_user_item("next")])
 
     assert rebuilt is not None
-    assert len(cast(list[JsonValue], rebuilt["input"])) == RELOCATION_TRANSCRIPT_MAX_TURNS * 2 + 1
+    assert len(cast(list[JsonValue], rebuilt["input"])) == 128 * 2 + 1
 
 
 def test_durable_rebuild_refuses_a_chain_past_the_turn_cap() -> None:
-    assert _rebuild(_chain_of_turns(RELOCATION_TRANSCRIPT_MAX_TURNS + 1), [_user_item("next")]) is None
+    assert _rebuild(_chain_of_turns(129), [_user_item("next")]) is None
 
 
 @pytest.mark.parametrize(("max_turns", "expected_rebuild"), [(2, True), (1, False)])

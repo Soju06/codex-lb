@@ -11,7 +11,6 @@ import pytest
 
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
-from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.load_balancer import effective_routing_tunables
 
@@ -676,7 +675,7 @@ async def test_reconcile_keeps_free_blocked_when_matching_baseline_predates_bloc
 
 
 @pytest.mark.asyncio
-async def test_reconcile_keeps_account_blocked_when_a_sibling_window_is_exhausted(
+async def test_reconcile_keeps_plus_blocked_when_its_short_window_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 1_700_000_000.0
@@ -1785,50 +1784,6 @@ async def test_reconcile_ignores_reset_evidence_from_an_unanchored_window(
 
 
 @pytest.mark.asyncio
-async def test_reconcile_recovers_when_the_exhausted_sibling_window_has_elapsed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A sibling row stuck at 100% past its own reset is stale, not a live block."""
-
-    now = 1_700_000_000.0
-    blocked_at = int(now - 2 * 24 * 3600)
-    weekly_reset_at = int(now + 3 * 24 * 3600)
-    monkeypatch.setattr("time.time", lambda: now)
-    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
-    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
-
-    account = _make_account(
-        "acc_pro_elapsed_sibling",
-        status=AccountStatus.RATE_LIMITED,
-        plan_type="pro",
-        reset_at=weekly_reset_at,
-        blocked_at=blocked_at,
-    )
-    before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
-    elapsed_sibling = _make_usage(
-        account.id,
-        window="secondary",
-        used_percent=100.0,
-        reset_at=int(now - 3600),
-        recorded_at=_epoch_to_naive_utc(now - 90),
-        window_minutes=10_080,
-    )
-
-    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
-        accounts_repo=StubAccountsRepository([account]),
-        usage_repo=StubUsageRepository(
-            primary={account.id: after},
-            secondary={account.id: elapsed_sibling},
-        ),
-        accounts=[account],
-        reset_evidence={account.id: _reset_evidence(before, after)},
-    )
-
-    assert recovered == 1
-    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
-
-
-@pytest.mark.asyncio
 async def test_resolve_reset_evidence_anchors_a_paid_block_to_its_primary_window() -> None:
     """The anchored lookup searches every quota slot, not just the monthly one."""
 
@@ -1866,8 +1821,8 @@ async def test_reconcile_recovers_downgraded_free_despite_an_obsolete_paid_secon
 
     Usage history is append-only, so an account downgraded from a paid plan
     keeps its last paid 7d sample as the newest row in that slot indefinitely.
-    Free quota lives in the monthly slot, so that leftover row is not current
-    quota state and must not be read as a live exhausted sibling window.
+    Only the short window can withhold recovery, so a leftover long-window
+    sample from a previous plan is never read as current quota state.
     """
 
     now = 1_700_000_000.0
@@ -1931,9 +1886,9 @@ async def test_reconcile_recovers_free_weekly_shape_despite_a_stale_monthly_row(
 ) -> None:
     """A Free account whose live quota is not in the monthly slot still recovers.
 
-    The sibling set has to follow the shape upstream currently reports. If it
-    were derived from the plan alone, a leftover monthly row would veto an
-    anchored reset in the slot that actually carries this account's quota.
+    A leftover monthly sample from an earlier quota shape is a long-window row,
+    so it can never withhold an anchored recovery in the slot that actually
+    carries this account's quota.
     """
 
     now = 1_700_000_000.0
@@ -1974,41 +1929,74 @@ async def test_reconcile_recovers_free_weekly_shape_despite_a_stale_monthly_row(
     assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
 
 
+def _long_window_block(
+    account_id: str,
+    *,
+    now: float,
+    long_reset_at: int,
+) -> tuple[UsageHistory, UsageHistory]:
+    """A confirmed reset in the long (secondary) window."""
+
+    before = _make_usage(
+        account_id,
+        window="secondary",
+        used_percent=100.0,
+        reset_at=long_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=10_080,
+    )
+    after = _make_usage(
+        account_id,
+        window="secondary",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 10_080 * 60),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=10_080,
+    )
+    return before, after
+
+
 @pytest.mark.asyncio
-async def test_reconcile_keeps_account_blocked_when_a_freshly_reported_sibling_is_exhausted(
+async def test_reconcile_keeps_account_blocked_when_its_short_window_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A sibling written by the same fetch as the anchored window still vetoes."""
+    """A long-window reset must not release an account whose 5h window is spent.
+
+    This is the risk the exception was originally scoped away from by
+    restricting it to Free accounts. Anchoring keeps an unrelated window's reset
+    from matching this block; this keeps the account's own exhausted short
+    window from being ignored.
+    """
 
     now = 1_700_000_000.0
     blocked_at = int(now - 2 * 24 * 3600)
-    weekly_reset_at = int(now + 3 * 24 * 3600)
+    long_reset_at = int(now + 3 * 24 * 3600)
     monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
     account = _make_account(
-        "acc_pro_fresh_sibling",
+        "acc_plus_short_window_spent",
         status=AccountStatus.RATE_LIMITED,
-        plan_type="pro",
-        reset_at=weekly_reset_at,
+        plan_type="plus",
+        reset_at=long_reset_at,
         blocked_at=blocked_at,
     )
-    before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
-    fresh_exhausted_sibling = _make_usage(
+    before, after = _long_window_block(account.id, now=now, long_reset_at=long_reset_at)
+    exhausted_short_window = _make_usage(
         account.id,
-        window="secondary",
+        window="primary",
         used_percent=100.0,
-        reset_at=int(now + 2 * 24 * 3600),
-        recorded_at=after.recorded_at,
-        window_minutes=10_080,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=300,
     )
 
     recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
         accounts_repo=StubAccountsRepository([account]),
         usage_repo=StubUsageRepository(
-            primary={account.id: after},
-            secondary={account.id: fresh_exhausted_sibling},
+            primary={account.id: exhausted_short_window},
+            secondary={account.id: after},
         ),
         accounts=[account],
         reset_evidence={account.id: _reset_evidence(before, after)},
@@ -2017,52 +2005,51 @@ async def test_reconcile_keeps_account_blocked_when_a_freshly_reported_sibling_i
     assert recovered == 0
     assert (account.status, account.reset_at, account.blocked_at) == (
         AccountStatus.RATE_LIMITED,
-        weekly_reset_at,
+        long_reset_at,
         blocked_at,
     )
 
 
 @pytest.mark.asyncio
-async def test_reconcile_keeps_unknown_plan_blocked_when_a_reported_sibling_is_exhausted(
+async def test_reconcile_keeps_unknown_plan_blocked_when_its_short_window_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unknown plan capacity is not evidence that a reported window does not exist.
+    """Unknown plan capacity is not evidence that the short window does not exist.
 
-    `coerce_account_plan_type` preserves an unrecognized stored plan, and
-    `capacity_for_plan` then returns `None` for every slot. Treating that as
-    "no such window" would clear the cooldown even though upstream just
-    reported a second window at `100%` with an unelapsed deadline.
+    `coerce_account_plan_type` preserves an unrecognized stored plan and
+    `capacity_for_plan` then returns `None` for every slot. Reading that as "no
+    such window" would clear the cooldown despite a reported exhausted 5h window.
     """
 
     now = 1_700_000_000.0
     blocked_at = int(now - 2 * 24 * 3600)
-    weekly_reset_at = int(now + 3 * 24 * 3600)
+    long_reset_at = int(now + 3 * 24 * 3600)
     monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
     account = _make_account(
-        "acc_unknown_plan_sibling",
+        "acc_unknown_plan_short_window",
         status=AccountStatus.RATE_LIMITED,
         plan_type="some-new-plan",
-        reset_at=weekly_reset_at,
+        reset_at=long_reset_at,
         blocked_at=blocked_at,
     )
-    before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
-    reported_exhausted_sibling = _make_usage(
+    before, after = _long_window_block(account.id, now=now, long_reset_at=long_reset_at)
+    exhausted_short_window = _make_usage(
         account.id,
-        window="secondary",
+        window="primary",
         used_percent=100.0,
-        reset_at=int(now + 2 * 24 * 3600),
-        recorded_at=after.recorded_at,
-        window_minutes=10_080,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=300,
     )
 
     recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
         accounts_repo=StubAccountsRepository([account]),
         usage_repo=StubUsageRepository(
-            primary={account.id: after},
-            secondary={account.id: reported_exhausted_sibling},
+            primary={account.id: exhausted_short_window},
+            secondary={account.id: after},
         ),
         accounts=[account],
         reset_evidence={account.id: _reset_evidence(before, after)},
@@ -2071,22 +2058,66 @@ async def test_reconcile_keeps_unknown_plan_blocked_when_a_reported_sibling_is_e
     assert recovered == 0
     assert (account.status, account.reset_at, account.blocked_at) == (
         AccountStatus.RATE_LIMITED,
-        weekly_reset_at,
+        long_reset_at,
         blocked_at,
     )
 
 
 @pytest.mark.asyncio
-async def test_reconcile_keeps_account_blocked_when_a_partial_live_update_lags_the_sibling(
+async def test_reconcile_recovers_when_the_exhausted_short_window_has_elapsed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A live sibling that simply fell behind its peers still vetoes recovery.
+    """A short-window row stuck at 100% past its own reset is stale, not a live block."""
 
-    `LiveUsageIngestor` appends only the windows a live header carries, so one
-    slot can advance without the other. Liveness therefore cannot mean "written
-    alongside the anchored window"; it means the slot has reported since the
-    block. Here the exhausted sibling lags the anchored row yet is plainly live,
-    and the account must stay blocked.
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    long_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_plus_elapsed_short_window",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="plus",
+        reset_at=long_reset_at,
+        blocked_at=blocked_at,
+    )
+    before, after = _long_window_block(account.id, now=now, long_reset_at=long_reset_at)
+    elapsed_short_window = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=100.0,
+        reset_at=int(now - 3600),
+        recorded_at=_epoch_to_naive_utc(now - 90),
+        window_minutes=300,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={account.id: elapsed_short_window},
+            secondary={account.id: after},
+        ),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 1
+    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recovers_a_short_window_reset_while_the_long_window_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard is deliberately only the short window.
+
+    Whether a long window at `100%` still permits traffic depends on credit-backed
+    quota and weekly-shape normalization, which `apply_usage_quota` owns. Rather
+    than duplicate that here, a long window is never a reason to withhold an
+    anchored short-window recovery: if it truly is spent, upstream re-blocks the
+    account with a fresh deadline instead of a stale one.
     """
 
     now = 1_700_000_000.0
@@ -2097,19 +2128,19 @@ async def test_reconcile_keeps_account_blocked_when_a_partial_live_update_lags_t
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
     account = _make_account(
-        "acc_pro_partial_live_update",
+        "acc_pro_long_window_spent",
         status=AccountStatus.RATE_LIMITED,
         plan_type="pro",
         reset_at=weekly_reset_at,
         blocked_at=blocked_at,
     )
     before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
-    lagging_live_sibling = _make_usage(
+    spent_long_window = _make_usage(
         account.id,
         window="secondary",
         used_percent=100.0,
         reset_at=int(now + 2 * 24 * 3600),
-        recorded_at=_epoch_to_naive_utc(naive_utc_to_epoch(after.recorded_at) - 90),
+        recorded_at=_epoch_to_naive_utc(now - 60),
         window_minutes=10_080,
     )
 
@@ -2117,15 +2148,11 @@ async def test_reconcile_keeps_account_blocked_when_a_partial_live_update_lags_t
         accounts_repo=StubAccountsRepository([account]),
         usage_repo=StubUsageRepository(
             primary={account.id: after},
-            secondary={account.id: lagging_live_sibling},
+            secondary={account.id: spent_long_window},
         ),
         accounts=[account],
         reset_evidence={account.id: _reset_evidence(before, after)},
     )
 
-    assert recovered == 0
-    assert (account.status, account.reset_at, account.blocked_at) == (
-        AccountStatus.RATE_LIMITED,
-        weekly_reset_at,
-        blocked_at,
-    )
+    assert recovered == 1
+    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)

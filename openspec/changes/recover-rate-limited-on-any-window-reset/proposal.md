@@ -32,11 +32,13 @@ quota window and therefore no window ambiguity to resolve.
 - Require the whole evidence chain (baseline, before, after, and the latest
   sample) to come from the one window the anchor identified, so a reset in an
   unrelated window cannot release a block.
-- Keep an account blocked when a *different* window that carries quota for its
-  plan is currently exhausted, so recovery cannot hand back an account that
-  would immediately 429 again. A window whose own reset has elapsed is stale
-  exhaustion evidence and does not veto recovery, and a plan's zero-capacity
-  slot (the Free primary artifact) is not a window for this purpose.
+- Withhold a long-window recovery while the account's own short window is
+  exhausted and unelapsed, which is the risk the Free-plan scoping was standing
+  in for. The Free primary slot has zero capacity and is excluded; an unknown
+  plan capacity is not treated as proof the window is absent. A long window at
+  100% deliberately does not withhold recovery: credit-backed quota and
+  weekly-shape normalization govern whether it still permits traffic, and if it
+  truly is spent upstream re-blocks with a fresh deadline instead of a stale one.
 - Keep reset-confirmed warm-up on the monthly slot: evidence resolved from the
   primary or secondary slot is used for recovery only and is not substituted
   into the monthly before/after pair warm-up consumes.

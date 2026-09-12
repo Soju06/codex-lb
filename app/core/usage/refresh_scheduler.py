@@ -448,19 +448,23 @@ async def reconcile_recoverable_account_statuses(
     return recovered
 
 
-def _sibling_window_blocks_recovery(
-    entry: UsageHistory | None,
-    *,
-    account: Account,
-    window: str,
-    blocked_at: float,
-    now: float,
-) -> bool:
-    """Return whether a non-recovered window would immediately re-block the account.
+def _short_window_blocks_recovery(entry: UsageHistory | None, *, account: Account, now: float) -> bool:
+    """Return whether the account's short window would immediately re-block it.
 
-    Releasing an account whose *other* quota window is still exhausted only buys
-    one upstream 429 and a fresh block, so a currently exhausted sibling keeps
-    the account blocked. Three exclusions keep that from over-blocking:
+    This is the risk the reset-confirmed exception was originally scoped away
+    from by restricting it to Free accounts: a paid account whose short window
+    is exhausted must not be released by a reset in a long window. Anchoring
+    already prevents an unrelated window's reset from matching this block's
+    deadline; this keeps the account blocked when its *own* short window is
+    still spent, so recovery cannot hand back an account that would spend one
+    request earning a fresh 429.
+
+    Deliberately only the short window. The long window is what a confirmed
+    reset and credit-backed quota act on, and reasoning about it here would
+    duplicate ``apply_usage_quota`` and the weekly-shape normalization that own
+    that question.
+
+    Two exclusions:
 
     * A slot known to carry zero capacity for the plan is not a window. The Free
       primary row is a normalization artifact of the monthly-only payload, not a
@@ -468,26 +472,16 @@ def _sibling_window_blocks_recovery(
       (an unrecognized stored plan, which ``coerce_account_plan_type``
       preserves) is not evidence that a reported window does not exist, so it
       does not exclude the slot.
-    * A slot with no sample since the block is not current state. Usage history
-      is append-only, so a slot upstream stopped reporting keeps its last row
-      forever -- a downgraded account's paid ``secondary`` sample, or a Free
-      account's ``monthly`` sample once live quota arrives in another slot.
-      Requiring a post-block sample is the same evidence bar the rest of this
-      predicate uses, and unlike comparing slots against each other it does not
-      depend on two windows being written together: live ingest can append a
-      single window, so a live sibling legitimately falls behind its peers.
     * An elapsed window is stale exhaustion evidence rather than a live block
-      (see "Usage refresh does not trust elapsed reset windows"). A 100% row
-      with no reset metadata is treated as current because nothing proves it
-      rolled.
+      (see "Usage refresh does not trust elapsed reset windows"), which also
+      covers upstream having stopped reporting the short window. A 100% row with
+      no reset metadata is treated as current because nothing proves it rolled.
     """
 
     if entry is None or entry.used_percent < 100.0:
         return False
-    capacity = capacity_for_plan(account.plan_type, window)
+    capacity = capacity_for_plan(account.plan_type, "primary")
     if capacity is not None and capacity <= 0:
-        return False
-    if naive_utc_to_epoch(entry.recorded_at) <= blocked_at:
         return False
     return entry.reset_at is None or entry.reset_at > now
 
@@ -541,17 +535,7 @@ def _confirmed_window_reset_recovery(
         return False
     if after.used_percent >= 100.0 or latest.used_percent >= 100.0:
         return False
-    if any(
-        _sibling_window_blocks_recovery(
-            entry,
-            account=account,
-            window=sibling,
-            blocked_at=account.blocked_at,
-            now=now,
-        )
-        for sibling, entry in latest_by_window.items()
-        if sibling != window
-    ):
+    if window != "primary" and _short_window_blocks_recovery(latest_by_window.get("primary"), account=account, now=now):
         return False
     return (
         naive_utc_to_epoch(after.recorded_at) > account.blocked_at

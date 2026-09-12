@@ -6,7 +6,7 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 
 A future persisted `reset_at` SHALL continue to block ordinary recovery except for a `rate_limited` account whose usage history proves that the specific quota window associated with the current block reset. The exception SHALL be bound to a window, not to the account's plan: the scheduler MUST search each quota-window slot (`primary`, `secondary`, `monthly`) for post-block history containing a baseline whose `reset_at` matches the persisted marker within five seconds, and at most one slot can anchor a given block. This exception MUST require `blocked_at` and a future persisted `reset_at`, at least 30 seconds elapsed after `blocked_at`, a baseline recorded strictly after `blocked_at` in the anchored slot, a real temporal reset in an adjacent pair from that same slot at or after that baseline, and both the transition's after sample and the latest sample of that slot recorded after `blocked_at` with usage below `100%`.
 
-Recovery MUST additionally be withheld while a window other than the anchored one reports usage at or above `100%` and has not itself elapsed, counting only windows that are currently live for the account. A slot known to carry zero quota capacity for the plan is not a window for this rule, because the Free primary row is a normalization artifact of the monthly-only payload rather than a live short window; an unknown capacity for an unrecognized stored plan is NOT evidence that a reported window does not exist and MUST NOT exclude the slot. A slot with no sample recorded after `blocked_at` is likewise not a window for this rule: usage history is append-only, so a slot upstream has stopped reporting keeps its last sample indefinitely. Liveness MUST be established from that slot's own post-block evidence rather than by comparing slots against each other, because a live usage ingest MAY append a single window and leave its peers behind. Deriving liveness from evidence rather than from the plan MUST hold in both directions -- a downgraded account's leftover paid `secondary` sample, and a Free account whose live quota arrives in a slot other than `monthly`. A window whose own `reset_at` has already passed is stale exhaustion evidence and MUST NOT veto recovery. The reset pair MAY come from the current refresh or be selected from adjacent persisted post-block samples so recovery survives a process restart and tolerates sliding reset deadlines without comparing non-neighboring rows. Availability without that matching anchored transition, reset timestamp jitter, an exhausted latest window, or a transition in a slot that does not anchor the persisted marker MUST NOT override the persisted cooldown.
+When the anchored window is not the short window, recovery MUST additionally be withheld while the account's short (`primary`) window reports usage at or above `100%` and has not itself elapsed. This is the only cross-window condition: it prevents a long-window reset from releasing an account whose own short window is still spent. A slot known to carry zero quota capacity for the plan is not a window for this rule, because the Free primary row is a normalization artifact of the monthly-only payload rather than a live short window; an unknown capacity for an unrecognized stored plan is NOT evidence that a reported window does not exist and MUST NOT exclude the slot. A long window at `100%` MUST NOT withhold recovery, because whether such a window still permits traffic depends on credit-backed quota and weekly-shape normalization that the quota layer owns; if it truly is spent, upstream re-blocks the account with a fresh deadline rather than a stale one. A short window whose own `reset_at` has already passed is stale exhaustion evidence and MUST NOT withhold recovery, which also covers upstream having stopped reporting it. The reset pair MAY come from the current refresh or be selected from adjacent persisted post-block samples so recovery survives a process restart and tolerates sliding reset deadlines without comparing non-neighboring rows. Availability without that matching anchored transition, reset timestamp jitter, an exhausted latest window, or a transition in a slot that does not anchor the persisted marker MUST NOT override the persisted cooldown.
 
 Every recovery write MUST compare the current status, deactivation reason, `reset_at`, and `blocked_at`. A successful write SHALL set the account to `active` and clear the deactivation reason and both block markers. A compare-and-set miss MUST preserve the newer row and MUST NOT make the stale account snapshot eligible for warm-up.
 
@@ -134,11 +134,11 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **THEN** the unanchored transition is not treated as evidence for the current block
 - **AND** the account remains `rate_limited`
 
-#### Scenario: An elapsed exhausted sibling window does not veto recovery
-- **GIVEN** an account qualifies for anchored reset recovery in one quota window
-- **AND** another window's latest sample reports `100%` but its own reset deadline has already passed
+#### Scenario: An elapsed exhausted short window does not withhold recovery
+- **GIVEN** an account qualifies for anchored reset recovery in its long window
+- **AND** its short window reports `100%` but that window's own reset deadline has already passed
 - **WHEN** background usage refresh evaluates recovery
-- **THEN** the stale sibling sample does not block the transition
+- **THEN** the stale short-window sample does not withhold the transition
 - **AND** the scheduler marks the account `active`
 
 #### Scenario: Scheduler recovers a stale quota-exceeded account from fresh secondary usage
@@ -167,35 +167,34 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **WHEN** background usage refresh recovers a `rate_limited` or `quota_exceeded` account to `active`
 - **THEN** the scheduler writes `deactivation_reason` as `NULL`
 
-#### Scenario: An obsolete sibling row from a previous plan does not veto recovery
+#### Scenario: An obsolete row from a previous plan does not withhold recovery
 - **GIVEN** an account was downgraded from a paid plan to Free
 - **AND** its newest `secondary` row is an exhausted, unelapsed sample left over from the paid era
 - **WHEN** background usage refresh evaluates anchored monthly reset evidence
-- **THEN** the leftover paid sample is not treated as a live exhausted window
+- **THEN** the leftover paid long-window sample does not withhold recovery
 - **AND** the scheduler marks the account `active`
 
-#### Scenario: A slot with no post-block sample does not veto recovery
+#### Scenario: A leftover long-window sample does not withhold recovery
 - **GIVEN** a Free account whose live quota is reported in a slot other than `monthly`
-- **AND** an exhausted, unelapsed `monthly` row remains from before the block
+- **AND** an exhausted, unelapsed `monthly` row remains from an earlier quota shape
 - **WHEN** background usage refresh evaluates anchored reset evidence in the live slot
-- **THEN** the `monthly` row is not treated as a live exhausted window
+- **THEN** the leftover long-window row does not withhold recovery
 - **AND** the scheduler marks the account `active`
 
-#### Scenario: A sibling that only lags its peers still vetoes recovery
-- **GIVEN** an account qualifies for anchored reset recovery in one quota window
-- **AND** a live usage ingest appended only that window, leaving an exhausted sibling behind
-- **AND** that sibling reported after the block with an unelapsed deadline
+#### Scenario: A spent long window does not withhold a short-window recovery
+- **GIVEN** an account qualifies for anchored reset recovery in its short window
+- **AND** its long window reports `100%` with an unelapsed deadline
+- **WHEN** background usage refresh evaluates recovery
+- **THEN** the scheduler marks the account `active`
+
+#### Scenario: An exhausted short window withholds a long-window recovery
+- **GIVEN** an account qualifies for anchored reset recovery in its long window
+- **AND** its short window reports `100%` with an unelapsed deadline
 - **WHEN** background usage refresh evaluates recovery
 - **THEN** the account remains `rate_limited`
 
-#### Scenario: A sibling reported after the block still vetoes recovery
-- **GIVEN** an account qualifies for anchored reset recovery in one quota window
-- **AND** another window carrying plan quota reported after the block at `100%` with an unelapsed deadline
-- **WHEN** background usage refresh evaluates recovery
-- **THEN** the account remains `rate_limited`
-
-#### Scenario: An unrecognized plan still honors a reported exhausted sibling
+#### Scenario: An unrecognized plan still honors a reported exhausted short window
 - **GIVEN** an account's stored plan is unrecognized, so no window capacity is known
-- **AND** upstream reports a second quota window at `100%` with an unelapsed deadline alongside the anchored one
-- **WHEN** background usage refresh evaluates anchored reset evidence
+- **AND** upstream reports its short window at `100%` with an unelapsed deadline
+- **WHEN** background usage refresh evaluates anchored long-window reset evidence
 - **THEN** the account remains `rate_limited`

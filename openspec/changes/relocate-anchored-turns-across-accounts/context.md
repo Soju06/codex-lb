@@ -107,11 +107,22 @@ showed that inspecting the input for *shape* fails the same way: a predicate
 that reads "no model-authored items" as "this is a delta" classified a full
 resend as a delta and doubled the conversation at the public entry point.
 
-The signal was in the request all along. `previous_response_id` present means
-the input is that turn's delta — that is what the anchor means in the wire
-contract — and absent means the body is the whole conversation. Two cases, no
-search, no third case to adjudicate. The requirement now names the anchor
-instead of asking an implementation to work the shape out.
+Naming the anchor as the signal was the fifth attempt and it was also wrong, for
+two reasons the fifth review measured. The proxy injects anchors onto requests
+that did not arrive with one, so the anchor on the wire says nothing about what
+the input holds. And an anchored full resend is not a contradiction in terms —
+it is a shape this repository already ships verification for, in
+`openspec/specs/responses-api-compat/spec.md:1214` and `:2741`. The rule defined
+that shape out of existence and the implementation dutifully doubled it.
+
+The discriminator this codebase already had is self-containment, and the
+predicates for it were sitting in the same module the whole time:
+`responses_input_items_are_self_contained_fresh_replay` and
+`responses_input_suffix_retains_prior_output`. Applied per stored request rather
+than once for the join, they answer every shape: a self-contained history
+supersedes, a clean delta appends, a partial restatement refuses. The chain turn
+that restated the conversation stops being a special case, because it supersedes
+at its own position.
 
 ## Why the zero-event precondition is the real fence
 

@@ -10,3 +10,11 @@ Provision each backend independently before switching. Keep the previous process
 The database must already be compatible with both running versions. Do not start candidates that auto-migrate a shared production database without first verifying their migration heads and backwards compatibility on a snapshot. This router cannot certify schema compatibility or recover context encrypted by a different provider. The bundled probe is not a full real-task acceptance suite; extend the fixed operator-owned validator with tool roundtrips and task fixtures for each rollout.
 
 Initial migration: stage the entrance on a new port pointing at the existing backend. This leaves the original listener intact. Moving the entrance to occupied port 2455 needs a separately coordinated handover after existing connections drain; it cannot be done by restarting the sole backend first. Client routing must remain unchanged until the user requests enabling the validated entrance.
+
+## SQLite validation result
+
+The deployed application holds `store.db.runstate.lock` for its lifetime. A real experiment starting two schema-compatible releases against one disposable production snapshot failed with `SqliteRunStateLockError` in the second instance. Do not bypass or delete this lock. Online overlap against SQLite is unsupported by this deployment, regardless of revision matching.
+
+`python -m scripts.local_database_gate --database <sqlite-file> --active <release-dir> --candidate <release-dir>` performs read-only schema checks. It rejects changed heads, migration contents, or ORM definitions. Passing it is necessary but insufficient for overlapping processes.
+
+Set `LOCAL_ENTRY_DATABASE_PLAN` on the acceptance validator to an operator-owned JSON file with `database`, `active_release`, `active_port`, and `candidates` (port strings mapped to release directories). SQLite plans deliberately refuse switching away from `active_port`. Use a separately validated PostgreSQL migration for overlapping instances or a coordinated SQLite maintenance window. Production migrations and client reconfiguration are separate operations.

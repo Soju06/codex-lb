@@ -5,12 +5,21 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
 
 
 async def main() -> None:
     url = os.environ["CANDIDATE_URL"]
+    if plan := os.environ.get("LOCAL_ENTRY_DATABASE_PLAN"):
+        from scripts.local_database_gate import check_plan
+
+        port = urlparse(url).port
+        if port is None:
+            raise ValueError("Candidate port required")
+        check_plan(Path(plan), port)
     payload = {
         "model": "trae/GPT-5.6-Luna-max",
         "stream": True,

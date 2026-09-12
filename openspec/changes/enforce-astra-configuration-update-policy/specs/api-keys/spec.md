@@ -78,6 +78,13 @@ anchors; repeated preparation SHALL be idempotent.
 - **THEN** the proxy SHALL fail that continuation closed with the existing invalid_request_error naming the offending parameter, because the injected reset is a configuration update
 - **AND** an allowed-list key without an enforced effort SHALL complete the same continuation without a reset
 
+#### Scenario: An enforced key keeps minimal distinct from low
+
+- **GIVEN** an API key that enforces a reasoning effort
+- **WHEN** a subscription Astra configuration_update selects an effort whose wire value differs from the enforced wire effort, including minimal against enforced low
+- **THEN** the proxy SHALL reject the request with reasoning_effort_not_allowed before upstream work on the HTTP and WebSocket routes
+- **AND** the allowed-list minimal/low equivalence SHALL NOT apply to enforcement
+
 #### Scenario: A pre-submit HTTP fallback retains continuation policy
 
 - **GIVEN** an anchored subscription Astra request uses an enforced-effort key without an applicable usage reservation

@@ -162,6 +162,18 @@ def test_astra_history_update_obeys_enforced_effort():
         _apply_subscription_policy(_request(), _key(enforced="low"))
 
 
+def test_astra_enforced_key_keeps_minimal_distinct_from_low():
+    with pytest.raises(ProxyReasoningEffortNotAllowed) as exc_info:
+        _apply_subscription_policy(_request("minimal"), _key(enforced="low"))
+    assert exc_info.value.param == "input.1.reasoning.effort"
+    with pytest.raises(ProxyReasoningEffortNotAllowed):
+        _apply_subscription_policy(_request("minimal"), _key(enforced="minimal"))
+
+    request = _request("low")
+    _apply_subscription_policy(request, _key(enforced="minimal"))
+    assert _configuration_effort(request.to_payload()["input"]) == "low"
+
+
 def test_astra_history_update_preserves_raw_enforcement_distinction():
     with pytest.raises(ProxyReasoningEffortNotAllowed):
         _apply_subscription_policy(_request("ultra"), _key(enforced="max"))

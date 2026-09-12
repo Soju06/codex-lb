@@ -485,8 +485,9 @@ def validate_configuration_update_policy(
         if api_key.enforced_reasoning_effort is not None:
             enforced = api_key.enforced_reasoning_effort.strip().lower()
             if subscription:
+                # The proxy would reset to this wire effort; an explicit update
+                # must match it exactly, without the allowed-list minimal/low alias.
                 enforced = _astra_subscription_client_effort(enforced)
-                effort = _astra_subscription_client_effort(effort)
             if effort != enforced:
                 raise ProxyReasoningEffortNotAllowed(
                     "Configuration update conflicts with the API key's enforced reasoning effort.",

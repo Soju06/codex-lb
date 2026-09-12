@@ -33,3 +33,4 @@
 - [x] 3.17 Preserve anchored-delta client prefix metadata when preparation inserts a reset without trimming; verify the surviving ledger-publication race and subsequent full resend
 - [x] 3.18 Record that an enforced reset makes automatic truncation or compaction continuations fail closed while allowed-list keys complete them
 - [x] 3.19 Forward non-Ultra configuration-update efforts verbatim at subscription serialization and keep the client's exact strings for late-anchor restoration; cover HTTP and WebSocket routes
+- [x] 3.20 Compare explicit configuration-update efforts against the enforced wire effort exactly, without the allowed-list minimal/low alias; cover HTTP and WebSocket routes

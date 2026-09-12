@@ -60,6 +60,9 @@ async def test_astra_valid_update_reaches_subscription_without_rewriting_prefix(
         pytest.param("low", {"enforcedReasoningEffort": "low"}, 200, id="low-enforced"),
         pytest.param("high", {"allowedReasoningEfforts": ["low"]}, 403, id="high-allowed"),
         pytest.param("high", {"enforcedReasoningEffort": "low"}, 403, id="high-enforced"),
+        pytest.param("minimal", {"enforcedReasoningEffort": "low"}, 403, id="minimal-enforced-low"),
+        pytest.param("minimal", {"allowedReasoningEfforts": ["low"]}, 200, id="minimal-allowed-low"),
+        pytest.param("low", {"enforcedReasoningEffort": "minimal"}, 200, id="low-enforced-minimal"),
     ],
 )
 async def test_astra_update_schema_and_key_policy_errors(

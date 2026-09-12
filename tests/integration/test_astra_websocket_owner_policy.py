@@ -485,6 +485,33 @@ def test_websocket_owner_selection_preserves_key_policy(
     assert client.portal.call(_reservation_statuses, app_instance) == []
 
 
+@pytest.mark.parametrize("path", _PATHS)
+def test_websocket_enforced_key_keeps_minimal_distinct_from_low(
+    app_instance, source_and_subscription_owner, monkeypatch, path
+):
+    client, key, _ = source_and_subscription_owner
+    updated = client.patch("/api/api-keys/" + key["id"], json={"enforcedReasoningEffort": "low"})
+    assert updated.status_code == 200
+    connect = AsyncMock(side_effect=AssertionError("A minimal update bypassed the enforced low effort"))
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    payload = _continuation(
+        {
+            "previous_response_id": _ANCHOR,
+            "input": [{"type": "configuration_update", "reasoning": {"effort": "minimal"}}],
+        }
+    )
+
+    with client.websocket_connect(path, headers={"Authorization": "Bearer " + key["key"]}) as ws:
+        ws.send_json(payload)
+        event = ws.receive_json()
+
+    assert event["status"] == 403
+    assert event["error"]["code"] == "reasoning_effort_not_allowed"
+    assert event["error"]["param"] == "input.0.reasoning.effort"
+    connect.assert_not_awaited()
+    assert client.portal.call(_reservation_statuses, app_instance) == []
+
+
 def test_websocket_subscription_owner_validates_proxy_injected_full_resend_before_fallback(
     app_instance, source_and_subscription_owner, monkeypatch
 ):

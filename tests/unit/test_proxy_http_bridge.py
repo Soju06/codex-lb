@@ -43710,6 +43710,9 @@ async def test_closing_http_bridge_session_defers_release_for_detached_reader(
     """A cancellation-resistant reader keeps the durable owner until deferred cleanup settles."""
     session = _denied_anchor_session()
     session.last_upstream_close_code = 1000
+    session.upstream_reader_cleanup_pending = True
+    cleanup_complete = asyncio.Event()
+    session.upstream_reader_cleanup_complete = cleanup_complete
     reader_started = asyncio.Event()
     release_reader = asyncio.Event()
 
@@ -43734,6 +43737,9 @@ async def test_closing_http_bridge_session_defers_release_for_detached_reader(
         setattr(cleanup_task, "_http_bridge_recovery_session_id", session.durable_session_id)
         cleanup_tasks.add(cleanup_task)
         cleanup_task.add_done_callback(cleanup_tasks.discard)
+        cleanup_task.add_done_callback(lambda _done: setattr(session, "upstream_reader_cleanup_pending", False))
+        cleanup_task.add_done_callback(lambda _done: cleanup_complete.set())
+        session.upstream_reader_cleanup_task = cleanup_task
         return False
 
     monkeypatch.setattr(http_bridge_helpers_module, "_await_cancelled_task", fake_await_cancelled_task)
@@ -43770,6 +43776,7 @@ async def test_closing_http_bridge_session_rechecks_finalizers_after_reader_sett
     """A finalizer scheduled while the reader settles must drain before release."""
     session = _denied_anchor_session()
     session.last_upstream_close_code = 1000
+    session.upstream_reader_cleanup_pending = True
     reader = asyncio.create_task(asyncio.sleep(60), name="http-bridge-reader-finalizer-race")
     session.upstream_reader = reader
     finalizer_release = asyncio.Event()
@@ -43785,6 +43792,7 @@ async def test_closing_http_bridge_session_rechecks_finalizers_after_reader_sett
         setattr(finalizer_task, "_http_bridge_session_id", session.durable_session_id)
         setattr(finalizer_task, "_http_bridge_owner_epoch", session.durable_owner_epoch)
         batcher._terminal_finalize_tasks.add(finalizer_task)
+        session.upstream_reader_cleanup_pending = False
         return True
 
     async def drain_finalizers(*, session_id: str | None = None, owner_epoch: int | None = None) -> None:

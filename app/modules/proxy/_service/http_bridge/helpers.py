@@ -1652,6 +1652,7 @@ async def _close_http_bridge_session_resources(
         if (
             release_durable_session
             and not durable_release_attempted
+            and not getattr(session, "upstream_reader_cleanup_pending", False)
             and _http_bridge_durable_release_allowed(service, session)
         ):
             durable_release_attempted = True
@@ -1694,24 +1695,26 @@ async def _close_http_bridge_session_resources(
             )
 
     upstream_reader = session.upstream_reader
+    cleanup_complete = getattr(session, "upstream_reader_cleanup_complete", None)
+    cleanup_owner_task = getattr(session, "upstream_reader_cleanup_task", None)
     clean_close_without_pending_requests = getattr(session, "last_upstream_close_code", None) == 1000 and not getattr(
         session, "pending_requests", ()
     )
-    if (
-        clean_close_without_pending_requests
-        and upstream_reader is None
-        and not drain_terminal_finalizers
-        and not session_finalizers_pending()
-    ):
-        # A graceful close with no pending request lifecycle and no reader can
-        # release promptly. If a reader exists, it may have already removed its
-        # request state while still settling retry or poisoned-anchor cleanup;
-        # keep the owner fence until that reader has actually unwound.
-        await release_durable_session_and_cleanup()
+    if clean_close_without_pending_requests and not drain_terminal_finalizers and not session_finalizers_pending():
+        # A graceful close with no pending request lifecycle can release before
+        # the reader task itself unwinds, but only after any reader-owned retry
+        # or poisoned-anchor settlement has completed. The completion event is
+        # set by the reader's cleanup wrapper before it proceeds to teardown.
+        # Resource closure is normally a child task. Waiting for a pending
+        # reader cleanup marker here can form a cycle when that reader awaits
+        # this resource-close task, so the durable release is deferred below;
+        # the reader's wrapper signals completion after this task returns.
+        if not getattr(session, "upstream_reader_cleanup_pending", False):
+            await release_durable_session_and_cleanup()
 
     detached_reader_pending = False
     if upstream_reader is not None:
-        if upstream_reader is asyncio.current_task():
+        if upstream_reader is asyncio.current_task() or upstream_reader is cleanup_owner_task:
             session.upstream_reader = None
         else:
             detached_reader_pending = not await _await_cancelled_task(
@@ -1723,7 +1726,12 @@ async def _close_http_bridge_session_resources(
             )
             if session.upstream_reader is upstream_reader:
                 session.upstream_reader = None
-    if not detached_reader_pending and not drain_terminal_finalizers and not session_finalizers_pending():
+    if (
+        not detached_reader_pending
+        and not getattr(session, "upstream_reader_cleanup_pending", False)
+        and not drain_terminal_finalizers
+        and not session_finalizers_pending()
+    ):
         # Once any reader has settled, a normal close can release its durable
         # lease before unrelated teardown awaits. A cancellation-resistant
         # reader keeps the owner fence until its cleanup continuation settles.
@@ -1760,23 +1768,46 @@ async def _close_http_bridge_session_resources(
     release_blocked = (
         release_durable_session
         and durable_session_id is not None
-        and not _http_bridge_durable_release_allowed(service, session)
+        and (
+            getattr(session, "upstream_reader_cleanup_pending", False)
+            or not _http_bridge_durable_release_allowed(service, session)
+        )
     )
     if (detached_reader_pending or release_blocked) and release_durable_session and durable_session_id is not None:
         # A cancellation-resistant reader may still append a terminal event
         # after this close returns. Keep the owner fence until that detached
         # cleanup and any finalizer it schedules have settled, then release in
         # an owner-fenced continuation.
-        cleanup_tasks = tuple(
+        cleanup_tasks = {
             task
             for task in service._background_cleanup_tasks
             if not task.done() and getattr(task, "_http_bridge_recovery_session_id", None) == durable_session_id
-        )
+        }
+        cleanup_owner_task = getattr(session, "upstream_reader_cleanup_task", None)
+        cleanup_owner_completion: asyncio.Event | None = None
+        if (
+            cleanup_owner_task is not None
+            and cleanup_owner_task is not asyncio.current_task()
+            and not cleanup_owner_task.done()
+        ):
+            if cleanup_complete is not None:
+                # The reader may be awaiting this resource-close task (and
+                # direct relay tests do not always retain it in
+                # ``session.upstream_reader``). Waiting on the owner task would
+                # deadlock; its completion event is the non-cyclic handoff.
+                cleanup_owner_completion = cleanup_complete
+            else:
+                cleanup_tasks.add(cleanup_owner_task)
+        cleanup_tasks = tuple(cleanup_tasks)
         existing_deferred = session.deferred_durable_release_task
-        if cleanup_tasks and (existing_deferred is None or existing_deferred.done()):
+        if (cleanup_tasks or cleanup_owner_completion is not None) and (
+            existing_deferred is None or existing_deferred.done()
+        ):
 
             async def deferred_release() -> None:
                 await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+                if cleanup_owner_completion is not None:
+                    await cleanup_owner_completion.wait()
                 await drain_and_release(force_drain=True)
 
             deferred_task = scheduler_for(service).create_task(

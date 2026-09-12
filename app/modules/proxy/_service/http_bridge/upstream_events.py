@@ -3521,6 +3521,33 @@ class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
         session: "_HTTPBridgeSession",
+        **kwargs: Any,
+    ) -> bool:
+        """Mark reader-owned cleanup until failure settlement and retirement finish."""
+        session.upstream_reader_cleanup_pending = True
+        session.upstream_reader_cleanup_task = asyncio.current_task()
+        cleanup_complete = asyncio.Event()
+        session.upstream_reader_cleanup_complete = cleanup_complete
+        try:
+            return await self._fail_http_bridge_reader_and_maybe_retire_impl(session, **kwargs)
+        finally:
+            session.upstream_reader_cleanup_pending = False
+            session.upstream_reader_cleanup_task = None
+            cleanup_complete.set()
+            # A resource-close child may have deferred the fenced durable
+            # release behind this reader's cleanup marker. Once the marker is
+            # published, finish that continuation before the reader exits so
+            # direct relay callers observe a fully settled owner, while still
+            # preserving any cancellation requested during the wait.
+            deferred_task = getattr(session, "deferred_durable_release_task", None)
+            if deferred_task is not None and deferred_task is not asyncio.current_task() and not deferred_task.done():
+                _, deferred_cancellation = await _await_task_deferring_cancellation(deferred_task)
+                if deferred_cancellation is not None:
+                    raise deferred_cancellation
+
+    async def _fail_http_bridge_reader_and_maybe_retire_impl(
+        self: Any,
+        session: "_HTTPBridgeSession",
         *,
         error_code: str,
         error_message: str,
@@ -4218,9 +4245,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # an accepted turn: a protocol-invalid binary frame did not end
                 # the socket, so it keeps the pre-created retry semantics only.
                 if not account_neutral and (message.kind in {"close", "error"} or not accepted_response_pending):
-                    retried = await self._retry_http_bridge_precreated_request(
+                    retry_method = self._retry_http_bridge_precreated_request
+                    retried = await retry_method(
                         session,
-                        allow_complete_transcript_recovery=True,
+                        **_http_bridge_precreated_retry_recovery_kwargs(retry_method),
                     )
                 if retried:
                     continue

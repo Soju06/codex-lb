@@ -1449,6 +1449,12 @@ class _HTTPBridgeSession:
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
+    # Set while the reader owns post-close request/retry/anchor settlement.
+    # Resource teardown must not release the durable owner until this work has
+    # completed, even if the reader already removed its request states.
+    upstream_reader_cleanup_pending: bool = False
+    upstream_reader_cleanup_task: asyncio.Task[Any] | None = None
+    upstream_reader_cleanup_complete: asyncio.Event | None = None
     last_upstream_event_generation: int = 0
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0

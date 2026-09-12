@@ -885,10 +885,13 @@ async def test_cancellation_between_the_reservation_and_the_open_releases(
     )
     key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
 
-    def interrupt(*args: object, **kwargs: object) -> dict[str, Any]:
+    async def interrupt(*args: object, **kwargs: object) -> object:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(proxy_api, "_shape_source_responses_payload", interrupt)
+    # Shaping precedes admission so the shaped body is what admission measures;
+    # the open is the step between the reservation and the dispatch.
+    monkeypatch.setattr(proxy_api, "stream_source_responses", interrupt)
+    monkeypatch.setattr(proxy_api, "forward_source_responses", interrupt)
     stream = _AsgiStream(
         app=_app(async_client),
         path="/v1/responses",
@@ -1075,7 +1078,7 @@ async def test_admission_estimate_exception_is_covered_by_the_route_helper_latch
         max_concurrency=1,
     )
 
-    def exploding_estimate(_payload: object) -> object:
+    def exploding_estimate(_payload: object, **_kwargs: object) -> object:
         raise RuntimeError("estimate exploded")
 
     async def never_opened(*_args: object, **_kwargs: object) -> object:

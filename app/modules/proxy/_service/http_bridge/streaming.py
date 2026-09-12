@@ -42,6 +42,7 @@ from app.core.errors import (
     openai_error,
     response_failed_event,
 )
+from app.core.exceptions import ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_durable_recover_total,
@@ -273,6 +274,10 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
+)
+from app.modules.proxy.request_policy import (
+    prepare_astra_reasoning_policy_continuation,
+    validate_astra_request,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 
@@ -564,6 +569,17 @@ def _http_bridge_durable_owner_is_dead(
     owner_instance_is_dead = lookup.owner_instance_id is not None and lookup.owner_instance_id != current_instance
     process_epoch_is_dead = previous_process_epoch is not None and previous_process_epoch != current_process_epoch
     return owner_instance_is_dead or process_epoch_is_dead or not lookup.lease_is_active(now=utcnow())
+
+
+def _prepare_http_fallback_payload(payload: ResponsesRequest, api_key: ApiKeyData | None) -> ResponsesRequest:
+    if (
+        payload.previous_response_id is not None
+        and isinstance(payload.input, list)
+        and payload.model.strip().lower() == "gpt-6-astra"
+    ):
+        payload = payload.model_copy(update={"input": _trim_http_bridge_previous_response_input_items(payload.input)})
+    validate_astra_request(payload, api_key)
+    return payload
 
 
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
@@ -1072,6 +1088,7 @@ class _HTTPBridgeStreamingMixin:
                 runtime_config = dataclasses.replace(runtime_config, enabled=False)
             force_upstream_stream_transport = "http"
         if not runtime_config.enabled:
+            payload = _prepare_http_fallback_payload(payload, api_key)
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
             async for line in stream_with_retry(
                 payload,
@@ -1252,6 +1269,7 @@ class _HTTPBridgeStreamingMixin:
                     )
         if not bridge_transport_unavailable:
             return
+        payload = _prepare_http_fallback_payload(payload, api_key)
         logger.warning(
             "stream_responses http bridge upstream unavailable; retrying over http upstream transport request_id=%s",
             request_id,
@@ -1364,6 +1382,11 @@ class _HTTPBridgeStreamingMixin:
             *,
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
         ) -> tuple[_WebSocketRequestState, str]:
+            # Astra resets must not shift the client prefix used by later trimming.
+            client_input = request_payload.input
+            request_payload = request_payload.model_copy()
+            reset_inserted = prepare_astra_reasoning_policy_continuation(request_payload, api_key)
+            validate_astra_request(request_payload, api_key)
             if bridge_uses_responses_lite:
                 request_state, text_data = self._prepare_http_bridge_request(
                     request_payload,
@@ -1383,6 +1406,10 @@ class _HTTPBridgeStreamingMixin:
                     request_id=request_id,
                     client_ip=client_ip,
                 )
+            if reset_inserted:
+                assert isinstance(client_input, list)
+                request_state.input_item_count = len(client_input)
+                request_state.input_full_fingerprint = _fingerprint_input_items(client_input)
             request_state.capacity_startup_wait_event = capacity_startup_wait_event
             request_state.capacity_startup_ready_event = capacity_startup_ready_event
             lifecycle = begin_bridge_lifecycle(request_state.api_key_reservation)
@@ -1681,6 +1708,8 @@ class _HTTPBridgeStreamingMixin:
                                 ),
                             )
                     except ProxyResponseError:
+                        raise
+                    except (ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed):
                         raise
                     except Exception:
                         logger.warning("Failed to inspect HTTP bridge recovery attempt", exc_info=True)
@@ -2975,6 +3004,20 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if recovery_injected_input is not None:
                     recovery_payload = recovery_payload.model_copy(update={"input": recovery_injected_input})
+                try:
+                    prepare_astra_reasoning_policy_continuation(recovery_payload, api_key)
+                    validate_astra_request(recovery_payload, api_key)
+                except (ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed):
+                    # A server-owned retry may carry a different reservation
+                    # from the API's original request. Settle this unsubmitted
+                    # lifecycle before returning the terminal policy error.
+                    try:
+                        await release_unowned_bridge_lifecycle(
+                            request_state.deferred_account_backoff_lifecycle, request_state
+                        )
+                    except Exception:
+                        logger.warning("Failed to release policy-rejected bridge reservation", exc_info=True)
+                    raise
                 owner_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None
                 if owner_recovery_scope_id is not None:
                     _reserve_http_bridge_unanchored_handoff(
@@ -4117,6 +4160,8 @@ class _HTTPBridgeStreamingMixin:
                 retry_api_key_reservation = api_key_reservation
                 retry_reservation_reacquired = False
                 if api_key is not None and api_key_reservation is not None:
+                    prepare_astra_reasoning_policy_continuation(retry_payload, api_key)
+                    validate_astra_request(retry_payload, api_key)
                     retry_api_key_reservation = await self._reserve_websocket_api_key_usage(
                         api_key,
                         request_model=retry_payload.model,

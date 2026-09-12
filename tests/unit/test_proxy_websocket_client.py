@@ -1787,6 +1787,7 @@ async def test_connect_responses_websocket_uses_https_proxy_fallback_for_ws(monk
 async def test_connect_responses_websocket_reuses_system_tls_across_client_lifecycle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr(proxy_websocket_module, "discover_native_egress_client", lambda: None)
     # This local certificate is valid at the fixture's 2026-09-05 as-of date.
     # A wide fixed window lets real TLS use the system clock without changing it.
     key = ec.generate_private_key(ec.SECP256R1())

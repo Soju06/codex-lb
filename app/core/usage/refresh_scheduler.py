@@ -53,6 +53,11 @@ _RESET_EVIDENCE_WINDOWS: tuple[str, ...] = ("primary", "secondary", "monthly")
 # transition older than this cap falls back to the ordinary persisted cooldown,
 # matching the existing fail-closed behavior when retention drops the pair.
 _RESET_EVIDENCE_HISTORY_ROW_CAP = 512
+# How far a sibling window's newest row may lag the anchored window's newest row
+# and still count as current. One usage fetch writes a row for every window the
+# payload carries, so live slots share a timestamp; this only has to absorb
+# write jitter and a transiently omitted window, not a change of quota shape.
+_SIBLING_WINDOW_FRESHNESS_TOLERANCE_SECONDS = 900
 
 
 def _normalized_usage_window(entry: UsageHistory) -> str:
@@ -457,43 +462,44 @@ async def reconcile_recoverable_account_statuses(
     return recovered
 
 
-def _applicable_quota_windows(account: Account) -> tuple[str, ...]:
-    """Return the window slots that carry live quota for this account's plan.
-
-    A plan has one short window and one long window. ``capacity_for_plan``
-    reports a zero-capacity primary for Free (a normalization artifact of the
-    monthly-only payload rather than a live 5h window) and no monthly capacity
-    for paid plans, so the long window is ``monthly`` for Free and ``secondary``
-    otherwise -- the same resolution ``_select_long_window_entry`` uses.
-
-    Slots outside this set can still hold rows written under a previous plan,
-    because usage history is append-only: an account downgraded from a paid plan
-    keeps its last paid ``secondary`` sample as the newest row in that slot
-    forever. Those rows are not current quota state and MUST NOT be read as one.
-    """
-
-    windows: list[str] = []
-    if capacity_for_plan(account.plan_type, "primary"):
-        windows.append("primary")
-    if capacity_for_plan(account.plan_type, "monthly"):
-        windows.append("monthly")
-    elif capacity_for_plan(account.plan_type, "secondary"):
-        windows.append("secondary")
-    return tuple(windows)
-
-
-def _sibling_window_blocks_recovery(entry: UsageHistory | None, *, now: float) -> bool:
+def _sibling_window_blocks_recovery(
+    entry: UsageHistory | None,
+    *,
+    account: Account,
+    window: str,
+    anchored_latest: UsageHistory,
+    now: float,
+) -> bool:
     """Return whether a non-recovered window would immediately re-block the account.
 
     Releasing an account whose *other* quota window is still exhausted only buys
-    one upstream 429 and a fresh block, so a current sibling at 100% keeps the
-    account blocked. An elapsed window is stale exhaustion evidence rather than a
-    live block (see "Usage refresh does not trust elapsed reset windows"), so it
-    does not veto. A 100% row with no reset metadata is treated as current
-    because nothing proves it rolled.
+    one upstream 429 and a fresh block, so a currently exhausted sibling keeps
+    the account blocked. Three exclusions keep that from over-blocking:
+
+    * A slot with zero capacity for the plan is not a window. The Free primary
+      row is a normalization artifact of the monthly-only payload, not a live 5h
+      window, and mirrors the monthly percentage.
+    * A slot upstream no longer reports is not current state. Usage history is
+      append-only and one fetch writes a row for every window the payload
+      carries, so a live sibling is recorded alongside the anchored window's own
+      newest row. A slot that falls behind it holds a leftover from an earlier
+      quota shape -- a plan change, or a payload that stopped carrying that
+      window -- and must not be read as live. Deriving this from the reported
+      shape rather than from the plan keeps it correct for both directions: a
+      downgraded account's stale paid `secondary` row, and a Free account whose
+      live quota arrives in a slot other than `monthly`.
+    * An elapsed window is stale exhaustion evidence rather than a live block
+      (see "Usage refresh does not trust elapsed reset windows"). A 100% row
+      with no reset metadata is treated as current because nothing proves it
+      rolled.
     """
 
     if entry is None or entry.used_percent < 100.0:
+        return False
+    if not capacity_for_plan(account.plan_type, window):
+        return False
+    anchored_recorded_at = naive_utc_to_epoch(anchored_latest.recorded_at)
+    if naive_utc_to_epoch(entry.recorded_at) < anchored_recorded_at - _SIBLING_WINDOW_FRESHNESS_TOLERANCE_SECONDS:
         return False
     return entry.reset_at is None or entry.reset_at > now
 
@@ -548,8 +554,14 @@ def _confirmed_window_reset_recovery(
     if after.used_percent >= 100.0 or latest.used_percent >= 100.0:
         return False
     if any(
-        _sibling_window_blocks_recovery(latest_by_window.get(sibling), now=now)
-        for sibling in _applicable_quota_windows(account)
+        _sibling_window_blocks_recovery(
+            entry,
+            account=account,
+            window=sibling,
+            anchored_latest=latest,
+            now=now,
+        )
+        for sibling, entry in latest_by_window.items()
         if sibling != window
     ):
         return False

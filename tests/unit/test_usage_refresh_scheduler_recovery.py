@@ -1973,15 +1973,98 @@ async def test_reconcile_recovers_downgraded_free_despite_an_obsolete_paid_secon
     assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
 
 
-def test_applicable_quota_windows_follows_the_plan_shape() -> None:
-    """Free quota lives in primary(zero-capacity)+monthly; paid plans in primary+secondary."""
+@pytest.mark.asyncio
+async def test_reconcile_recovers_free_weekly_shape_despite_a_stale_monthly_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Free account whose live quota is not in the monthly slot still recovers.
 
-    free = _make_account("acc_free_shape", status=AccountStatus.ACTIVE, plan_type="free")
-    pro = _make_account("acc_pro_shape", status=AccountStatus.ACTIVE, plan_type="pro")
-    plus = _make_account("acc_plus_shape", status=AccountStatus.ACTIVE, plan_type="plus")
-    unknown = _make_account("acc_unknown_shape", status=AccountStatus.ACTIVE, plan_type="unknown")
+    The sibling set has to follow the shape upstream currently reports. If it
+    were derived from the plan alone, a leftover monthly row would veto an
+    anchored reset in the slot that actually carries this account's quota.
+    """
 
-    assert refresh_scheduler_module._applicable_quota_windows(free) == ("monthly",)
-    assert refresh_scheduler_module._applicable_quota_windows(pro) == ("primary", "secondary")
-    assert refresh_scheduler_module._applicable_quota_windows(plus) == ("primary", "secondary")
-    assert refresh_scheduler_module._applicable_quota_windows(unknown) == ()
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    weekly_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_weekly_shape",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
+    stale_monthly = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=int(now + 10 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 20 * 24 * 3600),
+        window_minutes=43_200,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={account.id: after},
+            monthly={account.id: stale_monthly},
+        ),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 1
+    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_account_blocked_when_a_freshly_reported_sibling_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling written by the same fetch as the anchored window still vetoes."""
+
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    weekly_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_pro_fresh_sibling",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="pro",
+        reset_at=weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
+    fresh_exhausted_sibling = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=100.0,
+        reset_at=int(now + 2 * 24 * 3600),
+        recorded_at=after.recorded_at,
+        window_minutes=10_080,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={account.id: after},
+            secondary={account.id: fresh_exhausted_sibling},
+        ),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        weekly_reset_at,
+        blocked_at,
+    )

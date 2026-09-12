@@ -117,9 +117,7 @@ def test_transient_launchd_label_release_race_is_retried_without_rollback(
     assert plist.read_bytes() != rollback.read_bytes()
 
 
-def test_candidate_health_timeout_restores_healthy_rollback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_candidate_health_timeout_restores_healthy_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
     plist, rollback = _plists(tmp_path)
     calls: list[tuple[list[str], bool]] = []
@@ -160,3 +158,19 @@ def test_keepalive_launchagent_execution_is_rejected_before_cutover(
 
     assert calls == []
     assert os.environ["XPC_SERVICE_NAME"] == "local.codex-lb-cutover"
+
+
+def test_cli_refuses_disruptive_cutover_by_default(tmp_path):
+    from scripts.local_launchagent_cutover import main
+
+    with pytest.raises(CutoverError, match="Disruptive cutover disabled"):
+        main(
+            [
+                "--plist",
+                str(tmp_path / "missing"),
+                "--rollback-plist",
+                str(tmp_path / "missing-backup"),
+                "--label",
+                "gui/501/local.codex-lb",
+            ]
+        )

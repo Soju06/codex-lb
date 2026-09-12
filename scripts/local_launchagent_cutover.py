@@ -92,6 +92,11 @@ def run_cutover(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Switch a local codex-lb LaunchAgent with verified rollback.")
+    parser.add_argument(
+        "--allow-disruptive-maintenance",
+        action="store_true",
+        help="Explicit maintenance window only; terminates existing connections",
+    )
     parser.add_argument("--plist", type=Path, required=True)
     parser.add_argument("--rollback-plist", type=Path, required=True)
     parser.add_argument("--label", required=True, help="Full launchd label, for example gui/501/local.codex-lb")
@@ -102,6 +107,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    if not args.allow_disruptive_maintenance:
+        raise CutoverError("Disruptive cutover disabled; use local_stable_entry or an explicit maintenance window")
     run_cutover(
         plist=args.plist,
         rollback_plist=args.rollback_plist,

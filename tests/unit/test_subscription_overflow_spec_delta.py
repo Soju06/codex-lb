@@ -310,25 +310,36 @@ def test_the_stall_drill_no_longer_promises_a_timeout_for_a_dropped_connection()
     that follows it, up to the next one.
     """
 
-    shapes = (
-        ("drops the SYN", "model_source_unreachable"),
-        ("drops the connection attempt", "model_source_unreachable"),
-        ("accepts TCP and then stays silent", "model_source_timeout"),
-        ("accepts the connection and then sends nothing", "model_source_timeout"),
-    )
+    shapes = {
+        "drops the SYN": "model_source_unreachable",
+        "drops the connection attempt": "model_source_unreachable",
+        "accepts TCP and then stays silent": "model_source_timeout",
+        "accepts the connection and then sends nothing": "model_source_timeout",
+    }
     codes = re.compile(r"model_source_(?:unreachable|timeout)")
 
     for path in (_ROUTING_DOC, _ROUTING_DELTA):
         text = _read(path)
-        seen = 0
-        for shape, expected in shapes:
-            for match in re.finditer(re.escape(shape), text):
-                answer = codes.search(text, match.end())
-                assert answer is not None, (path, shape)
-                assert answer.group() == expected, (path, shape, answer.group())
-                seen += 1
-        # Each document states both shapes, so neither can drift out silently.
-        assert seen >= 2, (path, seen)
+        mentions = sorted(
+            (match.start(), match.end(), shape, expected)
+            for shape, expected in shapes.items()
+            for match in re.finditer(re.escape(shape), text)
+        )
+        assert mentions, path
+
+        answered: set[str] = set()
+        for index, (_start, end, shape, expected) in enumerate(mentions):
+            # Read only as far as the next shape: a code belonging to the shape
+            # after this one must not be able to answer for this one.
+            limit = mentions[index + 1][0] if index + 1 < len(mentions) else len(text)
+            answer = codes.search(text, end, limit)
+            assert answer is not None, (path, shape)
+            assert answer.group() == expected, (path, shape, answer.group())
+            answered.add(expected)
+
+        # Both shapes, not one of them twice: each document has to state the
+        # pair, which is what makes a swap visible.
+        assert answered == {"model_source_unreachable", "model_source_timeout"}, (path, sorted(answered))
 
 
 def test_dashboard_staged_notice_is_gone_from_the_component_and_every_locale() -> None:

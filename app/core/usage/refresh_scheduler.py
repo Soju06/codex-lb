@@ -92,6 +92,13 @@ class _LatestUsageRepository(Protocol):
         account_ids: Collection[str] | None = None,
     ) -> dict[str, UsageHistory]: ...
 
+    async def latest_by_account_per_window(
+        self,
+        *,
+        account_ids: Collection[str],
+        windows: Collection[str],
+    ) -> dict[str, dict[str, UsageHistory]]: ...
+
 
 class _BackgroundLimitWarmupRepository:
     async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
@@ -382,17 +389,20 @@ async def reconcile_recoverable_account_statuses(
     soft_drain_enabled = resolve_resilience_toggles(dashboard_settings).soft_drain_enabled
 
     candidate_ids = [account.id for account in candidates]
-    latest_primary = await usage_repo.latest_by_account(window="primary", account_ids=candidate_ids)
-    latest_secondary = await usage_repo.latest_by_account(window="secondary", account_ids=candidate_ids)
-    latest_monthly = await usage_repo.latest_by_account(window="monthly", account_ids=candidate_ids)
+    # One statement, so the windows compared below cannot come from different
+    # fetches: a concurrent usage write between per-window reads would otherwise
+    # make a live window look like one upstream stopped reporting.
+    latest_windows = await usage_repo.latest_by_account_per_window(
+        account_ids=candidate_ids,
+        windows=_RESET_EVIDENCE_WINDOWS,
+    )
 
     recovered = 0
     for account in candidates:
-        monthly_entry = latest_monthly.get(account.id)
+        account_windows = latest_windows.get(account.id, {})
+        monthly_entry = account_windows.get("monthly")
         latest_by_window: dict[str, UsageHistory | None] = {
-            "primary": latest_primary.get(account.id),
-            "secondary": latest_secondary.get(account.id),
-            "monthly": monthly_entry,
+            window: account_windows.get(window) for window in _RESET_EVIDENCE_WINDOWS
         }
         if _confirmed_window_reset_recovery(
             account=account,
@@ -405,11 +415,11 @@ async def reconcile_recoverable_account_statuses(
         else:
             state = background_recovery_state_from_account(
                 account=account,
-                primary_entry=latest_primary.get(account.id),
+                primary_entry=account_windows.get("primary"),
                 secondary_entry=_select_long_window_entry(
                     account=account,
                     monthly_entry=monthly_entry,
-                    secondary_entry=latest_secondary.get(account.id),
+                    secondary_entry=account_windows.get("secondary"),
                 ),
                 routing_tunables=routing_tunables,
                 soft_drain_enabled=soft_drain_enabled,

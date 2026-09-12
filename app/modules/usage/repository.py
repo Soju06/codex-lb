@@ -908,6 +908,53 @@ class UsageRepository:
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 
+    async def latest_by_account_per_window(
+        self,
+        *,
+        account_ids: Collection[str],
+        windows: Collection[str],
+    ) -> dict[str, dict[str, UsageHistory]]:
+        """Latest row per (account, window slot), read in a SINGLE statement.
+
+        Callers that compare one window against another need them from one
+        snapshot. Issuing `latest_by_account` once per window interleaves with
+        concurrent usage writes, so an earlier read can return a row from an
+        older fetch than a later read and make a live window look like one
+        upstream stopped reporting. One statement cannot straddle a write.
+        """
+
+        account_ids = list(account_ids)
+        windows = list(windows)
+        if not account_ids or not windows:
+            return {}
+        window_slot = _normalized_window_expr()
+        ranked = (
+            select(
+                UsageHistory.id.label("usage_id"),
+                window_slot.label("window_slot"),
+                func.row_number()
+                .over(
+                    partition_by=(UsageHistory.account_id, window_slot),
+                    order_by=(UsageHistory.recorded_at.desc(), UsageHistory.id.desc()),
+                )
+                .label("slot_rank"),
+            )
+            .where(
+                UsageHistory.account_id.in_(account_ids),
+                window_slot.in_(windows),
+            )
+            .subquery("ranked_usage")
+        )
+        stmt = select(UsageHistory, ranked.c.window_slot).join(
+            ranked,
+            and_(UsageHistory.id == ranked.c.usage_id, ranked.c.slot_rank == 1),
+        )
+        result = await self._session.execute(stmt)
+        latest: dict[str, dict[str, UsageHistory]] = {}
+        for entry, slot in result.all():
+            latest.setdefault(entry.account_id, {})[slot] = entry
+        return latest
+
     async def history_since(
         self,
         account_id: str,

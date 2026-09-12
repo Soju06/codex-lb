@@ -239,16 +239,34 @@ class StubUsageRepository:
     ) -> dict[str, UsageHistory]:
         normalized_account_ids = tuple(account_ids) if account_ids is not None else None
         self.queries.append((window, normalized_account_ids))
-        if window == "secondary":
-            rows = self._secondary
-        elif window == "monthly":
-            rows = self._monthly
-        else:
-            rows = self._primary
+        rows = self._rows_for(window)
         if normalized_account_ids is None:
             return rows
         allowed = set(normalized_account_ids)
         return {account_id: entry for account_id, entry in rows.items() if account_id in allowed}
+
+    def _rows_for(self, window: str | None) -> dict[str, UsageHistory]:
+        if window == "secondary":
+            return self._secondary
+        if window == "monthly":
+            return self._monthly
+        return self._primary
+
+    async def latest_by_account_per_window(
+        self,
+        *,
+        account_ids: Collection[str],
+        windows: Collection[str],
+    ) -> dict[str, dict[str, UsageHistory]]:
+        normalized_account_ids = tuple(account_ids)
+        self.queries.append((tuple(windows), normalized_account_ids))
+        allowed = set(normalized_account_ids)
+        latest: dict[str, dict[str, UsageHistory]] = {}
+        for window in windows:
+            for account_id, entry in self._rows_for(window).items():
+                if account_id in allowed:
+                    latest.setdefault(account_id, {})[window] = entry
+        return latest
 
 
 class MutatingAccountsRepository(StubAccountsRepository):
@@ -296,11 +314,9 @@ async def test_reconcile_recoverable_account_statuses_scopes_latest_usage_to_can
     )
 
     assert recovered == 0
-    assert usage_repo.queries == [
-        ("primary", (selected.id,)),
-        ("secondary", (selected.id,)),
-        ("monthly", (selected.id,)),
-    ]
+    # One statement, not one per window: the recovery guard compares windows
+    # against each other and must not straddle a concurrent usage write.
+    assert usage_repo.queries == [(("primary", "secondary", "monthly"), (selected.id,))]
 
 
 @pytest.mark.asyncio

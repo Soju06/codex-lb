@@ -124,6 +124,17 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
         query_scopes.append((window, tuple(account_ids) if account_ids is not None else None))
         return await original_latest_by_account(self, window, account_ids=account_ids)
 
+    original_latest_per_window = UsageRepository.latest_by_account_per_window
+
+    async def _tracked_latest_by_account_per_window(
+        self: UsageRepository,
+        *,
+        account_ids: Collection[str],
+        windows: Collection[str],
+    ) -> dict[str, dict[str, UsageHistory]]:
+        query_scopes.append((tuple(windows), tuple(account_ids)))
+        return await original_latest_per_window(self, account_ids=account_ids, windows=windows)
+
     class _Leader:
         async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
             return await fn()
@@ -145,6 +156,11 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
             warmup_calls.append(kwargs)
 
     monkeypatch.setattr(UsageRepository, "latest_by_account", _tracked_latest_by_account)
+    monkeypatch.setattr(
+        UsageRepository,
+        "latest_by_account_per_window",
+        _tracked_latest_by_account_per_window,
+    )
     monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
     monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
     monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
@@ -153,6 +169,9 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
 
     assert await scheduler._refresh_once() == 30.0
     assert updater_calls == [([selected.id], {selected.id})]
+    # Per-window reads bracket the usage fetch; reconciliation then takes all
+    # three slots in one statement so its cross-window comparison cannot
+    # straddle a concurrent usage write.
     assert query_scopes == [
         ("primary", (selected.id,)),
         ("secondary", (selected.id,)),
@@ -160,9 +179,7 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
         ("primary", (selected.id,)),
         ("secondary", (selected.id,)),
         ("monthly", (selected.id,)),
-        ("primary", (selected.id,)),
-        ("secondary", (selected.id,)),
-        ("monthly", (selected.id,)),
+        (("primary", "secondary", "monthly"), (selected.id,)),
     ]
     assert len(warmup_calls) == 1
     assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == [selected.id]

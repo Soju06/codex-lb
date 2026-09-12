@@ -200,8 +200,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const session = await loginPassword(username ? { username, password } : { password });
       // Remember what was typed, not the resolved account: a single-account
-      // install signs in without a username and must keep its password-only form.
-      rememberLastUsername(username);
+      // install signs in without a username and must keep its password-only
+      // form. An install that has come back to one account answers `hidden`,
+      // and the remembered name is dropped then even if one was typed -- the
+      // form reveals itself while a name is remembered, so keeping it would
+      // pin a username box on an install that no longer needs one (P5).
+      const hint = session.login ?? DEFAULT_LOGIN_HINT;
+      rememberLastUsername(hint.usernameField === "hidden" ? undefined : username);
       return applySession(set, session);
     } catch (error) {
       const shouldKeepAdminLogin =

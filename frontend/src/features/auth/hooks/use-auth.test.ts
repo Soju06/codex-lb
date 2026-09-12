@@ -206,7 +206,11 @@ describe("useAuthStore actions", () => {
   });
 
   it("sends the username when given and remembers the account that signed in", async () => {
-    (loginPassword as Mock).mockResolvedValue({ ...sessionBase, user: createSessionUser({ username: "alice" }) });
+    (loginPassword as Mock).mockResolvedValue({
+      ...sessionBase,
+      user: createSessionUser({ username: "alice" }),
+      login: LoginHintSchema.parse({ usernameField: "shown" }),
+    });
 
     await useAuthStore.getState().login("secret-pass", "alice");
 
@@ -221,6 +225,22 @@ describe("useAuthStore actions", () => {
 
     await useAuthStore.getState().login("secret-pass");
 
+    expect(window.localStorage.getItem(LAST_USERNAME_STORAGE_KEY)).toBeNull();
+  });
+
+  // The form reveals itself while a name is remembered, so an install that has
+  // come back to one account must stop remembering one -- whatever that
+  // account is called now that the bootstrapped one can be renamed (P5).
+  it("forgets a typed username when the session comes back on a single-account install", async () => {
+    (loginPassword as Mock).mockResolvedValue({
+      ...sessionBase,
+      user: createSessionUser({ username: "rosa" }),
+      login: LoginHintSchema.parse({ usernameField: "hidden" }),
+    });
+
+    await useAuthStore.getState().login("secret-pass", "rosa");
+
+    expect(loginPassword).toHaveBeenCalledWith({ username: "rosa", password: "secret-pass" });
     expect(window.localStorage.getItem(LAST_USERNAME_STORAGE_KEY)).toBeNull();
   });
 

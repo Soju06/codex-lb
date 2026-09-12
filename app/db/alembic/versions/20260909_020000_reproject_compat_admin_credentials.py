@@ -30,11 +30,36 @@ COMPAT_ADMIN_USER_ID = "7a4fc02d-216e-5be7-b974-bc437f23df60"
 COMPAT_ADMIN_USERNAME = "admin"
 ADMIN_ROLE_ID = "3fe7dc57-aabd-5b16-9850-b6d464087f07"
 
+#: Written by the revision that drops the legacy credential columns (see
+#: 20260912_010000); frozen here for the same reason as the ids above.
+_LEGACY_CREDENTIALS_RETIRED = "dashboard_legacy_credentials_retired"
+
+
+def _runtime_sentinels(bind: sa.Connection, inspector: sa.Inspector) -> set[str]:
+    if not inspector.has_table("runtime_sentinels"):
+        return set()
+    return set(bind.execute(sa.text("SELECT name FROM runtime_sentinels")).scalars())
+
 
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     if not inspector.has_table("dashboard_settings") or not inspector.has_table("dashboard_users"):
+        return
+    legacy_columns = {column["name"] for column in inspector.get_columns("dashboard_settings")}
+    if not {"password_hash", "totp_secret_encrypted", "totp_last_verified_step"} <= legacy_columns:
+        # A later revision dropped the legacy credential columns and this chain
+        # is being re-applied over a schema that already has them gone. There is
+        # nothing to re-project from and the account rows are the authority
+        # already: leave them alone rather than fail on a missing column.
+        return
+    if _LEGACY_CREDENTIALS_RETIRED in _runtime_sentinels(bind, inspector):
+        # Same database, harder case: a ledger-less bootstrap replays the whole
+        # chain, so the columns above were re-created empty by an earlier
+        # revision in this very run. Reading that emptiness as "the password was
+        # removed" would clear the account row, which now holds the only
+        # credential the install has. The marker the drop revision leaves behind
+        # is data rather than ledger, so it survives the replay and says so.
         return
 
     settings_row = bind.execute(

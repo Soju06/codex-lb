@@ -5,6 +5,7 @@ import logging
 import re
 import time
 import warnings
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -684,6 +685,86 @@ def _resolved_lock_timeout_seconds(lock_timeout_seconds: float | None) -> float:
     return get_settings().database_migration_lock_timeout_seconds
 
 
+#: The revision that copied the legacy dashboard credentials onto the account
+#: row (release N), and the one that drops the columns they lived in (this
+#: release). The drop **descends** from the re-projection, so any upgrade that
+#: crosses the drop re-projects first, in the same run: a database stamped at
+#: any older revision reaches head in one command with its credentials intact,
+#: and refusing that jump would keep every existing install from starting.
+CREDENTIAL_REPROJECTION_REVISION = "20260909_020000_reproject_compat_admin_credentials"
+CREDENTIAL_DROP_REVISION = "20260912_010000_drop_legacy_dashboard_credentials"
+
+_CREDENTIAL_DROP_DRAIN_WARNING = (
+    "Dropping the legacy dashboard credential columns (%s). Replicas of any earlier release map these "
+    "columns and load the settings row whole, so their settings reads fail once this commits: stop them "
+    "before this migration runs, not after. Rollback is supported to the immediately previous release only."
+)
+
+
+def _remapped(revision: str) -> str:
+    return OLD_TO_NEW_REVISION_MAP.get(revision, revision)
+
+
+def _ancestor_revisions(config: Config, revisions: Iterable[str]) -> set[str]:
+    """Every revision reachable walking down from ``revisions`` (inclusive).
+
+    Unknown ids are skipped rather than raised on: ``_run_upgrade_locked``
+    already refuses a schema stamped ahead of this build, and a legacy id the
+    remap has not reached yet carries no ancestry worth asking about.
+    """
+
+    script_directory = ScriptDirectory.from_config(config)
+    known = _known_revisions(config)
+    ancestors: set[str] = set()
+    for revision in revisions:
+        resolved = _remapped(revision)
+        if resolved not in known:
+            continue
+        for item in script_directory.iterate_revisions(resolved, "base"):
+            if item.revision:
+                ancestors.add(item.revision)
+    return ancestors
+
+
+def _check_legacy_credential_drop(config: Config, sync_database_url: str, revision: str) -> None:
+    """Read the ledger, then decide; no side effects, no DDL."""
+
+    with _sync_connection(sync_database_url) as connection:
+        if _ALEMBIC_VERSION_TABLE not in _read_table_names(connection):
+            return
+        current_revisions = _read_current_revisions_from_connection(connection)
+    check_legacy_credential_drop(config, current_revisions, revision)
+
+
+def check_legacy_credential_drop(config: Config, current_revisions: Sequence[str], revision: str) -> None:
+    """State the drain requirement before the legacy credential columns go.
+
+    Called before any DDL, and it deliberately claims only what the ledger can
+    show. Nothing is refused: ``CREDENTIAL_REPROJECTION_REVISION`` is an
+    ancestor of ``CREDENTIAL_DROP_REVISION``, so a database stamped anywhere
+    below both reaches head in one command with the credentials copied onto
+    the account rows before the columns they came from disappear, and the
+    ordering that makes that true is pinned by a test rather than re-checked
+    here. What no signal anywhere can show is whether a replica of an earlier
+    release is serving right now, so the drain requirement is a warning an
+    operator must act on rather than a condition this process can verify.
+    """
+
+    if not current_revisions:
+        # An empty ledger is a fresh install: the chain creates the tables
+        # without the dropped columns ever holding anything.
+        return
+
+    applied = _ancestor_revisions(config, current_revisions)
+    if CREDENTIAL_DROP_REVISION in applied:
+        return
+    target = _head_revision(config) if revision in ("head", "heads") else revision
+    if CREDENTIAL_DROP_REVISION not in _ancestor_revisions(config, (target,)):
+        return
+
+    logger.warning(_CREDENTIAL_DROP_DRAIN_WARNING, CREDENTIAL_DROP_REVISION)
+
+
 def _schema_ahead_error(state: MigrationState) -> MigrationBootstrapError:
     return MigrationBootstrapError(
         f"Database schema revision(s) {','.join(state.unknown_revisions)} are not known to this build "
@@ -758,6 +839,10 @@ def _run_upgrade_locked(
     _ensure_alembic_version_table_capacity(config)
     if auto_remap_legacy_revisions:
         _remap_legacy_alembic_revisions(config)
+    # Last read before the first DDL: the legacy bootstrap and the remap above
+    # may both have moved the ledger, and the question is what this database
+    # has actually applied at the moment the upgrade starts.
+    _check_legacy_credential_drop(config, _required_sqlalchemy_url(config), revision)
     command.upgrade(config, revision)
 
     sync_database_url = _required_sqlalchemy_url(config)

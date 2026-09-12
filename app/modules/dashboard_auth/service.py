@@ -91,8 +91,6 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def list_active_local_password_users(self) -> Sequence[DashboardUser]: ...
 
-    async def count_active_users(self) -> int: ...
-
     async def count_user_identities(self, user_id: str) -> int: ...
 
     async def count_live_invites(self) -> int: ...
@@ -108,8 +106,6 @@ class DashboardAuthRepositoryProtocol(Protocol):
     async def count_role_mappings(self) -> int: ...
 
     async def create_first_admin(self, password_hash: str) -> DashboardUser | None: ...
-
-    async def set_user_password_hash(self, user_id: str, password_hash: str) -> DashboardUser: ...
 
     async def rotate_user_password(self, user_id: str, password_hash: str) -> DashboardUser: ...
 
@@ -875,7 +871,19 @@ class DashboardAuthService:
         actor_ip: str | None = None,
         auth_method: str | None = None,
     ) -> None:
-        """Solo-install only: drop the user's credentials so the install is passwordless again."""
+        """Solo-install only: drop the user's credentials so the install is passwordless again.
+
+        "Solo" is every account the install holds, in any status -- not just
+        the active ones. A disabled account is still an account: it keeps its
+        role, its owned keys and (if it ever had one) its password hash, and
+        only an account with ``users:manage`` can bring it back. Removing the
+        last *active* password while one exists would hand the install to the
+        implicit local admin, which holds no account and therefore cannot
+        manage users at all, stranding the disabled row with no way to enable,
+        delete or sign in as it -- while the install-wide TOTP requirements
+        this write also clears were only ever justified by "this account *is*
+        the install". Deleting the other accounts first is the way through.
+        """
 
         if user.password_hash is None:
             raise PasswordNotConfiguredError("Password is not configured")
@@ -885,13 +893,15 @@ class DashboardAuthService:
         # invite would otherwise turn a passwordless install into one where
         # authentication is mandatory again but no admin holds a password.
         await self._repository.acquire_write_intent()
-        active_users = await self._repository.count_active_users()
+        counts = await self._repository.get_user_counts()
+        solo_install = counts.total == 1 and counts.active == 1
         identities = await self._repository.count_user_identities(user.id)
-        if active_users != 1 or identities or await self._repository.count_live_invites():
+        if not solo_install or identities or await self._repository.count_live_invites():
             raise OtherUsersExistError(
-                "Other users exist or invites are pending; log out everywhere or revoke pending invites instead"
+                "Other accounts exist or invites are pending; delete the other accounts "
+                "or revoke pending invites instead"
             )
-        assert_credential_remains(password_hash=None, identity_count=identities, solo_install=active_users == 1)
+        assert_credential_remains(password_hash=None, identity_count=identities, solo_install=solo_install)
         # Dropping the password is one more way to lose the last qualifying
         # emergency account: a restricted policy would survive the removal, and
         # the re-bootstrapped ``admin`` is designated but never qualifying, so

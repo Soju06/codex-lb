@@ -40,7 +40,6 @@ from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug
 from app.core.config.settings import get_settings
 from app.db.migration_url import to_sync_database_url
 from app.db.models import (
-    COMPAT_ADMIN_USERNAME,
     AuditLog,
     AuthProviderKind,
     DashboardAuthProvider,
@@ -152,16 +151,13 @@ def _reset_password(username: str, *, clear_two_factor: bool = False) -> _Report
             user.totp_secret_encrypted = None
             user.totp_last_verified_step = None
         settings_row = _settings_row(session)
-        if user.username == COMPAT_ADMIN_USERNAME and settings_row is not None:
-            # The legacy shared-credential columns are still read by a replica
-            # on the previous release, and the runtime write path mirrors them.
-            # A host write that skipped the mirror would let the two disagree.
-            settings_row.password_hash = password_hash
+        if settings_row is not None:
+            # An account holds a password again, so the remote bootstrap token
+            # must not: it grants first-run admin access and would otherwise
+            # outlive the credential the operator just recovered. Decided by
+            # the operation, never by which account was reset.
             settings_row.bootstrap_token_encrypted = None
             settings_row.bootstrap_token_hash = None
-            if clear_two_factor:
-                settings_row.totp_secret_encrypted = None
-                settings_row.totp_last_verified_step = None
         reopened = _reopen_local_login_if_unreachable(session, settings_row)
         _audit(
             session,
@@ -174,7 +170,7 @@ def _reset_password(username: str, *, clear_two_factor: bool = False) -> _Report
         )
         facts = (
             ("Account", user.username),
-            ("Status", user.status),
+            ("Status", _status_fact(user.status)),
             ("Two-factor", _two_factor_fact(was_enrolled=was_enrolled, cleared=clear_two_factor)),
             ("Existing sessions", "revoked"),
         )
@@ -235,6 +231,21 @@ def _policy_admits_nobody(session: Session, policy: str) -> bool:
         .all()
     )
     return not any(local_login_admits(candidate, policy) for candidate in candidates)
+
+
+def _status_fact(status: str) -> str:
+    """The account's status, and what it means for the password just handed out.
+
+    A password is only a way in for an *active* account: the login form refuses
+    every other status before it ever looks at a hash. The command still does
+    what it was asked -- re-enabling somebody an administrator turned off is a
+    decision for an administrator, not for a recovery command -- but it must
+    not let the operator walk away believing the door is open.
+    """
+
+    if status == DashboardUserStatus.ACTIVE.value:
+        return status
+    return f"{status} — this account cannot sign in until an administrator re-enables it"
 
 
 def _two_factor_fact(*, was_enrolled: bool, cleared: bool) -> str:

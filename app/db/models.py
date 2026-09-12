@@ -953,10 +953,17 @@ class LocalLoginPolicy(str, Enum):
     BREAK_GLASS_ONLY = "break_glass_only"
 
 
-#: Username of the account the legacy shared dashboard password is migrated
-#: into. During the expand/contract release its credentials are mirrored to the
-#: legacy ``dashboard_settings`` columns so older replicas keep working.
+#: Name the install's first (break-glass) account is created under, and the one
+#: name no other account may take. It is a reservation of the *name*: the
+#: account itself may be renamed, so nothing may identify it by this string.
 COMPAT_ADMIN_USERNAME = "admin"
+
+#: Deterministic id of that account, so the migration and the runtime bootstrap
+#: path create the same row, re-runs stay idempotent, and every path that has to
+#: find the bootstrapped account after a rename has a stable handle.
+COMPAT_ADMIN_USER_ID = str(
+    uuid.uuid5(uuid.UUID("6f1c0e4e-2b4a-4c1e-9c3b-7a5d2e8f0a11"), "codex-lb:dashboard-user:compat-admin")
+)
 
 
 class DashboardUser(Base):
@@ -1395,7 +1402,6 @@ class DashboardSettings(Base):
         server_default=text(f"'{LocalLoginPolicy.ENABLED.value}'"),
         nullable=False,
     )
-    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     guest_access_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1426,8 +1432,6 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
-    totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     telemetry_consent: Mapped[str] = mapped_column(
         String(16),
         default="undecided",

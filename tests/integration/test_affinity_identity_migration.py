@@ -68,13 +68,25 @@ def _applied_revisions(url: str, connection: Connection) -> set[str]:
     return {revision.revision for revision in script.iterate_revisions(versions, "base")}
 
 
-def _projected_rows(connection: Connection, table: str, snapshot: list[dict]) -> list[dict]:
-    """`table`'s rows narrowed to the snapshot's columns, so revisions merged in
-    from other branches that add columns to the same table cannot fail a
-    comparison about the rows the branch under test wrote."""
+def _assert_rows_preserved(connection: Connection, table: str, snapshot: list[dict]) -> None:
+    """`table` still carries every value the snapshot recorded.
 
-    columns = snapshot[0].keys() if snapshot else ()
-    return sorted([{key: row[key] for key in columns} for row in _rows(connection, table)], key=repr)
+    Compared on the snapshot's columns that the schema still has: a revision
+    merged in from another branch may add a column the snapshot cannot know
+    about, or drop one it recorded (the legacy dashboard credential columns),
+    and neither is a fact about the branch under test.
+    """
+
+    live = {column["name"] for column in inspect(connection).get_columns(table)}
+    columns = [key for key in (snapshot[0].keys() if snapshot else ()) if key in live]
+    narrowed = [{key: row[key] for key in columns} for row in snapshot]
+    actual = [{key: row[key] for key in columns} for row in _rows(connection, table)]
+    assert sorted(actual, key=repr) == sorted(narrowed, key=repr), table
+
+
+def _legacy_credential_columns_exist(connection: Connection) -> bool:
+    live = {column["name"] for column in inspect(connection).get_columns("dashboard_settings")}
+    return {"password_hash", "totp_secret_encrypted", "totp_last_verified_step"} <= live
 
 
 def _seed_history(connection: Connection) -> None:
@@ -104,13 +116,17 @@ def _seed_history(connection: Connection) -> None:
         VALUES ('synthetic-key', 'synthetic', 'synthetic-hash', 'synthetic-prefix', true)
     """)
     )
-    connection.execute(
-        text("""
-        UPDATE dashboard_settings SET guest_session_generation=7, password_hash='legacy-password',
-            totp_secret_encrypted=:secret, totp_last_verified_step=11 WHERE id=1
-    """),
-        {"secret": b"legacy-totp"},
-    )
+    connection.execute(text("UPDATE dashboard_settings SET guest_session_generation=7 WHERE id=1"))
+    if _legacy_credential_columns_exist(connection):
+        # Only a schema that predates the drop revision has anywhere to put a
+        # legacy credential; at head it is the account row or nothing.
+        connection.execute(
+            text("""
+            UPDATE dashboard_settings SET password_hash='legacy-password',
+                totp_secret_encrypted=:secret, totp_last_verified_step=11 WHERE id=1
+        """),
+            {"secret": b"legacy-totp"},
+        )
 
 
 def _seed_identity(connection: Connection) -> None:
@@ -182,7 +198,7 @@ def test_populated_upgrade_and_merge_reversal_preserve_both_histories(
         assert run_upgrade(url, _HEAD, bootstrap_legacy=False).current_revision == _HEAD
         with engine.begin() as connection:
             for table, rows in before.items():
-                assert _projected_rows(connection, table, rows) == sorted(rows, key=repr)
+                _assert_rows_preserved(connection, table, rows)
             if starting_revision == _IDENTITY:
                 assert _auth_snapshot(connection) == auth_before
                 assert {name: _rows(connection, "request_logs")[0][name] for name in _COLUMNS} == dict.fromkeys(
@@ -229,7 +245,7 @@ def test_populated_upgrade_and_merge_reversal_preserve_both_histories(
             assert {_AFFINITY, _IDENTITY} <= applied
             assert _HEAD not in applied
             for table, rows in preserved.items():
-                assert sorted(_rows(connection, table), key=repr) == sorted(rows, key=repr)
+                _assert_rows_preserved(connection, table, rows)
         # The merge re-applies; the other branch stays applied, so the ledger
         # reports both heads until the walk to the tree head converges them.
         reapplied = run_upgrade(url, _HEAD, bootstrap_legacy=False).current_revision
@@ -238,12 +254,19 @@ def test_populated_upgrade_and_merge_reversal_preserve_both_histories(
         assert check_schema_drift(url) == ()
         with engine.connect() as connection:
             for table, rows in preserved.items():
-                assert _projected_rows(connection, table, rows) == sorted(rows, key=repr)
+                _assert_rows_preserved(connection, table, rows)
     finally:
         engine.dispose()
 
 
-def test_fresh_single_head_and_bootstrap_apply_legacy_credential_projection(migration_url: str) -> None:
+def test_fresh_single_head_and_bootstrap_preserve_the_account_credentials(migration_url: str) -> None:
+    """Re-running the whole chain over an existing head schema changes no credential.
+
+    The one-shot re-projection has nowhere to read from once the legacy columns
+    are dropped, so the account rows -- the only authority left -- must come
+    through a ledger-less bootstrap exactly as they were.
+    """
+
     url = migration_url
     script = ScriptDirectory.from_config(_build_alembic_config(url))
     head = _current_head(url)
@@ -265,13 +288,10 @@ def test_fresh_single_head_and_bootstrap_apply_legacy_credential_projection(migr
                     for table in ("accounts", "request_logs", "api_keys", "dashboard_settings", "audit_logs")
                 }
             )
-            before["dashboard_users"][0].update(
-                password_hash="legacy-password", totp_secret_encrypted=b"legacy-totp", totp_last_verified_step=11
-            )
         assert run_upgrade(url, "head", bootstrap_legacy=True).current_revision == _current_head(url)
         assert check_schema_drift(url) == ()
         with engine.connect() as connection:
             for table, rows in before.items():
-                assert sorted(_rows(connection, table), key=repr) == sorted(rows, key=repr)
+                _assert_rows_preserved(connection, table, rows)
     finally:
         engine.dispose()

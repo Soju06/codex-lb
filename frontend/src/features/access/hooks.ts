@@ -29,7 +29,6 @@ export const PERMISSIONS_QUERY_KEY = ["dashboard-roles", "permissions"] as const
 // surfaces the server message unchanged.
 const EXPLAINED_ERROR_CODES = new Set([
   "admin_account_required",
-  "compat_user_locked",
   "credential_required",
   "email_taken",
   "insufficient_delegation",

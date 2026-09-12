@@ -232,7 +232,7 @@ from typing import Any  # noqa: E402
 import bcrypt  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import inspect, select  # noqa: E402
 
 import app.modules.dashboard_auth.api as dashboard_auth_api_module  # noqa: E402
 import app.modules.dashboard_auth.service as dashboard_auth_service_module  # noqa: E402
@@ -241,7 +241,7 @@ from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug  # no
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache  # noqa: E402
 from app.core.config.settings_cache import get_settings_cache  # noqa: E402
 from app.core.crypto import TokenEncryptor  # noqa: E402
-from app.db.models import COMPAT_ADMIN_USERNAME, AuditLog, DashboardSettings, DashboardUser  # noqa: E402
+from app.db.models import COMPAT_ADMIN_USERNAME, AuditLog, DashboardUser  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store  # noqa: E402
 from app.modules.dashboard_users.repository import DashboardUsersRepository, LocalAuthState  # noqa: E402
@@ -252,22 +252,6 @@ async def _clear_rate_limit_attempts(*types: str) -> None:
     async with get_background_session() as session:
         await session.execute(delete(RateLimitAttempt).where(RateLimitAttempt.type.in_(types)))
         await session.commit()
-
-
-async def _seed_legacy_password_hash(value: str | None) -> None:
-    """Write the legacy column directly, the way a previous-release replica would."""
-
-    async with SessionLocal() as session:
-        row = await SettingsRepository(session).get_or_create()
-        row.password_hash = value
-        await session.commit()
-    await get_settings_cache().invalidate()
-    await get_dashboard_users_cache().invalidate()
-
-
-async def _legacy_password_hash() -> str | None:
-    async with SessionLocal() as session:
-        return (await session.execute(select(DashboardSettings))).scalar_one().password_hash
 
 
 async def _insert_user(
@@ -587,10 +571,24 @@ async def test_remove_password_is_refused_while_other_accounts_exist(async_clien
 
 
 @pytest.mark.asyncio
-async def test_legacy_credential_columns_are_not_consulted(async_client, monkeypatch):
-    """Spec: with zero accounts the install is passwordless even if the legacy column says otherwise."""
+async def test_there_is_no_legacy_credential_to_consult(async_client, monkeypatch):
+    """Spec: the legacy credential columns are gone, and sign-in state comes from the accounts alone."""
 
-    await _seed_legacy_password_hash("$2b$stale-legacy-only")
+    async with SessionLocal() as session:
+        columns = await session.run_sync(
+            lambda sync: {column["name"] for column in inspect(sync.connection()).get_columns("dashboard_settings")}
+        )
+    assert not {"password_hash", "totp_secret_encrypted", "totp_last_verified_step"} & columns
+    # The neighbours the projection never wrote are live and must survive.
+    assert {
+        "guest_password_hash",
+        "guest_session_generation",
+        "bootstrap_token_encrypted",
+        "bootstrap_token_hash",
+        "totp_required_on_login",
+        "totp_required_for_admin_role",
+        "local_login_policy",
+    } <= columns
 
     assert (await async_client.get("/api/settings")).status_code == 200
     local = (await async_client.get("/api/dashboard-auth/session")).json()
@@ -607,23 +605,6 @@ async def test_legacy_credential_columns_are_not_consulted(async_client, monkeyp
     assert remote["assignableRoleIds"] == []
     assert remote["user"] is None
     assert remote["role"] == "admin" and remote["permissions"][:2] == ["read", "write"]
-
-
-@pytest.mark.asyncio
-async def test_stale_legacy_hash_does_not_block_first_run_setup(async_client):
-    """A legacy-only hash left by a late previous-release write must not wedge setup forever."""
-
-    await _seed_legacy_password_hash("$2b$stale-legacy-only")
-
-    payload = await _setup(async_client)
-    assert payload["user"]["username"] == "admin"
-    user = await _compat_user()
-    assert user.password_hash is not None
-    assert await _legacy_password_hash() == user.password_hash  # mirrored unconditionally
-
-    await async_client.post("/api/dashboard-auth/logout", json={})
-    login = await async_client.post("/api/dashboard-auth/password/login", json={"password": "password123"})
-    assert login.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -685,7 +666,7 @@ async def test_first_password_setup_is_compare_and_set(async_client, app_instanc
     allowed = await async_client.post("/api/dashboard-auth/password/login", json={"password": "first-password-1"})
     assert allowed.status_code == 200
     user = await _compat_user()
-    assert await _legacy_password_hash() == user.password_hash
+    assert user.password_hash is not None
 
 
 @pytest.mark.asyncio

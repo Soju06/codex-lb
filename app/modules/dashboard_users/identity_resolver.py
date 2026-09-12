@@ -460,9 +460,10 @@ class IdentityResolver:
         return role
 
     async def _free_username(self, subject: str) -> str:
-        """First candidate no account holds. ``admin`` is reserved for the migrated
-        break-glass account even before it exists, so a proxy user named admin
-        becomes ``admin-2`` and can never inherit that row."""
+        """First candidate no account holds. ``admin`` is reserved for the local
+        break-glass account even before it exists -- and stays reserved after that
+        account is renamed away from it -- so a proxy user named admin becomes
+        ``admin-2`` and the name the recovery runbooks use never means someone else."""
 
         for candidate in jit_username_candidates(slugify_subject(subject)):
             if candidate == COMPAT_ADMIN_USERNAME:

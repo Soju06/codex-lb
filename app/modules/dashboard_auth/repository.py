@@ -1,11 +1,11 @@
 """Persistence for dashboard sign-in: user credentials, guest settings, bootstrap token.
 
-The ``dashboard_users`` row is the source of truth for every credential. During
-the expand/contract release the legacy ``dashboard_settings`` credential
-columns are kept as a *write-only projection* of the ``admin`` (compat) user so
-replicas still running the previous release keep working: every write to the
-compat user's credential is mirrored onto the legacy columns in the same
-transaction, and nothing here reads the legacy credential columns back.
+The ``dashboard_users`` row is the sole authority for every credential: a
+credential write has exactly one destination and the account's *name* never
+decides whether it happens. ``dashboard_settings`` no longer carries a copy of
+any credential; the install-wide settings a credential path still writes (the
+bootstrap token, the two TOTP requirements) are decided by the operation, not
+by who performed it.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.utils.time import utcnow
 from app.db.models import (
+    COMPAT_ADMIN_USER_ID,
     COMPAT_ADMIN_USERNAME,
     DashboardIdentity,
     DashboardSettings,
@@ -28,7 +29,6 @@ from app.db.models import (
     DashboardUserStatus,
 )
 from app.modules.dashboard_roles.repository import DashboardRolesRepository
-from app.modules.dashboard_users.compat import COMPAT_ADMIN_USER_ID
 from app.modules.dashboard_users.repository import (
     DashboardUserCounts,
     DashboardUsersRepository,
@@ -39,6 +39,22 @@ from app.modules.role_mappings.repository import RoleMappingsRepository
 from app.modules.settings.repository import SettingsRepository
 
 _SETTINGS_ID = 1
+
+
+def _clear_bootstrap_token(row: DashboardSettings) -> None:
+    """A password now exists, so the remote bootstrap token must not.
+
+    The token grants first-run admin access and is inert the moment any account
+    holds a password, so every password write clears it -- whichever account
+    wrote it and whatever that account is called.
+    """
+
+    row.bootstrap_token_encrypted = None
+    row.bootstrap_token_hash = None
+
+
+def _clear_totp_required_on_login(row: DashboardSettings) -> None:
+    row.totp_required_on_login = False
 
 
 class DashboardAuthRepository:
@@ -54,36 +70,22 @@ class DashboardAuthRepository:
     async def get_settings(self) -> DashboardSettings:
         return await self._settings_repository.get_or_create()
 
-    async def _mutate_settings_with_retry(
-        self,
-        mutate: Callable[[DashboardSettings], None],
-        *,
-        mirror: Callable[[DashboardSettings], Awaitable[None]] | None = None,
-    ) -> DashboardSettings:
+    async def _mutate_settings_with_retry(self, mutate: Callable[[DashboardSettings], None]) -> DashboardSettings:
         """Apply a single-purpose settings mutation, retrying once on a version conflict.
 
-        These mutations are idempotent absolute writes (set/clear a credential
-        field), so losing the optimistic version race to a concurrent settings
-        update is benign: re-read the fresh row, re-apply the same mutation,
-        and commit again instead of surfacing a 500.
-
-        ``mirror`` re-applies the compat-admin projection of the same write
-        (it receives the mutated legacy row). It runs before every commit
-        attempt because the conflict rollback discards the flushed user-row
-        update together with the legacy one.
+        These mutations are idempotent absolute writes (set/clear a field), so
+        losing the optimistic version race to a concurrent settings update is
+        benign: re-read the fresh row, re-apply the same mutation, and commit
+        again instead of surfacing a 500.
         """
         row = await self._settings_repository.get_or_create()
         mutate(row)
-        if mirror is not None:
-            await mirror(row)
         try:
             await self._settings_repository.commit_refresh(row)
         except DashboardSettingsConflictError:
             row = await self._settings_repository.get_or_create()
             await self._session.refresh(row)
             mutate(row)
-            if mirror is not None:
-                await mirror(row)
             await self._settings_repository.commit_refresh(row)
         return row
 
@@ -146,9 +148,6 @@ class DashboardAuthRepository:
     async def list_active_local_password_users(self) -> Sequence[DashboardUser]:
         return await self._users.list_active_local_password_users()
 
-    async def count_active_users(self) -> int:
-        return (await self._users.counts()).active
-
     async def count_user_identities(self, user_id: str) -> int:
         return await self._users.count_identities(user_id)
 
@@ -170,33 +169,44 @@ class DashboardAuthRepository:
     async def count_role_mappings(self) -> int:
         return await self._mappings.count_mappings()
 
-    # --- users: writes (compat admin mirrored to the legacy columns) ---
+    # --- users: writes ---
 
     async def create_first_admin(self, password_hash: str) -> DashboardUser | None:
-        """First-run setup: give the install its ``admin`` account.
+        """First-run setup: give the install its bootstrap account.
 
-        Refused (``None``) when an active user already holds a password. The users
-        table is the only authority and the write is compare-and-set: a missing
-        row is inserted (deterministic id + unique username make a concurrent
-        insert fail), an existing credential-less row is re-armed with
-        ``UPDATE ... WHERE password_hash IS NULL``; zero rows means another
-        setup won the race and this one is refused. Only then are the legacy
-        columns mirrored and the bootstrap token cleared, in the same
-        transaction, so a stale legacy hash left behind by a previous-release
-        replica can never wedge setup.
+        Refused (``None``) when an active user already holds a password. The
+        users table is the only authority and the write is compare-and-set: a
+        missing row is inserted (deterministic id + unique username make a
+        concurrent insert fail), an existing row is re-armed only while it is
+        not an *active password holder*; zero rows means another setup won the
+        race and this one is refused.
+
+        "Not an active password holder" is the whole condition because that is
+        the same fact the gate above tests: anything else the bootstrap row may
+        have been edited into -- disabled, demoted, credential-less -- is a
+        leftover the install is entitled to bootstrap over, and the write puts
+        the row back into the state setup promises (active, admin preset,
+        manually sourced). A narrower ``password_hash IS NULL`` would leave a
+        *disabled* row holding its old hash unmatched, so the install could
+        neither sign in nor ever set a password again.
+
+        The row that may be re-armed is found by its deterministic id and its
+        break-glass designation, never by its name: the account is renameable,
+        and a lookup by ``admin`` would miss a renamed row, collide on the id
+        and refuse every re-bootstrap of that install forever. The bootstrap
+        token is cleared in the same transaction, so the token that was meant
+        to create this credential cannot outlive it.
         """
 
         await self._settings_repository.get_or_create()
         user_id: str | None = None
         for attempt in range(2):
             # Identity-only accounts (reverse-proxy users) do not count: the
-            # local ``admin`` remains creatable as the break-glass password login.
+            # local break-glass password login remains creatable.
             if (await self._users.local_auth_state()).active_local_password_users > 0:
                 return None
             existing = (
-                await self._session.execute(
-                    select(DashboardUser).where(DashboardUser.username == COMPAT_ADMIN_USERNAME)
-                )
+                await self._session.execute(select(DashboardUser).where(DashboardUser.id == COMPAT_ADMIN_USER_ID))
             ).scalar_one_or_none()
             if existing is None:
                 self._session.add(
@@ -213,18 +223,38 @@ class DashboardAuthRepository:
                 try:
                     await self._session.flush()
                 except IntegrityError:
+                    # A row already holds that id or the reserved name.
                     await self._session.rollback()
                     return None
                 user_id = COMPAT_ADMIN_USER_ID
-            elif existing.id != COMPAT_ADMIN_USER_ID or not existing.is_break_glass:
-                # Only the migrated/bootstrapped break-glass row may be re-armed.
+            elif not existing.is_break_glass:
+                # Only the bootstrapped break-glass row may be re-armed.
                 return None
             else:
                 armed = await self._session.execute(
                     update(DashboardUser)
                     .where(DashboardUser.id == existing.id)
-                    .where(DashboardUser.password_hash.is_(None))
-                    .values(password_hash=password_hash, totp_secret_encrypted=None, totp_last_verified_step=None)
+                    # Re-read the designation inside the statement, so a
+                    # concurrent write that cleared it cannot slip between the
+                    # check above and this UPDATE.
+                    .where(DashboardUser.is_break_glass.is_(True))
+                    .where(
+                        or_(
+                            DashboardUser.password_hash.is_(None),
+                            DashboardUser.status != DashboardUserStatus.ACTIVE.value,
+                        )
+                    )
+                    .values(
+                        password_hash=password_hash,
+                        totp_secret_encrypted=None,
+                        totp_last_verified_step=None,
+                        # The account setup hands back is the install's way in,
+                        # so the same statement undoes whatever an administrator
+                        # edited it into before it stopped being able to sign in.
+                        status=DashboardUserStatus.ACTIVE.value,
+                        role_id=PRESET_ROLE_IDS[PresetRoleSlug.ADMIN],
+                        role_source=DashboardUserRoleSource.MANUAL.value,
+                    )
                     .returning(DashboardUser.id)
                 )
                 if armed.scalar_one_or_none() is None:
@@ -232,9 +262,7 @@ class DashboardAuthRepository:
                     return None
                 user_id = existing.id
             row = await self._settings_repository.get_or_create()
-            row.password_hash = password_hash
-            row.bootstrap_token_encrypted = None
-            row.bootstrap_token_hash = None
+            _clear_bootstrap_token(row)
             try:
                 await self._settings_repository.commit_refresh(row)
                 break
@@ -261,20 +289,24 @@ class DashboardAuthRepository:
         self,
         user_id: str,
         mutate_user: Callable[[DashboardUser], None],
-        mirror_legacy: Callable[[DashboardSettings], None] | None,
         *,
+        mutate_settings: Callable[[DashboardSettings], None] | None = None,
         before: Callable[[], Awaitable[None]] | None = None,
         bump_generation: bool = False,
     ) -> DashboardUser:
-        """Apply a user mutation and, for the compat admin, the legacy mirror in one transaction.
+        """Apply a credential mutation, and any install-wide settings it implies, in one transaction.
 
-        The legacy row carries an optimistic version; when the commit loses
-        that race both writes roll back and are re-applied together (including
-        ``before``) so the two rows can never diverge. ``bump_generation``
-        increments ``session_generation`` with an atomic ``SET x = x + 1`` in
-        the same transaction, never from the possibly stale ORM value, so two
-        concurrent revocations can never resurrect an already revoked cookie.
-        Any other failure rolls the whole write back before propagating.
+        ``mutate_settings`` never carries a credential: it is the install-wide
+        consequence of the operation (the bootstrap token, the TOTP
+        requirements), and it is decided by the caller, never by the account's
+        name. The settings row carries an optimistic version; when the commit
+        loses that race the whole write rolls back and is re-applied (including
+        ``before``) so the account row and the settings row cannot diverge.
+        ``bump_generation`` increments ``session_generation`` with an atomic
+        ``SET x = x + 1`` in the same transaction, never from the possibly
+        stale ORM value, so two concurrent revocations can never resurrect an
+        already revoked cookie. Any other failure rolls the whole write back
+        before propagating.
         """
 
         async def _apply() -> DashboardUser:
@@ -290,9 +322,9 @@ class DashboardAuthRepository:
                     .values(session_generation=DashboardUser.session_generation + 1)
                     .returning(DashboardUser.session_generation)
                 )
-            if mirror_legacy is not None and user.username == COMPAT_ADMIN_USERNAME:
+            if mutate_settings is not None:
                 row = await self._settings_repository.get_or_create()
-                mirror_legacy(row)
+                mutate_settings(row)
                 await self._settings_repository.commit_refresh(row)
             else:
                 await self._session.commit()
@@ -308,29 +340,13 @@ class DashboardAuthRepository:
             await self._session.rollback()
             raise
 
-    async def set_user_password_hash(self, user_id: str, password_hash: str) -> DashboardUser:
-        def _user(user: DashboardUser) -> None:
-            user.password_hash = password_hash
-
-        def _legacy(row: DashboardSettings) -> None:
-            row.password_hash = password_hash
-            row.bootstrap_token_encrypted = None
-            row.bootstrap_token_hash = None
-
-        return await self._write_user(user_id, _user, _legacy)
-
     async def rotate_user_password(self, user_id: str, password_hash: str) -> DashboardUser:
         """Set a new password and revoke every existing session in one transaction."""
 
         def _user(user: DashboardUser) -> None:
             user.password_hash = password_hash
 
-        def _legacy(row: DashboardSettings) -> None:
-            row.password_hash = password_hash
-            row.bootstrap_token_encrypted = None
-            row.bootstrap_token_hash = None
-
-        return await self._write_user(user_id, _user, _legacy, bump_generation=True)
+        return await self._write_user(user_id, _user, mutate_settings=_clear_bootstrap_token, bump_generation=True)
 
     async def set_user_totp_secret(
         self,
@@ -342,30 +358,40 @@ class DashboardAuthRepository:
     ) -> DashboardUser:
         """Set or clear the TOTP secret; an administrative reset also revokes every session.
 
-        Self-service disable on the compat admin also turns the install-wide
-        ``totp_required_on_login`` off in the legacy mirror (today's behaviour);
-        an administrative reset passes ``preserve_policy`` so the mirror only
-        clears the secret and counter and the policy stays as configured.
+        Clearing the secret turns the install-wide ``totp_required_on_login``
+        off only on a one-account install, where "I turned two-factor off" and
+        "this install no longer requires two-factor" are the same statement.
+        ``/totp/disable`` carries no ``security:write``, so on any larger
+        install the requirement is left alone and the account meets the
+        enrolment gate on its next request. An administrative reset passes
+        ``preserve_policy`` and never touches either requirement.
+
+        "One-account install" counts every account the install holds, not only
+        the active ones: a disabled colleague is an account that can be enabled
+        again, and letting a self-service route turn an install-wide security
+        requirement off because the other accounts happen to be disabled today
+        is the same statement made about somebody else's sign-in.
         """
 
         def _user(user: DashboardUser) -> None:
             user.totp_secret_encrypted = secret_encrypted
             user.totp_last_verified_step = None
 
-        def _legacy(row: DashboardSettings) -> None:
-            row.totp_secret_encrypted = secret_encrypted
-            row.totp_last_verified_step = None
-            if secret_encrypted is None and not preserve_policy:
-                row.totp_required_on_login = False
+        mutate_settings: Callable[[DashboardSettings], None] | None = None
+        if secret_encrypted is None and not preserve_policy:
+            if (await self._users.counts()).total <= 1:
+                mutate_settings = _clear_totp_required_on_login
 
-        return await self._write_user(user_id, _user, _legacy, bump_generation=bump_generation)
+        return await self._write_user(user_id, _user, mutate_settings=mutate_settings, bump_generation=bump_generation)
 
     async def try_advance_user_totp_step(self, user_id: str, step: int) -> bool:
         """Advance the replay counter; ``False`` means the code was already used.
 
-        For the compat admin the legacy column must advance too (both or
-        neither): a code consumed by a previous-release replica is a replay
-        here, and vice versa.
+        The conditional UPDATE is what decides: a code whose step the account
+        row already reached changes zero rows, and the refusal rolls the
+        transaction back so nothing half-written survives. Callers depend on
+        that boundary -- ``disable_totp`` spends the code (and commits) before
+        the break-glass guard takes its write-intent lock.
         """
 
         result = await self._session.execute(
@@ -378,34 +404,16 @@ class DashboardAuthRepository:
                 )
             )
             .values(totp_last_verified_step=step)
-            .returning(DashboardUser.username)
+            .returning(DashboardUser.id)
         )
-        username = result.scalar_one_or_none()
-        if username is None:
+        if result.scalar_one_or_none() is None:
             await self._session.rollback()
             return False
-        if username == COMPAT_ADMIN_USERNAME:
-            await self._settings_repository.get_or_create()
-            mirrored = await self._session.execute(
-                update(DashboardSettings)
-                .where(DashboardSettings.id == _SETTINGS_ID)
-                .where(
-                    or_(
-                        DashboardSettings.totp_last_verified_step.is_(None),
-                        DashboardSettings.totp_last_verified_step < step,
-                    )
-                )
-                .values(totp_last_verified_step=step)
-                .returning(DashboardSettings.id)
-            )
-            if mirrored.scalar_one_or_none() is None:
-                await self._session.rollback()
-                return False
         await self._session.commit()
         return True
 
     async def bump_session_generation(self, user_id: str) -> int:
-        user = await self._write_user(user_id, lambda _user: None, None, bump_generation=True)
+        user = await self._write_user(user_id, lambda _user: None, bump_generation=True)
         return user.session_generation
 
     async def clear_user_credentials(self, user_id: str) -> DashboardUser:
@@ -416,19 +424,21 @@ class DashboardAuthRepository:
             user.totp_secret_encrypted = None
             user.totp_last_verified_step = None
 
-        def _legacy(row: DashboardSettings) -> None:
-            row.password_hash = None
-            row.bootstrap_token_encrypted = None
-            row.bootstrap_token_hash = None
+        def _settings(row: DashboardSettings) -> None:
+            # The route is already restricted to a one-account install, so the
+            # install is passwordless after this write: a requirement left on
+            # would make sign-in mandatory with no account able to present a
+            # factor. Neither clause asks what the account is called.
+            _clear_bootstrap_token(row)
             row.totp_required_on_login = False
             row.totp_required_for_admin_role = False
-            row.totp_secret_encrypted = None
-            row.totp_last_verified_step = None
 
         async def _delete_identities() -> None:
             await self._session.execute(delete(DashboardIdentity).where(DashboardIdentity.user_id == user_id))
 
-        return await self._write_user(user_id, _user, _legacy, before=_delete_identities, bump_generation=True)
+        return await self._write_user(
+            user_id, _user, mutate_settings=_settings, before=_delete_identities, bump_generation=True
+        )
 
     async def touch_last_login(self, user_id: str) -> None:
         await self._session.execute(

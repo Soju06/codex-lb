@@ -84,6 +84,7 @@ const DashboardUserCreatePayloadSchema = z.looseObject({
 });
 
 const DashboardUserUpdatePayloadSchema = z.looseObject({
+  username: z.string().optional(),
   roleId: z.string().optional(),
   status: z.enum(["active", "disabled"]).optional(),
   force: z.boolean().optional(),
@@ -2370,9 +2371,11 @@ export const handlers = [
       return HttpResponse.json({ error: { code: "user_not_found", message: "User not found" } }, { status: 404 });
     }
     const changesAccess = Boolean(payload.roleId && payload.roleId !== user.role.id) || Boolean(payload.status);
-    if (user.username === "admin" && changesAccess) {
+    // A rename is neither: it is allowed on any account, including the caller's own.
+    const renamesTo = payload.username && payload.username !== user.username ? payload.username : null;
+    if (renamesTo && state.dashboardUsers.some((candidate) => candidate.username === renamesTo)) {
       return HttpResponse.json(
-        { error: { code: "compat_user_locked", message: "The migrated 'admin' account keeps its role and status" } },
+        { error: { code: "username_taken", message: "Username is already taken" } },
         { status: 409 },
       );
     }
@@ -2408,6 +2411,7 @@ export const handlers = [
     const role = payload.roleId ? state.dashboardRoles.find((candidate) => candidate.id === payload.roleId) : null;
     const updated: DashboardUser = {
       ...user,
+      username: renamesTo ?? user.username,
       role: role ? { id: role.id, slug: role.slug, name: role.name, kind: role.kind } : user.role,
       status: payload.status ?? user.status,
       roleSource: payload.force ? "manual" : user.roleSource,
@@ -2424,12 +2428,6 @@ export const handlers = [
     if (user.id === state.authSession.user?.id) {
       return HttpResponse.json(
         { error: { code: "self_modification_forbidden", message: "You cannot delete your own account" } },
-        { status: 409 },
-      );
-    }
-    if (user.username === "admin") {
-      return HttpResponse.json(
-        { error: { code: "compat_user_locked", message: "The migrated 'admin' account cannot be deleted" } },
         { status: 409 },
       );
     }
@@ -2481,12 +2479,6 @@ export const handlers = [
     if (user.id === state.authSession.user?.id) {
       return HttpResponse.json(
         { error: { code: "self_modification_forbidden", message: "Disable your own TOTP from Settings" } },
-        { status: 409 },
-      );
-    }
-    if (user.username === "admin" && state.settings.totpRequiredOnLogin) {
-      return HttpResponse.json(
-        { error: { code: "compat_user_locked", message: "Resetting the migrated admin's TOTP would lock it out" } },
         { status: 409 },
       );
     }

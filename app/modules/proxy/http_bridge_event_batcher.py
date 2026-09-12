@@ -5,7 +5,8 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
-from app.core.clock import REAL_SCHEDULER, Scheduler
+from app.core import shutdown as shutdown_state
+from app.core.clock import REAL_SCHEDULER, Scheduler, clock_for
 from app.core.config.settings import get_settings
 from app.db.models import HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2, HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
 from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationEventInput
@@ -145,6 +146,10 @@ class HttpBridgeOperationEventBatcher:
         # to the finalizer tracker.  Shutdown waits for this handoff so a
         # finalizer cannot be created after the close drain snapshots tasks.
         self._terminal_append_callers: set[asyncio.Task[Any]] = set()
+        # Ordinary enqueue callers need the same admission handoff: once close
+        # starts, a caller that already passed admission must finish before the
+        # flusher is stopped and its queue is drained.
+        self._enqueue_callers: set[asyncio.Task[Any]] = set()
         self._closing = False
 
     async def _operation_lock_for(self, operation_id: str) -> asyncio.Lock:
@@ -204,7 +209,39 @@ class HttpBridgeOperationEventBatcher:
         recovery_dispatch_count: int = 0,
     ) -> None:
         """Admit a fenced event to the bounded queue and synchronously drain terminal submissions."""
-        self._ensure_task()
+        caller = asyncio.current_task()
+        async with self._lock:
+            if self._closing:
+                return
+            if caller is not None:
+                self._enqueue_callers.add(caller)
+            self._ensure_task()
+        try:
+            return await self._enqueue_impl(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                event_text=event_text,
+                terminal=terminal,
+                recovery_dispatch_count=recovery_dispatch_count,
+            )
+        finally:
+            if caller is not None:
+                async with self._lock:
+                    self._enqueue_callers.discard(caller)
+
+    async def _enqueue_impl(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        event_text: str,
+        terminal: bool = False,
+        recovery_dispatch_count: int = 0,
+    ) -> None:
         recovery_dispatch_count = max(0, int(recovery_dispatch_count))
         pending = _PendingOperationEvent(
             operation_id=operation_id,
@@ -918,6 +955,8 @@ class HttpBridgeOperationEventBatcher:
             ),
             name=f"http-bridge-terminal-spool-finalize-{operation_id}",
         )
+        setattr(finalize_task, "_http_bridge_session_id", session_id)
+        setattr(finalize_task, "_http_bridge_owner_epoch", owner_epoch)
         self._terminal_finalize_tasks.add(finalize_task)
         finalize_task.add_done_callback(self._terminal_finalize_done)
 
@@ -1122,6 +1161,18 @@ class HttpBridgeOperationEventBatcher:
             cleanup_task.cancel()
         if cleanup_tasks:
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        # Let enqueue callers that crossed the admission fence finish before
+        # stopping the flusher.  This prevents a producer that started just
+        # before shutdown from publishing work after the close drain snapshot.
+        while True:
+            current = asyncio.current_task()
+            async with self._lock:
+                active_enqueue_callers = tuple(
+                    caller for caller in self._enqueue_callers if caller is not current and not caller.done()
+                )
+            if not active_enqueue_callers:
+                break
+            await asyncio.sleep(0)
         task = self._task
         self._task = None
         if task is not None:
@@ -1159,10 +1210,17 @@ class HttpBridgeOperationEventBatcher:
     ) -> None:
         if not tasks:
             return
+        shutdown_remaining = shutdown_state.remaining_drain_timeout_seconds()
+        shutdown_deadline = (
+            None if shutdown_remaining is None else clock_for(self).monotonic() + max(shutdown_remaining, 0.0)
+        )
         if cancel:
             for task in tasks:
                 task.cancel()
-        _, pending = await asyncio.wait(tasks, timeout=max(self._terminal_append_timeout_seconds, 0.0))
+        timeout = max(self._terminal_append_timeout_seconds, 0.0)
+        if shutdown_remaining is not None:
+            timeout = min(timeout, max(shutdown_remaining, 0.0))
+        _, pending = await self._scheduler.wait(tasks, timeout=timeout)
         if not pending:
             return
         # A cancelled append, or an uncancelled finalizer, can still be inside
@@ -1175,6 +1233,28 @@ class HttpBridgeOperationEventBatcher:
             kind,
             len(pending),
             self._terminal_append_timeout_seconds,
-            sorted(task.get_name() for task in pending),
+            sorted(str(getattr(task, "get_name", lambda: "<unknown>")()) for task in pending),
         )
-        await asyncio.gather(*pending, return_exceptions=True)
+        if shutdown_deadline is None:
+            # Standalone callers do not have a process-level deadline; retain
+            # the historical ownership guarantee and wait for durable writers.
+            await asyncio.gather(*pending, return_exceptions=True)
+            return
+
+        remaining = max(shutdown_deadline - clock_for(self).monotonic(), 0.0)
+        if remaining:
+            _, pending = await self._scheduler.wait(pending, timeout=remaining)
+        if not pending:
+            return
+
+        # The service-level shutdown path owns the final forced termination
+        # decision once the shared deadline expires. Cancel what remains and
+        # leave callbacks tracking completion so late durable work cannot be
+        # mistaken for a clean drain.
+        logger.error(
+            "HTTP bridge terminal %s tasks exceeded the overall shutdown deadline; forcing termination count=%d",
+            kind,
+            len(pending),
+        )
+        for task in pending:
+            task.cancel()

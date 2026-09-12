@@ -1457,6 +1457,9 @@ class _HTTPBridgeSession:
     # through this task so invalidation and shutdown can distinguish a rejected
     # session from one whose socket and leases actually have a close owner.
     resource_close_task: asyncio.Task[None] | None = None
+    # If a cancellation-resistant reader outlives resource teardown, release
+    # of the durable owner is completed by this deferred, owner-fenced task.
+    deferred_durable_release_task: asyncio.Task[None] | None = None
     # ``closed`` rejects new admissions but is written by many unrelated
     # retirement paths; it never proves that a sender owns pending settlement.
     # Only the submitter may claim this, while holding ``lifecycle_lock``, when

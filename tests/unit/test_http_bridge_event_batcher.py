@@ -385,6 +385,9 @@ async def test_new_recovery_generation_clears_previous_overflow_marker() -> None
         flush_interval_seconds=60.0,
         max_pending_events=1,
     )
+    # Keep the background flusher out of the admission window so the first
+    # enqueue cannot drain before the second enqueue exercises overflow.
+    batcher._task = asyncio.create_task(asyncio.sleep(60.0))
     try:
         await _enqueue(batcher, "first")
         await _enqueue(batcher, "overflow")

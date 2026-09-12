@@ -37,3 +37,27 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+## Queued steering accounting
+
+The steering requirements in `spec.md` extend one successor reservation rather
+than charging each correction as a separate response. Existing items reserve
+only additional input; newly applicable limits use the ordinary bounded
+request-admission and remaining-capacity policy. Actual successor usage is
+settled once by the existing terminal path. This does not change pricing,
+ordinary admission, or the current-window backfill performed by key updates.
+
+Quota applicability can change while a socket remains open. For example, a
+first steer can be unmetered, then an administrator adds an exhausted input
+limit before a second steer. The second steer is rejected without retiring the
+first; when capacity permits, its reservation is attached to the existing
+successor rather than creating another settlement owner. Sender cancellation
+is deferred across the first reservation's commit and attachment so socket
+cleanup cannot miss a committed row. Rejection may remove an earlier input
+while a later admitted input waits for transport handoff; only the earlier
+increment is refunded.
+
+Reservation adjustments lock the reservation before updating its limit rows.
+Terminal claims retain their existing lock behavior but reload current item
+values after claiming, including when the ORM session retains an older graph.
+Failed refunds stay conservatively reserved for terminal reconciliation.

@@ -86,6 +86,7 @@ class _OpenHarness(websocket_mixin._WebSocketMixin):
 class _BlockingUpstream:
     def __init__(self) -> None:
         self.receive_calls = 0
+        self.closed = False
 
     async def receive(self) -> SimpleNamespace:
         self.receive_calls += 1
@@ -93,7 +94,7 @@ class _BlockingUpstream:
         raise AssertionError("unreachable")
 
     async def close(self) -> None:
-        return None
+        self.closed = True
 
 
 class _DownstreamWebSocket:
@@ -172,14 +173,16 @@ async def test_upstream_websocket_open_within_budget_disarms_the_virtual_deadlin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retire_after_drain", [False, True], ids=["keepalive", "steering-retirement"])
 async def test_upstream_relay_receive_deadline_and_keepalive_follow_the_virtual_scheduler(
     monkeypatch: pytest.MonkeyPatch,
+    retire_after_drain: bool,
 ) -> None:
     service, clock, scheduler = _virtual_service()
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
-        lambda: SimpleNamespace(sse_keepalive_interval_seconds=10.0),
+        lambda: SimpleNamespace(sse_keepalive_interval_seconds=0.0 if retire_after_drain else 10.0),
     )
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_virtual_relay",
@@ -192,6 +195,7 @@ async def test_upstream_relay_receive_deadline_and_keepalive_follow_the_virtual_
         response_create_sent_at=clock.monotonic(),
     )
     pending_requests: deque[proxy_service._WebSocketRequestState] = deque([request_state])
+    pending_lock = anyio.Lock()
     upstream = _BlockingUpstream()
     downstream = _DownstreamWebSocket()
 
@@ -202,10 +206,10 @@ async def test_upstream_relay_receive_deadline_and_keepalive_follow_the_virtual_
             account=cast(Account, SimpleNamespace(id="account_virtual_relay")),
             account_id_value="account_virtual_relay",
             pending_requests=pending_requests,
-            pending_lock=anyio.Lock(),
+            pending_lock=pending_lock,
             client_send_lock=anyio.Lock(),
             api_key=None,
-            upstream_control=proxy_service._WebSocketUpstreamControl(),
+            upstream_control=proxy_service._WebSocketUpstreamControl(retire_after_drain=retire_after_drain),
             response_create_gate=asyncio.Semaphore(1),
             proxy_request_budget_seconds=30.0,
             stream_idle_timeout_seconds=30.0,
@@ -221,16 +225,28 @@ async def test_upstream_relay_receive_deadline_and_keepalive_follow_the_virtual_
         # The receive deadline is a virtual timer, not a wall-clock wait_for.
         assert scheduler.pending_timers == 1
 
-        await scheduler.advance(9.0)
+        await scheduler.advance(0.9 if retire_after_drain else 9.0)
         assert downstream.sent_text == []
 
-        await scheduler.advance(1.0)
+        await scheduler.advance(0.1 if retire_after_drain else 1.0)
 
-        assert [json.loads(text)["type"] for text in downstream.sent_text] == ["response.in_progress"]
+        assert [json.loads(text)["type"] for text in downstream.sent_text] == (
+            [] if retire_after_drain else ["response.in_progress"]
+        )
         assert not relay.done()
-        # The keepalive re-armed the receive wait instead of expiring the request budget.
+        # Both poll modes re-arm the wait without expiring an owned request.
         assert upstream.receive_calls == 2
         assert pending_requests == deque([request_state])
+        assert not upstream.closed
+        if retire_after_drain:
+            # Local sender cleanup empties the queue without an upstream frame.
+            async with pending_lock:
+                pending_requests.clear()
+            await scheduler.advance(1.0)
+            await relay
+            assert upstream.closed
+            assert downstream.sent_text == []
+            assert scheduler.pending_timers == 0
     finally:
         relay.cancel()
         await asyncio.gather(relay, return_exceptions=True)

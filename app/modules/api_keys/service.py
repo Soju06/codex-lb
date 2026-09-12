@@ -162,7 +162,20 @@ class ApiKeysRepositoryProtocol(Protocol):
         items: list[UsageReservationItemData],
     ) -> None: ...
 
+    async def add_usage_reservation_item(self, reservation_id: str, item: UsageReservationItemData) -> None: ...
+
     async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None: ...
+
+    async def get_usage_reservation_for_update(self, reservation_id: str) -> UsageReservationData | None: ...
+
+    async def set_usage_reservation_item_reserved_delta(
+        self,
+        reservation_id: str,
+        *,
+        limit_id: int,
+        reserved_delta: int,
+        expected_reset_at: datetime | None = None,
+    ) -> bool: ...
 
     async def transition_usage_reservation_status(
         self,
@@ -1004,6 +1017,207 @@ class ApiKeysService:
             has_applicable_limits=bool(reservation_items),
         )
 
+    async def extend_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+        successor_usage_budget: ApiKeyRequestUsageBudget | None = None,
+    ) -> bool:
+        return await self._adjust_usage_reservation_input_budget(
+            reservation_id,
+            request_service_tier=request_service_tier,
+            request_usage_budget=request_usage_budget,
+            successor_usage_budget=successor_usage_budget,
+            direction=1,
+        )
+
+    async def reduce_usage_reservation(
+        self,
+        reservation_id: str,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+    ) -> bool:
+        return await self._adjust_usage_reservation_input_budget(
+            reservation_id,
+            request_service_tier=request_service_tier,
+            request_usage_budget=request_usage_budget,
+            direction=-1,
+        )
+
+    async def _adjust_usage_reservation_input_budget(
+        self,
+        reservation_id: str,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+        direction: int,
+        successor_usage_budget: ApiKeyRequestUsageBudget | None = None,
+    ) -> bool:
+        for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
+            try:
+                return await self._adjust_usage_reservation_input_budget_once(
+                    reservation_id,
+                    request_service_tier=request_service_tier,
+                    request_usage_budget=request_usage_budget,
+                    direction=direction,
+                    successor_usage_budget=successor_usage_budget,
+                )
+            except OperationalError as exc:
+                await self._repository.rollback()
+                if not await should_retry_after_sqlite_lock(
+                    exc,
+                    what="adjust_usage_reservation_input_budget",
+                    attempt=attempt,
+                    max_attempts=_SQLITE_BUSY_RETRY_ATTEMPTS,
+                    base_delay_seconds=_SQLITE_BUSY_RETRY_BASE_SECONDS,
+                ):
+                    raise
+        raise RuntimeError("unreachable")
+
+    async def _reset_elapsed_windows_before_reconciliation(self, reservation_id: str, *, now: datetime) -> None:
+        # Lazy resets commit, so they must happen before the reservation row is locked.
+        reservation = await self._repository.get_usage_reservation(reservation_id)
+        if reservation is None or reservation.status != "reserved":
+            return
+        key = _ensure_valid_api_key_row(await self._repository.get_for_limit_enforcement(reservation.api_key_id))
+        await _lazy_reset_expired_limits(self._repository, key.limits, now=now)
+
+    async def _rebase_usage_reservation_item(
+        self,
+        reservation_id: str,
+        *,
+        item: UsageReservationItemData,
+        limit: ApiKeyLimit,
+        input_delta: int,
+    ) -> None:
+        # The window advanced, so the item's earlier budget no longer counts against the live counter.
+        rebased_delta = item.reserved_delta + input_delta
+        result = await self._repository.try_reserve_usage(
+            limit.id, delta=rebased_delta, expected_reset_at=limit.reset_at
+        )
+        if not result.success:
+            raise _rate_limit_exceeded_error(limit)
+        updated = await self._repository.set_usage_reservation_item_reserved_delta(
+            reservation_id,
+            limit_id=item.limit_id,
+            reserved_delta=rebased_delta,
+            expected_reset_at=limit.reset_at,
+        )
+        if not updated:
+            raise RuntimeError("API key usage reservation item disappeared")
+
+    async def _adjust_usage_reservation_input_budget_once(
+        self,
+        reservation_id: str,
+        *,
+        request_service_tier: str | None,
+        request_usage_budget: ApiKeyRequestUsageBudget | None,
+        direction: int,
+        successor_usage_budget: ApiKeyRequestUsageBudget | None = None,
+    ) -> bool:
+        if direction not in {-1, 1}:
+            raise ValueError("direction must be -1 or 1")
+        normalized_budget = _normalize_request_usage_budget(request_usage_budget)
+        input_tokens = normalized_budget.input_tokens or 0
+        now = utcnow()
+        async with sqlite_writer_section():
+            if direction > 0:
+                await self._reset_elapsed_windows_before_reconciliation(reservation_id, now=now)
+            reservation = await self._repository.get_usage_reservation_for_update(reservation_id)
+            if reservation is None or reservation.status != "reserved":
+                await self._repository.rollback()
+                return False
+            try:
+                if direction > 0:
+                    key = _ensure_valid_api_key_row(
+                        await self._repository.get_for_limit_enforcement(reservation.api_key_id)
+                    )
+                    if key.expires_at is not None and key.expires_at < now:
+                        raise ApiKeyInvalidError("API key has expired")
+                    existing_limit_ids = {item.limit_id for item in reservation.items}
+                    live_limits_by_id = {limit.id: limit for limit in key.limits}
+                    for limit in key.limits:
+                        if not _limit_applies_for_request(limit, request_model=reservation.model):
+                            continue
+                        if limit.id in existing_limit_ids:
+                            continue
+                        if limit.current_value >= limit.max_value:
+                            raise _rate_limit_exceeded_error(limit)
+                        delta = _reserve_delta_for_limit(
+                            limit,
+                            request_model=reservation.model,
+                            request_service_tier=request_service_tier,
+                            request_usage_budget=_normalize_request_usage_budget(successor_usage_budget),
+                        )
+                        result = await self._repository.try_reserve_usage(
+                            limit.id, delta=delta, expected_reset_at=limit.reset_at
+                        )
+                        if not result.success:
+                            raise _rate_limit_exceeded_error(limit)
+                        await self._repository.add_usage_reservation_item(
+                            reservation_id,
+                            UsageReservationItemData(
+                                limit_id=limit.id,
+                                limit_type=limit.limit_type,
+                                reserved_delta=delta,
+                                expected_reset_at=limit.reset_at,
+                            ),
+                        )
+                for item in reservation.items:
+                    input_delta = _reserve_additional_input_delta_for_limit_type(
+                        item.limit_type,
+                        request_model=reservation.model,
+                        request_service_tier=request_service_tier,
+                        input_tokens=input_tokens,
+                    )
+                    if input_delta <= 0:
+                        continue
+                    if direction > 0:
+                        live_limit = live_limits_by_id.get(item.limit_id)
+                        if live_limit is not None and live_limit.reset_at != item.expected_reset_at:
+                            await self._rebase_usage_reservation_item(
+                                reservation_id, item=item, limit=live_limit, input_delta=input_delta
+                            )
+                            continue
+                        result = await self._repository.try_reserve_usage(
+                            item.limit_id,
+                            delta=input_delta,
+                            expected_reset_at=item.expected_reset_at,
+                        )
+                        if not result.success:
+                            raise ApiKeyRateLimitExceededError(
+                                message=f"API key {item.limit_type.value} limit exceeded",
+                                reset_at=result.reset_at or item.expected_reset_at,
+                            )
+                    else:
+                        if input_delta > item.reserved_delta:
+                            raise RuntimeError("usage reservation input budget underflow")
+                        adjusted = await self._repository.adjust_reserved_usage(
+                            item.limit_id,
+                            delta=-input_delta,
+                            expected_reset_at=item.expected_reset_at,
+                        )
+                        if not adjusted:
+                            raise RuntimeError("failed to reduce API key usage reservation")
+                    updated = await self._repository.set_usage_reservation_item_reserved_delta(
+                        reservation_id,
+                        limit_id=item.limit_id,
+                        reserved_delta=item.reserved_delta + direction * input_delta,
+                    )
+                    if not updated:
+                        raise RuntimeError("API key usage reservation item disappeared")
+                touched = await self._repository.touch_usage_reservation(reservation_id)
+                if not touched:
+                    raise RuntimeError("API key usage reservation changed while adjusting")
+                await self._repository.commit()
+                return True
+            except Exception:
+                await self._repository.rollback()
+                raise
+
     async def finalize_usage_reservation(
         self,
         reservation_id: str,
@@ -1099,6 +1313,13 @@ class ApiKeysService:
                 new_status="settling",
             )
             if not claimed:
+                await self._repository.rollback()
+                return
+            # Extend/reduce may have committed a new reserved_delta after the
+            # unlocked read above. Reload items after claiming the status so
+            # settlement does not reconcile against a stale budget.
+            reservation = await self._repository.get_usage_reservation(reservation_id)
+            if reservation is None:
                 await self._repository.rollback()
                 return
 
@@ -1207,6 +1428,10 @@ class ApiKeysService:
                 new_status="released",
             )
             if not claimed:
+                await self._repository.rollback()
+                return
+            reservation = await self._repository.get_usage_reservation(reservation_id)
+            if reservation is None:
                 await self._repository.rollback()
                 return
 
@@ -1763,6 +1988,25 @@ def _reserve_budget_for_limit_type(
     if limit_type == LimitType.CREDITS:
         return 0
     return 1
+
+
+def _reserve_additional_input_delta_for_limit_type(
+    limit_type: LimitType,
+    *,
+    request_model: str | None,
+    request_service_tier: str | None,
+    input_tokens: int,
+) -> int:
+    if limit_type in {LimitType.TOTAL_TOKENS, LimitType.INPUT_TOKENS}:
+        return input_tokens
+    if limit_type == LimitType.COST_USD:
+        return _reserve_cost_budget_microdollars(
+            request_model,
+            request_service_tier,
+            input_tokens=input_tokens,
+            output_tokens=0,
+        )
+    return 0
 
 
 def _reserve_cost_budget_microdollars(

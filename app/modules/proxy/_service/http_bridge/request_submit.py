@@ -788,6 +788,8 @@ class _HTTPBridgeRequestSubmitMixin:
             connection_request_kind=connection_request_kind,
             generate_false_prewarm=generate_false_prewarm,
         )
+        if payload.model == "gpt-6-astra" and transport == _REQUEST_TRANSPORT_WEBSOCKET:
+            request_state.steering_configuration = payload.model_dump_for_forwarding()
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count
             request_state.input_full_fingerprint = deduped_replayed_input_fingerprint

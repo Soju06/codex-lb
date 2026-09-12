@@ -310,3 +310,39 @@ advance the stream from different tasks.
 ## Detached retirement sweep deadline
 
 Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.
+
+## Astra WebSocket steering ownership
+
+The steering requirements in `spec.md` describe protocol-forward support for
+`response.steer` on an owned Astra subscription socket. For example,
+`{"type":"response.steer","previous_response_id":"r1","input":"Use the corrected value."}`
+keeps the active upstream connection/account and reserves one automatic
+successor. Configuration-update/Ultra policy, async-tool continuity and model
+catalog bootstrap remain separate capabilities. The checked rust-v0.153.4 Codex
+baseline does not emit steering; no live provider acceptance is inferred from
+the local transport fixtures.
+
+Explicit tool-input continuations replace a steering placeholder only after
+preparation and admission. Registration, compression, archive writes, and send
+return are not transport handoff: Python transports observe their owned write,
+and native egress observes the worker's successful send acknowledgment before
+making later inbound frames available. An explicit response received during
+post-write flow control remains owned. A dispatched explicit create retains
+priority over an ambiguous same-parent automatic successor; stronger causal
+identity would require upstream metadata not supplied by this protocol.
+
+Expired or finally rejected steering retains only bounded correlation IDs, not
+input bodies. Its parent cannot accept a replacement steer on that upstream
+connection because delayed acknowledgments lack a client generation ID.
+Explicit creates and other parents remain usable. At the history limit,
+admitted tool-input work drains before rotation without an account-health
+penalty. Eligible live requests retain priority for anonymous terminal events;
+an undispatched replacement is not eligible merely because it was registered.
+
+Completed Astra parents retain effective settings, including folded reasoning
+updates, without original input/replay bodies. These snapshots are specific to
+downstream WebSockets and are not duplicated for HTTP bridge requests. Quota
+refresh, exactly-once settlement and cancellation-safe reservation attachment
+are documented in `../api-keys/context.md`. Detailed implementation rationale
+and rejected approaches are retained with the archived
+`support-astra-websocket-steering` change.

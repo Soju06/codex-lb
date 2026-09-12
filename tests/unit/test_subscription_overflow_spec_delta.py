@@ -26,7 +26,6 @@ _OBSERVABILITY_DELTA = _CHANGE / "specs/proxy-runtime-observability/spec.md"
 _ACCOUNT_ROUTING_DELTA = _CHANGE / "specs/account-routing/spec.md"
 _TASKS = _CHANGE / "tasks.md"
 _ROUTING_DOC = REPO_ROOT / "docs/routing.md"
-_DRILL_SUITE = REPO_ROOT / "tests/integration/test_subscription_overflow_canary_drills.py"
 _FRONTEND_SRC = REPO_ROOT / "frontend/src"
 _LOCALES = _FRONTEND_SRC / "i18n/locales"
 _SETTINGS_COMPONENT = _FRONTEND_SRC / "features/settings/components/subscription-overflow-settings.tsx"
@@ -35,20 +34,10 @@ _BACKTICKED = re.compile(r"`([^`\n]+)`")
 # Every value of the closed ``outcome`` enum has one of these shapes; the
 # observability delta may not quote any such token that the enum lacks.
 _OUTCOME_SHAPE = re.compile(r"^(dispatched|bounced|declined|pinned|pin_commit|decision)_[a-z_]+$")
-# The seven canary drill rows and the rehearsals they must name. The row labels
-# are load-bearing (``test_routing_doc_states_shipped_status_canary_and_client_floor``
-# asserts each ``| <label> |`` prefix verbatim): add a column, never rename a row.
-_DRILL_ROWS = (
-    "Disconnect",
-    "Stall",
-    "Silent headers",
-    "Neutral release",
-    "Clear-then-touch",
-    "Kill switches",
-    "Anchor timing",
-)
-_DRILL_ROW = re.compile(r"^\|\s*(?:" + "|".join(re.escape(row) for row in _DRILL_ROWS) + r")\s*\|")
-_DRILL_TEST = re.compile(r"^async def (test_drill_[a-z0-9_]+)\(", re.MULTILINE)
+# The canary drill table itself -- rows, clauses and the rehearsals that cover
+# them -- is guarded by ``tests/unit/test_overflow_drill_coverage.py``, which
+# owns the only parser for it. Here it is only the row labels that matter, in
+# ``test_routing_doc_states_shipped_status_canary_and_client_floor``.
 
 
 def _read(path: Path) -> str:
@@ -189,36 +178,6 @@ def test_routing_doc_states_shipped_status_canary_and_client_floor() -> None:
     assert "no per-replica flag" in docs
     assert overflow.OVERFLOW_TOTAL_METRIC in docs
     assert overflow.BREAKER_STATE_METRIC in docs
-
-
-def test_every_drill_row_names_its_rehearsal_and_every_rehearsal_a_row() -> None:
-    """The drill table and the drill suite are a bijection.
-
-    A row whose ``Rehearsal`` cell names nothing is a drill that quietly went
-    back to being prose; a ``test_drill_*`` the table does not name is a
-    rehearsal an operator following the runbook would never run.
-    """
-
-    rows = [line for line in _read(_ROUTING_DOC).splitlines() if _DRILL_ROW.match(line)]
-    assert len(rows) == 7, rows
-
-    named: list[str] = []
-    for row in rows:
-        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
-        assert len(cells) == 4, row
-        rehearsals = [token for token in _BACKTICKED.findall(cells[3]) if token.startswith("test_drill_")]
-        # A row whose clauses split across two rehearsals (a passing and a
-        # failing half) names both; a row that names none is the failure.
-        assert rehearsals, (cells[0], cells[3])
-        named.extend(rehearsals)
-
-    defined = _DRILL_TEST.findall(_read(_DRILL_SUITE))
-
-    assert sorted(named) == sorted(defined), {
-        "in_docs_only": sorted(set(named) - set(defined)),
-        "in_suite_only": sorted(set(defined) - set(named)),
-    }
-    assert len(set(named)) == len(named), named
 
 
 def test_the_drill_entry_point_is_documented_and_exists() -> None:

@@ -18,13 +18,17 @@ check, Disconnect and Silent headers pin the counters their own rows are about
 label, and only Stall is a row about the breaker. Padding the rest with
 vacuous assertions would say less, not more.
 
-Three clauses have no rehearsal and say so in ``docs/routing.md`` under "Not
-rehearsed": whether live ChatGPT traffic keeps flowing through a stall (this
-suite's pool is exhausted by construction, so it can only assert that the
-stalled source never touches the ChatGPT connector), the cross-replica
-settings-cache window (it needs a second replica) and whether the real source
-mints its ``response.id`` on ``response.created`` (the stub here is built to;
-only the canary can tell you about the source you are about to designate).
+Which assertion covers which clause is not a claim in a docstring:
+``tests/unit/test_overflow_drill_coverage.py`` holds the map, parses the table
+out of ``docs/routing.md`` and fails when a clause has neither an assertion
+still present here nor an entry in the runbook's "Not rehearsed" list. The
+clauses in that list are the ones nothing in one process can settle -- whether
+live ChatGPT traffic keeps flowing through a stall (this suite's pool is
+exhausted by construction, so it can only assert that the stalled source never
+touches the ChatGPT connector), the cross-replica settings-cache window (it
+needs a second replica) and whether the real source mints its ``response.id``
+on ``response.created`` (the stub here is built to; only the canary can tell
+you about the source you are about to designate).
 
 What it is and is not (design v3 §13.4): these are in-process ASGI tests
 against a stub aiohttp source and the test database. ``make

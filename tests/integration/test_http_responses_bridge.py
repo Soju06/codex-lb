@@ -8487,6 +8487,192 @@ async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_attributes_and_logs_unavailable_required_owner(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """An unroutable continuity owner must name the refusing proof and leave a row.
+
+    Before this, the bridge surface raised this 502 out of session creation with
+    no request-log write and no reason, so the only evidence was a rotating
+    container log.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_owner_attribution",
+        "http-bridge-owner-attribution@example.com",
+    )
+    alternate_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_owner_attribution_other",
+        "http-bridge-owner-attribution-other@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    alternate_account = await _get_account(alternate_account_id)
+    upstream = _ClosingBridgeUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        preferred_account_id = cast(str | None, kwargs.get("preferred_account_id"))
+        fallback_enabled = bool(kwargs.get("fallback_on_preferred_account_unavailable", True))
+        if preferred_account_id is None:
+            return AccountSelection(account=owner_account, error_message=None, error_code=None)
+        if fallback_enabled:
+            return AccountSelection(account=alternate_account, error_message=None, error_code=None)
+        return AccountSelection(
+            account=None,
+            error_message="No available accounts",
+            error_code=CONTINUITY_OWNER_UNAVAILABLE,
+        )
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello",
+                "prompt_cache_key": "http-bridge-owner-attribution",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "continue",
+                "prompt_cache_key": "http-bridge-owner-attribution",
+                "previous_response_id": first.json()["id"],
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    # The client contract is unchanged; only the evidence trail is new.
+    assert second.status_code == 502
+    assert second.json()["error"]["code"] == "previous_response_owner_unavailable"
+
+    rejections = [
+        record.getMessage() for record in caplog.records if "owner_unavailable_replay_rejected" in record.getMessage()
+    ]
+    assert len(rejections) == 1
+    assert any(
+        f"detail=reason={reason}" in rejections[0]
+        for reason in http_bridge_streaming_module.ACCOUNT_NEUTRAL_REPLAY_REJECTIONS
+    )
+    assert "detail=reason=payload_not_full_resend" in rejections[0]
+
+    service = get_proxy_service_for_app(app_instance)
+    rows: list[RequestLog] = []
+    deadline = time.monotonic() + _TEST_SYNC_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        assert await service.drain_persistence_tasks(timeout_seconds=10)
+        async with SessionLocal() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(RequestLog).where(RequestLog.error_code == "previous_response_owner_unavailable")
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if rows:
+            break
+        await asyncio.sleep(0.05)
+    assert len(rows) == 1
+    assert rows[0].status == "error"
+    assert rows[0].model == "gpt-5.1"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_capacity_failure_writes_no_owner_request_log(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    """Only continuity-owner codes gain a row; other pre-submit codes are unchanged."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    await _import_account(
+        async_client,
+        "acc_http_bridge_owner_row_scope",
+        "http-bridge-owner-row-scope@example.com",
+    )
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        # ``capacity_exhausted_active_sessions`` is the one local cap code the
+        # bridge treats as terminal rather than waiting out the request budget,
+        # so this exercises the no-row path without a capacity sleep.
+        return AccountSelection(
+            account=None,
+            error_message="HTTP bridge capacity exhausted",
+            error_code="capacity_exhausted_active_sessions",
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+
+    response = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello",
+                "prompt_cache_key": "http-bridge-owner-row-scope",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    # ``capacity_exhausted_active_sessions`` is a local overload code, so this
+    # is the stable 429 contract rather than merely "not 200" — a broad check
+    # would also pass if the request failed for an unrelated reason.
+    assert response.status_code == 429
+
+    service = get_proxy_service_for_app(app_instance)
+    assert await service.drain_persistence_tasks(timeout_seconds=10)
+    async with SessionLocal() as session:
+        owner_rows = list(
+            (
+                await session.execute(
+                    select(RequestLog).where(RequestLog.error_code == "previous_response_owner_unavailable")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert owner_rows == []
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_soft_prompt_cache_follow_up_uses_durable_owner_over_stale_local_lane(
     async_client,
     app_instance,

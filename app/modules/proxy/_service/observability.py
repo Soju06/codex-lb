@@ -12,6 +12,7 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    continuity_replay_rejected_total,
     http_bridge_routing_total,
     upstream_reasoning_replay_400_total,
     upstream_transport_decisions_total,
@@ -250,6 +251,19 @@ def _record_continuity_owner_resolution(
         _hash_identifier_or_none(previous_response_id),
         _hash_identifier_or_none(session_id),
     )
+
+
+def _record_continuity_replay_rejected(*, surface: str, reason: str) -> None:
+    """Count one refusal to move an unavailable owner's turn to another account.
+
+    The recovery gate is a conjunction of independent proofs, so the caller
+    reports the first one that refused; the paired ``owner_unavailable_replay_rejected``
+    bridge event carries the request-scoped identifiers.
+    """
+    prometheus_available = bool(_service_global("PROMETHEUS_AVAILABLE", PROMETHEUS_AVAILABLE))
+    counter = _service_global("continuity_replay_rejected_total", continuity_replay_rejected_total)
+    if prometheus_available and counter is not None:
+        counter.labels(surface=surface, reason=reason).inc()
 
 
 def _format_continuity_fail_closed_diagnostics(

@@ -230,6 +230,12 @@ if PROMETHEUS_AVAILABLE:
         ["surface", "source", "outcome"],
         registry=REGISTRY,
     )
+    continuity_replay_rejected_total = Counter(
+        "codex_lb_continuity_replay_rejected_total",
+        "Total cross-account continuity replays refused by surface and refusing proof",
+        ["surface", "reason"],
+        registry=REGISTRY,
+    )
     continuity_fail_closed_total = Counter(
         "codex_lb_continuity_fail_closed_total",
         "Total continuity fail-closed or masked retryable outcomes by surface and reason",
@@ -515,6 +521,7 @@ else:
     bridge_forward_latency_seconds: HistogramLike | None = None
     bridge_public_contract_error_total: CounterLike | None = None
     continuity_owner_resolution_total: CounterLike | None = None
+    continuity_replay_rejected_total: CounterLike | None = None
     continuity_fail_closed_total: CounterLike | None = None
     account_lease_acquired_total: CounterLike | None = None
     account_lease_released_total: CounterLike | None = None
@@ -594,6 +601,7 @@ __all__ = [
     "event_loop_lag_seconds",
     "event_loop_lag_warnings_total",
     "continuity_owner_resolution_total",
+    "continuity_replay_rejected_total",
     "http_bridge_prewarm_total",
     "http_bridge_retry_circuit_total",
     "http_bridge_spool_cleanup_backlog_likely",

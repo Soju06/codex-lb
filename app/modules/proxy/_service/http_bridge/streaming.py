@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from collections.abc import AsyncGenerator, Callable
-from typing import Any, AsyncIterator, Mapping, TypeVar, cast
+from typing import Any, AsyncIterator, Literal, Mapping, TypeVar, cast, get_args
 from uuid import uuid4
 
 import anyio
@@ -116,6 +116,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _proxy_admission_wait_timeout_seconds,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
+    _record_continuity_replay_rejected,
     _release_http_bridge_denied_anchor_fences,
     _release_http_bridge_unanchored_handoff,
     _release_http_bridge_unanchored_handoffs_for_request,
@@ -198,6 +199,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_local_account_cap_code,
+    _request_log_client_fields,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _signal_propagated_responses_service_cleanup_ready,
@@ -279,6 +281,61 @@ T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
+
+# Why a cross-account replay of an unavailable owner's turn was refused. The
+# recovery gate is a conjunction of independent proofs, so a bare ``False``
+# cannot say which one held; these name them for
+# ``owner_unavailable_replay_rejected``.
+_AccountNeutralReplayRejection = Literal[
+    "file_bound",
+    "no_durable_lookup",
+    "payload_not_full_resend",
+    "anchor_metadata_missing",
+    "prefix_fingerprint_mismatch",
+    "input_not_itemized",
+    "missing_prior_output",
+    "account_scoped_input",
+]
+ACCOUNT_NEUTRAL_REPLAY_REJECTIONS: frozenset[str] = frozenset(
+    get_args(_AccountNeutralReplayRejection),
+)
+# Bridge pre-submit failures that name an account-scoped continuity owner. These
+# get a request-log row; other pre-submit codes keep their existing behaviour.
+_HTTP_BRIDGE_CONTINUITY_OWNER_ERROR_CODES = frozenset(
+    {
+        "previous_response_owner_unavailable",
+        "continuity_owner_conflict",
+    }
+)
+
+
+def _durable_full_resend_anchor_rejection(
+    payload: ResponsesRequest,
+    lookup: DurableBridgeLookup,
+    *,
+    payload_looks_like_full_resend: bool,
+) -> _AccountNeutralReplayRejection | None:
+    """Return which stored-anchor proof refuses this body, or None when all hold.
+
+    Each of these clears the anchor fields, which downstream cannot tell apart
+    even though they call for different fixes: a client that never sends full
+    history, a durable row written before the anchor metadata existed, and a
+    body whose prefix diverged from the stored turn.
+    """
+    if not payload_looks_like_full_resend:
+        return "payload_not_full_resend"
+    stored_count = lookup.latest_input_item_count
+    if stored_count is None:
+        return "anchor_metadata_missing"
+    if not _input_prefix_matches_stored_context(
+        payload.input,
+        stored_count=stored_count,
+        stored_fingerprint=lookup.latest_input_full_fingerprint,
+    ):
+        return "prefix_fingerprint_mismatch"
+    if not isinstance(payload.input, list):
+        return "input_not_itemized"
+    return None
 
 
 def _http_bridge_verified_stale_anchor_replay_is_operation_fenced(
@@ -1039,6 +1096,7 @@ class _HTTPBridgeStreamingMixin:
         deferred_account_backoff_tracker = _DeferredAccountBackoffTracker()
         bridge_yielded_any = False
         bridge_transport_unavailable = False
+        bridge_attempt_started_at = clock_for(self).monotonic()
         try:
             try:
                 async for line in self._stream_via_http_bridge(
@@ -1123,6 +1181,33 @@ class _HTTPBridgeStreamingMixin:
                     or getattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, False)
                     or (transport_failure_code is None and not cooldown_suppression)
                 ):
+                    # Continuity-owner failures are raised out of bridge session
+                    # creation, the one proxy surface with no request-log write
+                    # of its own: the direct-websocket and raw-HTTP surfaces
+                    # both log this code, so a bridged thread's outage was
+                    # visible only in a rotating container log. Record it on the
+                    # propagating path only — the branch below hands the turn to
+                    # the raw-HTTP upstream, which settles its own outcome, and
+                    # an error row for a turn that then succeeded would corrupt
+                    # the very error rate this row exists to show.
+                    bridge_error_code, bridge_error_message = _proxy_error_code_message(exc)
+                    if bridge_error_code in _HTTP_BRIDGE_CONTINUITY_OWNER_ERROR_CODES:
+                        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
+                        await self._write_stream_preflight_error(
+                            account_id=None,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            start=bridge_attempt_started_at,
+                            error_code=bridge_error_code,
+                            error_message=bridge_error_message or "Continuity owner account is unavailable",
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
+                            conversation_id=conversation_id,
+                            client_ip=client_ip,
+                        )
                     raise
                 if transport_failure_code is not None:
                     # Bridge session creation runs its own pre-dispatch
@@ -1478,6 +1563,12 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_fresh_payload: ResponsesRequest | None = None
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_has_safe_fresh_context = False
+        # Set only when a durable lookup existed but failed one of the anchor
+        # proofs; ``no_durable_lookup`` covers the absent-lookup case instead.
+        durable_full_resend_anchor_reason: _AccountNeutralReplayRejection | None = None
+        # Why the folded anchor/prior-output proof last refused, so the
+        # classifier can report it without re-deriving the conjunction.
+        durable_full_resend_context_rejection: _AccountNeutralReplayRejection | None = None
         durable_full_resend_retains_required_context_cache: bool | None = None
         durable_full_resend_proof = _verify_durable_full_resend(payload, durable_lookup)
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
@@ -1519,19 +1610,15 @@ class _HTTPBridgeStreamingMixin:
 
         def classify_durable_full_resend(
             lookup: DurableBridgeLookup,
-        ) -> tuple[int | None, str | None, bool]:
+        ) -> tuple[int | None, str | None, bool, _AccountNeutralReplayRejection | None]:
+            anchor_rejection = _durable_full_resend_anchor_rejection(
+                payload,
+                lookup,
+                payload_looks_like_full_resend=payload_looks_like_full_resend,
+            )
             stored_count = lookup.latest_input_item_count
-            if (
-                not payload_looks_like_full_resend
-                or stored_count is None
-                or not _input_prefix_matches_stored_context(
-                    payload.input,
-                    stored_count=stored_count,
-                    stored_fingerprint=lookup.latest_input_full_fingerprint,
-                )
-                or not isinstance(payload.input, list)
-            ):
-                return None, None, False
+            if anchor_rejection is not None or stored_count is None or not isinstance(payload.input, list):
+                return None, None, False, anchor_rejection or "anchor_metadata_missing"
             replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                 cast(list[JsonValue], payload.input),
                 stored_count=stored_count,
@@ -1544,13 +1631,14 @@ class _HTTPBridgeStreamingMixin:
             safe_fresh_context = False
             if replay_projection is not None:
                 safe_fresh_context = replay_projection_retains_required_context(replay_projection, lookup)
-            return stored_count, lookup.latest_input_full_fingerprint, safe_fresh_context
+            return stored_count, lookup.latest_input_full_fingerprint, safe_fresh_context, None
 
         if durable_lookup is not None:
             (
                 durable_full_resend_anchor_count,
                 durable_full_resend_anchor_fingerprint,
                 durable_full_resend_has_safe_fresh_context,
+                durable_full_resend_anchor_reason,
             ) = classify_durable_full_resend(durable_lookup)
         if (
             durable_full_resend_has_safe_fresh_context
@@ -1997,12 +2085,15 @@ class _HTTPBridgeStreamingMixin:
 
         def durable_full_resend_retains_required_context() -> bool:
             nonlocal durable_full_resend_retains_required_context_cache
+            nonlocal durable_full_resend_context_rejection
 
-            if (
-                durable_full_resend_anchor_count is None
-                or durable_full_resend_anchor_fingerprint is None
-                or not isinstance(payload.input, list)
-            ):
+            if durable_full_resend_anchor_count is None or durable_full_resend_anchor_fingerprint is None:
+                # Either no durable row was supplied, or classification already
+                # cleared the anchor fields and named its own reason.
+                durable_full_resend_context_rejection = durable_full_resend_anchor_reason or "no_durable_lookup"
+                return False
+            if not isinstance(payload.input, list):
+                durable_full_resend_context_rejection = "input_not_itemized"
                 return False
             if durable_full_resend_retains_required_context_cache is None:
                 eligibility_projection = project_responses_input_for_account_neutral_fresh_replay(
@@ -2011,28 +2102,46 @@ class _HTTPBridgeStreamingMixin:
                     preserve_developer_message_ids=True,
                 )
                 if eligibility_projection is None or durable_lookup is None:
+                    # A body the projection cannot rebuild carries state that
+                    # is not ours to move; a missing lookup is the pinned-owner
+                    # case. They are different fixes, so keep them distinct.
+                    durable_full_resend_context_rejection = (
+                        "account_scoped_input" if durable_lookup is not None else "no_durable_lookup"
+                    )
                     return False
                 durable_full_resend_retains_required_context_cache = replay_projection_retains_required_context(
                     eligibility_projection,
                     durable_lookup,
                 )
-            return bool(durable_full_resend_retains_required_context_cache)
+            if not durable_full_resend_retains_required_context_cache:
+                durable_full_resend_context_rejection = "missing_prior_output"
+                return False
+            return True
 
-        def durable_full_resend_allows_account_neutral_replay() -> bool:
+        def classify_account_neutral_replay_rejection() -> _AccountNeutralReplayRejection | None:
+            """Return why this turn cannot move accounts, or None when it can.
+
+            Evaluation order matches the conjunction this replaces, so the
+            reported reason is the first proof that refused.
+            """
             nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
 
-            if rewritten_file_account_id is not None or not durable_full_resend_retains_required_context():
-                return False
+            if rewritten_file_account_id is not None:
+                return "file_bound"
+            if not durable_full_resend_retains_required_context():
+                return durable_full_resend_context_rejection or "no_durable_lookup"
             if durable_full_resend_fresh_payload is None:
-                assert isinstance(payload.input, list)
-                assert durable_full_resend_anchor_count is not None
+                if not isinstance(payload.input, list) or durable_full_resend_anchor_count is None:
+                    # Unreachable while the proof above holds; kept explicit so
+                    # a future caller cannot turn it into an AssertionError.
+                    return "no_durable_lookup"
                 replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                     cast(list[JsonValue], payload.input),
                     stored_count=durable_full_resend_anchor_count,
                 )
                 if replay_projection is None:
-                    return False
+                    return "account_scoped_input"
                 durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
                     payload
                 ).model_copy(update={"input": replay_projection.input_items})
@@ -2040,7 +2149,25 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload
                 )
-            return durable_full_resend_is_account_neutral
+            return None if durable_full_resend_is_account_neutral else "account_scoped_input"
+
+        def durable_full_resend_allows_account_neutral_replay() -> bool:
+            return classify_account_neutral_replay_rejection() is None
+
+        def record_account_neutral_replay_rejection(
+            rejection: _AccountNeutralReplayRejection,
+        ) -> None:
+            _record_continuity_replay_rejected(surface="http_bridge", reason=rejection)
+            _log_http_bridge_event(
+                "owner_unavailable_replay_rejected",
+                bridge_session_key,
+                account_id=request_state.preferred_account_id,
+                model=payload.model,
+                detail=f"reason={rejection}",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
 
         def switch_model_transition_to_account_neutral_fork(exc: ProxyResponseError) -> bool:
             nonlocal account_neutral_recovery
@@ -2107,10 +2234,13 @@ class _HTTPBridgeStreamingMixin:
             return True
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
-            return (
-                _http_bridge_is_previous_response_owner_unavailable(exc)
-                and durable_full_resend_allows_account_neutral_replay()
-            )
+            if not _http_bridge_is_previous_response_owner_unavailable(exc):
+                return False
+            rejection = classify_account_neutral_replay_rejection()
+            if rejection is None:
+                return True
+            record_account_neutral_replay_rejection(rejection)
+            return False
 
         def switch_to_account_neutral_replay(
             *,
@@ -2125,6 +2255,8 @@ class _HTTPBridgeStreamingMixin:
             nonlocal dead_owner_process_epoch_mismatch
             nonlocal durable_full_resend_anchor_count
             nonlocal durable_full_resend_anchor_fingerprint
+            nonlocal durable_full_resend_anchor_reason
+            nonlocal durable_full_resend_context_rejection
             nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
             nonlocal durable_lookup
@@ -2210,6 +2342,8 @@ class _HTTPBridgeStreamingMixin:
             previous_response_trimmed_input_fingerprint = None
             durable_full_resend_anchor_count = None
             durable_full_resend_anchor_fingerprint = None
+            durable_full_resend_anchor_reason = None
+            durable_full_resend_context_rejection = None
             durable_full_resend_fresh_payload = None
             durable_full_resend_is_account_neutral = None
             durable_lookup = None
@@ -2251,6 +2385,13 @@ class _HTTPBridgeStreamingMixin:
                 session_id=request_state.session_id,
                 upstream_error_code="owner_lookup_miss",
             )
+            # This exit has no exception to classify, so the funnel in
+            # ``owner_unavailable_allows_account_neutral_replay`` never sees it.
+            # Attribute it here for the same reason: a refusal that names no
+            # proof cannot be acted on.
+            replay_rejection = classify_account_neutral_replay_rejection()
+            if replay_rejection is not None:
+                record_account_neutral_replay_rejection(replay_rejection)
             raise owner_unavailable
 
         while True:
@@ -2470,15 +2611,18 @@ class _HTTPBridgeStreamingMixin:
                         else:
                             if _http_bridge_durable_lookup_allows_turn_state_takeover(fresh_turn_state_lookup):
                                 durable_lookup = fresh_turn_state_lookup
+                                durable_full_resend_context_rejection = None
                                 if fresh_turn_state_lookup is None:
                                     durable_full_resend_anchor_count = None
                                     durable_full_resend_anchor_fingerprint = None
                                     durable_full_resend_has_safe_fresh_context = False
+                                    durable_full_resend_anchor_reason = None
                                 else:
                                     (
                                         durable_full_resend_anchor_count,
                                         durable_full_resend_anchor_fingerprint,
                                         durable_full_resend_has_safe_fresh_context,
+                                        durable_full_resend_anchor_reason,
                                     ) = classify_durable_full_resend(fresh_turn_state_lookup)
                                     continuity_preferred_account_id = fresh_turn_state_lookup.account_id
                                     request_state.preferred_account_id = resolve_required_account_id(

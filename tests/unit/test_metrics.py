@@ -142,6 +142,8 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
     assert prometheus_module.continuity_owner_resolution_total.labelnames == ("surface", "source", "outcome")
     assert prometheus_module.continuity_fail_closed_total.name == "codex_lb_continuity_fail_closed_total"
     assert prometheus_module.continuity_fail_closed_total.labelnames == ("surface", "reason")
+    assert prometheus_module.continuity_replay_rejected_total.name == "codex_lb_continuity_replay_rejected_total"
+    assert prometheus_module.continuity_replay_rejected_total.labelnames == ("surface", "reason")
     assert prometheus_module.upstream_reasoning_replay_400_total.name == "codex_lb_upstream_reasoning_replay_400_total"
     assert prometheus_module.upstream_reasoning_replay_400_total.labelnames == ()
     assert prometheus_module.account_inflight_leases.name == "codex_lb_account_inflight_leases"

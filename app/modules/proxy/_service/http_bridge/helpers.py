@@ -121,6 +121,9 @@ from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
 )
 from app.modules.proxy._service.observability import (
+    _record_continuity_replay_rejected as _record_continuity_replay_rejected,
+)
+from app.modules.proxy._service.observability import (
     _summarize_input as _summarize_input,
 )
 from app.modules.proxy._service.observability import (
@@ -3837,6 +3840,7 @@ def _log_http_bridge_event(
         "capacity_exhausted_active_sessions",
         "owner_mismatch",
         "owner_forward_fail",
+        "owner_unavailable_replay_rejected",
         "missing_response_created_timeout",
         "prompt_cache_locality_miss",
         "reallocation_orphan",

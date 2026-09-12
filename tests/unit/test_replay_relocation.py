@@ -27,6 +27,7 @@ class _Operation:
     request_text: str | None
     response_id: str | None = "resp_1"
     parent_response_id: str | None = None
+    event_spool_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -48,15 +49,18 @@ def _user(text: str) -> dict[str, JsonValue]:
 
 
 def _assistant(text: str) -> dict[str, JsonValue]:
-    # ``annotations`` rides on every ``output_text`` part the Responses API
-    # produces, so it is here on both sides of every join, exactly as the spool
-    # and a resending client both carry it.
     return {
         "type": "message",
         "role": "assistant",
         "status": "completed",
-        "content": [{"type": "output_text", "text": text, "annotations": []}],
+        "content": [{"type": "output_text", "text": text}],
     }
+
+
+def _spooled_assistant(text: str) -> dict[str, JsonValue]:
+    # ``annotations`` rides on every ``output_text`` part the Responses API
+    # produces, so the spool carries it and the rebuild has to deal with it.
+    return {**_assistant(text), "content": [{"type": "output_text", "text": text, "annotations": []}]}
 
 
 def _completed_turn(prompt: str, answer: str, *, response_id: str) -> _Turn:
@@ -73,7 +77,7 @@ def _completed_turn(prompt: str, answer: str, *, response_id: str) -> _Turn:
                         "id": response_id,
                         "output": [
                             {"id": f"rs_{response_id}", "type": "reasoning", "summary": []},
-                            {"id": f"msg_{response_id}", **_assistant(answer)},
+                            {"id": f"msg_{response_id}", **_spooled_assistant(answer)},
                         ],
                     },
                 }
@@ -94,7 +98,7 @@ _FULL_RESEND_PAYLOAD: dict[str, JsonValue] = {
     "previous_response_id": _ANCHOR,
 }
 _UNANCHORED_PAYLOAD: dict[str, JsonValue] = {"model": "gpt-5.4", "input": [_user("hello")]}
-_TRANSCRIPT = (_completed_turn("hello", "hi there", response_id="resp_1"),)
+_TRANSCRIPT = (_completed_turn("hello", "hi there", response_id=_ANCHOR),)
 _RESEND_PROOF = ClientResendProof(stored_input_item_count=1)
 
 _OWNER_METADATA: JsonValue = {"turn_id": "turn-owner"}
@@ -165,7 +169,6 @@ def _client_full_resend(transport: RelocationTransport, **overrides: object) -> 
             transport=transport,
             payload=_FULL_RESEND_PAYLOAD,
             evidence="definitive",
-            previous_response_id=_ANCHOR,
             client_resend=_RESEND_PROOF,
         ),
         **overrides,
@@ -178,7 +181,6 @@ def _durable_transcript(transport: RelocationTransport, **overrides: object) -> 
             transport=transport,
             payload=_DELTA_PAYLOAD,
             evidence="definitive",
-            previous_response_id=_ANCHOR,
             durable_transcript=_TRANSCRIPT,
         ),
         **overrides,
@@ -254,7 +256,6 @@ def test_a_client_full_resend_relocates_on_the_projected_body(transport: Relocat
             transport=transport,
             payload=_PRODUCTION_FULL_RESEND_PAYLOAD,
             evidence="definitive",
-            previous_response_id=_ANCHOR,
             client_resend=_PRODUCTION_RESEND_PROOF,
         ),
     )
@@ -304,6 +305,34 @@ def test_durable_transcript_accepts_a_verbatim_bridge_frame(transport: Relocatio
 
     assert verdict.movable is True
     assert verdict.source == "durable_transcript"
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_the_verbatim_frame_decides_the_verdict_it_also_carries(transport: RelocationTransport) -> None:
+    # The frame is what would have gone upstream; the parsed request beside it
+    # is a second copy that need not agree. Deciding on one and dispatching the
+    # other produces a verdict about a request nobody made -- here, a turn the
+    # parsed copy says is unanchored and the frame says continues the thread.
+    verdict = decide_relocation(
+        _durable_transcript(
+            transport,
+            payload={"model": "gpt-5.4", "input": [_user("stale parse")]},
+            current_request_text=_frame(_DELTA_PAYLOAD),
+        ),
+    )
+
+    assert verdict.source == "durable_transcript"
+    assert verdict.body is not None
+    assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), _user("and now?")]
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_a_frame_the_transport_cannot_have_sent_yields_no_body(transport: RelocationTransport) -> None:
+    verdict = decide_relocation(_durable_transcript(transport, current_request_text="{not json"))
+
+    assert verdict.movable is False
+    assert verdict.body is None
+    assert verdict.decline_reason == "no_account_neutral_body"
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
@@ -485,7 +514,6 @@ def test_a_fresh_developer_message_the_owner_minted_is_not_a_client_full_resend(
             transport=transport,
             payload=payload,
             evidence="definitive",
-            previous_response_id=_ANCHOR,
             client_resend=_PRODUCTION_RESEND_PROOF,
         ),
     )
@@ -533,7 +561,6 @@ def test_an_anchored_turn_without_any_source_stays_owner_bound(
             transport=transport,
             payload=_DELTA_PAYLOAD,
             evidence=evidence,
-            previous_response_id=_ANCHOR,
             seconds_since_dispatch=1.0,
             arms_side_effect_replay_dedupe=True,
         ),
@@ -544,32 +571,34 @@ def test_an_anchored_turn_without_any_source_stays_owner_bound(
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_a_full_resend_whose_suffix_is_unproven_is_not_a_source(transport: RelocationTransport) -> None:
+def test_a_production_resend_the_anchor_cannot_vouch_for_stays_owner_bound(
+    transport: RelocationTransport,
+) -> None:
+    # A real Codex resend restates every item the owner account minted, ids and
+    # reasoning included. The proof rung declines it, and the chain rung joins
+    # it verbatim -- where those owner-minted items meet the strict predicate
+    # and keep the turn where it is.
     verdict = decide_relocation(
-        _client_full_resend(
-            transport,
-            # The stored turn accounted for the whole body, so nothing in it
-            # continues that turn.
-            client_resend=ClientResendProof(stored_input_item_count=3),
+        RelocationInputs(
+            transport=transport,
+            payload=_PRODUCTION_FULL_RESEND_PAYLOAD,
+            evidence="definitive",
+            client_resend=ClientResendProof(stored_input_item_count=len(_PRODUCTION_FULL_RESEND_INPUT)),
             durable_transcript=_TRANSCRIPT,
         ),
     )
 
     assert verdict.movable is False
     assert verdict.source is None
-    # A resend the anchor's stored turn cannot vouch for does not become a
-    # delta the chain can be joined to. Where its restatement ends is exactly
-    # the thing that is not established.
-    assert verdict.decline_reason == "unestablished_turn_shape"
+    assert verdict.body is None
+    assert verdict.decline_reason == "no_account_neutral_body"
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
 @pytest.mark.parametrize(
-    "unestablished_input",
+    "unusable_input",
     [
-        # A restatement of the thread's tail plus a new message.
-        [_assistant("hi there"), _user("and now?")],
-        # Bookkeeping only the owner account minted.
+        # Bookkeeping only the owner account minted, which no other account resolves.
         [{"type": "reasoning", "id": "rs_owner", "summary": []}, _user("and now?")],
         # Not a list of items at all: a scalar prompt cannot carry the
         # conversation the dropped anchor stood for.
@@ -577,18 +606,32 @@ def test_a_full_resend_whose_suffix_is_unproven_is_not_a_source(transport: Reloc
         [],
     ],
 )
-def test_an_unestablishable_turn_shape_refuses_rather_than_guessing(
+def test_a_current_turn_the_rebuild_cannot_use_refuses_rather_than_guessing(
     transport: RelocationTransport,
-    unestablished_input: JsonValue,
+    unusable_input: JsonValue,
 ) -> None:
     verdict = decide_relocation(
-        _durable_transcript(transport, payload={**_DELTA_PAYLOAD, "input": unestablished_input}),
+        _durable_transcript(transport, payload={**_DELTA_PAYLOAD, "input": unusable_input}),
     )
 
     assert verdict.movable is False
     assert verdict.source is None
     assert verdict.body is None
-    assert verdict.decline_reason == "unestablished_turn_shape"
+    assert verdict.decline_reason == "no_account_neutral_body"
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_an_anchored_delta_is_joined_whatever_the_delta_holds(transport: RelocationTransport) -> None:
+    # The anchor already said this input is the turn's delta, so a delta that
+    # restates part of the thread is joined whole rather than trimmed to fit.
+    delta = [_assistant("hi there"), _user("and now?")]
+
+    verdict = decide_relocation(_durable_transcript(transport, payload={**_DELTA_PAYLOAD, "input": delta}))
+
+    assert verdict.movable is True
+    assert verdict.source == "durable_transcript"
+    assert verdict.body is not None
+    assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), *delta]
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
@@ -607,7 +650,6 @@ def test_a_pending_tool_call_manifest_proves_a_tool_settling_suffix(transport: R
             transport=transport,
             payload=payload,
             evidence="definitive",
-            previous_response_id=_ANCHOR,
             client_resend=ClientResendProof(
                 stored_input_item_count=1,
                 pending_tool_calls={"call_1": "function_call"},
@@ -713,20 +755,19 @@ def test_definitive_evidence_still_requires_that_upstream_emitted_nothing(
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_a_recorded_response_id_gates_the_fenced_lane_and_only_it(transport: RelocationTransport) -> None:
-    # The two classes do not owe the same proof. A response id is upstream
-    # acknowledging the operation, which turns an ambiguous outcome into an
-    # unknown-but-accepted one and makes the fenced dispatch a double-spend.
-    # Definitive evidence is a rejection upstream accepted nothing from: it
-    # spends no budget and duplicates nothing, and it owes only that no
-    # response event was emitted.
+def test_a_recorded_response_id_gates_both_lanes(transport: RelocationTransport) -> None:
+    # Both classes owe proof that upstream emitted no response event, and the
+    # transports keep that proof in different places: the bridge spools the
+    # events, the streaming and WebSocket paths record the id upstream assigned
+    # at ``response.created``. Reading only the spool lets the two transports
+    # that record the id relocate a turn upstream has already answered.
     acknowledged = {"response_id": "resp_owner_ack", "spooled_event_count": 0}
 
     fenced = decide_relocation(_unanchored(transport, **_AMBIGUITY_CLEARED, **acknowledged))
     unfenced = decide_relocation(_unanchored(transport, **acknowledged))
 
     assert (fenced.movable, fenced.decline_reason) == (False, "upstream_execution_observed")
-    assert (unfenced.movable, unfenced.decline_reason) == (True, None)
+    assert (unfenced.movable, unfenced.decline_reason) == (False, "upstream_execution_observed")
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
@@ -790,14 +831,11 @@ def test_a_rebuild_that_fails_is_not_reported_as_an_absent_transcript(transport:
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
 def test_an_anchor_never_leaves_through_the_unanchored_branch(transport: RelocationTransport) -> None:
-    anchor_free_body: dict[str, JsonValue] = {"model": "gpt-5.4", "input": [_user("and now?")]}
+    # The unanchored rung strips ``previous_response_id`` and dispatches the new
+    # turn by itself. Reaching it with an anchored body would discard the
+    # conversation and still report the turn as moved.
     verdict = decide_relocation(
-        RelocationInputs(
-            transport=transport,
-            payload=anchor_free_body,
-            evidence="definitive",
-            previous_response_id=_ANCHOR,
-        ),
+        RelocationInputs(transport=transport, payload=_DELTA_PAYLOAD, evidence="definitive"),
     )
 
     assert verdict.movable is False
@@ -807,44 +845,52 @@ def test_an_anchor_never_leaves_through_the_unanchored_branch(transport: Relocat
 
 @pytest.mark.parametrize("blank_anchor", [None, "", "   "])
 def test_a_blank_anchor_is_unanchored(blank_anchor: str | None) -> None:
-    verdict = decide_relocation(_unanchored("http_bridge", previous_response_id=blank_anchor))
+    payload: dict[str, JsonValue] = {**_UNANCHORED_PAYLOAD, "previous_response_id": blank_anchor}
+    verdict = decide_relocation(_unanchored("http_bridge", payload=payload, durable_transcript=_TRANSCRIPT))
 
     assert verdict.source == "unanchored"
-
-
-@pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_an_anchor_the_caller_did_not_mirror_is_still_an_anchor(transport: RelocationTransport) -> None:
-    verdict = decide_relocation(
-        RelocationInputs(
-            transport=transport,
-            payload=_DELTA_PAYLOAD,
-            evidence="definitive",
-            # The caller left the dedicated field unset; the body still names the
-            # prior response, and stripping it would discard the conversation.
-            previous_response_id=None,
-        ),
-    )
-
-    assert verdict.movable is False
-    assert verdict.source is None
-    assert verdict.decline_reason == "absent_transcript"
-
-
-@pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_an_unmirrored_anchor_still_reaches_the_durable_rebuild(transport: RelocationTransport) -> None:
-    verdict = decide_relocation(
-        RelocationInputs(
-            transport=transport,
-            payload=_DELTA_PAYLOAD,
-            evidence="definitive",
-            previous_response_id=None,
-            durable_transcript=_TRANSCRIPT,
-        ),
-    )
-
-    assert verdict.source == "durable_transcript"
     assert verdict.body is not None
-    assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), _user("and now?")]
+    assert verdict.body["input"] == [_user("hello")]
+
+
+_RESENT_HISTORY: list[JsonValue] = [_user("hello"), _user("and now?"), _user("and then?")]
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+@pytest.mark.parametrize(
+    "carried_alongside",
+    [
+        # Nothing beside the request.
+        {},
+        # The bridge's parsed copy of an earlier turn, still naming an anchor.
+        # The frame is what would go upstream, and it is unanchored; a decision
+        # taken on the copy relocates a body the dispatch does not carry.
+        {"payload": _DELTA_PAYLOAD},
+    ],
+)
+def test_an_unanchored_resend_holding_no_assistant_turn_is_not_joined_to_the_chain(
+    transport: RelocationTransport,
+    carried_alongside: dict[str, object],
+) -> None:
+    # The client restated its whole history, and that history happens to hold no
+    # model-authored item -- a thread of questions, or one whose answers the
+    # client does not keep. Reading "no assistant turn" as "this is a delta"
+    # joins the chain to a body that already holds it and doubles the
+    # conversation. The request carries no anchor, so it is the whole
+    # conversation by the wire contract and the chain has no part in it.
+    verdict = decide_relocation(
+        _unanchored(
+            transport,
+            current_request_text=_frame({"model": "gpt-5.4", "input": _RESENT_HISTORY}),
+            durable_transcript=_TRANSCRIPT,
+            **carried_alongside,
+        ),
+    )
+
+    assert verdict.movable is True
+    assert verdict.source == "unanchored"
+    assert verdict.body is not None
+    assert verdict.body["input"] == _RESENT_HISTORY
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
@@ -877,7 +923,6 @@ def test_every_decline_reason_is_in_the_closed_vocabulary() -> None:
             _unanchored("http_bridge", session_identity_bound=True),
             _unanchored("http_bridge", evidence="none"),
             _durable_transcript("http_bridge", durable_transcript=None),
-            _durable_transcript("http_bridge", payload=_FULL_RESEND_PAYLOAD),
             _durable_transcript("http_bridge", durable_transcript=(_Turn(operation=_Operation(None), events=()),)),
             _unanchored("http_bridge", **_AMBIGUITY_CLEARED, spooled_event_count=1),
             _unanchored("http_bridge", evidence="ambiguous", arms_side_effect_replay_dedupe=True),

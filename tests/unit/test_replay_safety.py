@@ -21,10 +21,10 @@ from app.modules.proxy.replay_safety import (
     _transcript_turn_input_items,
     project_durable_transcript_for_account_neutral_fresh_replay,
     project_responses_input_for_account_neutral_fresh_replay,
-    responses_input_is_continuation_delta,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
+    responses_request_frame_payload,
 )
 
 
@@ -177,34 +177,35 @@ def _corpus_assistant_message_contents() -> list[list[JsonValue]]:
     ]
 
 
-def test_account_neutral_fresh_replay_accepts_the_recorded_assistant_content_shape() -> None:
+def test_the_recorded_assistant_content_shape_keeps_the_admission_it_has_today() -> None:
     contents = _corpus_assistant_message_contents()
 
     assert contents, "the corpus no longer records an assistant message"
     for content in contents:
         # Recorded, not authored. Every ``output_text`` part the Responses API
-        # produces carries an annotations array -- the same shape the terminal
-        # SSE output a durable rebuild reads back carries (see the
-        # ``response.output_item.done`` item in
-        # tests/unit/test_proxy_api_responses_contract.py) -- so refusing the
-        # field at all refuses every real conversation.
+        # produces carries an annotations array, and this shared predicate has
+        # always refused the field. The durable rebuild needs those parts, but
+        # it owns the items it assembles and removes the field from them --
+        # admitting it here instead would change what the already-shipped
+        # fresh-replay paths accept from clients, which is not this change's
+        # concern.
         assert [cast(Any, part).get("annotations") for part in content] == [[]]
         message: JsonValue = {"type": "message", "role": "assistant", "status": "completed", "content": content}
 
-        assert responses_payload_is_account_neutral_fresh_replay({"input": [message]}) is True
+        assert responses_payload_is_account_neutral_fresh_replay({"input": [message]}) is False
 
 
 @pytest.mark.parametrize(
     ("annotations", "expected"),
     [
-        # Absent entirely: the pre-annotation shape stays accepted.
+        # Absent entirely: the pre-annotation shape is the one this predicate takes.
         (None, True),
-        ([], True),
+        ([], False),
         ([{"type": "url_citation", "url": "https://example.test/a", "start_index": 0, "end_index": 1}], False),
         ([{"type": "file_citation", "file_id": "file_owner_scoped", "filename": "notes.md", "index": 3}], False),
     ],
 )
-def test_account_neutral_fresh_replay_admits_only_an_empty_annotation_list(
+def test_account_neutral_fresh_replay_admits_no_annotation_list_at_all(
     annotations: list[JsonValue] | None,
     expected: bool,
 ) -> None:
@@ -218,17 +219,11 @@ def test_account_neutral_fresh_replay_admits_only_an_empty_annotation_list(
     assert responses_payload_is_account_neutral_fresh_replay(payload) is expected
 
 
-@pytest.mark.parametrize(
-    ("annotations", "expected"),
-    [([], True), ([{"type": "url_citation", "url": "https://example.test/a"}], False)],
-)
-def test_full_resend_retained_output_reads_annotations_the_same_way(
-    annotations: list[JsonValue],
-    expected: bool,
-) -> None:
-    # The client-resend path shares the content-part predicate, so the widening
-    # must move both together and no further: a cited answer stays owner-bound
-    # on the path that was already live.
+@pytest.mark.parametrize("annotations", [[], [{"type": "url_citation", "url": "https://example.test/a"}]])
+def test_full_resend_retained_output_reads_annotations_the_same_way(annotations: list[JsonValue]) -> None:
+    # The client-resend path shares the content-part predicate, so anything the
+    # rebuild needed must have stayed out of it: an annotated answer is refused
+    # on the path that was already live, exactly as it was before.
     input_items: list[JsonValue] = [
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "old question"}]},
         {
@@ -240,7 +235,7 @@ def test_full_resend_retained_output_reads_annotations_the_same_way(
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next question"}]},
     ]
 
-    assert responses_input_suffix_retains_prior_output(input_items, stored_count=1) is expected
+    assert responses_input_suffix_retains_prior_output(input_items, stored_count=1) is False
 
 
 def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() -> None:
@@ -2712,6 +2707,7 @@ class _TranscriptOperation:
     request_text: str | None
     response_id: str | None = "resp_1"
     parent_response_id: str | None = None
+    event_spool_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -2758,6 +2754,13 @@ def _assistant_item(
     return item if item_id is None else {"id": item_id, **item}
 
 
+def _replayed_assistant_item(text: str, *, phase: str | None = None) -> dict[str, JsonValue]:
+    """The same answer as the rebuild dispatches it: no owner id, no annotations."""
+
+    item = _assistant_item(text, phase=phase)
+    return {**item, "content": cast(JsonValue, [{"type": "output_text", "text": text}])}
+
+
 def _reasoning_item(item_id: str) -> dict[str, JsonValue]:
     return {"id": item_id, "type": "reasoning", "summary": []}
 
@@ -2789,20 +2792,33 @@ def _transcript_turn(
     )
 
 
-def _current_frame(input_items: Sequence[JsonValue], **extra: JsonValue) -> str:
-    return _request_frame(
-        {"model": "gpt-5.4", "input": list(input_items), "previous_response_id": "resp_owner", **extra}
-    )
+def _newest_response_id(transcript: Sequence[object]) -> str:
+    """The anchor a client continuing this chain would send."""
+
+    newest = cast(_TranscriptTurn, transcript[-1]) if transcript else None
+    return newest.operation.response_id or "" if newest is not None else ""
+
+
+def _current_payload(input_items: Sequence[JsonValue], anchor: str, **extra: JsonValue) -> dict[str, JsonValue]:
+    return {"model": "gpt-5.4", "input": list(input_items), "previous_response_id": anchor, **extra}
 
 
 def _rebuild(
     transcript: Sequence[object],
     current_input: Sequence[JsonValue],
+    *,
+    anchor_response_id: str | None = None,
+    max_turns: int = RELOCATION_TRANSCRIPT_MAX_TURNS,
+    max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
     **extra: JsonValue,
 ) -> dict[str, JsonValue] | None:
+    anchor = _newest_response_id(transcript) if anchor_response_id is None else anchor_response_id
     return project_durable_transcript_for_account_neutral_fresh_replay(
         transcript,
-        current_request_text=_current_frame(current_input, **extra),
+        anchor_response_id=anchor,
+        current_payload=_current_payload(current_input, anchor, **extra),
+        max_turns=max_turns,
+        max_bytes=max_bytes,
     )
 
 
@@ -2910,9 +2926,9 @@ def test_durable_rebuild_joins_the_parent_chain_oldest_turn_first() -> None:
     assert rebuilt is not None
     assert rebuilt["input"] == [
         _user_item("first"),
-        _assistant_item("first answer"),
+        _replayed_assistant_item("first answer"),
         _user_item("second"),
-        _assistant_item("second answer"),
+        _replayed_assistant_item("second answer"),
         _user_item("third"),
     ]
 
@@ -3057,7 +3073,10 @@ def test_durable_rebuild_accepts_a_turn_in_the_shape_the_bridge_actually_spools(
         stored_input[0],
         {key: value for key, value in cast(Any, terminal_output[1]).items() if key != "id"},
         terminal_output[2],
-        {key: value for key, value in cast(Any, terminal_output[3]).items() if key != "id"},
+        {
+            **{key: value for key, value in cast(Any, terminal_output[3]).items() if key != "id"},
+            "content": [{"type": "output_text", "text": "old answer"}],
+        },
         {
             "role": "user",
             "content": [{"type": "input_text", "text": "next question"}],
@@ -3097,14 +3116,24 @@ def test_durable_rebuild_expands_a_stored_scalar_turn_input() -> None:
     rebuilt = _rebuild(transcript, [_user_item("second")])
 
     assert rebuilt is not None
-    assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
+    assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item("answer"), _user_item("second")]
 
 
-def test_durable_rebuild_refuses_a_client_that_resent_the_whole_conversation() -> None:
-    # The chain is not the authority for a resend -- the client's own body is,
-    # through the proof the anchor's stored turn supplies. Joining the two here
-    # would need a boundary nobody can establish, so this rung declines and the
-    # resend is answered where its evidence lives.
+@pytest.mark.parametrize(
+    "client_turn",
+    [
+        # The ordinary delta.
+        [_user_item("second")],
+        # A delta that restates the thread as well. The anchor already said this
+        # input is the delta, so it is joined whole: doubling tokens is
+        # recoverable, and searching for where a restatement ends is how a
+        # message the user wrote goes missing instead.
+        [_user_item("first"), _replayed_assistant_item("answer"), _user_item("second")],
+        # A delta holding no message item at all, which the corpus records.
+        [{"type": "input_text", "text": "second"}],
+    ],
+)
+def test_the_anchor_decides_the_join_whatever_the_delta_holds(client_turn: list[JsonValue]) -> None:
     transcript = (
         _transcript_turn(
             [_user_item("first")],
@@ -3112,35 +3141,18 @@ def test_durable_rebuild_refuses_a_client_that_resent_the_whole_conversation() -
         ),
     )
 
-    assert _rebuild(transcript, [_user_item("first"), _assistant_item("answer"), _user_item("second")]) is None
+    rebuilt = _rebuild(transcript, client_turn)
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item("answer"), *client_turn]
 
 
-@pytest.mark.parametrize(
-    "partial_restatement",
-    [
-        # The tail of the thread plus a new message: where the restatement stops
-        # can only be found by matching content.
-        [_assistant_item("answer"), _user_item("second")],
-        [_reasoning_item("rs_1"), _user_item("second")],
-        [
-            {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
-            {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
-        ],
-        [],
-    ],
-)
-def test_durable_rebuild_refuses_a_turn_that_is_neither_a_delta_nor_a_resend(
-    partial_restatement: list[JsonValue],
-) -> None:
-    transcript = (_transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),)
-
-    assert _rebuild(transcript, partial_restatement) is None
-
-
-def test_durable_rebuild_refuses_a_chain_turn_that_restated_the_conversation() -> None:
-    # A client that anchors *and* restates: turn two carries the whole thread so
-    # far plus its own new message. Concatenating it doubles the conversation;
-    # trimming it needs the same boundary nobody can establish.
+def test_a_chain_turn_that_was_itself_a_full_resend_is_ordinary_material() -> None:
+    # The thread's second recorded turn carries everything before it as well as
+    # its own new message, which is what a client sends the first time this
+    # proxy sees a conversation it did not start. Demanding that every chain
+    # turn look like a delta would disable relocation for that thread for as
+    # long as it lives, and the chain's shapes are explicitly not a gate.
     transcript = (
         _transcript_turn(
             [_user_item("first")],
@@ -3159,7 +3171,10 @@ def test_durable_rebuild_refuses_a_chain_turn_that_restated_the_conversation() -
         ),
     )
 
-    assert _rebuild(transcript, [_user_item("third")]) is None
+    rebuilt = _rebuild(transcript, [_user_item("third")])
+
+    assert rebuilt is not None
+    assert cast(list[JsonValue], rebuilt["input"])[-1] == _user_item("third")
 
 
 def test_durable_rebuild_keeps_a_repeated_message_the_chain_already_holds() -> None:
@@ -3168,7 +3183,7 @@ def test_durable_rebuild_keeps_a_repeated_message_the_chain_already_holds() -> N
     rebuilt = _rebuild(transcript, [_user_item("ping")])
 
     assert rebuilt is not None
-    assert rebuilt["input"] == [_user_item("ping"), _assistant_item("pong"), _user_item("ping")]
+    assert rebuilt["input"] == [_user_item("ping"), _replayed_assistant_item("pong"), _user_item("ping")]
 
 
 def test_durable_rebuild_keeps_a_new_turn_whose_first_message_repeats_the_thread_opening() -> None:
@@ -3190,9 +3205,9 @@ def test_durable_rebuild_keeps_a_new_turn_whose_first_message_repeats_the_thread
     assert rebuilt is not None
     assert rebuilt["input"] == [
         _user_item("go"),
-        _assistant_item("ok"),
+        _replayed_assistant_item("ok"),
         _user_item("next"),
-        _assistant_item("done"),
+        _replayed_assistant_item("done"),
         _user_item("go"),
         _user_item("again"),
     ]
@@ -3255,7 +3270,7 @@ def test_durable_rebuild_falls_back_to_item_events_when_an_incomplete_terminal_o
     rebuilt = _rebuild(transcript, [_user_item("second")])
 
     assert rebuilt is not None
-    assert rebuilt["input"] == [_user_item("first"), _assistant_item("partial"), _user_item("second")]
+    assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item("partial"), _user_item("second")]
 
 
 def test_durable_rebuild_prefers_the_terminal_output_over_accumulated_items() -> None:
@@ -3270,7 +3285,7 @@ def test_durable_rebuild_prefers_the_terminal_output_over_accumulated_items() ->
     rebuilt = _rebuild(transcript, [_user_item("second")])
 
     assert rebuilt is not None
-    assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
+    assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item("answer"), _user_item("second")]
 
 
 def test_durable_rebuild_prefers_the_terminal_output_when_an_item_frame_never_reached_the_spool() -> None:
@@ -3303,8 +3318,8 @@ def test_durable_rebuild_prefers_the_terminal_output_when_an_item_frame_never_re
     assert rebuilt is not None
     assert rebuilt["input"] == [
         _user_item("first"),
-        _assistant_item("thinking out loud", phase="commentary"),
-        _assistant_item("answer", phase="final_answer"),
+        _replayed_assistant_item("thinking out loud", phase="commentary"),
+        _replayed_assistant_item("answer", phase="final_answer"),
         _user_item("second"),
     ]
 
@@ -3396,6 +3411,144 @@ def test_a_terminal_that_carries_no_answer_settles_nothing(answerless_events: tu
     )
 
 
+def test_a_terminal_with_no_response_object_fails_closed_over_the_accumulator() -> None:
+    # The item frames arrived, then a terminal that carries no response object
+    # at all. Falling back to the accumulated items would report a turn whose
+    # settlement nothing describes as answered.
+    events = (
+        _sse_block({"type": "response.output_item.done", "item": _assistant_item("answer", item_id="msg_1")}),
+        _sse_block({"type": "response.completed", "id": "resp_1"}),
+    )
+
+    assert _terminal_response_output_items(events) is None
+
+
+@pytest.mark.parametrize("end_of_attempt", ["response.failed", "error"])
+def test_an_explicitly_abandoned_attempt_leaves_nothing_in_the_next_ones_answer(end_of_attempt: str) -> None:
+    # One spool, two attempts. The first streamed an item and then failed; the
+    # replacement streamed its own and completed without a response.output.
+    # Carrying the accumulator across the failure reports the abandoned
+    # generation as part of this turn's reply.
+    events = (
+        _sse_block({"type": "response.output_item.done", "item": _assistant_item("abandoned", item_id="msg_1")}),
+        _sse_block({"type": end_of_attempt, "response": {"id": "resp_1"}}),
+        _sse_block({"type": "response.output_item.done", "item": _assistant_item("replacement", item_id="msg_2")}),
+        _sse_block({"type": "response.completed", "response": {"id": "resp_1"}}),
+    )
+
+    assert _terminal_response_output_items(events) == [_assistant_item("replacement", item_id="msg_2")]
+
+
+def test_an_attempt_that_died_mid_stream_leaves_nothing_in_the_next_ones_answer() -> None:
+    # The realistic shape: the abandoned attempt reaches no terminal at all, it
+    # simply stops, and the only marker that a new one began is the
+    # replacement's own ``response.created``.
+    events = (
+        _sse_block({"type": "response.created", "response": {"id": "resp_1"}}),
+        _sse_block({"type": "response.output_item.done", "item": _assistant_item("abandoned", item_id="msg_1")}),
+        _sse_block({"type": "response.created", "response": {"id": "resp_1"}}),
+        _sse_block({"type": "response.output_item.done", "item": _assistant_item("replacement", item_id="msg_2")}),
+        _sse_block({"type": "response.completed", "response": {"id": "resp_1"}}),
+    )
+
+    assert _terminal_response_output_items(events) == [_assistant_item("replacement", item_id="msg_2")]
+
+
+def test_an_abandoned_attempt_whose_replacement_answers_nothing_settles_nothing() -> None:
+    events = (
+        _sse_block({"type": "response.output_item.done", "item": _assistant_item("abandoned", item_id="msg_1")}),
+        _sse_block({"type": "response.failed", "response": {"id": "resp_1"}}),
+        _sse_block({"type": "response.completed", "response": {"id": "resp_1"}}),
+    )
+
+    assert _terminal_response_output_items(events) is None
+
+
+@pytest.mark.parametrize(
+    "unreadable_events",
+    [
+        None,
+        7,
+        {"type": "response.completed"},
+        # A single string is a Sequence of characters, and iterating it yields
+        # no event at all rather than the one frame it looks like.
+        'event: response.completed\ndata: {"type":"response.completed"}\n\n',
+        b"bytes",
+    ],
+)
+def test_a_turn_whose_events_are_not_a_sequence_of_frames_settles_nothing(unreadable_events: object) -> None:
+    assert _terminal_response_output_items(unreadable_events) is None
+    assert (
+        _rebuild(
+            (
+                _TranscriptTurn(
+                    operation=_TranscriptOperation(
+                        request_text=_request_frame({"model": "gpt-5.4", "input": [_user_item("first")]}),
+                    ),
+                    events=cast(Any, unreadable_events),
+                ),
+            ),
+            [_user_item("second")],
+        )
+        is None
+    )
+
+
+def test_a_malformed_item_frame_does_not_become_a_rebuilt_item() -> None:
+    # The frame's ``item`` is not an object, so there is no item in it. Letting
+    # it through puts a scalar where an input item belongs and costs the turn a
+    # rebuild the rest of its material fully supports.
+    events = (
+        _sse_block({"type": "response.output_item.done", "item": cast(JsonValue, "not an item")}),
+        _sse_block({"type": "response.output_item.done", "item": _assistant_item("answer", item_id="msg_1")}),
+        _sse_block({"type": "response.completed", "response": {"id": "resp_1"}}),
+    )
+
+    assert _terminal_response_output_items(events) == [_assistant_item("answer", item_id="msg_1")]
+    rebuilt = _rebuild(
+        (
+            _TranscriptTurn(
+                operation=_TranscriptOperation(
+                    request_text=_request_frame({"model": "gpt-5.4", "input": [_user_item("first")]}),
+                ),
+                events=events,
+            ),
+        ),
+        [_user_item("second")],
+    )
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item("answer"), _user_item("second")]
+
+
+@pytest.mark.parametrize("wrong_anchor", ["resp_1", "resp_other", "", "resp_2 "])
+def test_durable_rebuild_refuses_a_chain_that_is_not_this_anchors_history(wrong_anchor: str) -> None:
+    # Parent links prove only that these turns follow one another. This chain is
+    # internally perfect and belongs to somebody else's conversation, or stops
+    # short of the turn the client actually anchored on.
+    transcript = _linked_pair()
+
+    assert _rebuild(transcript, [_user_item("third")], anchor_response_id=wrong_anchor) is None
+    assert _rebuild(transcript, [_user_item("third")], anchor_response_id="resp_2") is not None
+
+
+def test_durable_rebuild_refuses_a_turn_whose_event_spool_never_finished() -> None:
+    # An unfinished spool holds a fragment of an answer, not an answer, and the
+    # fragment reads exactly like a complete one once it is in the chain.
+    settled, unsettled = _linked_pair()
+    partial = _TranscriptTurn(
+        operation=_TranscriptOperation(
+            request_text=unsettled.operation.request_text,
+            response_id="resp_2",
+            parent_response_id="resp_1",
+            event_spool_complete=False,
+        ),
+        events=unsettled.events,
+    )
+
+    assert _rebuild((settled, partial), [_user_item("third")]) is None
+
+
 # Characters ``str.splitlines`` breaks on that the SSE wire format does not, and
 # that a JSON serializer leaves unescaped because they sit above U+001F: NEL,
 # LINE SEPARATOR and PARAGRAPH SEPARATOR. These are the ones that actually reach
@@ -3435,7 +3588,7 @@ def test_durable_rebuild_reads_a_terminal_whose_answer_contains_a_non_sse_line_b
     rebuilt = _rebuild(transcript, [_user_item("second")])
 
     assert rebuilt is not None
-    assert rebuilt["input"] == [_user_item("first"), _assistant_item(answer), _user_item("second")]
+    assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item(answer), _user_item("second")]
 
 
 @pytest.mark.parametrize("terminator", ["\n", "\r\n", "\r"])
@@ -3456,14 +3609,17 @@ def test_terminal_output_joins_a_multi_line_data_field_with_line_feeds(terminato
     assert _terminal_response_output_items((block,)) == [_assistant_item("answer")]
 
 
-def test_durable_rebuild_carries_the_empty_annotation_list_every_output_text_part_has() -> None:
+def test_durable_rebuild_drops_the_empty_annotation_list_every_output_text_part_has() -> None:
+    # The spooled answer carries the field; the dispatched body must not, because
+    # the strict predicate refuses it and widening the predicate would change
+    # what the already-shipped client-resend admission accepts.
     transcript = (_transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),)
 
     rebuilt = _rebuild(transcript, [_user_item("second")])
 
     assert rebuilt is not None
-    assert rebuilt["input"] == [_user_item("first"), _assistant_item("answer"), _user_item("second")]
-    assert cast(Any, cast(list[JsonValue], rebuilt["input"])[1])["content"][0]["annotations"] == []
+    answer = cast(Any, cast(list[JsonValue], rebuilt["input"])[1])
+    assert answer["content"] == [{"type": "output_text", "text": "answer"}]
 
 
 _POPULATED_ANNOTATIONS: list[dict[str, JsonValue]] = [
@@ -3487,16 +3643,22 @@ def test_durable_rebuild_refuses_a_populated_annotation_list(annotation: dict[st
     assert _rebuild(transcript, [_user_item("second")]) is None
 
 
-@pytest.mark.parametrize("annotation", _POPULATED_ANNOTATIONS)
-def test_the_shipped_fresh_replay_admission_still_refuses_a_populated_annotation_list(
-    annotation: dict[str, JsonValue],
+@pytest.mark.parametrize("annotations", [[], *[[annotation] for annotation in _POPULATED_ANNOTATIONS]])
+@pytest.mark.parametrize("role", ["assistant", "user", "developer", "system"])
+def test_the_shipped_fresh_replay_admission_refuses_annotations_in_every_position(
+    role: str,
+    annotations: list[JsonValue],
 ) -> None:
     # The content-part field set is shared with the transparent fresh-replay
-    # admission that is already live. Whatever the rebuild needed, that path
-    # must not have been widened by it.
-    message = _assistant_item("answer", annotations=[annotation])
+    # admission that is already live, in every message position and standing
+    # alone as an input item. What the rebuild needed it took from the items it
+    # assembles itself, so none of these moved.
+    part_type = "output_text" if role == "assistant" else "input_text"
+    part: dict[str, JsonValue] = {"type": part_type, "text": "a line", "annotations": cast(JsonValue, annotations)}
+    message: JsonValue = {"type": "message", "role": role, "status": "completed", "content": [part]}
 
     assert responses_payload_is_account_neutral_fresh_replay({"input": [message]}) is False
+    assert responses_payload_is_account_neutral_fresh_replay({"input": [part]}) is False
     assert (
         responses_input_suffix_retains_prior_output(
             [_user_item("old question"), message, _user_item("next question")],
@@ -3504,41 +3666,6 @@ def test_the_shipped_fresh_replay_admission_still_refuses_a_populated_annotation
         )
         is False
     )
-
-
-@pytest.mark.parametrize("annotations", [[], _POPULATED_ANNOTATIONS[:1]])
-def test_an_annotated_output_text_standing_alone_is_not_an_input_item(annotations: list[JsonValue]) -> None:
-    # ``annotations`` belongs to an assistant message's content and is admitted
-    # there. Standing alone, an ``output_text`` is not an admissible item type
-    # at all -- with or without the field -- so nothing in that position ever
-    # reads what the annotations say. That is exactly why the widening is
-    # scoped to the answer's content rather than added to the shared field set.
-    payload: dict[str, JsonValue] = {
-        "input": [{"type": "output_text", "text": "answer", "annotations": cast(JsonValue, annotations)}]
-    }
-
-    assert responses_payload_is_account_neutral_fresh_replay(payload) is False
-    assert responses_payload_is_account_neutral_fresh_replay({"input": [{"type": "output_text", "text": "a"}]}) is False
-
-
-@pytest.mark.parametrize("annotations", [[], _POPULATED_ANNOTATIONS[:1]])
-@pytest.mark.parametrize("role", ["user", "developer", "system"])
-def test_a_part_outside_an_assistant_answer_carries_no_annotations(
-    role: str,
-    annotations: list[JsonValue],
-) -> None:
-    # The Responses API attaches the field to the model's own answer and to
-    # nothing else, so an input part carrying it is an unknown field on a part
-    # the sender wrote. Admitting it because the answer needs it would widen
-    # every position at once.
-    part: dict[str, JsonValue] = {
-        "type": "input_text",
-        "text": "a question",
-        "annotations": cast(JsonValue, annotations),
-    }
-    payload: dict[str, JsonValue] = {"input": [{"type": "message", "role": role, "content": [part]}]}
-
-    assert responses_payload_is_account_neutral_fresh_replay(payload) is False
 
 
 def test_durable_rebuild_strips_a_response_owned_developer_id_from_the_chain() -> None:
@@ -3570,7 +3697,7 @@ def test_durable_rebuild_strips_a_response_owned_developer_id_from_the_chain() -
         lite_bundle,
         {key: value for key, value in stored_developer.items() if key != "id"},
         _user_item("first"),
-        _assistant_item("answer"),
+        _replayed_assistant_item("answer"),
         _user_item("second"),
     ]
 
@@ -3641,28 +3768,53 @@ def test_durable_rebuild_refuses_an_empty_chain(empty_transcript: Sequence[objec
 
 
 @pytest.mark.parametrize(
-    "current_request_text",
+    "current_input",
     [
-        None,
-        "{not json",
-        "[]",
-        json.dumps({"type": "response.cancel", "input": []}),
         # A scalar input is the new prompt alone and cannot stand in for the
         # conversation the dropped anchor represented.
-        _request_frame({"model": "gpt-5.4", "input": "second"}),
-        _request_frame({"model": "gpt-5.4"}),
+        "second",
+        None,
+        7,
+        [],
+        {},
     ],
 )
-def test_durable_rebuild_refuses_an_unusable_current_request(current_request_text: str | None) -> None:
+def test_durable_rebuild_refuses_an_unusable_current_request(current_input: JsonValue) -> None:
     transcript = (_transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),)
+    current_payload: dict[str, JsonValue] = {"model": "gpt-5.4", "previous_response_id": "resp_1"}
+    if current_input is not None:
+        current_payload["input"] = current_input
 
     assert (
         project_durable_transcript_for_account_neutral_fresh_replay(
             transcript,
-            current_request_text=current_request_text,
+            anchor_response_id="resp_1",
+            current_payload=current_payload,
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("request_text", "expected"),
+    [
+        # The session bridge spools the exact upstream frame, envelope and all.
+        (json.dumps({"type": "response.create", "model": "gpt-5.4"}), {"model": "gpt-5.4"}),
+        # The direct paths store the body alone.
+        (json.dumps({"model": "gpt-5.4"}), {"model": "gpt-5.4"}),
+        # Any other envelope is a frame whose body is not a turn to replay.
+        (json.dumps({"type": "response.cancel", "model": "gpt-5.4"}), None),
+        (json.dumps({"type": "response.created", "model": "gpt-5.4"}), None),
+        ("{not json", None),
+        ("[]", None),
+        ('"a string"', None),
+    ],
+)
+def test_a_request_frame_yields_a_body_only_for_the_create_envelope(
+    request_text: str,
+    expected: dict[str, JsonValue] | None,
+) -> None:
+    assert responses_request_frame_payload(request_text) == expected
 
 
 @pytest.mark.parametrize(
@@ -3718,56 +3870,6 @@ def test_durable_rebuild_result_satisfies_the_strict_predicate() -> None:
     assert responses_payload_is_account_neutral_fresh_replay(rebuilt) is True
 
 
-@pytest.mark.parametrize(
-    ("delta_item", "expected"),
-    [
-        # Recorded client-authored shapes (tests/fixtures/passthrough_request_corpus.json).
-        ({"role": "user", "content": [{"type": "input_text", "text": "hello"}]}, True),
-        ({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Be terse."}]}, True),
-        ({"role": "system", "content": [{"type": "input_text", "text": "You are Codex."}]}, True),
-        ({"type": "function_call_output", "call_id": "call_1", "output": "a\nb\tc"}, True),
-        ({"type": "custom_tool_call_output", "call_id": "call_2", "output": "ok"}, True),
-        ({"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "x"}]}, True),
-        ({"type": "input_text", "text": "hello"}, True),
-        # Recorded model-authored shapes: only the account that produced the
-        # turn could have written these, so an input carrying one is restating.
-        ({"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"}, False),
-        ({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc=="}, False),
-        (
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "done", "annotations": []}],
-            },
-            False,
-        ),
-        ({"type": "web_search_call", "id": "ws_1", "status": "completed"}, False),
-        ({"type": "item_reference", "id": "msg_owner"}, False),
-        # Not an item at all: the corpus records both of these in a real body.
-        ("trailing string item", False),
-        ([1, 2], False),
-    ],
-)
-def test_continuation_delta_admits_only_what_its_sender_could_have_written(
-    delta_item: JsonValue,
-    expected: bool,
-) -> None:
-    assert responses_input_is_continuation_delta([delta_item]) is expected
-
-
-def test_an_empty_input_is_not_a_continuation_delta() -> None:
-    assert responses_input_is_continuation_delta([]) is False
-
-
-def test_one_model_authored_item_disqualifies_a_whole_delta() -> None:
-    assert (
-        responses_input_is_continuation_delta(
-            [_user_item("first"), _reasoning_item("rs_1"), _user_item("second")],
-        )
-        is False
-    )
-
-
 def _chain_of_turns(turn_count: int) -> tuple[object, ...]:
     return tuple(
         _transcript_turn(
@@ -3801,11 +3903,7 @@ def test_durable_rebuild_refuses_a_chain_past_the_turn_cap() -> None:
 
 @pytest.mark.parametrize(("max_turns", "expected_rebuild"), [(2, True), (1, False)])
 def test_durable_rebuild_honours_an_explicit_turn_cap(max_turns: int, expected_rebuild: bool) -> None:
-    rebuilt = project_durable_transcript_for_account_neutral_fresh_replay(
-        _chain_of_turns(2),
-        current_request_text=_current_frame([_user_item("next")]),
-        max_turns=max_turns,
-    )
+    rebuilt = _rebuild(_chain_of_turns(2), [_user_item("next")], max_turns=max_turns)
 
     assert (rebuilt is not None) is expected_rebuild
 
@@ -3847,14 +3945,7 @@ def test_durable_rebuild_refuses_material_past_an_explicit_byte_cap() -> None:
     transcript = _chain_of_turns(1)
     stored_bytes = len(cast(_TranscriptTurn, transcript[0]).operation.request_text or "")
 
-    assert (
-        project_durable_transcript_for_account_neutral_fresh_replay(
-            transcript,
-            current_request_text=_current_frame([_user_item("next")]),
-            max_bytes=stored_bytes,
-        )
-        is None
-    )
+    assert _rebuild(transcript, [_user_item("next")], max_bytes=stored_bytes) is None
 
 
 def test_durable_rebuild_admits_material_inside_an_explicit_byte_cap() -> None:
@@ -3862,11 +3953,4 @@ def test_durable_rebuild_admits_material_inside_an_explicit_byte_cap() -> None:
     turn = cast(_TranscriptTurn, transcript[0])
     turn_bytes = len(turn.operation.request_text or "") + sum(len(event) for event in turn.events)
 
-    assert (
-        project_durable_transcript_for_account_neutral_fresh_replay(
-            transcript,
-            current_request_text=_current_frame([_user_item("next")]),
-            max_bytes=turn_bytes,
-        )
-        is not None
-    )
+    assert _rebuild(transcript, [_user_item("next")], max_bytes=turn_bytes) is not None

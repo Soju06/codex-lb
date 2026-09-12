@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, cast
@@ -12,10 +11,10 @@ from app.modules.proxy.replay_safety import (
     AccountNeutralReplayProjection,
     project_durable_transcript_for_account_neutral_fresh_replay,
     project_responses_input_for_account_neutral_fresh_replay,
-    responses_input_is_continuation_delta,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
+    responses_request_frame_payload,
 )
 
 RelocationTransport = Literal["http_stream", "websocket", "http_bridge"]
@@ -40,7 +39,6 @@ RelocationDeclineReason = Literal[
     "session_identity_bound",
     "no_relocation_evidence",
     "absent_transcript",
-    "unestablished_turn_shape",
     "no_account_neutral_body",
     "upstream_execution_observed",
     "outside_ambiguity_window",
@@ -77,7 +75,6 @@ class RelocationInputs:
     transport: RelocationTransport
     payload: Mapping[str, JsonValue]
     evidence: RelocationEvidence
-    previous_response_id: str | None = None
     downstream_output_visible: bool = False
     routing_strategy: str | None = None
     input_file_pinned: bool = False
@@ -163,33 +160,27 @@ def _ownership_decline_reason(inputs: RelocationInputs) -> RelocationDeclineReas
 def _evidence_decline_reason(inputs: RelocationInputs) -> RelocationDeclineReason | None:
     """What the failure proved, and what each evidence class owes on top of it.
 
-    The two classes owe different things, and conflating them charges the
-    unfenced lane for a fence it does not use.
+    Both classes owe proof that upstream emitted no response event, and the two
+    records of one are a spooled event and a recorded response id. Which of them
+    a transport keeps differs -- the bridge spools, the streaming and WebSocket
+    paths record the id -- so reading only one lets the transports that keep the
+    other relocate a turn upstream has already answered.
 
-    Definitive evidence is a rejection upstream accepted nothing from, and it
-    owes exactly one thing: no response event emitted. A spooled event is a
-    response event, so one of those contradicts the classification and the turn
-    stays put.
-
-    The fenced lane owes that and two more facts, because it is spending a
-    one-shot budget on a turn that may already have run. A recorded response id
-    is upstream acknowledging the operation, which makes the outcome unknown
-    rather than ambiguous -- it is listed here and not above because the
-    definitive lane consumes no budget and risks no duplicate. An age the
-    caller could not establish, or one no clock could have produced, counts as
-    outside the window rather than inside it: a dispatch old enough to be
-    mid-execution is likelier to write its first event than to have been lost.
-    And without the side-effect replay-dedupe identity on the relocated
-    dispatch, the duplicate this lane knowingly risks is unbounded in kind
-    rather than merely in tokens.
+    The fenced lane owes two further facts, because it is spending a one-shot
+    budget on a turn that may already have run. An age the caller could not
+    establish, or one no clock could have produced, counts as outside the window
+    rather than inside it: a dispatch old enough to be mid-execution is likelier
+    to write its first event than to have been lost. And without the side-effect
+    replay-dedupe identity on the relocated dispatch, the duplicate this lane
+    knowingly risks is unbounded in kind rather than merely in tokens.
     """
 
     if inputs.evidence == "none":
         return "no_relocation_evidence"
-    if inputs.evidence == "definitive":
-        return "upstream_execution_observed" if inputs.spooled_event_count > 0 else None
     if inputs.spooled_event_count > 0 or _names_a_prior_response(inputs.response_id):
         return "upstream_execution_observed"
+    if inputs.evidence == "definitive":
+        return None
     seconds_since_dispatch = inputs.seconds_since_dispatch
     if seconds_since_dispatch is None or not 0.0 <= seconds_since_dispatch <= RELOCATION_AMBIGUITY_WINDOW_SECONDS:
         return "outside_ambiguity_window"
@@ -203,45 +194,52 @@ def _relocated_body(
 ) -> tuple[Mapping[str, JsonValue], RelocationSource] | RelocationDeclineReason:
     """The first source that yields a body another account can accept, or why none did.
 
-    The ladder is ordered by how much the proxy has to assume. A client full
-    resend is the client's own transcript; the durable chain is one the proxy
-    rebuilds from what it spooled; an unanchored body needs nothing proven at all
-    and is last only because the anchored sources answer the anchored question.
+    The anchor decides which sources apply, and it decides definitionally rather
+    than by inference. A request carrying ``previous_response_id`` is a
+    continuation by the wire contract: its input is that turn's delta, whatever
+    the delta happens to contain, and the chain supplies everything before it. A
+    request carrying no anchor is the whole conversation already. Reading the
+    input's shape instead classifies a client restating a history that holds no
+    model-authored item as a delta, joins the chain to it and doubles the
+    conversation.
+
+    Above the chain sits the one boundary the anchor itself establishes: the
+    count of items its stored turn accounted for. A client that resent its whole
+    history is recognised by that count, not by searching its content for where
+    the restatement ends.
 
     An anchored turn whose transport recorded no durable material declines with
     its own reason. Having nothing to rebuild from is a different fact from a
     rebuild that ran and could not prove itself, and only the second one says
     anything about this conversation.
-
-    The durable rung is reached only once the client's turn is a shape the join
-    can be decided from. A full resend was already answered above, by the proof
-    the anchor's stored turn supplies; what is left -- a partial restatement --
-    has a boundary that cannot be found without comparing content, and guessing
-    it deletes a message the user wrote.
     """
 
-    client_resend_body = _client_full_resend_body(inputs)
+    payload = _current_turn_payload(inputs)
+    if payload is None:
+        return "no_account_neutral_body"
+    anchor = payload.get("previous_response_id")
+    if not _names_a_prior_response(anchor):
+        unanchored_body = _account_neutral_body_without_anchor(payload)
+        return (unanchored_body, "unanchored") if unanchored_body is not None else "no_account_neutral_body"
+    client_resend_body = _client_full_resend_body(payload, inputs.client_resend)
     if client_resend_body is not None:
         return client_resend_body, "client_full_resend"
-    if not _is_anchored(inputs):
-        unanchored_body = _account_neutral_body_without_anchor(inputs.payload)
-        return (unanchored_body, "unanchored") if unanchored_body is not None else "no_account_neutral_body"
-    transcript = inputs.durable_transcript
-    if not transcript:
+    if not inputs.durable_transcript:
         return "absent_transcript"
-    current_input = inputs.payload.get("input")
-    if not isinstance(current_input, list) or not responses_input_is_continuation_delta(current_input):
-        return "unestablished_turn_shape"
     durable_transcript_body = project_durable_transcript_for_account_neutral_fresh_replay(
-        transcript,
-        current_request_text=_current_request_text(inputs),
+        inputs.durable_transcript,
+        anchor_response_id=cast(str, anchor),
+        current_payload=payload,
     )
     if durable_transcript_body is None:
         return "no_account_neutral_body"
     return durable_transcript_body, "durable_transcript"
 
 
-def _client_full_resend_body(inputs: RelocationInputs) -> Mapping[str, JsonValue] | None:
+def _client_full_resend_body(
+    payload: Mapping[str, JsonValue],
+    proof: ClientResendProof | None,
+) -> Mapping[str, JsonValue] | None:
     """The client's own resend, once its suffix is proven to continue the stored turn.
 
     Two projections, and the difference between them is the whole point. The
@@ -252,9 +250,8 @@ def _client_full_resend_body(inputs: RelocationInputs) -> Mapping[str, JsonValue
     bookkeeping and all, and the strict predicate refuses each of them.
     """
 
-    proof = inputs.client_resend
-    input_value = inputs.payload.get("input")
-    if not _is_anchored(inputs) or proof is None or not isinstance(input_value, list):
+    input_value = payload.get("input")
+    if proof is None or not isinstance(input_value, list):
         return None
     input_items = cast(list[JsonValue], input_value)
     classification = project_responses_input_for_account_neutral_fresh_replay(
@@ -270,9 +267,7 @@ def _client_full_resend_body(inputs: RelocationInputs) -> Mapping[str, JsonValue
     )
     if replay_projection is None:
         return None
-    return _account_neutral_body_without_anchor(
-        {**inputs.payload, "input": cast(JsonValue, replay_projection.input_items)}
-    )
+    return _account_neutral_body_without_anchor({**payload, "input": cast(JsonValue, replay_projection.input_items)})
 
 
 def _resend_suffix_continues_the_stored_turn(
@@ -302,36 +297,21 @@ def _account_neutral_body_without_anchor(payload: Mapping[str, JsonValue]) -> Ma
     return body if responses_payload_is_account_neutral_fresh_replay(body) else None
 
 
-def _is_anchored(inputs: RelocationInputs) -> bool:
-    """Whether this turn names a prior response, in the dedicated field or in the body.
-
-    The field is a mirror the caller fills in; the body is where the anchor
-    actually lives. Trusting the mirror alone lets an unmirrored anchor take the
-    unanchored rung, which strips ``previous_response_id`` and dispatches the new
-    turn by itself -- the conversation discarded, and the verdict calling it
-    movable.
-    """
-
-    return _names_a_prior_response(inputs.previous_response_id) or _names_a_prior_response(
-        inputs.payload.get("previous_response_id")
-    )
-
-
 def _names_a_prior_response(value: JsonValue | None) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _current_request_text(inputs: RelocationInputs) -> str | None:
-    """The client's current turn as the text the rebuild joins the chain to.
+def _current_turn_payload(inputs: RelocationInputs) -> Mapping[str, JsonValue] | None:
+    """The one body this verdict is decided from and dispatched as.
 
-    The session bridge holds the exact frame it would have sent upstream and
-    passes it verbatim; the streaming and WebSocket paths hold a parsed body, so
-    serialize theirs rather than making the durable source bridge-only.
+    The session bridge holds the exact frame it would have sent upstream, which
+    need not agree with the parsed request it also carries; the streaming and
+    WebSocket paths hold only the parsed request. Preferring the frame keeps the
+    decision and the dispatch on the same material, because a verdict reached
+    about one body and carried by another describes a request nobody made -- not
+    least about whether that request is anchored at all.
     """
 
-    if inputs.current_request_text is not None:
-        return inputs.current_request_text
-    try:
-        return json.dumps(dict(inputs.payload), ensure_ascii=False, separators=(",", ":"))
-    except (TypeError, ValueError):
-        return None
+    if inputs.current_request_text is None:
+        return inputs.payload
+    return responses_request_frame_payload(inputs.current_request_text)

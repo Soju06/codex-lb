@@ -8,11 +8,7 @@ from typing import Literal, cast
 
 from app.core.types import JsonValue
 from app.modules.proxy.replay_safety import (
-    AccountNeutralReplayProjection,
     project_durable_transcript_for_account_neutral_fresh_replay,
-    project_responses_input_for_account_neutral_fresh_replay,
-    responses_input_suffix_matches_pending_tool_calls,
-    responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
     responses_request_frame_payload,
 )
@@ -30,7 +26,7 @@ then died before any event, which may or may not have run. ``none`` covers every
 other outcome, including a deterministic rejection another account would repeat.
 """
 
-RelocationSource = Literal["client_full_resend", "durable_transcript", "unanchored"]
+RelocationSource = Literal["durable_transcript", "unanchored"]
 RelocationDeclineReason = Literal[
     "downstream_output_visible",
     "single_account_routing",
@@ -55,20 +51,6 @@ _SINGLE_ACCOUNT_ROUTING_STRATEGY = "single_account"
 
 
 @dataclass(frozen=True, slots=True)
-class ClientResendProof:
-    """Evidence that the client's own prefix reproduces the anchor's stored input.
-
-    Establishing it needs the durable or continuity row the anchor points at, so
-    it is settled at the I/O boundary and the verdict consumes only its result:
-    how many leading items the stored turn accounted for, and the tool-call
-    manifest that turn left outstanding.
-    """
-
-    stored_input_item_count: int
-    pending_tool_calls: Mapping[str, str] | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class RelocationInputs:
     """Everything the shared decision is allowed to look at."""
 
@@ -80,7 +62,6 @@ class RelocationInputs:
     input_file_pinned: bool = False
     turn_state_owned: bool = False
     session_identity_bound: bool = False
-    client_resend: ClientResendProof | None = None
     durable_transcript: Sequence[object] | None = None
     current_request_text: str | None = None
     response_id: str | None = None
@@ -192,21 +173,14 @@ def _evidence_decline_reason(inputs: RelocationInputs) -> RelocationDeclineReaso
 def _relocated_body(
     inputs: RelocationInputs,
 ) -> tuple[Mapping[str, JsonValue], RelocationSource] | RelocationDeclineReason:
-    """The first source that yields a body another account can accept, or why none did.
+    """The source that yields a body another account can accept, or why none did.
 
-    The anchor decides which sources apply, and it decides definitionally rather
-    than by inference. A request carrying ``previous_response_id`` is a
-    continuation by the wire contract: its input is that turn's delta, whatever
-    the delta happens to contain, and the chain supplies everything before it. A
-    request carrying no anchor is the whole conversation already. Reading the
-    input's shape instead classifies a client restating a history that holds no
-    model-authored item as a delta, joins the chain to it and doubles the
-    conversation.
-
-    Above the chain sits the one boundary the anchor itself establishes: the
-    count of items its stored turn accounted for. A client that resent its whole
-    history is recognised by that count, not by searching its content for where
-    the restatement ends.
+    A request carrying no anchor is the whole conversation already and needs
+    only the strict predicate. An anchored one is rebuilt from the chain, which
+    classifies the client's own turn the same way it classifies every stored
+    request in that chain -- so a client that resent its history supersedes the
+    chain rather than being joined to it, and the anchor is passed in only so
+    the walk can verify it terminates there.
 
     An anchored turn whose transport recorded no durable material declines with
     its own reason. Having nothing to rebuild from is a different fact from a
@@ -221,9 +195,6 @@ def _relocated_body(
     if not _names_a_prior_response(anchor):
         unanchored_body = _account_neutral_body_without_anchor(payload)
         return (unanchored_body, "unanchored") if unanchored_body is not None else "no_account_neutral_body"
-    client_resend_body = _client_full_resend_body(payload, inputs.client_resend)
-    if client_resend_body is not None:
-        return client_resend_body, "client_full_resend"
     if not inputs.durable_transcript:
         return "absent_transcript"
     durable_transcript_body = project_durable_transcript_for_account_neutral_fresh_replay(
@@ -234,62 +205,6 @@ def _relocated_body(
     if durable_transcript_body is None:
         return "no_account_neutral_body"
     return durable_transcript_body, "durable_transcript"
-
-
-def _client_full_resend_body(
-    payload: Mapping[str, JsonValue],
-    proof: ClientResendProof | None,
-) -> Mapping[str, JsonValue] | None:
-    """The client's own resend, once its suffix is proven to continue the stored turn.
-
-    Two projections, and the difference between them is the whole point. The
-    proof runs on one that keeps inline Responses-Lite developer ids, because
-    the suffix checks have to see them to reject a response-owned message. The
-    dispatched body takes the default one, which strips response-owned ids and
-    drops reasoning: a real resend restates every item the owner account minted,
-    bookkeeping and all, and the strict predicate refuses each of them.
-    """
-
-    input_value = payload.get("input")
-    if proof is None or not isinstance(input_value, list):
-        return None
-    input_items = cast(list[JsonValue], input_value)
-    classification = project_responses_input_for_account_neutral_fresh_replay(
-        input_items,
-        stored_count=proof.stored_input_item_count,
-        preserve_developer_message_ids=True,
-    )
-    if classification is None or not _resend_suffix_continues_the_stored_turn(classification, proof):
-        return None
-    replay_projection = project_responses_input_for_account_neutral_fresh_replay(
-        input_items,
-        stored_count=proof.stored_input_item_count,
-    )
-    if replay_projection is None:
-        return None
-    return _account_neutral_body_without_anchor({**payload, "input": cast(JsonValue, replay_projection.input_items)})
-
-
-def _resend_suffix_continues_the_stored_turn(
-    projection: AccountNeutralReplayProjection,
-    proof: ClientResendProof,
-) -> bool:
-    """Whether what the client added past the stored turn stands on its own."""
-
-    pending_tool_calls = proof.pending_tool_calls
-    return responses_input_suffix_retains_prior_output(
-        projection.input_items,
-        stored_count=projection.stored_prefix_count,
-        canonical_lite_developer_index=projection.canonical_lite_developer_index,
-    ) or (
-        pending_tool_calls is not None
-        and responses_input_suffix_matches_pending_tool_calls(
-            projection.input_items,
-            stored_count=projection.stored_prefix_count,
-            pending_tool_calls=pending_tool_calls,
-            canonical_lite_developer_index=projection.canonical_lite_developer_index,
-        )
-    )
 
 
 def _account_neutral_body_without_anchor(payload: Mapping[str, JsonValue]) -> Mapping[str, JsonValue] | None:

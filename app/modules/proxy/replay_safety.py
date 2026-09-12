@@ -553,6 +553,7 @@ def _direct_tool_call_prefix_state(
 ) -> tuple[deque[tuple[str, str]], set[str], dict[str, str]] | None:
     pending_calls: deque[tuple[str, str]] = deque()
     async_unsettled: dict[str, str] = {}
+    async_items: list[JsonValue] = []
     seen_call_ids: set[str] = set()
     # A pending window opens when ``pending_calls`` becomes non-empty and closes when it
     # drains. Historical interleaving is proven only for a window that never held more than
@@ -597,6 +598,7 @@ def _direct_tool_call_prefix_state(
             seen_call_ids.add(call_id)
             if item.get("async") is True:
                 async_unsettled[call_id] = item_type
+                async_items.append(item)
                 continue
             pending_calls.append((item_type, call_id))
             if len(pending_calls) > 1:
@@ -622,6 +624,7 @@ def _direct_tool_call_prefix_state(
                 continue
             if async_unsettled.get(call_id) == call_type:
                 del async_unsettled[call_id]
+                async_items.append(item)
                 continue
             return None
         if pending_calls and (
@@ -636,6 +639,9 @@ def _direct_tool_call_prefix_state(
         fallthrough_call_id = item.get("call_id")
         if isinstance(fallthrough_call_id, str) and fallthrough_call_id:
             seen_call_ids.add(fallthrough_call_id)
+    # Settlement removes outstanding work, not the evidence requiring validation.
+    if not responses_input_items_are_self_contained_fresh_replay(async_items):
+        return None
     return pending_calls, seen_call_ids, async_unsettled
 
 

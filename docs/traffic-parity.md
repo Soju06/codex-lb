@@ -259,13 +259,13 @@ proxy variables pointing at it:
 https_proxy=http://127.0.0.1:18081 \
 wss_proxy=http://127.0.0.1:18081 \
 SSL_CERT_FILE="$HOME/.mitmproxy/mitmproxy-ca-cert.pem" \
-CODEX_LB_UPSTREAM_STREAM_TRANSPORT=auto \
 uv run fastapi run app/main.py --port 2455
 ```
 
-`auto` exercises the normal transport decision. Set the transport to `http` or
-`websocket` for a controlled lane, then run both lanes when investigating a
-transport-specific regression. If the account has an explicit upstream proxy
+The upstream stream transport is a dashboard setting (Settings → Routing →
+Upstream stream transport). `auto` exercises the normal transport decision. Set
+the transport to `http` or `websocket` in the dashboard for a controlled lane,
+then run both lanes when investigating a transport-specific regression. If the account has an explicit upstream proxy
 route, route it through the capture proxy as well; explicit account routing can
 otherwise bypass environment proxies.
 
@@ -433,6 +433,22 @@ logic. Each run receives a new directory under
 pass, database/key/log cleanup completes, and the retained tree passes the
 credential-shape privacy scan. Overlap, command timeout, a missing scenario,
 or invalid result leaves the previous success unchanged.
+
+Before either runner starts, the suite stamps the isolated `auth.json`'s
+recorded refresh time to the current instant — every key the account importer
+accepts (`lastRefreshAt`, `last_refresh`), so no stale alias outranks the stamp
+— with mode 600 preserved and tokens untouched. An imported
+account inherits that timestamp, and codex-lb proactively exchanges a refresh
+token once the account is older than the fixed eight-day
+`TOKEN_REFRESH_INTERVAL_DAYS` window (`app/core/auth/refresh.py`). Without the
+stamp, a run started with a week-old isolated credential would exchange that
+real, single-use refresh token against `https://auth.openai.com` — the OAuth
+host is a protocol constant, so redirecting `CODEX_LB_UPSTREAM_BASE_URL` at the
+fixture does not cover it — rotating the credential into a database the suite
+deletes on cleanup and leaving every later run with a dead file. The stamp
+replaces the former `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS=365` pin, which is a
+removed setting; delete that line from host-local runner scripts to silence its
+startup WARN.
 
 The scheduled result is labelled `fast_canary`. It does not include the
 independently sampled HTTP JSON/SSE/WebSocket ClientHello cohorts and therefore

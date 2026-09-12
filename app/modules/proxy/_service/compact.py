@@ -30,6 +30,7 @@ from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
 from app.core.resilience.network_recovery import ProcessNetworkRecovery
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
@@ -55,6 +56,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
     _thread_codex_session_affinity,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
     resolve_required_account_id,
@@ -265,17 +267,11 @@ def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
     return min(20.0, max(0.0, remaining_budget - reserve))
 
 
-def _compact_upstream_budget_seconds(
-    remaining_budget: float,
-    configured_timeout_seconds: float | None = None,
-) -> float:
+def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
     if remaining_budget <= 0:
         return 0.0
     reserve = _compact_upstream_call_budget_reserve_seconds(remaining_budget)
-    available = max(0.0, remaining_budget - reserve)
-    if configured_timeout_seconds is not None:
-        return min(configured_timeout_seconds, available)
-    return available
+    return max(0.0, remaining_budget - reserve)
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -854,6 +850,8 @@ class _CompactMixin:
                     )
             raise
         settings = await _service_get_settings_cache().get()
+        # C2-3 resilience toggles: this request's snapshot, bound for the client.
+        resilience = bind_resilience_toggles(settings, startup_settings=base_settings)
         concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
@@ -880,6 +878,7 @@ class _CompactMixin:
                 sticky_key_source = "payload"
         elif affinity.key:
             sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
         _maybe_log_proxy_request_shape(
             "compact",
             payload,
@@ -1153,10 +1152,7 @@ class _CompactMixin:
                             target.id,
                         )
                         _raise_proxy_budget_exhausted()
-                    upstream_budget = _compact_upstream_budget_seconds(
-                        remaining_budget,
-                        getattr(settings, "upstream_compact_timeout_seconds", None),
-                    )
+                    upstream_budget = _compact_upstream_budget_seconds(remaining_budget)
                     if upstream_budget <= 0:
                         logger.warning(
                             "Compact request budget exhausted before upstream call cap request_id=%s account_id=%s",
@@ -1195,6 +1191,7 @@ class _CompactMixin:
                                     "allow_direct_egress": route is None,
                                     "route_trace": route_trace,
                                     "chatgpt_account_id": account_id,
+                                    "synthesize_routing_hint": True,
                                 },
                             ),
                             timeout=upstream_budget,
@@ -2053,7 +2050,7 @@ class _CompactMixin:
                             http_status=exc.status_code,
                             phase="first_event",
                         )
-                        if getattr(base_settings, "deterministic_failover_enabled", True):
+                        if resilience.deterministic_failover_enabled:
                             action = failover_decision(
                                 failure_class=classified["failure_class"],
                                 downstream_visible=False,
@@ -2148,6 +2145,7 @@ class _CompactMixin:
             usage = response.usage if response else None
             reasoning_effort = payload.reasoning.effort if payload.reasoning else None
             await proxy._write_request_log(
+                affinity_observation=affinity_observation,
                 account_id=account_id_value,
                 api_key=api_key,
                 request_id=request_id,

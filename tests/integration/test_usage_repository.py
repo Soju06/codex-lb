@@ -16,11 +16,9 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.repository import (
     AdditionalUsageRepository,
     UsageRepository,
-    _additional_latest_by_account_sqlite,
     _bulk_history_since_sqlite,
     _clear_bulk_history_since_sqlite_cache,
     _latest_by_account_sqlite,
-    _resolve_additional_quota_query_scope,
 )
 
 pytestmark = pytest.mark.integration
@@ -677,44 +675,6 @@ def test_latest_by_account_sqlite_closes_direct_connection(tmp_path, monkeypatch
     result = _latest_by_account_sqlite(str(db_path), "primary", None)
 
     assert result["acc1"].used_percent == 10.0
-    assert closed == [True]
-
-
-def test_additional_latest_by_account_sqlite_closes_direct_connection(tmp_path, monkeypatch):
-    db_path = tmp_path / "usage.db"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            create table additional_usage_history (
-                id integer primary key,
-                account_id text not null,
-                quota_key text not null,
-                limit_name text not null,
-                metered_feature text not null,
-                window text not null,
-                used_percent real not null,
-                reset_at integer,
-                window_minutes integer,
-                recorded_at text not null
-            )
-            """
-        )
-        conn.execute(
-            """
-            insert into additional_usage_history
-                (id, account_id, quota_key, limit_name, metered_feature, window, used_percent, recorded_at)
-            values (1, 'acc1', 'codex_spark', 'Codex Spark', 'codex_spark', 'primary', 20.0,
-                    '2026-01-01 00:00:00')
-            """
-        )
-        conn.commit()
-    scope = _resolve_additional_quota_query_scope(quota_key="codex_spark")
-    assert scope is not None
-    closed = _track_sqlite_connect_close(monkeypatch)
-
-    result = _additional_latest_by_account_sqlite(str(db_path), scope, "primary", None, None)
-
-    assert result["acc1"].used_percent == 20.0
     assert closed == [True]
 
 

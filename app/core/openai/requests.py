@@ -160,28 +160,6 @@ def validate_tool_types(tools: list[JsonValue], *, allow_builtin_tools: bool = F
     return normalized_tools
 
 
-def _has_input_file_id(input_items: list[JsonValue]) -> bool:
-    for item in input_items:
-        if not is_json_mapping(item):
-            continue
-        item_mapping = item
-        if _is_input_file_with_id(item_mapping):
-            return True
-        content = item_mapping.get("content")
-        if is_json_list(content):
-            parts = content
-        elif is_json_mapping(content):
-            parts = [content]
-        else:
-            parts = []
-        for part in parts:
-            if not is_json_mapping(part):
-                continue
-            if _is_input_file_with_id(part):
-                return True
-    return False
-
-
 def _is_input_file_with_id(item: Mapping[str, JsonValue]) -> bool:
     if item.get("type") != "input_file":
         return False
@@ -463,11 +441,6 @@ def _split_responses_instruction_item_content(item: Mapping[str, JsonValue]) -> 
     return "", content
 
 
-def _responses_instruction_item_text(item: Mapping[str, JsonValue]) -> str:
-    instruction_text, _ = _split_responses_instruction_item_content(item)
-    return instruction_text
-
-
 def _responses_instruction_content_text(content: JsonValue) -> str | None:
     if isinstance(content, str):
         return content
@@ -671,6 +644,12 @@ class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
     _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
+    # The client's own ``store`` value (``None`` when the client omitted it),
+    # captured by ``normalize_responses_request_payload`` before ``store`` is
+    # forced to ``False`` for the ChatGPT backend. Read only by the
+    # subscription-overflow dispatch (anchor rule and the source-direction
+    # body); the ChatGPT-bound serialization never consults it.
+    _codex_lb_client_store: bool | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod

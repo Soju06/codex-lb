@@ -53,6 +53,7 @@ README and sample env stay slim without losing content.
   Listings also carry least-privilege guidance: guest access for monitoring
   where the companion supports it, and admin access only for control features;
   each companion remains responsible for documenting its current auth modes.
+  [Codex LB for Omarchy](https://github.com/janaki-sasidhar/omarchy-codex-lb) extends this pattern to Linux with a native Omarchy Quattro plugin using the same dashboard API. Its monitoring-only scope includes guest access, account quota and usage summaries, reset timing, and optional desktop notifications.
   Placement: the listing renders as an appendix-level section at the end of
   `docs/index.md` (below core usage and screenshots) and is kept
   self-contained so it can move to a dedicated page once the list grows; a

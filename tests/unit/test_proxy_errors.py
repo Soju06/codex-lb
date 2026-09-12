@@ -2,86 +2,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from starlette.requests import Request
 
 from app.core.clients.proxy import ProxyResponseError, _error_event_from_response, _error_payload_from_response
-from app.core.exceptions import ProxyInvalidRequestError, ProxyRateLimitError, ProxyReasoningEffortNotAllowed
-from app.core.openai.requests import ResponsesRequest
+from app.core.exceptions import ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.api import _logged_error_json_response, _stream_response_error_events
-from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
-
-
-def test_http_bridge_recovery_eligibility_accepts_turn_state_anchor_without_previous_response(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        proxy_api.proxy_service_module,
-        "get_settings",
-        lambda: SimpleNamespace(http_responses_session_bridge_operation_ledger_enabled=True),
-    )
-    payload = ResponsesRequest(model="gpt-5.6", instructions="", input="retry")
-
-    assert (
-        proxy_api._http_bridge_recovery_request_eligible(
-            payload,
-            bridge_active=True,
-            headers={"x-codex-turn-state": "turn-1"},
-        )
-        is True
-    )
-    assert (
-        proxy_api._http_bridge_recovery_request_eligible(
-            payload,
-            bridge_active=True,
-            headers={},
-        )
-        is False
-    )
-
-
-def test_http_bridge_indefinite_recovery_defers_predecessor_proof_to_submit_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        proxy_api.proxy_service_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_operation_ledger_enabled=True,
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
-            http_responses_session_bridge_server_recovery_max_attempts=6,
-        ),
-    )
-    fresh_turn = ResponsesRequest(model="gpt-5.6", instructions="", input="retry")
-    anchored_turn = ResponsesRequest(
-        model="gpt-5.6",
-        instructions="",
-        input="retry",
-        previous_response_id="resp_parent",
-    )
-
-    assert (
-        proxy_api._http_bridge_recovery_request_eligible(
-            fresh_turn,
-            bridge_active=True,
-            headers={"x-codex-turn-state": "turn-1"},
-        )
-        is True
-    )
-    assert (
-        proxy_api._http_bridge_recovery_request_eligible(
-            anchored_turn,
-            bridge_active=True,
-            headers={"x-codex-turn-state": "turn-1"},
-        )
-        is True
-    )
 
 
 def test_logged_error_json_response_preserves_upstream_diagnostic_markers():
@@ -150,7 +81,6 @@ async def test_stream_proxy_error_preserves_retry_after_as_sse_retry_hint():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("location", ["initial-stream", "recovery-factory", "recovery-stream"])
 @pytest.mark.parametrize("native_lifecycle", [False, True], ids=["openai", "native"])
 @pytest.mark.parametrize(
     "policy_error",
@@ -161,73 +91,33 @@ async def test_stream_proxy_error_preserves_retry_after_as_sse_retry_hint():
     ],
     ids=["invalid-request", "reasoning-policy", "without-param"],
 )
-async def test_stream_policy_rejection_preserves_terminal_error_during_recovery(
-    monkeypatch: pytest.MonkeyPatch,
-    location: str,
+async def test_stream_policy_rejection_preserves_terminal_error(
     native_lifecycle: bool,
     policy_error: ProxyInvalidRequestError | ProxyReasoningEffortNotAllowed,
 ) -> None:
-    monkeypatch.setattr(
-        proxy_api,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
-            http_responses_session_bridge_server_recovery_max_attempts=6,
-        ),
-    )
-    scheduler = VirtualScheduler(VirtualClock())
     cleanup = AsyncMock(spec=proxy_api._ResponsesReservationCleanup)
     created_event = 'data: {"type":"response.created","response":{"id":"resp_policy"}}\n\n'
 
     async def stream() -> AsyncIterator[str]:
-        if location == "initial-stream":
-            yield created_event
-            raise policy_error
-        exc = ProxyResponseError(
-            502,
-            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
-        )
-        setattr(exc, "http_bridge_durable_recovery_eligible", True)
-        raise exc
-
-    async def recovery_stream() -> AsyncIterator[str]:
         yield created_event
         raise policy_error
 
-    def recovery_factory() -> AsyncIterator[str]:
-        assert location != "initial-stream", "policy rejection must not trigger recovery"
-        if location == "recovery-factory":
-            raise policy_error
-        return recovery_stream()
-
-    events: list[str] = []
-
-    async def consume() -> None:
+    events = [
+        event
         async for event in _stream_response_error_events(
             stream(),
             owns_reservation=True,
             reservation=None,
             reservation_cleanup=cleanup,
-            recovery_stream_factory=recovery_factory,
-            require_durable_recovery_fence=True,
             preserve_native_failure_lifecycle=native_lifecycle,
-            scheduler=scheduler,
-        ):
-            events.append(event)
+        )
+    ]
 
-    consumer = scheduler.create_task(consume())
-    try:
-        await scheduler.drain()
-        await scheduler.advance(5.0)
-        assert consumer.done(), "policy rejection must terminate without further recovery"
-        await consumer
-    finally:
-        await scheduler.cancel_owned_tasks()
-
-    failures = [proxy_api._parse_sse_payload(event) for event in events if "response.failed" in event]
-    assert len(failures) == 1
-    failed = failures[0]
+    assert events[0] == created_event
+    assert len(events) == 2
+    failed = proxy_api._parse_sse_payload(events[1])
     assert failed is not None
+    assert failed["type"] == "response.failed"
     assert proxy_api.SYNTHETIC_TRANSPORT_FAILURE_MARKER not in failed
     response = failed["response"]
     assert isinstance(response, dict)
@@ -235,285 +125,7 @@ async def test_stream_policy_rejection_preserves_terminal_error_during_recovery(
     if policy_error.param is not None:
         expected_error["param"] = policy_error.param
     assert response["error"] == expected_error
-    assert events.count(created_event) == (0 if location == "recovery-factory" else 1)
     cleanup.release.assert_awaited_once_with(action="responses stream cleanup")
-
-
-@pytest.mark.asyncio
-async def test_indefinite_recovery_does_not_retry_after_downstream_event(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        proxy_api,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
-            http_responses_session_bridge_server_recovery_max_attempts=6,
-        ),
-    )
-
-    async def recovery() -> AsyncIterator[str]:
-        raise AssertionError("recovery must not run after a downstream event")
-        yield ""
-
-    async def stream():
-        yield 'data: {"type":"response.created"}\n\n'
-        raise ProxyResponseError(
-            502,
-            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
-        )
-
-    events = [
-        event
-        async for event in _stream_response_error_events(
-            stream(),
-            owns_reservation=False,
-            reservation=None,
-            recovery_stream_factory=recovery,
-        )
-    ]
-
-    assert len(events) == 2
-    assert "response.created" in events[0]
-    assert "response.failed" in events[1]
-
-
-@pytest.mark.asyncio
-async def test_indefinite_recovery_converts_retry_reservation_failure_to_sse(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        proxy_api,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
-            http_responses_session_bridge_server_recovery_max_attempts=6,
-        ),
-    )
-    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
-
-    async def stream():
-        if False:
-            yield ""
-        raise ProxyResponseError(
-            502,
-            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
-        )
-
-    async def recovery_stream():
-        raise ProxyRateLimitError("quota exhausted")
-        yield ""
-
-    events = [
-        event
-        async for event in _stream_response_error_events(
-            stream(),
-            owns_reservation=False,
-            reservation=None,
-            recovery_stream_factory=lambda: recovery_stream(),
-        )
-    ]
-
-    assert any("rate_limit_exceeded" in event and "response.failed" in event for event in events)
-
-
-@pytest.mark.asyncio
-async def test_indefinite_recovery_exhaustion_emits_terminal_response_failed(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        proxy_api,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
-            http_responses_session_bridge_server_recovery_max_attempts=2,
-        ),
-    )
-    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
-    attempts = 0
-
-    def durable_stream_incomplete(message: str) -> ProxyResponseError:
-        exc = ProxyResponseError(
-            502,
-            {"error": {"code": "stream_incomplete", "message": message, "type": "server_error"}},
-            retry_after_seconds=1,
-        )
-        setattr(exc, "http_bridge_durable_recovery_eligible", True)
-        return exc
-
-    async def stream():
-        if False:
-            yield ""
-        raise durable_stream_incomplete("closed before response.created")
-
-    async def recovery_stream():
-        nonlocal attempts
-        attempts += 1
-        raise durable_stream_incomplete(f"still closed attempt {attempts}")
-        yield ""
-
-    events = [
-        event
-        async for event in _stream_response_error_events(
-            stream(),
-            owns_reservation=False,
-            reservation=None,
-            recovery_stream_factory=lambda: recovery_stream(),
-            require_durable_recovery_fence=True,
-        )
-    ]
-
-    assert attempts == 2
-    assert events.count(": codex-lb recovery in progress\n\n") == 2
-    assert "response.failed" in events[-1]
-    assert "stream_incomplete" in events[-1]
-    assert "still closed attempt 2" in events[-1]
-    payload = proxy_api._parse_sse_payload(events[-1])
-    assert payload is not None
-    response = payload.get("response")
-    assert isinstance(response, dict)
-    assert isinstance(response.get("id"), str)
-    assert response["id"]
-
-
-@pytest.mark.asyncio
-async def test_indefinite_recovery_retries_eventless_bridge_timeouts(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        proxy_api,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
-            http_responses_session_bridge_server_recovery_max_attempts=2,
-        ),
-    )
-    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
-    attempts = 0
-
-    def durable_eventless_timeout(message: str) -> ProxyResponseError:
-        exc = ProxyResponseError(
-            503,
-            {
-                "error": {
-                    "code": proxy_api.HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
-                    "message": message,
-                    "type": "server_error",
-                }
-            },
-            retry_after_seconds=1,
-        )
-        setattr(exc, "http_bridge_durable_recovery_eligible", True)
-        return exc
-
-    async def stream():
-        if False:
-            yield ""
-        raise durable_eventless_timeout("eventless before recovery")
-
-    async def recovery_stream():
-        nonlocal attempts
-        attempts += 1
-        raise durable_eventless_timeout(f"eventless retry {attempts}")
-        yield ""
-
-    events = [
-        event
-        async for event in _stream_response_error_events(
-            stream(),
-            owns_reservation=False,
-            reservation=None,
-            recovery_stream_factory=lambda: recovery_stream(),
-            require_durable_recovery_fence=True,
-        )
-    ]
-
-    assert attempts == 2
-    assert events.count(": codex-lb recovery in progress\n\n") == 2
-    assert "response.failed" in events[-1]
-    assert proxy_api.HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE in events[-1]
-    assert "eventless retry 2" in events[-1]
-
-
-@pytest.mark.asyncio
-async def test_indefinite_recovery_converts_unexpected_admission_failure_to_sse(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(
-        proxy_api,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
-            http_responses_session_bridge_server_recovery_max_attempts=6,
-        ),
-    )
-    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
-
-    async def stream():
-        if False:
-            yield ""
-        raise ProxyResponseError(
-            502,
-            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
-        )
-
-    async def recovery_stream():
-        raise RuntimeError("durable admission database unavailable")
-        yield ""
-
-    events = [
-        event
-        async for event in _stream_response_error_events(
-            stream(),
-            owns_reservation=False,
-            reservation=None,
-            recovery_stream_factory=lambda: recovery_stream(),
-        )
-    ]
-
-    assert any("bridge_recovery_admission_failed" in event and "response.failed" in event for event in events)
-
-
-@pytest.mark.asyncio
-async def test_indefinite_recovery_stops_after_retry_output_then_transport_error(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(
-        proxy_api,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
-            http_responses_session_bridge_server_recovery_max_attempts=6,
-        ),
-    )
-    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay, result=None: _completed_asyncio_sleep())
-    attempts = 0
-
-    async def stream():
-        if False:
-            yield ""
-        raise ProxyResponseError(
-            502,
-            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
-        )
-
-    async def recovery_stream():
-        nonlocal attempts
-        attempts += 1
-        yield 'data: {"type":"response.created"}\n\n'
-        raise ProxyResponseError(
-            502,
-            {"error": {"code": "upstream_request_timeout", "message": "stalled", "type": "server_error"}},
-        )
-
-    events = [
-        event
-        async for event in _stream_response_error_events(
-            stream(),
-            owns_reservation=False,
-            reservation=None,
-            recovery_stream_factory=lambda: recovery_stream(),
-        )
-    ]
-
-    assert attempts == 1
-    assert any('"type":"response.created"' in event for event in events)
-
-
-async def _completed_asyncio_sleep(_delay: float = 0.0) -> None:
-    return None
 
 
 def _payload_error_code(payload) -> str | None:
@@ -611,59 +223,3 @@ async def test_error_event_fallback_no_reason():
     event = await _error_event_from_response(resp)
 
     assert event["response"]["error"].get("message") == "Upstream error: HTTP 500"
-
-
-@pytest.mark.asyncio
-async def test_indefinite_recovery_delay_sleeps_on_the_injected_scheduler(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        proxy_api,
-        "get_settings",
-        lambda: SimpleNamespace(
-            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
-            http_responses_session_bridge_server_recovery_max_attempts=2,
-        ),
-    )
-    clock = VirtualClock()
-    scheduler = VirtualScheduler(clock)
-    recovery_attempts = 0
-
-    async def stream():
-        if False:
-            yield ""
-        raise ProxyResponseError(
-            502,
-            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
-        )
-
-    async def recovery_stream():
-        nonlocal recovery_attempts
-        recovery_attempts += 1
-        yield 'data: {"type":"response.completed","response":{"id":"resp_recovered"}}\n\n'
-
-    events: list[str] = []
-
-    async def consume() -> None:
-        async for event in _stream_response_error_events(
-            stream(),
-            owns_reservation=False,
-            reservation=None,
-            recovery_stream_factory=lambda: recovery_stream(),
-            scheduler=scheduler,
-        ):
-            events.append(event)
-
-    consumer = scheduler.create_task(consume())
-    await scheduler.drain()
-    # The recovery marker is emitted, then the retry parks on a virtual timer
-    # (retry_after defaults to 5 seconds) instead of a wall-clock sleep.
-    assert events == [": codex-lb recovery in progress\n\n"]
-    assert recovery_attempts == 0
-    assert not consumer.done()
-    assert scheduler.pending_timers == 1
-
-    await scheduler.advance(5.0)
-    await consumer
-
-    assert recovery_attempts == 1
-    assert events[-1].startswith("data:") and "response.completed" in events[-1]
-    assert clock.monotonic() == pytest.approx(5.0)

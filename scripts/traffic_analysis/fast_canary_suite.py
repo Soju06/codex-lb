@@ -10,6 +10,7 @@ import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,10 @@ from scripts.traffic_analysis.failure_matrix import (
 from scripts.traffic_analysis.privacy_scan import scan_tree
 
 _RAW_RESULT_NAMES = ("client_a_reference", "client_a", "client_c", "strict")
+# Every key ``app.core.auth.AuthFile.last_refresh_at`` accepts, in the order it
+# resolves them. Stamping only one would leave a stale alias that the account
+# importer prefers, so all present keys are stamped together.
+_AUTH_LAST_REFRESH_KEYS = ("lastRefreshAt", "last_refresh")
 
 
 class FastCanaryError(RuntimeError):
@@ -99,6 +104,47 @@ def validate_config(config: FastCanaryConfig) -> FastCanaryConfig:
         trigger=config.trigger,
         codex_version=config.codex_version,
     )
+
+
+def stamp_isolated_auth_refresh(auth_json: Path) -> str:
+    """Record the isolated canary credential as having just been refreshed.
+
+    codex-lb proactively exchanges an account's refresh token on the first
+    request once the account's ``last_refresh`` is older than the fixed
+    ``TOKEN_REFRESH_INTERVAL_DAYS`` window (eight days,
+    ``app/core/auth/refresh.py``), and an imported account inherits
+    ``last_refresh`` verbatim from this file. Both controlled runners import it
+    into a throwaway database and then drive real client turns through the
+    proxy, so a stale timestamp makes the run exchange the real, single-use
+    refresh token against ``https://auth.openai.com``: the rotated credential
+    lands in a database the suite deletes during cleanup, every later run then
+    starts from a dead file, and the run being measured carries an outbound
+    call that has nothing to do with traffic parity. The upstream base URL is
+    redirected to the local fixture but the OAuth authorization host is a
+    protocol constant, so nothing else stops that call.
+
+    Stamping the file keeps the whole run inside the window (a run lasts
+    minutes, the window is days) without widening the window for the process,
+    which is what the removed ``CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS=365``
+    injection used to do for the failure matrix only. The recorded refresh time
+    is the only value that changes (the file is rewritten as formatted JSON);
+    tokens are neither inspected nor logged.
+    """
+    try:
+        document = json.loads(auth_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise FastCanaryError("isolated auth.json is not readable JSON") from exc
+    if not isinstance(document, dict):
+        raise FastCanaryError("isolated auth.json must contain a JSON object")
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+    present = [key for key in _AUTH_LAST_REFRESH_KEYS if key in document]
+    for key in present or [_AUTH_LAST_REFRESH_KEYS[-1]]:
+        document[key] = stamp
+    try:
+        atomic_write_json(auth_json, document, mode=0o600)
+    except OSError as exc:
+        raise FastCanaryError("isolated auth.json is not writable") from exc
+    return stamp
 
 
 def _run_checked(argv: Sequence[str], cwd: Path, environment: Mapping[str, str] | None = None) -> None:
@@ -181,6 +227,7 @@ def run_suite(
     config = validate_config(config)
     output_dir = config.run_dir / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
+    stamp_isolated_auth_refresh(config.auth_json)
     try:
         command_runner(
             (
@@ -203,7 +250,6 @@ def run_suite(
             raise FastCanaryError("raw HTTP/2 canary did not satisfy every required result")
 
         failure_environment = os.environ.copy()
-        failure_environment["CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS"] = "365"
         failure_environment["PATH"] = f"{config.native_bin_dir}{os.pathsep}{failure_environment.get('PATH', '')}"
         command_runner(
             (str(config.failure_runner), str(config.run_dir / "failure-matrix")),

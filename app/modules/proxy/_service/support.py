@@ -34,13 +34,14 @@ from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.locks import fast_lock
 from app.core.utils.sse import sse_event_type_from_block
-from app.db.models import Account
+from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy.affinity import _AffinityPolicy
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountLease,
@@ -495,6 +496,23 @@ def _account_selection_recovery_sleep_seconds_from_message(
 
 
 def _account_selection_recovery_sleep_seconds(selection: AccountSelection) -> float | None:
+    """The wait this selection failure earns before the caller re-selects.
+
+    ``hard_affinity_owner_excluded`` is the selector's proof that the hard
+    ``CODEX_SESSION`` owner it resolved is one of the caller's own
+    ``exclude_account_ids``. The owner cannot become selectable while that
+    exclusion holds and a hard row never spills to another account, so the
+    short owner-recovery window earns nothing here: every re-selection would
+    report the same ``hard_affinity_saturated`` until the request budget is
+    spent (7200s on the HTTP bridge), long after the client gave up. Fail
+    closed at once instead -- the same fail-closed the bridge already applies
+    when the request excludes the account its hard session is bound to
+    (``_require_http_bridge_bound_account_not_excluded``) -- and let the
+    client's own retry reach the owner with no exclusion. A genuinely
+    unavailable owner the caller did NOT exclude keeps its recovery wait.
+    """
+    if selection.hard_affinity_owner_excluded:
+        return None
     return _account_selection_recovery_sleep_seconds_from_message(
         selection.error_message,
         error_code=selection.error_code,
@@ -703,6 +721,9 @@ class _RefreshFailoverProxy(Protocol):
         http_status: int | None = None,
         *,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+        retry_after_seconds: float | None = None,
+        burst_cooldown_recorded: bool = False,
+        upstream_http_status: int | None = None,
     ) -> Any: ...
 
 
@@ -870,6 +891,12 @@ class _StreamSettlement:
     downstream_text_visible: bool = False
     response_id: str | None = None
     usage_settlement_transferred: bool = False
+    # Monotonic instant the upstream terminal frame (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed by
+    # ``_stream_once``, before it is yielded downstream. The throughput cohort
+    # sample ends its generation span here; the row's ``latency_ms`` keeps
+    # measuring to the generator's close (downstream flush, upstream EOF).
+    upstream_terminal_at: float | None = None
 
     def reset(self) -> None:
         fresh = type(self)()
@@ -984,6 +1011,12 @@ class _WebSocketRequestState:
     latency_first_upstream_event_ms: int | None = None
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
+    # Monotonic instant the upstream terminal event (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed for
+    # this turn, before terminal bookkeeping, API-key settlement and cleanup.
+    # The throughput cohort sample ends its generation span here; the row's
+    # ``latency_ms`` keeps measuring to the end of the finalizer.
+    upstream_terminal_at: float | None = None
     response_create_gate_wait_started_at: float | None = None
     # Monotonic time immediately before the current upstream response.create
     # send. Retries replace this value so admission wait and prior attempts do
@@ -1150,7 +1183,6 @@ class _WebSocketRequestState:
     # True after an existing UNKNOWN operation is claimed for this attempt.
     # If admission fails before send, cleanup must restore UNKNOWN rather than
     # treating the pre-existing row like a newly-created operation.
-    operation_recovery_claimed: bool = False
     # True only when this request created the durable operation row. A
     # pre-dispatch admission failure may remove that row; an existing row
     # represents an ambiguous upstream attempt and must remain fenced.
@@ -1162,9 +1194,6 @@ class _WebSocketRequestState:
     operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
-    # Immutable durable attempt generation. Recovery claims increment the
-    # operation's dispatch count before sending a replacement attempt.
-    operation_attempt_generation: int = 0
     # Last response identity successfully written to the durable operation.
     # Retry setup may clear the active response before a replacement is
     # acknowledged, but fallback settlement must still fence against this ID.
@@ -1219,8 +1248,8 @@ class _WebSocketRequestState:
     account_response_create_release: Callable[[AccountLease | None], Coroutine[Any, Any, None]] | None = None
     websocket_stream_lease: AccountLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
+    affinity_observation: AffinityObservation | None = None
     thread_affinity_last_touch_at: float = field(default_factory=time.monotonic)
-    suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
@@ -1763,6 +1792,28 @@ def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketReque
     return not (request_state.pending_function_call_ids or request_state.pending_tool_call_types)
 
 
+def _affinity_may_resolve_hard_owner(affinity_policy: _AffinityPolicy) -> bool:
+    """Return whether sticky selection may bind this affinity to one owner account.
+
+    A resolved hard ``CODEX_SESSION`` row narrows selection to its owner
+    (``hard_sticky`` in ``sticky_selection``): turn-state ownership, or the raw
+    compatibility row an old replica persisted for a bare session or thread
+    header, which every policy exposing ``legacy_selection_key`` consults and
+    which wins over the namespaced soft row. The owner is not a request-state
+    pin -- it is read from the database at selection time -- so neither the
+    direct websocket request nor the HTTP bridge session can tell whether its
+    affinity resolves to a hard owner. Any policy that may is treated as
+    owner-bound: excluding that owner would leave every re-selection at
+    ``hard_affinity_saturated`` until the connect budget runs out. Shared by
+    the direct websocket accepted-replay exclusion and the HTTP bridge one.
+    """
+    return (
+        affinity_policy.kind == StickySessionKind.CODEX_SESSION
+        or affinity_policy.legacy_selection_key is not None
+        or affinity_policy.legacy_continuity_source is not None
+    )
+
+
 def _record_websocket_route_metadata(
     request_state: _WebSocketRequestState,
     *,
@@ -1920,6 +1971,29 @@ def _selection_api_key_fair_share_threshold_pct(
     return _api_key_fair_share_threshold_pct_from_settings(settings)
 
 
+def opportunistic_admission_account_scope(settings: object, api_key: ApiKeyData | None) -> set[str] | None:
+    """Account ids an opportunistic admission check may consider; ``None`` is the whole pool.
+
+    The API key's account-assignment scope applies first. Single-account
+    routing then narrows the scope to the selected account, or to nothing when
+    no account is selected or the selected one lies outside the key's scope.
+    This is the exact scope ``ProxyService.check_opportunistic_admission`` has
+    always applied, hoisted so read-only callers (the pool-exhaustion probe)
+    share one definition with the admission gate.
+    """
+    scoped_account_ids = (
+        set(api_key.assigned_account_ids) if api_key is not None and api_key.account_assignment_scope_enabled else None
+    )
+    if getattr(settings, "routing_strategy", None) != "single_account":
+        return scoped_account_ids
+    selected_account_id = (getattr(settings, "single_account_id", None) or "").strip()
+    if not selected_account_id:
+        return set()
+    if scoped_account_ids is None or selected_account_id in scoped_account_ids:
+        return {selected_account_id}
+    return set()
+
+
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
     if not isinstance(payload, dict):
         return None
@@ -2023,6 +2097,24 @@ def websocket_connect_transport_failure_code(
         connect_error.code if connect_error else None,
         connect_error.type if connect_error else None,
     )
+
+
+UPSTREAM_STREAM_TRANSPORTS = frozenset({"auto", "http", "websocket"})
+_UPSTREAM_STREAM_TRANSPORT_DEFAULT = "auto"
+
+
+def configured_upstream_stream_transport(dashboard_settings: Any) -> str:
+    """Return the operator-configured upstream stream transport.
+
+    The dashboard row is the only source. The legacy ``"default"`` sentinel
+    (which used to defer to the removed ``CODEX_LB_UPSTREAM_STREAM_TRANSPORT``
+    env var) and any unknown value resolve to ``"auto"`` so a settings-cache
+    snapshot taken before the data migration ran behaves like the migrated row.
+    """
+    configured = getattr(dashboard_settings, "upstream_stream_transport", None)
+    if configured in UPSTREAM_STREAM_TRANSPORTS:
+        return cast(str, configured)
+    return _UPSTREAM_STREAM_TRANSPORT_DEFAULT
 
 
 def upstream_websocket_transport_recently_failed() -> bool:

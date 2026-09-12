@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { getReports } from "../api";
+import { getReports, getReportsOptions } from "../api";
 import { isReportDateRangeValid } from "../date";
 
 type ReportsFilterState = {
@@ -31,7 +31,28 @@ export function useReports(
         useragent: filters.useragent || undefined,
         timezone: timeZone,
       }),
-    refetchInterval: 60_000,
-    refetchIntervalInBackground: false,
+    staleTime: 5 * 60_000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+}
+
+export function useReportsOptions(filters: ReportsFilterState, timeZone: string | undefined) {
+  const scope = {
+    startDate: filters.startDate,
+    endDate: filters.endDate,
+    accountId: [...filters.accountId].sort(),
+    apiKeyId: [...(filters.apiKeyId ?? [])].sort(),
+    timezone: timeZone,
+  };
+  return useQuery({
+    queryKey: ["reports-options", scope],
+    enabled: isReportDateRangeValid(filters.startDate, filters.endDate),
+    queryFn: () => getReportsOptions(scope),
+    staleTime: 5 * 60_000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 }

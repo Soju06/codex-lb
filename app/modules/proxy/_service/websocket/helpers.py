@@ -15,6 +15,7 @@ from app.core.balancer.types import UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
+from app.core.clients.native_egress import NativeWebSocketRoutingMetadata
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     ImageFetchSession,
@@ -71,7 +72,6 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
-    StickySessionKind,
 )
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -291,6 +291,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _affinity_may_resolve_hard_owner,
     _clear_websocket_request_error_overrides,
     _DeferredKeyedStreamHealthPenalty,
     _event_type_from_payload,
@@ -625,22 +626,14 @@ def _websocket_accepted_replay_can_switch_account(request_state: "_WebSocketRequ
 def _websocket_affinity_may_resolve_hard_owner(affinity_policy: _AffinityPolicy) -> bool:
     """Return whether sticky selection may bind this request to one owner account.
 
-    A resolved hard ``CODEX_SESSION`` row narrows selection to its owner
-    (``hard_sticky`` in ``sticky_selection``): turn-state ownership, or the raw
-    compatibility row an old replica persisted for a bare session or thread
-    header, which every policy exposing ``legacy_selection_key`` consults and
-    which wins over the namespaced soft row. The owner is not a request-state
-    pin -- it is read from the database at selection time -- so the request
-    cannot tell whether its session resolves to a hard owner. Any policy that
-    may is treated as owner-bound: excluding that owner would leave every
-    re-selection at ``hard_affinity_saturated`` until the connect budget runs
-    out.
+    The predicate is shared with the HTTP bridge accepted replay
+    (``_affinity_may_resolve_hard_owner``): a resolved hard ``CODEX_SESSION``
+    row -- turn-state ownership or the raw compatibility row consulted through
+    ``legacy_selection_key`` -- narrows selection to an owner the request state
+    never carries, so excluding that owner would leave every re-selection at
+    ``hard_affinity_saturated`` until the connect budget runs out.
     """
-    return (
-        affinity_policy.kind == StickySessionKind.CODEX_SESSION
-        or affinity_policy.legacy_selection_key is not None
-        or affinity_policy.legacy_continuity_source is not None
-    )
+    return _affinity_may_resolve_hard_owner(affinity_policy)
 
 
 def _websocket_accepted_replay_may_exclude_account(request_state: "_WebSocketRequestState") -> bool:
@@ -704,18 +697,41 @@ def _prepare_websocket_request_state_for_account_switch(
     return _install_verified_fresh_replay(request_state)
 
 
+def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
+    """Drop the completed-response anchor and the state that only exists for it."""
+    continuity_state.last_completed_response_id = None
+    continuity_state.last_completed_input_count = 0
+    continuity_state.last_completed_input_prefix_fingerprint = None
+    continuity_state.last_pending_function_call_ids = []
+    continuity_state.last_pending_tool_call_types = {}
+
+
 def _websocket_continuity_anchor_for_payload(
     continuity_state: _WebSocketContinuityState | None,
     *,
     responses_payload: ResponsesRequest,
     codex_session_affinity: bool,
+    api_key_id: str | None = None,
 ) -> _WebSocketContinuityAnchor | None:
+    """Select a matching session anchor, retiring any known upstream rejection."""
     if continuity_state is None or not codex_session_affinity:
         return None
     if responses_payload.previous_response_id is not None:
         return None
     previous_response_id = continuity_state.last_completed_response_id
     if previous_response_id is None:
+        return None
+    if _is_websocket_stale_previous_response(previous_response_id=previous_response_id, api_key_id=api_key_id):
+        # Upstream already denied this anchor (``previous_response_not_found``)
+        # and the fail-closed path remembered it. Injecting it again would
+        # fail the client's retry identically (#1921): retire it from session
+        # continuity so the full-context resend goes unanchored, and so the
+        # same id cannot return once the negative cache entry expires.
+        _retire_websocket_continuity_anchor(continuity_state)
+        _facade().logger.info(
+            "websocket_session_anchor_retired response_id=%s reason=stale_previous_response",
+            previous_response_id,
+        )
         return None
     stored_count = continuity_state.last_completed_input_count
     if not _facade()._input_prefix_matches_stored_context(
@@ -793,12 +809,9 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
+    """Record completed context and pending tools, or clear an absent response anchor."""
     if response_id is None:
-        continuity_state.last_completed_response_id = None
-        continuity_state.last_completed_input_count = 0
-        continuity_state.last_completed_input_prefix_fingerprint = None
-        continuity_state.last_pending_function_call_ids = []
-        continuity_state.last_pending_tool_call_types = {}
+        _retire_websocket_continuity_anchor(continuity_state)
         return
     # Record the completed response id and pending tool-call metadata
     # regardless of input shape (string inputs leave ``input_item_count`` at
@@ -842,9 +855,16 @@ def _record_websocket_responses_lite_acceptance(
     )
 
 
-def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
+def _websocket_response_id(
+    event: OpenAIEvent | None,
+    payload: dict[str, JsonValue] | None,
+    *,
+    routing: NativeWebSocketRoutingMetadata | None = None,
+) -> str | None:
     if event is not None and event.response is not None and event.response.id:
         return event.response.id
+    if routing is not None:
+        return routing.payload_response_id
     if not isinstance(payload, dict):
         return None
     direct_response_id = payload.get("response_id")
@@ -1837,6 +1857,15 @@ def _draining_websocket_request_states(
     return [request_state for request_state in pending_requests if request_state.draining_until_terminal]
 
 
+def _is_response_output_event(event_type: str | None) -> bool:
+    """A ``response.*`` frame that is neither a terminal nor an error carries response output."""
+    return (
+        isinstance(event_type, str)
+        and event_type.startswith("response.")
+        and event_type not in {"response.completed", "response.failed", "response.incomplete"}
+    )
+
+
 def _match_websocket_request_state_for_anonymous_event(
     pending_requests: deque[_WebSocketRequestState],
     *,
@@ -1845,6 +1874,7 @@ def _match_websocket_request_state_for_anonymous_event(
     error_message: str | None = None,
     allow_unanchored_previous_response_error: bool = False,
     prefer_draining_requests: bool = True,
+    event_type: str | None = None,
 ) -> _WebSocketRequestState | None:
     if prefer_previous_response_not_found:
         return _match_websocket_request_state_for_previous_response_error(
@@ -1853,6 +1883,18 @@ def _match_websocket_request_state_for_anonymous_event(
             error_message=error_message,
             allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
+
+    if _is_response_output_event(event_type):
+        # Output frames carry no response id. On a pipelined socket they belong
+        # to the one response upstream has already created, whether that request
+        # is still visible or draining, never to a sibling still waiting for its
+        # own response.created (issue #2350). Vendor telemetry such as
+        # ``codex.rate_limits`` keeps the pre-created ownership below.
+        created_requests = [
+            request_state for request_state in pending_requests if request_state.response_id is not None
+        ]
+        if len(created_requests) == 1:
+            return created_requests[0]
 
     visible_requests = [
         request_state for request_state in pending_requests if _http_bridge_request_counts_against_queue(request_state)

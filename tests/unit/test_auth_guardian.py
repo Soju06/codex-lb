@@ -118,6 +118,7 @@ def test_build_auth_guardian_scheduler_allows_single_replica_without_leader_elec
     scheduler = build_auth_guardian_scheduler()
 
     assert scheduler.enabled is True
+    assert scheduler.topology_blocked is False
 
 
 def test_build_auth_guardian_scheduler_enabled_by_default_for_single_replica(
@@ -131,6 +132,20 @@ def test_build_auth_guardian_scheduler_enabled_by_default_for_single_replica(
 
     assert settings.auth_guardian_enabled is True
     assert scheduler.enabled is True
+    assert scheduler.topology_blocked is False
+
+
+def test_build_auth_guardian_scheduler_always_starts_and_reads_the_dashboard_toggle_per_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2: the env alias no longer decides whether the loop exists; each pass reads the effective toggle."""
+    settings = _settings(auth_guardian_enabled=False, leader_election_enabled=True)
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is True
+    assert scheduler.dashboard_enabled is guardian_module._dashboard_guardian_enabled
 
 
 def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replica(
@@ -147,9 +162,11 @@ def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replic
     with caplog.at_level(logging.WARNING, logger=guardian_module.logger.name):
         scheduler = build_auth_guardian_scheduler()
 
-    assert scheduler.enabled is False
-    # Operators must be told the guardian was disabled instead of silently
-    # losing proactive refresh work.
+    # The loop starts (the dashboard toggle is read per pass) but the static
+    # topology gate makes every pass skip; operators must be told rather than
+    # silently losing proactive refresh work.
+    assert scheduler.enabled is True
+    assert scheduler.topology_blocked is True
     assert any(
         "Auth Guardian disabled" in record.getMessage() and "without leader election" in record.getMessage()
         for record in caplog.records
@@ -158,12 +175,7 @@ def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replic
     settings.leader_election_enabled = True
     scheduler = build_auth_guardian_scheduler()
 
-    assert scheduler.enabled is True
-
-    settings.auth_guardian_enabled = False
-    scheduler = build_auth_guardian_scheduler()
-
-    assert scheduler.enabled is False
+    assert scheduler.topology_blocked is False
 
 
 def test_build_auth_guardian_scheduler_wires_leader_election_flag(
@@ -180,7 +192,7 @@ def test_build_auth_guardian_scheduler_wires_leader_election_flag(
     assert scheduler.leader_election_enabled is True
 
 
-def test_build_auth_guardian_scheduler_warns_when_self_disabling_without_leader_election(
+def test_build_auth_guardian_scheduler_warns_when_topology_blocks_without_leader_election(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -194,7 +206,7 @@ def test_build_auth_guardian_scheduler_warns_when_self_disabling_without_leader_
     with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
         scheduler = build_auth_guardian_scheduler()
 
-    assert scheduler.enabled is False
+    assert scheduler.topology_blocked is True
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
     assert len(warnings) == 1
     message = warnings[0].getMessage()
@@ -217,7 +229,119 @@ def test_build_auth_guardian_scheduler_does_not_warn_when_leader_election_enable
         scheduler = build_auth_guardian_scheduler()
 
     assert scheduler.enabled is True
+    assert scheduler.topology_blocked is False
     assert not [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
+def _tick_scheduler(
+    calls: list[str],
+    *,
+    now: datetime,
+    dashboard_enabled: Callable[[], Awaitable[bool]],
+    topology_blocked: bool = False,
+    leader_election_enabled: bool = True,
+    clock: Callable[[], datetime] | None = None,
+) -> AuthGuardianScheduler:
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    async def _single_live_replica() -> int:
+        return 1
+
+    return AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        dashboard_enabled=dashboard_enabled,
+        topology_blocked=topology_blocked,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_enabled=leader_election_enabled,
+        live_replica_count=_single_live_replica,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=clock or (lambda: now),
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_ticks_follow_the_dashboard_toggle_without_restart() -> None:
+    """M2: booted enabled -> dashboard off -> next tick skipped -> dashboard on -> next tick runs."""
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    # Fake clock: every tick is one guardian interval later, so the account
+    # refreshed on the first tick is stale again (> max age) by the third.
+    clock = {"now": now}
+    calls: list[str] = []
+    toggle = {"enabled": True}
+
+    async def dashboard_enabled() -> bool:
+        return toggle["enabled"]
+
+    def tick() -> None:
+        clock["now"] += timedelta(hours=13)
+
+    scheduler = _tick_scheduler(calls, now=now, dashboard_enabled=dashboard_enabled, clock=lambda: clock["now"])
+
+    await scheduler._refresh_once()
+    assert calls == ["stale-active"]
+
+    tick()
+    toggle["enabled"] = False
+    await scheduler._refresh_once()
+    assert calls == ["stale-active"]
+
+    tick()
+    toggle["enabled"] = True
+    await scheduler._refresh_once()
+    assert calls == ["stale-active", "stale-active"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("topology_blocked", "leader_election_enabled", "expected_calls"),
+    [
+        pytest.param(False, False, ["stale-active"], id="single-replica"),
+        pytest.param(False, True, ["stale-active"], id="multi-replica-with-election"),
+        pytest.param(True, False, [], id="multi-replica-without-election"),
+    ],
+)
+async def test_auth_guardian_dashboard_toggle_cannot_override_the_topology_gate(
+    topology_blocked: bool,
+    leader_election_enabled: bool,
+    expected_calls: list[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The static topology gate (multi-replica ring without election) wins over a dashboard ``true``."""
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    calls: list[str] = []
+    scheduler = _tick_scheduler(
+        calls,
+        now=now,
+        dashboard_enabled=_always_enabled,
+        topology_blocked=topology_blocked,
+        leader_election_enabled=leader_election_enabled,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="app.core.auth.guardian"):
+        await scheduler._refresh_once()
+
+    assert calls == expected_calls
+    # The builder logs the static topology block once at WARNING; a pass that
+    # skips because of it only says so at DEBUG (a 6-hourly WARNING for a
+    # condition that cannot change without a restart is noise).
+    assert [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING] == []
+    skips = [record.getMessage() for record in caplog.records if "without leader election" in record.getMessage()]
+    if topology_blocked:
+        assert len(skips) == 1
+    else:
+        assert skips == []
 
 
 @pytest.mark.asyncio
@@ -238,6 +362,7 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=2,
@@ -268,6 +393,7 @@ async def test_auth_guardian_refresh_once_refreshes_stale_paused_without_changin
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
@@ -309,6 +435,7 @@ async def test_auth_guardian_refresh_once_survives_candidate_session_close() -> 
         scheduler = AuthGuardianScheduler(
             interval_seconds=21600,
             enabled=True,
+            dashboard_enabled=_always_enabled,
             max_age_seconds=12 * 3600,
             batch_size=10,
             concurrency=1,
@@ -346,6 +473,7 @@ async def test_auth_guardian_skips_pass_when_dynamic_ring_shows_multiple_replica
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
@@ -386,6 +514,7 @@ async def test_auth_guardian_runs_when_dynamic_ring_has_single_replica() -> None
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
@@ -424,6 +553,7 @@ async def test_auth_guardian_ignores_dynamic_ring_when_leader_election_enabled()
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
@@ -462,6 +592,7 @@ async def test_auth_guardian_refresh_once_invalidates_account_selection_cache(
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
@@ -501,6 +632,7 @@ async def test_auth_guardian_transport_failure_does_not_mark_status() -> None:
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
@@ -545,6 +677,7 @@ async def test_auth_guardian_permanent_refresh_failure_invalidates_account_selec
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
@@ -586,6 +719,7 @@ async def test_auth_guardian_run_loop_survives_transient_pass_failure(caplog: py
     scheduler = AuthGuardianScheduler(
         interval_seconds=1,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
@@ -622,6 +756,7 @@ async def test_auth_guardian_skips_backoff_before_batch_limit() -> None:
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=2,
         concurrency=1,
@@ -672,6 +807,7 @@ async def test_auth_guardian_waits_for_refresh_before_cancelled_candidate_exits(
     scheduler = AuthGuardianScheduler(
         interval_seconds=21600,
         enabled=True,
+        dashboard_enabled=_always_enabled,
         max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
@@ -702,6 +838,10 @@ async def test_auth_guardian_waits_for_refresh_before_cancelled_candidate_exits(
 
 async def _noop_sleep() -> None:
     return None
+
+
+async def _always_enabled() -> bool:
+    return True
 
 
 def _settings(

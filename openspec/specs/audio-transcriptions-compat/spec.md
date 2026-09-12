@@ -1,7 +1,7 @@
 # audio-transcriptions-compat Specification
 
 ## Purpose
-TBD - created by archiving change add-transcription-proxy-compat. Update Purpose after archive.
+Governs the transcription proxy routes: the native Codex `POST /backend-api/transcribe` and the OpenAI-compatible `POST /v1/audio/transcriptions`. Codex voice input and OpenAI-style clients both send audio through these paths, so they must reuse the proxy's authentication, model restriction, rate-limit, account-selection, and retry behaviour with a fixed effective model, while keeping multipart uploads authorized and bounded.
 ## Requirements
 ### Requirement: Native transcription proxy endpoint
 The system SHALL expose `POST /backend-api/transcribe` for multipart audio transcription requests. The endpoint MUST accept a multipart `file` part and MAY accept a `prompt` part, and MUST forward requests to upstream `/transcribe` using selected account credentials. While forwarding multipart form data, the service MUST strip inbound `Content-Type` header values case-insensitively so the upstream client can generate a correct boundary. For a non-native Codex client, the upstream request MUST use canonical `codex_cli_rs` `User-Agent`, `originator`, and `version` values and MUST NOT forward OpenAI SDK fingerprint headers including `x-stainless-*`. A native Codex client MUST forward its inbound `User-Agent` unchanged and MUST NOT add canonical `originator` or `version` headers.
@@ -85,7 +85,7 @@ When transcription account freshness checks fail before the first upstream call,
 - **THEN** the request returns an OpenAI-format error envelope with non-500 status and does not surface an unhandled exception
 
 ### Requirement: Transcription proxy requests use a bounded retry budget
-The system MUST enforce a configurable total request budget for transcription proxy routes across account selection, token refresh, upstream connect, and upstream response handling. Once that budget is exhausted, the proxy MUST stop retrying and return a stable OpenAI-format timeout failure instead of waiting through repeated hard-coded timeout windows.
+The system MUST enforce a configurable total request budget for transcription proxy routes across account selection, token refresh, upstream connect, and upstream response handling. Once that budget is exhausted, the proxy MUST stop retrying and return a stable OpenAI-format timeout failure instead of waiting through repeated hard-coded timeout windows. The budget is `transcription_request_budget_seconds`, dashboard-managed (`configuration-tiers`): a non-NULL `dashboard_settings.transcription_request_budget_seconds` MUST override `CODEX_LB_TRANSCRIPTION_REQUEST_BUDGET_SECONDS`, which remains a deprecated fallback, and the effective value MUST come from the `SettingsCache` snapshot bound to the request.
 
 #### Scenario: Transcription budget expires before retry
 - **WHEN** a transcription request consumes its configured request budget before a retry attempt can begin
@@ -96,6 +96,12 @@ The system MUST enforce a configurable total request budget for transcription pr
 - **WHEN** the first transcription attempt returns 401 and token refresh succeeds while request budget remains
 - **THEN** the retry uses the refreshed account metadata
 - **AND** the retry only proceeds if enough request budget remains for another attempt
+
+#### Scenario: Dashboard budget overrides startup environment
+- **GIVEN** `CODEX_LB_TRANSCRIPTION_REQUEST_BUDGET_SECONDS=120` and an operator stores `240` through `PUT /api/settings`
+- **WHEN** a new transcription request computes its deadline on any replica
+- **THEN** the deadline uses the 240 second dashboard value
+- **AND** `GET /api/settings` reports `provenance.transcription_request_budget_seconds.source = "dashboard"`
 
 ### Requirement: Transcription multipart uploads are authorized and bounded
 
@@ -160,3 +166,19 @@ Byte-limit failures MUST return HTTP 413 with OpenAI error `code = payload_too_l
 - **WHEN** parsing succeeds, fails a limit, encounters malformed multipart, receives a client disconnect, or is cancelled
 - **THEN** every created multipart spool is closed
 - **AND** disconnect and cancellation are not converted to HTTP 413
+
+### Requirement: Daybreak capability intent fails closed before transcription parsing
+
+`POST /backend-api/transcribe` and `POST /v1/audio/transcriptions` MUST require a valid proxy API key whenever `X-Codex-LB-Required-Capability` is present, even when deployment-wide API-key authentication is disabled. After authentication they MUST return HTTP 400 with `error.code = "required_capability_transport_unsupported"` before multipart parsing, model-source lookup, usage reservation, account selection, or upstream dispatch. Headerless transcription requests MUST retain their existing behavior.
+
+#### Scenario: Authenticated carrier is denied before transcription parsing
+
+- **WHEN** a valid proxy API key sends either transcription route with the Daybreak carrier
+- **THEN** the route returns HTTP 400 `required_capability_transport_unsupported`
+- **AND** no multipart body is parsed and no model source, reservation, account, or upstream request is selected
+
+#### Scenario: Headerless transcription behavior remains unchanged
+
+- **WHEN** a transcription request omits the required-capability carrier
+- **THEN** the existing authentication, parsing, policy, account-routing, and response behavior remains in effect
+

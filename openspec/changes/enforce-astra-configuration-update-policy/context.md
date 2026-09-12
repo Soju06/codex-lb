@@ -155,6 +155,11 @@ for a follow-up and is not covered by the delta requirement.
 Source dispatch now owns admission slots and settlement. Validate configuration
 updates and estimate the prepared source body inside the existing cleanup
 boundary, including admission claims already acquired by overflow routing.
+Payload shaping therefore precedes the reservation on that route; a failure
+while shaping releases the admission claims without a request-log row, and the
+owner's abandonment accounting (client disconnect, stall, interrupted dispatch)
+begins at the source open, which is the step between the reservation and the
+dispatch.
 Preserve source overflow attribution,
 telemetry stripping, and slot release on payload or reservation errors.
 

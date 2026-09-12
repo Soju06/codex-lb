@@ -792,7 +792,7 @@ async def test_overflow_route_helper_releases_the_decisions_claims_when_admissio
     dispatch = _dispatch_double(source, model="overflow-latch-model", route=ROUTE_V1_RESPONSES)
     assert get_source_bulkhead().in_flight(source_id) == 1
 
-    def exploding_estimate(_payload: object) -> object:
+    def exploding_estimate(_payload: object, **_kwargs: object) -> object:
         raise RuntimeError("estimate exploded")
 
     async def never_opened(*_args: object, **_kwargs: object) -> object:
@@ -2000,10 +2000,13 @@ async def test_abandonment_d_cancellation_between_the_reservation_and_the_open(
     _forbid_subscription_stream(monkeypatch)
     scene = await _exhausted_scene(async_client, source_upstream, tag="abandon_d")
 
-    def interrupt(*args: object, **kwargs: object) -> dict[str, Any]:
+    async def interrupt(*args: object, **kwargs: object) -> object:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(proxy_api, "_shape_source_responses_payload", interrupt)
+    # Shaping precedes admission so the shaped body is what admission measures;
+    # the open is the step between the reservation and the dispatch.
+    monkeypatch.setattr(proxy_api, "stream_source_responses", interrupt)
+    monkeypatch.setattr(proxy_api, "forward_source_responses", interrupt)
     stream = _AsgiStream(
         app=_app(async_client),
         path=CODEX_ROUTE,

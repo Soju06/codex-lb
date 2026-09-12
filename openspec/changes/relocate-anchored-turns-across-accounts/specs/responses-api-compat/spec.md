@@ -40,9 +40,13 @@ The rebuild MUST walk the `parent_response_id` chain from the anchor and assembl
 
 A turn counts as settled, and so as material for the rebuild, only when its spool carries a terminal event that reports an answer. A terminal event that reports a failure MUST NOT make a failed turn read as an answered one in the rebuilt conversation. The rebuilt input MUST then be joined to the client's current turn. The join MUST NOT delete, reorder or alter any item the client sent. A rebuild that drops a client item because its content coincides with an item already in the chain is a worse failure than refusing to rebuild at all: the user's message is gone, the result still satisfies every structural predicate, and nothing downstream can detect it.
 
-The proxy MUST therefore establish which shape the client sent rather than infer it from content equality. When the client's input is a continuation delta, the chain supplies the history and the delta is appended unchanged. When it is a full resend, the client's own body is the authority and the chain is not used. When the input is provably neither — a partial restatement whose boundary cannot be established without matching content — the proxy MUST refuse to rebuild and keep today's fail-closed behaviour.
+**The anchor decides the shape, not the input.** A request carrying `previous_response_id` is a continuation by the wire contract: its `input` is that turn's delta, whatever the delta happens to contain, and the chain supplies everything before it. A request carrying no anchor is not a continuation at all — it is the full-resend case, served by the client's own body, which does not use the chain. There is no third case to adjudicate and no boundary to search for.
 
-Content comparison MAY be used to *verify* a boundary the shape already established. It MUST NOT be used to *discover* one.
+The proxy MUST NOT derive the shape by inspecting the input: a client may legitimately restate a history that contains no model-authored item, and any predicate that reads "no assistant turns" as "this is a delta" will join the chain to a full resend and double the conversation. Content comparison MAY verify a boundary the anchor already established. It MUST NOT discover one.
+
+The rebuild MUST be told which anchor it is rebuilding, and MUST verify that the chain it was handed terminates at that anchor. A chain that is internally consistent but belongs to a different conversation MUST be refused; internal parent links alone do not prove the chain is this request's history.
+
+The shapes of the turns inside the chain are not a gate. A parent turn that was itself a full resend is ordinary material, and requiring every chain turn to look like a delta would permanently disable relocation for any thread whose first recorded turn was a resend.
 
 The rebuilt body MUST satisfy the same strict account-neutral predicate a client-supplied full resend must satisfy. The proxy MUST fail closed — leaving today's owner-unavailable behaviour intact — when the transcript is unavailable or incomplete, when any turn lacks a stored request body or a complete event spool, when the parent chain is broken or cyclic, when a terminal response event is missing, when the current input is a scalar string that cannot carry prior context, when a tool call is unsettled, when a declared tool is not portable, or when any account-owned state survives projection.
 
@@ -75,11 +79,18 @@ The rebuild requires durable operation material — a stored request body, a com
 - **THEN** every item the client sent appears in the result
 - **AND** the coincidence does not shorten the client's turn
 
-#### Scenario: An unestablishable boundary refuses rather than guesses
+#### Scenario: A resend with no assistant turns is still a resend
 
-- **GIVEN** a client input that is neither a recognised continuation delta nor a recognised full resend
+- **GIVEN** an unanchored request whose restated history contains no model-authored item
 - **WHEN** relocation is evaluated
-- **THEN** no rebuild is produced and the request keeps today's fail-closed behaviour
+- **THEN** it is treated as a full resend, not as a continuation delta
+- **AND** the durable chain is not joined to it
+
+#### Scenario: A chain that is not this anchor's history is refused
+
+- **GIVEN** a transcript whose parent links are internally consistent but whose newest turn is not the anchor the client sent
+- **WHEN** the rebuild verifies it
+- **THEN** it refuses rather than rebuilding another conversation's history
 
 #### Scenario: The byte bound is a whole-transcript bound
 

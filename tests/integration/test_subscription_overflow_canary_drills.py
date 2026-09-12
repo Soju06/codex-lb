@@ -4,21 +4,27 @@ Until now the drills existed only as prose: a seven-row table in
 ``docs/routing.md`` and the matching clauses in the
 ``add-subscription-overflow-model-source`` spec delta. An operator ran them by
 hand against a canary deployment and compared what they saw with a sentence.
-This module is the same list, executable: one ``test_drill_*`` per table row,
-each asserting what **that row** promises rather than a fixed checklist -- the
-wire answer every time (its exact message where the row states one; for
-Disconnect, that nothing reached the client at all), and then whichever of the
-``request_logs`` rows, the ``model_source_pins`` rows, the outcome label, the
-API-key reservation, the source bulkhead and the breaker state the row is
-actually about. No drill asserts all six: one that runs without an API key has
-no reservation to check, Disconnect and Silent headers pin the counters their
-own rows are about (the abandonment ``stage``, the timeout ``phase``) rather
-than the outcome label, and only Stall is a row about the breaker. Padding the
-rest with vacuous assertions would say less, not more. ``docs/routing.md``
-states the same rule beside the table, and names the two clauses of the Kill
-switches row its own drill does not cover: the cross-replica settings-cache
-window (manual, it needs a second replica) and the release half, which is the
-Neutral release drill's subject on a disabled source.
+This module is the same list, executable: the **Expected** cell of every table
+row is a list of clauses, and each clause is either asserted by a
+``test_drill_*`` here or listed in the runbook as one only the canary can
+settle. A drill asserts what *its own clauses* promise rather than a fixed
+checklist -- the wire answer every time, its exact message where the clause
+states one, and then whichever of the ``request_logs`` rows, the
+``model_source_pins`` rows, the outcome label, the API-key reservation, the
+source bulkhead and the breaker state those clauses are actually about. No
+drill asserts all six: one that runs without an API key has no reservation to
+check, Disconnect and Silent headers pin the counters their own rows are about
+(the abandonment ``stage``, the timeout ``phase``) rather than the outcome
+label, and only Stall is a row about the breaker. Padding the rest with
+vacuous assertions would say less, not more.
+
+Three clauses have no rehearsal and say so in ``docs/routing.md`` under "Not
+rehearsed": whether live ChatGPT traffic keeps flowing through a stall (this
+suite's pool is exhausted by construction, so it can only assert that the
+stalled source never touches the ChatGPT connector), the cross-replica
+settings-cache window (it needs a second replica) and whether the real source
+mints its ``response.id`` on ``response.created`` (the stub here is built to;
+only the canary can tell you about the source you are about to designate).
 
 What it is and is not (design v3 §13.4): these are in-process ASGI tests
 against a stub aiohttp source and the test database. ``make
@@ -141,6 +147,9 @@ _RETENTION_LOGGER = "app.core.retention.job"
 # A dropped-SYN address: RFC 5737 TEST-NET-1 on the discard port. Reserved for
 # documentation and routed nowhere, so the connect phase is what fails.
 _BLACK_HOLE_URL = "http://192.0.2.1:9/v1"
+# The frames a client cannot see before the response id is known, so the ones
+# ``response.created`` must precede for an SDK turn to be anchorable.
+_CONTENT_BEARING_EVENTS = frozenset({"response.output_item.added", "response.output_text.delta"})
 # Short enough that a drill finishes in well under a second; the wire text the
 # assertions pin still names the production deadline.
 _SHORT_DEADLINE_SECONDS = 0.4
@@ -519,6 +528,7 @@ async def test_drill_stall_fails_closed_and_opens_the_breaker(
 
     assert unreachable.status_code == 502, unreachable.text
     assert _error(unreachable)["code"] == "model_source_unreachable"
+    assert b"data:" not in unreachable.content, "the error document is the whole answer; no `200` preceded it"
     assert [(row.status, row.error_code) for row in await _all_rows()] == [("error", "model_source_unreachable")]
     assert breaker.failures(black_hole_id) == 1
 
@@ -542,6 +552,7 @@ async def test_drill_stall_fails_closed_and_opens_the_breaker(
     header_error = _error(timed_out)
     assert header_error["code"] == "model_source_timeout"
     assert "response headers within 20s" in header_error["message"], header_error["message"]
+    assert b"data:" not in timed_out.content, "the header wait fails before any `200` reaches the client"
     assert timeouts.phases() == ["header"]
     assert breaker.failures(silent_id) == 1
 
@@ -580,7 +591,9 @@ async def test_drill_stall_fails_closed_and_opens_the_breaker(
     assert fresh.json() == _todays_429(reset_at)
     assert pinned.status_code == 503, pinned.text
     assert _error(pinned)["code"] == MODEL_SOURCE_UNAVAILABLE_CODE
-    assert pinned.headers["retry-after"] == str(overflow_module.RETRY_AFTER_SECONDS)
+    # The runbook names the literal, so the drill pins the literal as well as
+    # the constant: a re-tuned ``RETRY_AFTER_SECONDS`` must edit the row too.
+    assert pinned.headers["retry-after"] == str(overflow_module.RETRY_AFTER_SECONDS) == "2"
     assert len(state.requests) == 3, "an open breaker must not reach the source again"
     assert outcomes[-2:] == [
         (ROUTE_CODEX_RESPONSES, "declined_breaker_open"),
@@ -752,10 +765,14 @@ async def test_drill_neutral_release_frees_a_source_free_conversation(
 
 
 @pytest.mark.asyncio
-async def test_neutral_release_drill_refuses_a_ciphertext_transcript_whatever_it_declares(
+async def test_drill_neutral_release_refuses_a_ciphertext_transcript_whatever_it_declares(
     async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other half of the row: reasoning ciphertext is unreleasable even behind a stateless declaration."""
+    """The other half of the row: a reasoning-bearing conversation gets ``400`` and keeps its pin.
+
+    Reasoning ciphertext is unreleasable even behind a stateless declaration --
+    the tool shapes above are the *portable* axis, this is the transcript one.
+    """
 
     outcomes = _spy_overflow_outcomes(monkeypatch)
     scene = await _exhausted_scene(async_client, source_upstream, tag="drill_release_cipher")
@@ -773,7 +790,7 @@ async def test_neutral_release_drill_refuses_a_ciphertext_transcript_whatever_it
     assert response.status_code == 400, response.text
     assert _error(response)["code"] == SOURCE_UNAVAILABLE_CODE
     assert attempts == [] and scene.state.requests == []
-    assert len(await _pin_rows()) == 1
+    assert [pin.source_id for pin in await _pin_rows()] == [scene.source_id], "a refused thread keeps its pin"
     assert outcomes == [(ROUTE_CODEX_RESPONSES, "pinned_unservable_source_disabled")]
 
 
@@ -955,7 +972,9 @@ async def test_drill_kill_switches_restore_subscription_behaviour(
     by "pinned conversations drain", asserted here as the served turn, its
     ``subscription_overflow_pinned`` row, the ``dispatched_pinned`` outcome and
     the surviving pin rows, still the source's and still inside the idle TTL --
-    and once the source is gone it ends with ``400`` and keeps its pin.
+    and once the source is gone it ends with ``400`` and keeps its pin. A
+    *source-free* conversation on that same gone source is released to an
+    account instead, which is the row's other half.
     """
 
     attempts = _forbid_subscription_stream(monkeypatch)
@@ -1041,6 +1060,26 @@ async def test_drill_kill_switches_restore_subscription_behaviour(
         assert rows[2:] == []
         assert set(pins) == {pinned_key}
         assert pins[pinned_key].source_id == scene.source_id
+
+        # "... releases source-free conversations": the other half of the same
+        # switch, on a transcript an account can reproduce. The delete leg is
+        # the only rehearsal anywhere that deletes a source and then releases a
+        # conversation off it -- the cause differs (``source_deleted`` vs
+        # ``source_disabled``) even though the release path is shared.
+        await _pool_is_healthy(async_client, tag=f"switch_{switch[:6]}")
+        relayed = _canned_subscription_stream(monkeypatch, response_id=f"resp_drill_switch_{switch[:6]}")
+        released = await async_client.post(
+            CODEX_ROUTE,
+            json={**_codex_body(), "tools": [{"type": "local_shell"}], "input": _source_free_input()},
+            headers=_native_headers(pinned_thread),
+        )
+        await _drain(async_client)
+
+        assert released.status_code == 200, released.text
+        assert len(relayed) == 1, "the release target is a subscription account"
+        assert outcomes[-1] == (ROUTE_CODEX_RESPONSES, "pinned_released_neutral")
+        assert await _pin_rows() == [], "a released conversation is no longer the source's"
+        assert (await _all_rows())[-1].account_id is not None
     assert get_source_bulkhead().in_flight(scene.source_id) == 0
 
 
@@ -1140,11 +1179,16 @@ async def test_drill_anchor_timing_refuses_an_unanchorable_sdk_turn(
 
 
 @pytest.mark.asyncio
-async def test_anchor_timing_drill_accepts_a_source_that_mints_its_id_first(
+async def test_drill_anchor_timing_accepts_a_source_that_mints_its_id_first(
     async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The passing half of the same row: an early ``response.created`` id anchors the chain to its source.
 
+    Whether the *real* source mints its id that early is the canary's job (the
+    stub here is built to); what this pins is the proxy's half -- given an id
+    on ``response.created``, that event still reaches the client before any
+    content-bearing frame, the anchor row exists and the turn is ``200``, and
+    the next SDK turn goes back to the same source on the strength of that row.
     The follow-up runs against a *healthy* pool on purpose -- the anchor row,
     not exhaustion, is what must send it back to the source.
     """
@@ -1166,6 +1210,14 @@ async def test_anchor_timing_drill_accepts_a_source_that_mints_its_id_first(
 
     assert anchored.status_code == 200, anchored.text
     assert _lifecycle(_events(anchored.text)) == (["resp_drill_anchor"], ["response.completed"])
+    # "... **before** its first content-bearing frame": the ordering the row is
+    # about, read off the client's stream rather than assumed from the stub --
+    # a proxy that buffered ``response.created`` behind the first delta would
+    # leave an SDK client unable to anchor its follow-up.
+    event_types = [event["type"] for event in _events(anchored.text)]
+    content_at = [index for index, name in enumerate(event_types) if name in _CONTENT_BEARING_EVENTS]
+    assert content_at, event_types
+    assert event_types.index("response.created") < content_at[0], event_types
     assert [(pin.kind, pin.pin_key, pin.source_id) for pin in await _pin_rows()] == [
         (PIN_KIND_ANCHOR, anchor_pin_key(key_id, "resp_drill_anchor"), scene.source_id)
     ]

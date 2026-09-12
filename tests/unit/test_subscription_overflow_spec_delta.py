@@ -207,8 +207,10 @@ def test_every_drill_row_names_its_rehearsal_and_every_rehearsal_a_row() -> None
         cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
         assert len(cells) == 4, row
         rehearsals = [token for token in _BACKTICKED.findall(cells[3]) if token.startswith("test_drill_")]
-        assert len(rehearsals) == 1, (cells[0], rehearsals)
-        named.append(rehearsals[0])
+        # A row whose clauses split across two rehearsals (a passing and a
+        # failing half) names both; a row that names none is the failure.
+        assert rehearsals, (cells[0], cells[3])
+        named.extend(rehearsals)
 
     defined = _DRILL_TEST.findall(_read(_DRILL_SUITE))
 

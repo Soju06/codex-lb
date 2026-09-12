@@ -42,6 +42,7 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.clock import Scheduler
 from app.core.errors import (
+    NATIVE_GIVEUP_RETRYABLE_CODE,
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
@@ -49,6 +50,7 @@ from app.core.errors import (
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
     coerce_error_param,
+    native_giveup_retryable_message,
     normalize_public_error_param,
     openai_error,
     previous_response_stream_incomplete_error,
@@ -1758,6 +1760,22 @@ def _sanitize_websocket_terminal_error_fields(
             error_param_state if error_param_state.present else None,
         )
     normalized_code = _normalize_error_code(error_code, error_type)
+    if normalized_code in {"server_is_overloaded", "slow_down"}:
+        # These two codes are the only ones the native Codex CLI treats as
+        # terminal (zero reconnect attempts) rather than retryable, and
+        # overflow.py's own contract already forbids sending them to Codex
+        # over this transport. Unlike ``stream_incomplete`` et al. (used
+        # broadly here for ordinary connection drops, not just capacity
+        # give-up), these two codes are unambiguous capacity signals
+        # wherever they appear on a terminal frame, so relabel them the same
+        # way the HTTP give-up path does.
+        request_state.websocket_terminal_error_fields_sanitized = True
+        return (
+            NATIVE_GIVEUP_RETRYABLE_CODE,
+            native_giveup_retryable_message(normalized_code, error_message, None),
+            "server_error",
+            error_param_state if error_param_state.present else None,
+        )
     recoverable = _facade()._is_previous_response_not_found_error(
         code=normalized_code,
         param=error_param_state,

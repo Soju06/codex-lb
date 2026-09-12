@@ -6,6 +6,7 @@ import gc
 import hashlib
 import json
 import logging
+import re
 import socket
 import ssl
 import sys
@@ -9815,15 +9816,28 @@ async def test_native_codex_stream_suppresses_marked_synthetic_transport_termina
         )
         yield "data: [DONE]\n\n"
 
-    with pytest.raises(proxy_module.ProxyResponseError):
-        _ = [
-            event_block
-            async for event_block in proxy_api._normalize_public_responses_stream(
-                synthetic_failure_stream(),
-                enforce_openai_sdk_contract=False,
-                preserve_native_failure_lifecycle=True,
-            )
-        ]
+    events = [
+        event_block
+        async for event_block in proxy_api._normalize_public_responses_stream(
+            synthetic_failure_stream(),
+            enforce_openai_sdk_contract=False,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    # codex-lb has already given up: rather than re-raising (which would
+    # close the already-200'd stream with zero bytes), it must emit exactly
+    # one terminal ``response.failed`` naming a retryable code, then end the
+    # stream (the ``data: [DONE]`` upstream sent after the marked event is
+    # never reached/forwarded).
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    error = payload["response"]["error"]
+    assert error["code"] == "rate_limit_exceeded"
+    assert re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error["message"])
+    assert "upstream_request_timeout" in error["message"]
 
 
 @pytest.mark.asyncio
@@ -9836,15 +9850,23 @@ async def test_native_codex_stream_suppresses_marked_incomplete_terminal_as_eof(
         )
         yield "data: [DONE]\n\n"
 
-    with pytest.raises(proxy_module.ProxyResponseError):
-        _ = [
-            event_block
-            async for event_block in proxy_api._normalize_public_responses_stream(
-                synthetic_failure_stream(),
-                enforce_openai_sdk_contract=False,
-                preserve_native_failure_lifecycle=True,
-            )
-        ]
+    events = [
+        event_block
+        async for event_block in proxy_api._normalize_public_responses_stream(
+            synthetic_failure_stream(),
+            enforce_openai_sdk_contract=False,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    error = payload["response"]["error"]
+    assert error["code"] == "rate_limit_exceeded"
+    assert re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error["message"])
+    assert "stream_incomplete" in error["message"]
 
 
 @pytest.mark.asyncio
@@ -9870,26 +9892,101 @@ async def test_non_native_stream_emits_synthetic_transport_terminal_without_inte
 
 
 @pytest.mark.asyncio
-async def test_native_codex_stream_reraises_transport_failure_without_terminal_event() -> None:
+async def test_native_codex_stream_emits_retryable_terminal_event_instead_of_reraising() -> None:
     async def failed_stream() -> AsyncIterator[str]:
         raise proxy_module.ProxyResponseError(
             502,
             openai_error("upstream_request_timeout", "timed out"),
+            retry_after_seconds=7,
         )
         yield ""  # pragma: no cover
 
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        _ = [
-            event
-            async for event in proxy_api._stream_response_error_events(
-                failed_stream(),
-                owns_reservation=False,
-                reservation=None,
-                preserve_native_failure_lifecycle=True,
-            )
-        ]
+    events = [
+        event
+        async for event in proxy_api._stream_response_error_events(
+            failed_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
 
-    assert _proxy_error_code(exc_info.value) == "upstream_request_timeout"
+    # Starlette has already sent the 200 by the time codex-lb gives up here,
+    # so a bare re-raise used to close the stream with zero bytes (the
+    # "Stream disconnected before completion" symptom). It must instead
+    # surface exactly one named, retryable terminal event.
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    error = payload["response"]["error"]
+    assert error["code"] == "rate_limit_exceeded"
+    assert "upstream_request_timeout" in error["message"]
+    assert "timed out" in error["message"]
+    match = re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error["message"])
+    assert match is not None
+    assert match.group(1) == "7"
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_error_events_default_retry_delay_when_unknown() -> None:
+    async def failed_stream() -> AsyncIterator[str]:
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("stream_idle_timeout", "idle too long"),
+        )
+        yield ""  # pragma: no cover
+
+    events = [
+        event
+        async for event in proxy_api._stream_response_error_events(
+            failed_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    error = payload["response"]["error"]
+    assert error["code"] == "rate_limit_exceeded"
+    match = re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error["message"])
+    assert match is not None
+    assert match.group(1) == "5"
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_error_events_unaffected_for_non_giveup_codes() -> None:
+    """Errors outside the overload/transport-failure set are untouched by
+    this patch: they keep going through the pre-existing terminal-event path
+    with their own code (not relabeled to rate_limit_exceeded, and not
+    re-raised -- only the four give-up codes are special-cased for native
+    clients)."""
+
+    async def failed_stream() -> AsyncIterator[str]:
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("bridge_continuity_persistence_failed", "retry the request"),
+        )
+        yield ""  # pragma: no cover
+
+    events = [
+        event
+        async for event in proxy_api._stream_response_error_events(
+            failed_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    error = payload["response"]["error"]
+    assert error["code"] == "bridge_continuity_persistence_failed"
 
 
 def test_stream_startup_error_response_preserves_exact_retry_after_header() -> None:
@@ -39506,6 +39603,36 @@ def test_sanitize_websocket_terminal_stale_error_marks_missing_anchor_source_unk
     assert request_state.failure_detail_override is not None
     assert "previous_response_source=unknown" in request_state.failure_detail_override
     assert "previous_response_source=none" not in request_state.failure_detail_override
+
+
+@pytest.mark.parametrize("overload_code", ["server_is_overloaded", "slow_down"])
+def test_sanitize_websocket_terminal_error_relabels_overload_codes_as_retryable(overload_code: str):
+    """Codex treats server_is_overloaded/slow_down as terminal (see
+    app/modules/proxy/_service/websocket/overflow.py's own contract), so the
+    WS give-up frame must relabel them to the one code Codex retries on and
+    parses a delay from."""
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_overload_giveup",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    error_code, error_message, error_type, error_param = proxy_service._sanitize_websocket_terminal_error_fields(
+        request_state=request_state,
+        error_code=overload_code,
+        error_message="Upstream capacity exhausted after retries",
+        error_type="server_error",
+        error_param=None,
+    )
+
+    assert error_code == "rate_limit_exceeded"
+    assert error_type == "server_error"
+    assert error_param is None
+    assert overload_code in error_message
+    assert re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error_message)
 
 
 def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_response_not_found():

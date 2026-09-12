@@ -2068,6 +2068,14 @@ class _HTTPBridgeRequestSubmitMixin:
                                 "stream_incomplete",
                                 "The previous response anchor was rejected upstream; retry the request.",
                             ),
+                            # Fail-closed rewrite: preserve the upstream cause
+                            # just recorded above instead of dropping it. The
+                            # native give-up path (api.py
+                            # ``_stream_response_error_events``) reads
+                            # ``upstream_error_code``/``retry_after_seconds``
+                            # off this exception to name the real cause in the
+                            # retryable error it surfaces to Codex clients.
+                            upstream_error_code="previous_response_not_found",
                         )
                     if (
                         request_state.verified_stale_anchor_replay

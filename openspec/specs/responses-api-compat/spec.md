@@ -7125,6 +7125,17 @@ MUST still execute reservation, request-log, account-health, and owned-resource
 cleanup before propagating the termination. Non-native and OpenAI-compatible
 clients MUST retain the existing stable terminal-error shaping.
 
+When codex-lb has exhausted its own internal retries/replays for one of these
+transport failures (`stream_incomplete`, `stream_idle_timeout`,
+`upstream_request_timeout`, `upstream_unavailable`) or an upstream capacity
+rejection, this "no synthetic terminal event" rule is superseded: the proxy
+MUST instead emit exactly one terminal `response.failed` with
+`error.code = "rate_limit_exceeded"` and a message naming the upstream cause
+and a "try again in `<N>`s" delay, then end the stream. Overload codes
+(`server_is_overloaded`, `slow_down`) themselves MUST NOT reach the client,
+since the native Codex CLI treats them as non-retryable; `rate_limit_exceeded`
+is the one code Codex both retries on and parses a reconnect delay from.
+
 #### Scenario: Native Codex sees a truncated SSE lifecycle
 
 - **GIVEN** a native Codex HTTP request has received a non-terminal SSE event

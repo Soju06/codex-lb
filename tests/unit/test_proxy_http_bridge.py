@@ -479,6 +479,10 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    # Fail-closed rewrite: the raised exception must carry the upstream
+    # cause forward (rather than dropping it) so the native give-up path in
+    # api.py can name it in the retryable error it surfaces to Codex.
+    assert exc_info.value.upstream_error_code == "previous_response_not_found"
     send_text.assert_not_awaited()
     assert not session.pending_requests
 

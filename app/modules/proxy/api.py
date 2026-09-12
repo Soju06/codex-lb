@@ -87,11 +87,13 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
     HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
+    NATIVE_GIVEUP_RETRYABLE_CODE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     SYNTHETIC_TRANSPORT_FAILURE_MARKER,
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
     is_previous_response_not_found_public_shape,
+    native_giveup_retryable_message,
     normalize_public_error_param,
     openai_error,
     response_failed_event,
@@ -8398,13 +8400,6 @@ async def _stream_response_error_events(
     except ProxyResponseError as exc:
         error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
         await release_owned_reservation()
-        if preserve_native_failure_lifecycle and error_code in {
-            "stream_incomplete",
-            "stream_idle_timeout",
-            "upstream_request_timeout",
-            "upstream_unavailable",
-        }:
-            raise
         response_id = None
         if isinstance(exc.payload, dict):
             response_id = _response_id_from_event_payload(cast(dict[str, JsonValue], exc.payload))
@@ -8416,6 +8411,35 @@ async def _stream_response_error_events(
             default_status=exc.status_code,
         )
         error = envelope.error
+        if preserve_native_failure_lifecycle and error_code in {
+            "stream_incomplete",
+            "stream_idle_timeout",
+            "upstream_request_timeout",
+            "upstream_unavailable",
+        }:
+            # codex-lb has already given up (internal retries/replays are
+            # exhausted). Starlette already sent the 200, so the only way to
+            # tell a native Codex client anything is a terminal SSE event on
+            # the open stream — a bare re-raise here used to close the
+            # stream with zero bytes, which the client reported as "Stream
+            # disconnected before completion" and retried blind. Emit a
+            # named, retryable error instead: Codex's own reconnect logic
+            # only retries on ``rate_limit_exceeded`` (overload codes are
+            # terminal to it) and only that code's message is scanned for a
+            # "try again in Ns" delay.
+            retryable_message = native_giveup_retryable_message(
+                exc.upstream_error_code or error_code,
+                error.message if error and error.message else None,
+                exc.retry_after_seconds,
+            )
+            giveup_event = response_failed_event(
+                NATIVE_GIVEUP_RETRYABLE_CODE,
+                retryable_message,
+                "server_error",
+                response_id=response_id,
+            )
+            yield format_sse_event(giveup_event)
+            return
         retry_hint = ""
         if exc.retry_after_seconds is not None and exc.retry_after_seconds > 0:
             # Preserve the HTTP Retry-After signal when a streaming response
@@ -9294,11 +9318,32 @@ async def _normalize_public_responses_stream(
             payload = dict(payload)
             payload.pop(SYNTHETIC_TRANSPORT_FAILURE_MARKER, None)
             if preserve_native_failure_lifecycle:
-                raise ProxyResponseError(
-                    502,
-                    openai_error("stream_incomplete", "Native upstream transport ended before a terminal event"),
-                    failure_phase="upstream",
+                # Second give-up gate: codex-lb marked this event as a
+                # synthetic transport failure upstream of us (the account
+                # path's own retry/replay is exhausted) instead of raising
+                # ``ProxyResponseError`` directly. Raising here would still
+                # close the stream with no bytes sent to a native Codex
+                # client (the 200 is already on the wire), so emit the same
+                # terminal, retryable ``response.failed`` this module's other
+                # give-up gate emits and end the stream.
+                response_obj = payload.get("response")
+                nested_error = response_obj.get("error") if is_json_mapping(response_obj) else None
+                upstream_code = nested_error.get("code") if is_json_mapping(nested_error) else None
+                upstream_message = nested_error.get("message") if is_json_mapping(nested_error) else None
+                response_id = _response_id_from_event_payload(payload)
+                retryable_message = native_giveup_retryable_message(
+                    upstream_code if isinstance(upstream_code, str) else "stream_incomplete",
+                    upstream_message if isinstance(upstream_message, str) else None,
+                    None,
                 )
+                giveup_event = response_failed_event(
+                    NATIVE_GIVEUP_RETRYABLE_CODE,
+                    retryable_message,
+                    "server_error",
+                    response_id=response_id,
+                )
+                yield format_sse_event(giveup_event)
+                return
         raw_event_type = payload.get("type")
         if (
             enforce_openai_sdk_contract

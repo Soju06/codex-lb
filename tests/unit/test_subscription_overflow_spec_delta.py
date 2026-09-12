@@ -56,7 +56,12 @@ _OUTCOME_SHAPE = re.compile(r"^(dispatched|bounced|declined|pinned|pin_commit|de
 # the outcome regex above could match on. The delta enumerates them in prose
 # instead -- "closed `route` set `a`, `b`, `c`", "`kind` `a`, `b` or `c`" -- and
 # each such run is compared to the discovered enum in both directions.
-_ENUMERATED_RUN = re.compile(r"`[a-z0-9_]+`(?:(?:, | or |, or )`[a-z0-9_]+`)*")
+# The connectors are comma-anchored on purpose. A bare ``and`` before a backticked
+# token starts a new clause in this delta ("... `compact` and `outcome` in the closed
+# set"), so absorbing it would misread the live spec; a run cut short by an
+# unrecognised connector still fails the comparison whenever the dropped token is a
+# live label.
+_ENUMERATED_RUN = re.compile(r"`[a-z0-9_]+`(?:(?:, |, and |, or | or )`[a-z0-9_]+`)*")
 _ROUTE_ENUMERATION = re.compile(r"`route`(?: set| in) (?=`)")
 _KIND_ENUMERATION = re.compile(r"(?:for direct source routing and |`kind` (?=`))")
 
@@ -164,6 +169,20 @@ def test_observability_delta_enumerates_exactly_the_closed_route_and_kind_sets()
                 "in_spec_only": sorted(run - expected),
                 "in_code_only": sorted(expected - run),
             }
+
+
+def test_enumeration_parser_reads_the_connectors_the_delta_uses() -> None:
+    """The run must not stop early on a comma connector, nor swallow the next clause."""
+    oxford = _enumerations(
+        "the closed `route` set `a`, `b`, and `retired` and the closed `outcome` set", _ROUTE_ENUMERATION
+    )
+
+    assert oxford == [{"a", "b", "retired"}], oxford
+    # The delta's second enumeration really ends this way; a bare ``and`` before a
+    # backticked token starts a new clause and must not join the run.
+    clause = _enumerations("with `route` in `a`, `b` and `outcome` in the closed set", _ROUTE_ENUMERATION)
+
+    assert clause == [{"a", "b"}], clause
 
 
 def test_request_log_source_values_are_quoted_in_every_normative_surface() -> None:

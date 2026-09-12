@@ -2825,6 +2825,77 @@ def test_durable_rebuild_joins_the_parent_chain_oldest_turn_first() -> None:
     ]
 
 
+def test_durable_rebuild_accepts_a_turn_in_the_shape_the_bridge_actually_spools() -> None:
+    # Every part of this is the shape the session bridge stores, not a reduced
+    # stand-in: the owner's turn metadata on each item, its minted reasoning,
+    # function-call and message ids, the settled tool pair, the final-answer
+    # phase, and the annotations array on the answer's output_text part.
+    owner_metadata: JsonValue = {"turn_id": "turn-owner"}
+    stored_input: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old question"}],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+    ]
+    terminal_output: list[JsonValue] = [
+        {
+            "type": "reasoning",
+            "id": "rs_owner",
+            "encrypted_content": "encrypted-owner-scoped-reasoning",
+            "summary": [],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "function_call",
+            "id": "fc_owner",
+            "call_id": "call_old",
+            "name": "lookup",
+            "arguments": "{}",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_old",
+            "output": "old output",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "message",
+            "id": "msg_owner",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "old answer", "annotations": []}],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+    ]
+
+    rebuilt = _rebuild(
+        (_transcript_turn(stored_input, terminal_output),),
+        [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "next question"}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+            }
+        ],
+    )
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [
+        stored_input[0],
+        {key: value for key, value in cast(Any, terminal_output[1]).items() if key != "id"},
+        terminal_output[2],
+        {key: value for key, value in cast(Any, terminal_output[3]).items() if key != "id"},
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "next question"}],
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+        },
+    ]
+
+
 def test_durable_rebuild_drops_the_anchor_and_keeps_the_clients_other_fields() -> None:
     transcript = (_transcript_turn([_user_item("first")], [_assistant_item("answer", item_id="msg_1")]),)
 
@@ -3102,11 +3173,15 @@ def test_durable_rebuild_refuses_a_turn_with_no_terminal_marker() -> None:
     assert _rebuild(transcript, [_user_item("second")]) is None
 
 
-# Characters ``str.splitlines`` breaks on that the SSE wire format does not:
-# vertical tab, form feed, the file/group/record separators, NEL, LINE
-# SEPARATOR and PARAGRAPH SEPARATOR. Every one is legal unescaped inside a JSON
-# string, so a model answer containing one must not cost the turn its terminal.
-_NON_SSE_LINE_BREAKS = ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ")
+# Characters ``str.splitlines`` breaks on that the SSE wire format does not, and
+# that a JSON serializer leaves unescaped because they sit above U+001F: NEL,
+# LINE SEPARATOR and PARAGRAPH SEPARATOR. These are the ones that actually reach
+# the spool inside a model's answer -- an unescaped U+2028 in a response the
+# proxy relays is the shape tests/unit/test_proxy_api_responses_contract.py
+# records -- so one of them must not cost the turn its terminal. Vertical tab,
+# form feed and the file/group/record separators break ``splitlines`` too, but a
+# JSON string escapes them, so they never appear raw in a ``data:`` field.
+_NON_SSE_LINE_BREAKS = ("\x85", " ", " ")
 
 
 @pytest.mark.parametrize("line_break", _NON_SSE_LINE_BREAKS)

@@ -3637,6 +3637,18 @@ async def test_http_bridge_recovery_column_repair_downgrade_preserves_parent_sch
             await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN target_response_id"))
 
         await to_thread.run_sync(lambda: run_upgrade(db_url, repair_revision, bootstrap_legacy=False))
+        # Simulate a database repaired by the previous implementation, which
+        # recorded revision-local ownership markers before the downgrade was
+        # made metadata-preserving.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO http_bridge_migration_object_ownership "
+                    "(revision, object_type, object_name) VALUES "
+                    "(:revision, 'column', 'response_output_items_json')"
+                ),
+                {"revision": repair_revision},
+            )
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
 
         async with engine.connect() as conn:

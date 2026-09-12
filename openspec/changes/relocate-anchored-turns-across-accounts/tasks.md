@@ -22,18 +22,24 @@
   prefix-overlap dedupe. **Delete the content-matching overlap search.** Three rounds of it
   produced three different ways to delete a message the client had just sent,
   because content equality cannot tell a restatement from a coincidence.
-  Classify every input — each chain turn's stored request AND the client's turn —
-  with the predicates already shipped for this question:
-  `responses_input_items_are_self_contained_fresh_replay` (supersede) and
-  `responses_input_suffix_retains_prior_output` (refuse). Do NOT invent a new
-  discriminator and do NOT use `previous_response_id`: the proxy injects anchors
-  itself, and anchored full resends are a shape this repo already verifies
-  (`openspec/specs/responses-api-compat/spec.md:1214`, `:2741`). Still pass the
-  anchor into the rebuild so it can verify the chain terminates there — that is
-  a separate job from classifying the join. Terminal-output extraction from the spooled SSE with the
-  `response.output_item.done` fallback when `response.incomplete` omits
-  `response.output`. Keep the module free of persistence imports by accepting
-  transcript turns structurally. Use one overlap routine, not two.
+  Implement the tail-overlap join: where the client's input matches the tail of
+  what the chain walk accumulated, discard that chain tail and append the
+  client's input verbatim. Same rule per chain turn as the walk accumulates.
+  **Never drop a client item; dropping chain items the client re-supplied is
+  free.** Do not classify the client's intent — full resend, delta and rolling
+  window are not distinguishable from the request, and every rule that tried
+  (`previous_response_id`, model-authored items, structural self-containment)
+  was wrong for one of the real shapes. In particular
+  `responses_input_items_are_self_contained_fresh_replay` is a safety predicate,
+  not a completeness test; using it as one inverts the outcome for the full
+  resends Codex actually sends (developer-instruction-led, tool-pair tail).
+  Still pass the anchor in so the walk can verify it terminates there.
+- [ ] Bind the join with a truth table over real client shapes, asserting the
+  dispatched body item by item: developer-led full resend, tool-pair-tail full
+  resend, tool-only history, rolling window of 1 and 2 exchanges, a window from
+  the middle of the chain, a coincidental mid-chain match, and a chain whose own
+  turns restate. For every row assert both invariants: no client item missing,
+  no turn twice.
 - [ ] `_service/support.py`: `materialize_relocation(...)` — the only caller of
   `DurableBridgeRepository.get_replayable_transcript`; load failure is treated
   as "no transcript"; emits one structured `relocation_decision` log line.

@@ -23,7 +23,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from app.core.config.settings import _REMOVED_SETTINGS, Settings
-from app.core.config.tiers import DASHBOARD_HOMES, SETTING_TIERS
+from app.core.config.tiers import DASHBOARD_HOMES, MIGRATING, SETTING_TIERS
 from app.db.models import DashboardSettings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -249,8 +249,11 @@ def _render_tier_cell(name: str) -> str:
     # A T3 setting with a same-name dashboard_settings column (or a DASHBOARD_HOMES
     # table) is managed from the dashboard; the env var is only the fallback while
     # the dashboard holds no value.
-    if tier == "T3" and (name in _DASHBOARD_COLUMNS or name in DASHBOARD_HOMES):
-        return "T3 (dashboard)"
+    if tier == "T3":
+        if name in _DASHBOARD_COLUMNS or name in DASHBOARD_HOMES:
+            return "T3 (dashboard)"
+        if name in MIGRATING:
+            return "T3 (env, migrating)"
     return tier
 
 

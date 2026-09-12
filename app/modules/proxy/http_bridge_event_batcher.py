@@ -1182,9 +1182,7 @@ class HttpBridgeOperationEventBatcher:
         # before shutdown from publishing work after the close drain snapshot.
         shutdown_remaining = shutdown_state.remaining_drain_timeout_seconds()
         shutdown_deadline = (
-            clock_for(self).monotonic()
-            if shutdown_remaining is None
-            else clock_for(self).monotonic() + max(shutdown_remaining, 0.0)
+            None if shutdown_remaining is None else clock_for(self).monotonic() + max(shutdown_remaining, 0.0)
         )
         while True:
             current = asyncio.current_task()

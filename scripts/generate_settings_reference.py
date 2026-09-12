@@ -23,7 +23,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from app.core.config.settings import _REMOVED_SETTINGS, Settings
-from app.core.config.tiers import SETTING_TIERS
+from app.core.config.tiers import DASHBOARD_HOMES, SETTING_TIERS
 from app.db.models import DashboardSettings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -239,9 +239,10 @@ _DASHBOARD_COLUMNS = frozenset(column.name for column in DashboardSettings.__tab
 
 def _render_tier_cell(name: str) -> str:
     tier = SETTING_TIERS.get(name, "unassigned")
-    # A T3 setting with a same-name dashboard_settings column is managed from
-    # the dashboard; the env var is only the fallback while the column is NULL.
-    if tier == "T3" and name in _DASHBOARD_COLUMNS:
+    # A T3 setting with a same-name dashboard_settings column (or a DASHBOARD_HOMES
+    # table) is managed from the dashboard; the env var is only the fallback while
+    # the dashboard holds no value.
+    if tier == "T3" and (name in _DASHBOARD_COLUMNS or name in DASHBOARD_HOMES):
         return "T3 (dashboard)"
     return tier
 
@@ -361,6 +362,13 @@ def render_settings_reference() -> str:
         [
             "",
             "## Removed",
+            "",
+            "Images and default account probes choose `gpt-5.6-luna`, then `gpt-5.5`,",
+            "using registry plan visibility and suppression. If neither qualifies, they",
+            "use `gpt-5.6-luna`. Catalog visibility does not guarantee account access.",
+            "There is no host-model setting. See the",
+            "[Images spec](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/images-api-compat)",
+            "and [probe spec](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy).",
             "",
             "Removed settings (ignored with a one-release startup warning; each is now a",
             "fixed default or a dashboard runtime setting — see PRINCIPLES.md P2 /",

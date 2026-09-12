@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from collections.abc import AsyncGenerator, Callable
-from typing import Any, AsyncIterator, Mapping, TypeVar, cast
+from typing import Any, AsyncIterator, Literal, Mapping, TypeVar, cast, get_args
 from uuid import uuid4
 
 import anyio
@@ -85,9 +85,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _capture_http_bridge_denied_anchor_fence,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_abandonment_may_settle_circuit,
-    _http_bridge_client_full_history_recovery_error,
     _http_bridge_continuity_bound_without_safe_replay,
-    _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_eventless_budget_seconds,
     _http_bridge_eventless_max_keepalive_count,
@@ -106,7 +104,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_requires_cluster_registration,
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _http_bridge_runtime_config,
-    _http_bridge_server_anchored_replay_enabled,
     _http_bridge_should_attempt_local_bootstrap_rebind,
     _http_bridge_should_attempt_local_previous_response_recovery,
     _http_bridge_should_attempt_soft_affinity_reroute,
@@ -119,6 +116,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _proxy_admission_wait_timeout_seconds,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
+    _record_continuity_replay_rejected,
     _release_http_bridge_denied_anchor_fences,
     _release_http_bridge_unanchored_handoff,
     _release_http_bridge_unanchored_handoffs_for_request,
@@ -135,7 +133,6 @@ from app.modules.proxy._service.http_bridge.quarantine import (
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
-    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -145,6 +142,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _header_value_case_insensitive,
     _http_bridge_startup_keepalive_grace_seconds,
     _inject_missing_interrupted_function_call_outputs,
+    _input_image_request_requires_http_upstream,
     _input_prefix_matches_stored_context,
     _is_previous_response_not_found_error,
     _maybe_log_proxy_request_payload,
@@ -201,6 +199,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_local_account_cap_code,
+    _request_log_client_fields,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _signal_propagated_responses_service_cleanup_ready,
@@ -254,6 +253,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
@@ -282,10 +282,60 @@ _REQUEST_TRANSPORT_HTTP = "http"
 
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
+# Why a cross-account replay of an unavailable owner's turn was refused. The
+# recovery gate is a conjunction of independent proofs, so a bare ``False``
+# cannot say which one held; these name them for
+# ``owner_unavailable_replay_rejected``.
+_AccountNeutralReplayRejection = Literal[
+    "file_bound",
+    "no_durable_lookup",
+    "payload_not_full_resend",
+    "anchor_metadata_missing",
+    "prefix_fingerprint_mismatch",
+    "input_not_itemized",
+    "missing_prior_output",
+    "account_scoped_input",
+]
+ACCOUNT_NEUTRAL_REPLAY_REJECTIONS: frozenset[str] = frozenset(
+    get_args(_AccountNeutralReplayRejection),
+)
+# Bridge pre-submit failures that name an account-scoped continuity owner. These
+# get a request-log row; other pre-submit codes keep their existing behaviour.
+_HTTP_BRIDGE_CONTINUITY_OWNER_ERROR_CODES = frozenset(
+    {
+        "previous_response_owner_unavailable",
+        "continuity_owner_conflict",
+    }
+)
 
-def _http_bridge_durable_recovery_predecessor_proven(request_state: _WebSocketRequestState) -> bool:
-    """Return whether the operation has a durable predecessor anchor."""
-    return request_state.previous_response_id is not None or request_state.operation_parent_response_id is not None
+
+def _durable_full_resend_anchor_rejection(
+    payload: ResponsesRequest,
+    lookup: DurableBridgeLookup,
+    *,
+    payload_looks_like_full_resend: bool,
+) -> _AccountNeutralReplayRejection | None:
+    """Return which stored-anchor proof refuses this body, or None when all hold.
+
+    Each of these clears the anchor fields, which downstream cannot tell apart
+    even though they call for different fixes: a client that never sends full
+    history, a durable row written before the anchor metadata existed, and a
+    body whose prefix diverged from the stored turn.
+    """
+    if not payload_looks_like_full_resend:
+        return "payload_not_full_resend"
+    stored_count = lookup.latest_input_item_count
+    if stored_count is None:
+        return "anchor_metadata_missing"
+    if not _input_prefix_matches_stored_context(
+        payload.input,
+        stored_count=stored_count,
+        stored_fingerprint=lookup.latest_input_full_fingerprint,
+    ):
+        return "prefix_fingerprint_mismatch"
+    if not isinstance(payload.input, list):
+        return "input_not_itemized"
+    return None
 
 
 def _http_bridge_verified_stale_anchor_replay_is_operation_fenced(
@@ -454,25 +504,6 @@ def _verify_durable_full_resend(
     if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
         return None
     return _VerifiedDurableFullResend._verify(payload, durable_lookup)
-
-
-def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketRequestState) -> bool:
-    """Return whether an ambiguous anchored turn may fall back to client replay.
-
-    The client can recover an unknown upstream handoff by dropping
-    ``previous_response_id`` and resending its full local history. This is
-    intentionally opt-in: upstream acceptance is still ambiguous and the
-    fallback therefore has at-least-once (possible duplicate) semantics.
-    """
-    settings = _service_get_settings()
-    return (
-        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
-        == "client_full_history_once"
-        and request_state.previous_response_id is not None
-        and request_state.response_id is None
-        and request_state.response_event_count == 0
-        and not request_state.fresh_upstream_request_is_retry_safe
-    )
 
 
 _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL = "The previous bridge owner is no longer available."
@@ -978,7 +1009,7 @@ class _HTTPBridgeStreamingMixin:
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             require_forwarded_file_owner=forwarded_request,
         )
-        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
+        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes()
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
             record_http_bridge_routing(stage="bypass", reason="payload_size")
             logger.info(
@@ -990,7 +1021,20 @@ class _HTTPBridgeStreamingMixin:
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
         image_request = _responses_request_contains_input_image(payload)
         image_generation_request = _responses_request_uses_image_generation(payload)
-        force_upstream_stream_transport = "http" if image_request else None
+        # The bridge bypass below is about bridge pending slots; it must not also
+        # decide the upstream transport. An inline ``data:`` image rides the
+        # upstream websocket unchanged, so only the two websocket-specific
+        # hazards keep the pin (#2363). ``image_request`` gates the predicate
+        # because the predicate's own first check is that same walk of the whole
+        # input, and this runs on every request on the hot path.
+        force_upstream_stream_transport = (
+            "http"
+            if image_request
+            and _input_image_request_requires_http_upstream(
+                payload, payload_size_estimate_bytes=payload_size_estimate_bytes
+            )
+            else None
+        )
         if runtime_config.enabled and (image_request or image_generation_request):
             record_http_bridge_routing(stage="bypass", reason="image")
             logger.info(
@@ -1052,6 +1096,7 @@ class _HTTPBridgeStreamingMixin:
         deferred_account_backoff_tracker = _DeferredAccountBackoffTracker()
         bridge_yielded_any = False
         bridge_transport_unavailable = False
+        bridge_attempt_started_at = clock_for(self).monotonic()
         try:
             try:
                 async for line in self._stream_via_http_bridge(
@@ -1136,6 +1181,33 @@ class _HTTPBridgeStreamingMixin:
                     or getattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, False)
                     or (transport_failure_code is None and not cooldown_suppression)
                 ):
+                    # Continuity-owner failures are raised out of bridge session
+                    # creation, the one proxy surface with no request-log write
+                    # of its own: the direct-websocket and raw-HTTP surfaces
+                    # both log this code, so a bridged thread's outage was
+                    # visible only in a rotating container log. Record it on the
+                    # propagating path only — the branch below hands the turn to
+                    # the raw-HTTP upstream, which settles its own outcome, and
+                    # an error row for a turn that then succeeded would corrupt
+                    # the very error rate this row exists to show.
+                    bridge_error_code, bridge_error_message = _proxy_error_code_message(exc)
+                    if bridge_error_code in _HTTP_BRIDGE_CONTINUITY_OWNER_ERROR_CODES:
+                        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
+                        await self._write_stream_preflight_error(
+                            account_id=None,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            start=bridge_attempt_started_at,
+                            error_code=bridge_error_code,
+                            error_message=bridge_error_message or "Continuity owner account is unavailable",
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
+                            conversation_id=conversation_id,
+                            client_ip=client_ip,
+                        )
                     raise
                 if transport_failure_code is not None:
                     # Bridge session creation runs its own pre-dispatch
@@ -1336,7 +1408,6 @@ class _HTTPBridgeStreamingMixin:
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
         explicit_prompt_cache_key = _prompt_cache_key_from_request_model(payload)
-        had_prompt_cache_key = explicit_prompt_cache_key is not None
         affinity = _sticky_key_for_responses_request(
             payload,
             headers,
@@ -1346,21 +1417,14 @@ class _HTTPBridgeStreamingMixin:
             sticky_threads_enabled=dashboard_settings.sticky_threads_enabled,
             api_key=api_key,
         )
-        sticky_key_source = "none"
-        if affinity.codex_session_source == "thread_header":
-            sticky_key_source = "thread_header"
-        elif affinity.kind == StickySessionKind.CODEX_SESSION:
-            sticky_key_source = (
-                "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
-            )
-        elif affinity.key:
-            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        inbound_affinity_observation = AffinityObservation.from_policy(affinity)
         _maybe_log_proxy_request_shape(
             "stream_http_bridge",
             payload,
             headers,
-            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
-            sticky_key_source=sticky_key_source,
+            sticky_kind=inbound_affinity_observation.kind,
+            sticky_key_source=inbound_affinity_observation.source,
+            derivation_outcome=affinity.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
 
@@ -1499,6 +1563,12 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_fresh_payload: ResponsesRequest | None = None
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_has_safe_fresh_context = False
+        # Set only when a durable lookup existed but failed one of the anchor
+        # proofs; ``no_durable_lookup`` covers the absent-lookup case instead.
+        durable_full_resend_anchor_reason: _AccountNeutralReplayRejection | None = None
+        # Why the folded anchor/prior-output proof last refused, so the
+        # classifier can report it without re-deriving the conjunction.
+        durable_full_resend_context_rejection: _AccountNeutralReplayRejection | None = None
         durable_full_resend_retains_required_context_cache: bool | None = None
         durable_full_resend_proof = _verify_durable_full_resend(payload, durable_lookup)
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
@@ -1540,19 +1610,15 @@ class _HTTPBridgeStreamingMixin:
 
         def classify_durable_full_resend(
             lookup: DurableBridgeLookup,
-        ) -> tuple[int | None, str | None, bool]:
+        ) -> tuple[int | None, str | None, bool, _AccountNeutralReplayRejection | None]:
+            anchor_rejection = _durable_full_resend_anchor_rejection(
+                payload,
+                lookup,
+                payload_looks_like_full_resend=payload_looks_like_full_resend,
+            )
             stored_count = lookup.latest_input_item_count
-            if (
-                not payload_looks_like_full_resend
-                or stored_count is None
-                or not _input_prefix_matches_stored_context(
-                    payload.input,
-                    stored_count=stored_count,
-                    stored_fingerprint=lookup.latest_input_full_fingerprint,
-                )
-                or not isinstance(payload.input, list)
-            ):
-                return None, None, False
+            if anchor_rejection is not None or stored_count is None or not isinstance(payload.input, list):
+                return None, None, False, anchor_rejection or "anchor_metadata_missing"
             replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                 cast(list[JsonValue], payload.input),
                 stored_count=stored_count,
@@ -1565,13 +1631,14 @@ class _HTTPBridgeStreamingMixin:
             safe_fresh_context = False
             if replay_projection is not None:
                 safe_fresh_context = replay_projection_retains_required_context(replay_projection, lookup)
-            return stored_count, lookup.latest_input_full_fingerprint, safe_fresh_context
+            return stored_count, lookup.latest_input_full_fingerprint, safe_fresh_context, None
 
         if durable_lookup is not None:
             (
                 durable_full_resend_anchor_count,
                 durable_full_resend_anchor_fingerprint,
                 durable_full_resend_has_safe_fresh_context,
+                durable_full_resend_anchor_reason,
             ) = classify_durable_full_resend(durable_lookup)
         if (
             durable_full_resend_has_safe_fresh_context
@@ -1845,6 +1912,9 @@ class _HTTPBridgeStreamingMixin:
             )
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
+        request_state.affinity_observation = AffinityObservation.retaining_source(
+            inbound_affinity_observation.source, affinity
+        )
         _apply_http_bridge_downstream_turn_state(
             request_state,
             downstream_turn_state=downstream_turn_state,
@@ -1942,13 +2012,24 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_turn_state is not None
             )
         )
+        # A retired owner is not a missing one. Failing closed is right when a
+        # row should name an account and does not — that is lost state. But a
+        # retirement marker is positive proof that the owner was deliberately
+        # abandoned because it could not come back, so the correct response is
+        # to pick a fresh owner, exactly as the sticky selector does when it
+        # sees its own tombstone. Without this exemption, retiring an owner
+        # would convert one 502 into a different 502.
         durable_owner_missing = (
-            durable_lookup is not None and durable_lookup_requires_owner and durable_lookup.account_id is None
+            durable_lookup is not None
+            and durable_lookup_requires_owner
+            and durable_lookup.account_id is None
+            and not durable_lookup.continuity_abandoned
         )
         model_transition_owner_missing = (
             durable_model_transition_lookup is not None
             and durable_model_transition_requires_owner
             and durable_model_transition_lookup.account_id is None
+            and not durable_model_transition_lookup.continuity_abandoned
         )
         required_continuity_owner_missing = (
             (request_state.previous_response_id is not None and request_state.preferred_account_id is None)
@@ -2006,7 +2087,9 @@ class _HTTPBridgeStreamingMixin:
             else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
+        model_transition_owner_conflict_fork_attempted = False
         unanchored_fork_spill_attempted = False
+        owner_retirement_attempted = False
         verified_stale_anchor_generation_captured = False
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
         verified_stale_anchor_generation: tuple[int, float, int, float, int, float, float] | None = None
@@ -2014,12 +2097,15 @@ class _HTTPBridgeStreamingMixin:
 
         def durable_full_resend_retains_required_context() -> bool:
             nonlocal durable_full_resend_retains_required_context_cache
+            nonlocal durable_full_resend_context_rejection
 
-            if (
-                durable_full_resend_anchor_count is None
-                or durable_full_resend_anchor_fingerprint is None
-                or not isinstance(payload.input, list)
-            ):
+            if durable_full_resend_anchor_count is None or durable_full_resend_anchor_fingerprint is None:
+                # Either no durable row was supplied, or classification already
+                # cleared the anchor fields and named its own reason.
+                durable_full_resend_context_rejection = durable_full_resend_anchor_reason or "no_durable_lookup"
+                return False
+            if not isinstance(payload.input, list):
+                durable_full_resend_context_rejection = "input_not_itemized"
                 return False
             if durable_full_resend_retains_required_context_cache is None:
                 eligibility_projection = project_responses_input_for_account_neutral_fresh_replay(
@@ -2028,28 +2114,46 @@ class _HTTPBridgeStreamingMixin:
                     preserve_developer_message_ids=True,
                 )
                 if eligibility_projection is None or durable_lookup is None:
+                    # A body the projection cannot rebuild carries state that
+                    # is not ours to move; a missing lookup is the pinned-owner
+                    # case. They are different fixes, so keep them distinct.
+                    durable_full_resend_context_rejection = (
+                        "account_scoped_input" if durable_lookup is not None else "no_durable_lookup"
+                    )
                     return False
                 durable_full_resend_retains_required_context_cache = replay_projection_retains_required_context(
                     eligibility_projection,
                     durable_lookup,
                 )
-            return bool(durable_full_resend_retains_required_context_cache)
+            if not durable_full_resend_retains_required_context_cache:
+                durable_full_resend_context_rejection = "missing_prior_output"
+                return False
+            return True
 
-        def durable_full_resend_allows_account_neutral_replay() -> bool:
+        def classify_account_neutral_replay_rejection() -> _AccountNeutralReplayRejection | None:
+            """Return why this turn cannot move accounts, or None when it can.
+
+            Evaluation order matches the conjunction this replaces, so the
+            reported reason is the first proof that refused.
+            """
             nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
 
-            if rewritten_file_account_id is not None or not durable_full_resend_retains_required_context():
-                return False
+            if rewritten_file_account_id is not None:
+                return "file_bound"
+            if not durable_full_resend_retains_required_context():
+                return durable_full_resend_context_rejection or "no_durable_lookup"
             if durable_full_resend_fresh_payload is None:
-                assert isinstance(payload.input, list)
-                assert durable_full_resend_anchor_count is not None
+                if not isinstance(payload.input, list) or durable_full_resend_anchor_count is None:
+                    # Unreachable while the proof above holds; kept explicit so
+                    # a future caller cannot turn it into an AssertionError.
+                    return "no_durable_lookup"
                 replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                     cast(list[JsonValue], payload.input),
                     stored_count=durable_full_resend_anchor_count,
                 )
                 if replay_projection is None:
-                    return False
+                    return "account_scoped_input"
                 durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
                     payload
                 ).model_copy(update={"input": replay_projection.input_items})
@@ -2057,13 +2161,172 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload
                 )
-            return durable_full_resend_is_account_neutral
+            return None if durable_full_resend_is_account_neutral else "account_scoped_input"
+
+        def durable_full_resend_allows_account_neutral_replay() -> bool:
+            return classify_account_neutral_replay_rejection() is None
+
+        def record_account_neutral_replay_rejection(
+            rejection: _AccountNeutralReplayRejection,
+        ) -> None:
+            _record_continuity_replay_rejected(surface="http_bridge", reason=rejection)
+            _log_http_bridge_event(
+                "owner_unavailable_replay_rejected",
+                bridge_session_key,
+                account_id=request_state.preferred_account_id,
+                model=payload.model,
+                detail=f"reason={rejection}",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
+
+        def switch_model_transition_to_account_neutral_fork(exc: ProxyResponseError) -> bool:
+            nonlocal account_neutral_recovery
+            nonlocal affinity
+            nonlocal bridge_session_key
+            nonlocal downstream_turn_state
+            nonlocal force_local_recovery_creation
+            nonlocal incoming_turn_state_header
+            nonlocal model_transition_owner_conflict_fork_attempted
+            nonlocal preferred_account_has_continuity_provenance
+            nonlocal request_state
+            nonlocal session_creation_headers
+            nonlocal session_header_fallback_key
+
+            error_code, _error_message = _proxy_error_code_message(exc)
+            if (
+                durable_model_transition_lookup is None
+                or error_code != "continuity_owner_conflict"
+                or model_transition_owner_conflict_fork_attempted
+                or forwarded_request
+                or not _http_bridge_payload_is_account_neutral_fresh_replay(effective_payload)
+                or request_state.previous_response_id is not None
+                or rewritten_file_account_id is not None
+            ):
+                return False
+            reused_parent_turn_state = (
+                incoming_turn_state_header is not None and downstream_turn_state == incoming_turn_state_header
+            )
+            failed_owner_id = request_state.preferred_account_id
+            _log_http_bridge_event(
+                "model_transition_owner_conflict_fork",
+                bridge_session_key,
+                account_id=failed_owner_id,
+                model=effective_payload.model,
+                detail="outcome=retry_without_previous_model_owner",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                owner_check_applied=True,
+            )
+            if failed_owner_id is not None:
+                fresh_replay_excluded_account_ids.add(failed_owner_id)
+            session_creation_headers = without_http_bridge_session_affinity_headers(session_creation_headers)
+            incoming_turn_state_header = None
+            session_header_fallback_key = None
+            affinity = _AffinityPolicy()
+            replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(uuid4().hex)
+            bridge_session_key = _HTTPBridgeSessionKey(
+                replay_kind,
+                replay_key,
+                bridge_session_key.api_key_id,
+                strength="hard",
+            )
+            account_neutral_recovery = True
+            force_local_recovery_creation = True
+            model_transition_owner_conflict_fork_attempted = True
+            request_state.affinity_policy = affinity
+            request_state.hard_continuity_anchor = False
+            request_state.preferred_account_id = None
+            request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
+            preferred_account_has_continuity_provenance = False
+            if reused_parent_turn_state:
+                request_state.session_id = None
+                downstream_turn_state = None
+            return True
+
+        async def retire_unavailable_continuity_owner(exc: ProxyResponseError) -> bool:
+            """Retire an owner that cannot return in time, so this turn can rebind.
+
+            The scheduled sweep frees a thread six hours after its last turn.
+            That is right for a dormant thread but not for the one a user is
+            waiting on, so ask the narrower question here: can this owner come
+            back before this request's own budget runs out? ``reset_at``
+            answers it for a rate or quota limit; paused, re-auth-blocked and
+            deactivated owners carry no horizon, so the answer is always no.
+
+            Only for an anchor the proxy injected. A client that supplied its
+            own ``previous_response_id`` named upstream state that lived on
+            this account, and dropping it here would silently change what the
+            client asked for.
+            """
+            nonlocal durable_lookup
+            nonlocal effective_payload
+            nonlocal owner_retirement_attempted
+            nonlocal preferred_account_has_continuity_provenance
+            nonlocal request_state
+            nonlocal text_data
+
+            if owner_retirement_attempted:
+                return False
+            if not _http_bridge_is_previous_response_owner_unavailable(exc):
+                return False
+            if payload.previous_response_id is not None or rewritten_file_account_id is not None:
+                return False
+            retiring_account_id = request_state.preferred_account_id
+            if durable_lookup is None or retiring_account_id is None:
+                # Nothing durable to retire: the owner came from the
+                # request-log index or the in-process registry, which is the
+                # ``no_durable_lookup`` shape tracked separately.
+                return False
+            if durable_lookup.account_id != retiring_account_id:
+                return False
+            owner_retirement_attempted = True
+            retired = await self._durable_bridge.retire_continuity_owner_if_unavailable(
+                session_id=durable_lookup.session_id,
+                expected_account_id=retiring_account_id,
+                # ``request_deadline`` is monotonic and ``reset_at`` is wall
+                # clock, so project the remaining budget onto the epoch the
+                # account row uses rather than comparing the two directly.
+                recovery_deadline_epoch=int(
+                    clock.time() + max(0.0, request_deadline - clock.monotonic()),
+                ),
+            )
+            if not retired:
+                return False
+            _log_http_bridge_event(
+                "owner_retired_on_request",
+                bridge_session_key,
+                account_id=retiring_account_id,
+                model=payload.model,
+                detail="outcome=rebind_without_anchor",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
+            # Send the body the client actually sent, minus the anchor only the
+            # retired owner could resolve. ``untrimmed_effective_payload`` is
+            # the pre-trim copy the other anchor-free retries already use.
+            effective_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
+            request_state, text_data = prepare_bridge_request(effective_payload)
+            request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+            request_state.affinity_policy = affinity
+            request_state.transport = _REQUEST_TRANSPORT_HTTP
+            request_state.preferred_account_id = None
+            if downstream_turn_state is not None:
+                request_state.session_id = _normalize_session_id(downstream_turn_state)
+            preferred_account_has_continuity_provenance = False
+            durable_lookup = None
+            return True
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
-            return (
-                _http_bridge_is_previous_response_owner_unavailable(exc)
-                and durable_full_resend_allows_account_neutral_replay()
-            )
+            if not _http_bridge_is_previous_response_owner_unavailable(exc):
+                return False
+            rejection = classify_account_neutral_replay_rejection()
+            if rejection is None:
+                return True
+            record_account_neutral_replay_rejection(rejection)
+            return False
 
         def switch_to_account_neutral_replay(
             *,
@@ -2078,6 +2341,8 @@ class _HTTPBridgeStreamingMixin:
             nonlocal dead_owner_process_epoch_mismatch
             nonlocal durable_full_resend_anchor_count
             nonlocal durable_full_resend_anchor_fingerprint
+            nonlocal durable_full_resend_anchor_reason
+            nonlocal durable_full_resend_context_rejection
             nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
             nonlocal durable_lookup
@@ -2105,9 +2370,6 @@ class _HTTPBridgeStreamingMixin:
                 else None
             )
             prior_operation_registered = request_state.operation_registered if preserve_operation_identity else False
-            prior_operation_attempt_generation = (
-                request_state.operation_attempt_generation if preserve_operation_identity else 0
-            )
             prior_operation_persisted_response_id = (
                 request_state.operation_persisted_response_id if preserve_operation_identity else None
             )
@@ -2140,11 +2402,13 @@ class _HTTPBridgeStreamingMixin:
                 request_state.operation_fingerprint = prior_operation_fingerprint
                 request_state.operation_parent_response_id = prior_operation_parent_response_id
                 request_state.operation_registered = prior_operation_registered
-                request_state.operation_attempt_generation = prior_operation_attempt_generation
                 request_state.operation_persisted_response_id = prior_operation_persisted_response_id
                 request_state.operation_rebind_required = True
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
+            request_state.affinity_observation = AffinityObservation.retaining_source(
+                inbound_affinity_observation.source, affinity
+            )
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
             if downstream_turn_state is not None:
                 request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -2164,6 +2428,8 @@ class _HTTPBridgeStreamingMixin:
             previous_response_trimmed_input_fingerprint = None
             durable_full_resend_anchor_count = None
             durable_full_resend_anchor_fingerprint = None
+            durable_full_resend_anchor_reason = None
+            durable_full_resend_context_rejection = None
             durable_full_resend_fresh_payload = None
             durable_full_resend_is_account_neutral = None
             durable_lookup = None
@@ -2205,6 +2471,13 @@ class _HTTPBridgeStreamingMixin:
                 session_id=request_state.session_id,
                 upstream_error_code="owner_lookup_miss",
             )
+            # This exit has no exception to classify, so the funnel in
+            # ``owner_unavailable_allows_account_neutral_replay`` never sees it.
+            # Attribute it here for the same reason: a refusal that names no
+            # proof cannot be acted on.
+            replay_rejection = classify_account_neutral_replay_rejection()
+            if replay_rejection is not None:
+                record_account_neutral_replay_rejection(replay_rejection)
             raise owner_unavailable
 
         while True:
@@ -2269,7 +2542,11 @@ class _HTTPBridgeStreamingMixin:
                 # carries its own continuity is a safe fresh raw-HTTP replay.
                 if effective_payload.previous_response_id != payload.previous_response_id:
                     setattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, True)
+                if switch_model_transition_to_account_neutral_fork(exc):
+                    continue
                 if not owner_unavailable_allows_account_neutral_replay(exc):
+                    if await retire_unavailable_continuity_owner(exc):
+                        continue
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
                         error_code=exc_code,
@@ -2422,15 +2699,18 @@ class _HTTPBridgeStreamingMixin:
                         else:
                             if _http_bridge_durable_lookup_allows_turn_state_takeover(fresh_turn_state_lookup):
                                 durable_lookup = fresh_turn_state_lookup
+                                durable_full_resend_context_rejection = None
                                 if fresh_turn_state_lookup is None:
                                     durable_full_resend_anchor_count = None
                                     durable_full_resend_anchor_fingerprint = None
                                     durable_full_resend_has_safe_fresh_context = False
+                                    durable_full_resend_anchor_reason = None
                                 else:
                                     (
                                         durable_full_resend_anchor_count,
                                         durable_full_resend_anchor_fingerprint,
                                         durable_full_resend_has_safe_fresh_context,
+                                        durable_full_resend_anchor_reason,
                                     ) = classify_durable_full_resend(fresh_turn_state_lookup)
                                     continuity_preferred_account_id = fresh_turn_state_lookup.account_id
                                     request_state.preferred_account_id = resolve_required_account_id(
@@ -2702,28 +2982,20 @@ class _HTTPBridgeStreamingMixin:
                         request_scope_id=owner_recovery_scope_id,
                     )
                 retry_request_state: _WebSocketRequestState | None = None
-                retry_unowned_lifecycle: _DeferredAccountBackoffLifecycle | None = None
                 try:
-                    retry_api_key_reservation = api_key_reservation
-                    retry_reservation_reacquired = False
-                    if api_key is not None and api_key_reservation is not None:
-                        retry_api_key_reservation = await self._reserve_websocket_api_key_usage(
-                            api_key,
-                            request_model=recovery_payload.model,
-                            request_service_tier=_normalize_service_tier_value(
-                                dict(recovery_payload.to_payload()).get("service_tier"),
-                            ),
-                            request_usage_budget=estimate_api_key_request_usage(recovery_payload),
-                        )
-                        retry_reservation_reacquired = True
-                        retry_unowned_lifecycle = begin_bridge_lifecycle(retry_api_key_reservation)
-
                     retry_request_state, retry_text_data = prepare_bridge_request(
                         recovery_payload,
-                        reservation=retry_api_key_reservation,
+                        # The owner rejected before dispatch, so the origin's
+                        # reservation is transferred to the local request.
+                        # Reacquiring here would consume quota twice and leave
+                        # the original hold without its lifecycle owner.
+                        reservation=request_state.api_key_reservation,
                     )
                     retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                     retry_request_state.affinity_policy = affinity
+                    retry_request_state.affinity_observation = AffinityObservation.retaining_source(
+                        inbound_affinity_observation.source, affinity
+                    )
                     _apply_http_bridge_downstream_turn_state(
                         retry_request_state,
                         downstream_turn_state=downstream_turn_state,
@@ -2776,21 +3048,6 @@ class _HTTPBridgeStreamingMixin:
                         request_deadline=request_deadline,
                     ):
                         yield event_block
-                except BaseException:
-                    if retry_reservation_reacquired and retry_api_key_reservation is not None:
-                        retry_lifecycle = (
-                            retry_request_state.deferred_account_backoff_lifecycle
-                            if retry_request_state is not None
-                            else retry_unowned_lifecycle
-                        )
-                        try:
-                            await release_unowned_bridge_lifecycle(retry_lifecycle, retry_request_state)
-                        except Exception:
-                            logger.warning(
-                                "Failed to release owner-recovery HTTP bridge reservation",
-                                exc_info=True,
-                            )
-                    raise
                 finally:
                     if owner_recovery_scope_id is not None:
                         _release_http_bridge_unanchored_handoff(
@@ -2909,6 +3166,9 @@ class _HTTPBridgeStreamingMixin:
             request_state, text_data = prepare_bridge_request(effective_payload)
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
+            request_state.affinity_observation = AffinityObservation.retaining_source(
+                inbound_affinity_observation.source, affinity
+            )
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -3042,6 +3302,9 @@ class _HTTPBridgeStreamingMixin:
             request_state, text_data = prepare_bridge_request(submit_payload)
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
+            request_state.affinity_observation = AffinityObservation.retaining_source(
+                inbound_affinity_observation.source, affinity
+            )
             _apply_http_bridge_downstream_turn_state(
                 request_state,
                 downstream_turn_state=downstream_turn_state,
@@ -3249,19 +3512,6 @@ class _HTTPBridgeStreamingMixin:
                 yield event_block
                 yielded_any = True
         except ProxyResponseError as exc:
-            if (
-                request_state.operation_registered
-                and request_state.operation_id is not None
-                and session.durable_session_id is not None
-                and session.durable_owner_epoch is not None
-                and _http_bridge_durable_recovery_predecessor_proven(request_state)
-            ):
-                # The API-level recovery loop must only run when this request
-                # has an actual durable operation fence. Settings alone are
-                # insufficient during a rolling migration where the durable
-                # tables may be unavailable and the bridge falls back to an
-                # in-memory session.
-                setattr(exc, "http_bridge_durable_recovery_eligible", True)
             if yielded_any:
                 yield _partial_output_proxy_error_event_block(
                     exc,
@@ -3915,7 +4165,6 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.operation_fingerprint = request_state.operation_fingerprint
                 retry_request_state.operation_parent_response_id = request_state.operation_parent_response_id
                 retry_request_state.operation_registered = request_state.operation_registered
-                retry_request_state.operation_attempt_generation = request_state.operation_attempt_generation
                 retry_request_state.operation_persisted_response_id = request_state.operation_persisted_response_id
                 retry_request_state.operation_rebind_required = request_state.operation_rebind_required
                 # An anchored recovery replays the proxy's own anchor, so the
@@ -3964,6 +4213,9 @@ class _HTTPBridgeStreamingMixin:
                     # atomically moves it back to submitted before send.
                     retry_request_state.operation_rebind_required = True
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+                retry_request_state.affinity_observation = AffinityObservation.retaining_source(
+                    inbound_affinity_observation.source, affinity
+                )
                 _apply_http_bridge_downstream_turn_state(
                     retry_request_state,
                     downstream_turn_state=downstream_turn_state,
@@ -4144,19 +4396,6 @@ class _HTTPBridgeStreamingMixin:
                 mark_bridge_eventless_failure()
                 await record_bridge_eventless_timeout_failure()
                 eventless_message = _http_bridge_eventless_timeout_message(session.unmatched_upstream_liveness_count)
-                if getattr(
-                    _service_get_settings(),
-                    "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
-                    "fail_closed",
-                ) == "server_indefinite_recovery" and _http_bridge_server_anchored_replay_enabled(request_state):
-                    raise ProxyResponseError(
-                        503,
-                        openai_error(
-                            _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
-                            eventless_message,
-                            error_type="server_error",
-                        ),
-                    ) from exc
                 return (
                     False,
                     format_sse_event(
@@ -4171,152 +4410,9 @@ class _HTTPBridgeStreamingMixin:
                     ),
                 )
 
-        def operation_fenced_cooldown_wait_enabled() -> bool:
-            """Allow a hard turn to wait until its durable fence can arbitrate recovery."""
-            return (
-                getattr(
-                    _service_get_settings(),
-                    "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
-                    "fail_closed",
-                )
-                in {"server_anchored_replay_once", "server_indefinite_recovery"}
-                and getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
-                and request_state.hard_continuity_anchor
-                and session.durable_session_id is not None
-                and session.durable_owner_epoch is not None
-                and request_state.previous_response_id is None
-                and request_state.response_id is None
-                and request_state.response_event_count == 0
-            )
-
         def continuity_bound_without_safe_replay() -> bool:
             """Do not hold a client stream through a cooldown we cannot use."""
-            return _http_bridge_continuity_bound_without_safe_replay(request_state) and not (
-                _http_bridge_server_anchored_replay_enabled(request_state) or operation_fenced_cooldown_wait_enabled()
-            )
-
-        async def wait_through_operation_fenced_startup_cooldown() -> bool:
-            if session.key.strength != "hard" or not operation_fenced_cooldown_wait_enabled():
-                return False
-            retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
-            if retry_cooldown_seconds <= 0:
-                return False
-            remaining_budget_seconds = request_deadline - clock.monotonic()
-            if remaining_budget_seconds <= 0:
-                return False
-            wait_seconds = min(retry_cooldown_seconds, remaining_budget_seconds)
-            async with session.pending_lock:
-                if session.queued_request_count >= queue_limit:
-                    raise ProxyResponseError(
-                        429,
-                        openai_error(
-                            "bridge_queue_full",
-                            "HTTP responses session bridge queue is full",
-                            error_type="rate_limit_error",
-                        ),
-                    )
-                session.queued_request_count += 1
-            _log_http_bridge_event(
-                "wait_operation_fenced_cooldown",
-                session.key,
-                account_id=session.account.id,
-                model=session.request_model,
-                detail="hard_turn_operation_fence",
-                cache_key_family=session.key.affinity_kind,
-            )
-            logger.info(
-                "HTTP bridge waiting through retry-circuit cooldown before durable hard-turn arbitration "
-                "request_id=%s wait_seconds=%.1f remaining_budget_seconds=%.1f",
-                request_state.request_id,
-                wait_seconds,
-                remaining_budget_seconds,
-            )
-            # No upstream request has been dispatched on this path.  After the
-            # cooldown, normal submission still has to create or claim the
-            # durable operation fence before response.create can be sent.
-            try:
-                current_instance = _service_get_settings().http_responses_session_bridge_instance_id
-                lease_refresh_interval_seconds = max(
-                    1.0,
-                    min(
-                        _http_bridge_durable_lease_ttl_seconds() / 3.0,
-                        wait_seconds,
-                    ),
-                )
-                remaining_wait_seconds = wait_seconds
-                while remaining_wait_seconds > 0:
-                    sleep_seconds = min(remaining_wait_seconds, lease_refresh_interval_seconds)
-                    await scheduler.sleep(sleep_seconds)
-                    remaining_wait_seconds = max(0.0, remaining_wait_seconds - sleep_seconds)
-                    if remaining_wait_seconds <= 0:
-                        break
-                    try:
-                        owner_lookup = await self._durable_bridge.renew_live_session(
-                            session_id=session.durable_session_id,
-                            api_key_id=session.key.api_key_id,
-                            instance_id=current_instance,
-                            owner_epoch=session.durable_owner_epoch,
-                            lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                            latest_turn_state=session.downstream_turn_state,
-                            latest_response_id=None,
-                        )
-                    except Exception as exc:
-                        session.closed = True
-                        session.upstream_control.reconnect_requested = True
-                        session.upstream_control.retire_after_drain = True
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                "bridge_continuity_persistence_failed",
-                                "HTTP responses session ownership could not be renewed; retry the request.",
-                            ),
-                        ) from exc
-                    if (
-                        owner_lookup is None
-                        or owner_lookup.owner_instance_id != current_instance
-                        or owner_lookup.owner_epoch != session.durable_owner_epoch
-                    ):
-                        session.closed = True
-                        session.upstream_control.reconnect_requested = True
-                        session.upstream_control.retire_after_drain = True
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                "bridge_continuity_persistence_failed",
-                                "HTTP responses session ownership changed during cooldown; retry the request.",
-                            ),
-                        )
-            finally:
-                async with session.pending_lock:
-                    session.queued_request_count = max(0, session.queued_request_count - 1)
-            return True
-
-        async def operation_fenced_request_budget_terminal_event() -> str | None:
-            if not operation_fenced_cooldown_wait_enabled() or clock.monotonic() < request_deadline:
-                return None
-            await self._release_websocket_request_state_reservation(request_state)
-            request_state.api_key_reservation = None
-            mark_bridge_eventless_failure()
-            eventless_message = _http_bridge_eventless_timeout_message(session.unmatched_upstream_liveness_count)
-            if propagate_http_errors:
-                raise ProxyResponseError(
-                    503,
-                    openai_error(
-                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
-                        eventless_message,
-                        error_type="server_error",
-                    ),
-                )
-            return format_sse_event(
-                cast(
-                    Mapping[str, JsonValue],
-                    response_failed_event(
-                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
-                        eventless_message,
-                        response_id=_websocket_downstream_response_id(request_state),
-                    ),
-                )
-            )
+            return _http_bridge_continuity_bound_without_safe_replay(request_state)
 
         def mark_bridge_eventless_failure() -> None:
             """Record the pre-response-start classification on the request log.
@@ -4357,12 +4453,11 @@ class _HTTPBridgeStreamingMixin:
             if observed_response_events > 0 or consecutive_failures is None:
                 return
 
-            # Same capped, fenced flow as the idle-recovery exhaustion: the
-            # consult applies the effective (circuit-capped) threshold and
-            # captures the continuity the abandonment fences on, so this
-            # retry-transport funnel can neither wait past the opened
-            # circuit for the raw configured threshold nor erase continuity
-            # a sibling registered during the window. Only the strike above
+            # Same fenced flow as the idle-recovery exhaustion: the consult
+            # applies the circuit threshold and captures the continuity the
+            # abandonment fences on, so this retry-transport funnel can
+            # neither wait past the opened circuit nor erase continuity a
+            # sibling registered during the window. Only the strike above
             # runs before publication; the consult and abandonment run as
             # an owned settlement task the stream finalizer awaits, so a
             # slow durable store never delays the client-visible terminal
@@ -4379,11 +4474,6 @@ class _HTTPBridgeStreamingMixin:
                 ) = await self._http_bridge_poison_anchor_clear_owed(
                     session,
                     consecutive_failures=consecutive_failures,
-                    configured_threshold=getattr(
-                        _service_get_settings(),
-                        "http_responses_session_bridge_anchor_poison_failure_threshold",
-                        _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
-                    ),
                 )
                 if poison_episode is None:
                     return
@@ -4461,11 +4551,6 @@ class _HTTPBridgeStreamingMixin:
             # non-streaming collector.
             await self._release_websocket_request_state_reservation(request_state)
             request_state.api_key_reservation = None
-            if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(request_state):
-                raise ProxyResponseError(
-                    400,
-                    _http_bridge_client_full_history_recovery_error(),
-                )
             if propagate_http_errors:
                 if request_state.durable_owner_dead:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
@@ -4502,12 +4587,6 @@ class _HTTPBridgeStreamingMixin:
             )
 
         while True:
-            budget_terminal_event = await operation_fenced_request_budget_terminal_event()
-            if budget_terminal_event is not None:
-                yield budget_terminal_event
-                return
-            if await wait_through_operation_fenced_startup_cooldown():
-                continue
             startup_terminal_event = await startup_continuity_cooldown_terminal_event()
             if startup_terminal_event is not None:
                 yield startup_terminal_event
@@ -4648,11 +4727,6 @@ class _HTTPBridgeStreamingMixin:
             # gate, reservation, and pending queue entry while marking the
             # upstream handoff for retirement.
             await self._detach_http_bridge_request(session, request_state=request_state)
-            if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(request_state):
-                raise ProxyResponseError(
-                    400,
-                    _http_bridge_client_full_history_recovery_error(),
-                )
             if propagate_http_errors:
                 if request_state.durable_owner_dead:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
@@ -4915,13 +4989,6 @@ class _HTTPBridgeStreamingMixin:
                                         retry_cooldown_seconds,
                                         continuity_bound,
                                     )
-                                    if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(
-                                        request_state
-                                    ):
-                                        raise ProxyResponseError(
-                                            400,
-                                            _http_bridge_client_full_history_recovery_error(),
-                                        )
                                     yield format_sse_event(
                                         cast(
                                             Mapping[str, JsonValue],
@@ -4966,13 +5033,6 @@ class _HTTPBridgeStreamingMixin:
                                             retry_cooldown_seconds,
                                             retry_cooldown_remaining_budget,
                                         )
-                                        if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(
-                                            request_state
-                                        ):
-                                            raise ProxyResponseError(
-                                                400,
-                                                _http_bridge_client_full_history_recovery_error(),
-                                            )
                                         yield format_sse_event(
                                             cast(
                                                 Mapping[str, JsonValue],
@@ -5090,11 +5150,6 @@ class _HTTPBridgeStreamingMixin:
                                             ) = await self._http_bridge_poison_anchor_clear_owed(
                                                 session,
                                                 consecutive_failures=idle_consecutive_failures,
-                                                configured_threshold=getattr(
-                                                    _service_get_settings(),
-                                                    "http_responses_session_bridge_anchor_poison_failure_threshold",
-                                                    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
-                                                ),
                                             )
                                             if poison_episode is None:
                                                 return

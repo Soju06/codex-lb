@@ -2,11 +2,16 @@ PYTEST_ARGS := -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeou
 POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
 INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
+	tests/integration/test_affinity_invite_migration.py \
+	tests/integration/test_affinity_identity_migration.py \
+	tests/integration/test_cost_backfill.py \
+	tests/integration/test_atomic_quota_warmup_claims.py \
 	tests/integration/test_report_rollup.py \
 	tests/integration/test_reports_performance_api.py \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
+	tests/integration/test_auth_provider_abstraction.py \
 	tests/integration/test_migration_serialization.py::test_concurrent_upgrades_on_fresh_postgresql_database_apply_head_exactly_once \
 	tests/integration/test_migration_serialization.py::test_postgresql_run_upgrade_times_out_when_advisory_lock_is_held \
 	tests/integration/test_usage_repository.py::test_latest_by_account_primary_query_plan_uses_normalized_window_index_postgresql \
@@ -25,6 +30,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_account_deletion_background.py \
 	tests/integration/test_request_usage_time_rollup.py \
 	tests/integration/test_request_usage_rollup_parity.py \
+	tests/integration/test_conversation_presence_union.py \
 	tests/integration/test_migrations.py::test_request_usage_time_rollups_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_conversation_presence_rollup_migration_upgrade_and_downgrade \
 	tests/integration/test_data_retention.py \
@@ -37,6 +43,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_repositories.py::test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport \
 	tests/integration/test_migrations.py::test_account_plan_downgrade_observations_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_account_pending_deletion_migration_upgrade_and_downgrade \
+	tests/integration/test_migrations.py::test_bridge_continuity_abandonment_migration_upgrade_and_downgrade \
+	tests/integration/test_repositories.py::test_retire_stale_unavailable_bridge_owners_frees_a_reauth_pinned_thread \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_primary_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_cutoff_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_secondary_query_plan_is_index_only_postgresql \
@@ -49,7 +57,9 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_usage_history_bulk_covering_indexes_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql \
-	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql
+	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql \
+	tests/integration/test_migrations.py::test_model_source_pins_kind_expires_index_repairs_invalid_leftover_postgresql \
+	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql
 SHELL := bash
 
 .PHONY: help
@@ -57,7 +67,7 @@ help:
 	@printf '%s\n' \
 	  'Common targets:' \
 	  '  make lint                    ruff check + format check + architecture checks' \
-	  '  make architecture-check      proxy architecture fitness ratchets' \
+	  '  make architecture-check      proxy, settings, and migration-graph fitness ratchets' \
 	  '  make typecheck               ty check' \
 	  '  make rust-check              fmt + clippy + tests + release build' \
 	  '  make rust-audit              cargo-deny dependency policy' \
@@ -65,6 +75,7 @@ help:
 	  '  make test-dashboard-browser-smoke  built dashboard against the real local API' \
 	  '  make test-unit               unit pytest slice, same as CI' \
 	  '  make test-integration-core   integration-core pytest slice' \
+	  '  make test-overflow-drills    subscription-overflow canary drill rehearsals' \
 	  '  make package                 build and verify sdist/wheel' \
 	  '  make ci-fast                 lint/type/frontend/unit/package/rust-check' \
 	  '  make ci                      full local CI gate'
@@ -106,6 +117,7 @@ architecture-check:
 	uv run python scripts/check_cancellation_safety.py
 	uv run python scripts/check_proxy_timing_seams.py
 	uv run python scripts/check_settings_tiers.py
+	uv run python scripts/check_migration_topology.py
 
 typecheck:
 	uv sync --dev --frozen
@@ -130,7 +142,7 @@ rust-audit:
 
 .PHONY: test-unit test-integration-core test-integration-core-shard \
 	test-integration-core-1 test-integration-core-2 test-integration-core-3 \
-	test-integration-bridge test-e2e test-postgres
+	test-integration-bridge test-overflow-drills test-e2e test-postgres
 test-unit: frontend-build
 	uv sync --dev --frozen
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/simulation tests/test_request_logs_options_api.py
@@ -164,6 +176,15 @@ test-integration-bridge: frontend-build
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -vv \
 	  tests/integration/test_http_responses_bridge.py \
 	  tests/integration/test_proxy_websocket_responses.py
+
+# The pre-flip canary drill rehearsals (docs/routing.md "Canary and drills").
+# Marker-selected rather than path-selected so a drill can move modules without
+# staling the runbook; ``tests/integration`` only bounds collection. Already
+# covered by test-integration-core -- this target exists so an operator can run
+# exactly the drill list before standing a canary up.
+test-overflow-drills:
+	uv sync --dev --frozen
+	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -m overflow_drill tests/integration
 
 test-e2e: frontend-build
 	uv sync --dev --frozen

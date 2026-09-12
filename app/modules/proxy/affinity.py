@@ -8,15 +8,17 @@ orchestration class.
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Literal, TypedDict, cast
+from typing import Literal, TypedDict
 from uuid import uuid4
 
-from app.core.config.settings import get_settings
+from app.core.metrics.prometheus import (
+    PROMETHEUS_AVAILABLE,
+    prompt_cache_key_derivation_total,
+)
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
@@ -26,6 +28,11 @@ from app.core.openai.requests import (
 from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.thread_anchors import (
+    build_thread_window,
+    get_thread_anchor_index,
+    thread_anchor_domain,
+)
 
 # This typed provenance is a routing capability: callers must never recover it
 # from key text, because a client-controlled turn state can mimic any prefix.
@@ -83,6 +90,18 @@ class _AffinityPolicy:
     # ``conversation`` has no dedicated owner index. Preserve that provenance
     # until selection can prove one hard owner or a one-account pool.
     require_unambiguous_account: bool = False
+    # For a policy whose key IS the prompt cache key: whether the client sent
+    # that key (``payload``) or the proxy derived it (``derived``). Recorded by
+    # the resolver rather than re-derived by callers, because
+    # ``_resolve_prompt_cache_key`` writes the derived key back onto the
+    # payload — so a later reader of the payload cannot tell the two apart, and
+    # a blank client hint the resolver rejected still looks present. Routing
+    # never reads this; it exists so the request log can describe the decision.
+    prompt_cache_key_source: str | None = None
+    # How the forwarded ``prompt_cache_key`` was obtained this turn. Diagnostic
+    # only: it never participates in routing, but it is the signal that tells
+    # an operator whether unanchored threads are being held or are churning.
+    prompt_cache_derivation_outcome: str | None = None
 
     @property
     def selection_key(self) -> str | None:
@@ -272,108 +291,134 @@ def _extract_model_class(model: str) -> str:
     return "std"
 
 
+# Version marker for keys minted by the thread-anchor derivation. It also
+# separates the new shape from the legacy content-hash shape
+# (``{model_class}-{api_key_id[:12]}-{hash}...``) so the stale legacy rows can
+# be swept by key prefix. The readable model class and API-key prefix are kept
+# because operators search ``sticky_sessions`` by key text.
+_ANCHORED_KEY_VERSION = "v2t"
+# Fallback when no caller supplies the dashboard freshness window. Matches the
+# ``openai_cache_affinity_max_age_seconds`` column default.
+_DEFAULT_ANCHOR_TTL_SECONDS = 1800
+
+DERIVATION_OUTCOME_PAYLOAD = "payload"
+DERIVATION_OUTCOME_DISABLED = "disabled"
+DERIVATION_OUTCOME_ANCHOR_HIT = "anchor_hit"
+DERIVATION_OUTCOME_ANCHOR_NEW = "anchor_new"
+DERIVATION_OUTCOME_ANCHOR_RESET = "anchor_reset"
+DERIVATION_OUTCOME_UNANCHORABLE = "unanchorable"
+
+
+@dataclass(frozen=True, slots=True)
+class _PromptCacheAnchor:
+    """Result of anchoring one turn.
+
+    ``sticky_key`` is both the value forwarded upstream and the sticky routing
+    key -- deliberately the same string, so there is no proxy-minted value that
+    is forwarded but must not be routed on. It is ``None`` when the turn is
+    unanchorable: there is no transcript to hold, so there is nothing to name,
+    selection takes the unbound path, and **nothing is written onto the
+    payload**.
+
+    That last part is load-bearing. The same payload object is resolved a
+    second time on the real bridge -> ``_stream_with_retry`` fallback, and a
+    written placeholder comes back through the client-supplied branch: a
+    constant ``<class>-<apikey12>`` string promoted to a PROMPT_CACHE sticky
+    key, collapsing every unanchorable thread of one API key onto one row and
+    one account, reported as ``source=payload``.
+    """
+
+    sticky_key: str | None
+    outcome: str
+
+
+def _input_contains_prior_assistant_turn(payload: ResponsesRequest | ResponsesCompactRequest) -> bool:
+    """Whether this body already carries model output from an earlier turn."""
+
+    input_value = getattr(payload, "input", None)
+    if not isinstance(input_value, list):
+        return False
+    for item in input_value:
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") == "assistant" or item.get("type") == "reasoning":
+            return True
+    return False
+
+
+def _derive_prompt_cache_anchor(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    api_key: ApiKeyData | None,
+    *,
+    max_age_seconds: int = _DEFAULT_ANCHOR_TTL_SECONDS,
+) -> _PromptCacheAnchor:
+    """Anchor a turn with no client-supplied ``prompt_cache_key`` to its thread.
+
+    The key is minted once per thread and then reused for every turn whose
+    transcript verifiably extends the previous one (see
+    ``thread_anchors``). It is therefore stable across appends, across a
+    client trimming its leading history, and across an identical re-derivation
+    of the same body (bridge-to-HTTP fallback, cross-transport replay). It
+    deliberately does **not** survive compaction: a compacted turn does not
+    extend the stored transcript, the upstream prefix cache is cold, and the
+    only way to bridge it would be fuzzy matching that merges distinct threads.
+
+    Unlike the previous content-hash derivation, nothing here is a truncated
+    digest of client text, so two threads that share their first 512
+    characters -- one `<environment_context>` block for one cwd, for
+    ``codex_cli_rs`` -- no longer collapse onto one key.
+    """
+
+    model = getattr(payload, "model", None)
+    model_class = _extract_model_class(model) if isinstance(model, str) and model else None
+    api_key_id = api_key.id if api_key is not None else ""
+    instructions = getattr(payload, "instructions", None)
+    instructions_text = instructions if isinstance(instructions, str) else ""
+    readable_parts = [part for part in (model_class, api_key_id[:12] or None) if part]
+
+    window = build_thread_window(
+        getattr(payload, "input", None),
+        domain=thread_anchor_domain(
+            owner_row_id=api_key_id,
+            model_class=model_class or "",
+            instructions=instructions_text,
+        ),
+    )
+    if window is None:
+        return _PromptCacheAnchor(sticky_key=None, outcome=DERIVATION_OUTCOME_UNANCHORABLE)
+
+    index = get_thread_anchor_index()
+    anchored_key = index.lookup(window, ttl_seconds=max_age_seconds)
+    if anchored_key is not None:
+        index.register(anchored_key, window)
+        return _PromptCacheAnchor(anchored_key, DERIVATION_OUTCOME_ANCHOR_HIT)
+
+    minted_key = "-".join([_ANCHORED_KEY_VERSION, *readable_parts, uuid4().hex[:16]])
+    index.register(minted_key, window)
+    # A body that already carries model output belonged to a thread we could
+    # not match: compaction, a restart, or an anchor eviction. Separating it
+    # from a genuinely first turn is what makes the counter actionable.
+    outcome = (
+        DERIVATION_OUTCOME_ANCHOR_RESET
+        if _input_contains_prior_assistant_turn(payload)
+        else DERIVATION_OUTCOME_ANCHOR_NEW
+    )
+    return _PromptCacheAnchor(minted_key, outcome)
+
+
 def _derive_prompt_cache_key(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
-) -> str:
-    """Derive a stable, session-scoped prompt_cache_key when the client does not provide one.
+    *,
+    max_age_seconds: int = _DEFAULT_ANCHOR_TTL_SECONDS,
+) -> str | None:
+    """Key attached to the payload and forwarded upstream, or ``None``.
 
-    The generated key is scoped to (model-class, api-key, instructions-prefix,
-    instruction-role input, first-user-input) so that:
-    - Different model classes get *different* keys (prevents cache pollution).
-    - Parallel sessions from the same API key get *different* keys (different first input).
-    - Successive turns within one session get the *same* key (first input stays constant).
-    - Different API keys never collide.
+    ``None`` means the turn is unanchorable and nothing is attached; see
+    ``_PromptCacheAnchor``.
     """
-    parts: list[str] = []
-    model = getattr(payload, "model", None)
-    model_class = _extract_model_class(model) if isinstance(model, str) and model else None
 
-    if api_key is not None:
-        parts.append(api_key.id[:12])
-
-    instructions = getattr(payload, "instructions", None)
-    if isinstance(instructions, str) and instructions:
-        parts.append(sha256(instructions[:512].encode()).hexdigest()[:12])
-
-    instruction_input_text = _extract_instruction_input(payload)
-    if instruction_input_text:
-        parts.append(sha256(instruction_input_text[:512].encode()).hexdigest()[:12])
-
-    first_user_text = _extract_first_user_input(payload)
-    if first_user_text:
-        parts.append(sha256(first_user_text[:512].encode()).hexdigest()[:12])
-
-    if not parts:
-        random_suffix = uuid4().hex[:24]
-        return f"{model_class}-{random_suffix}" if model_class is not None else random_suffix
-
-    return "-".join([model_class, *parts]) if model_class is not None else "-".join(parts)
-
-
-def _extract_instruction_input(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
-    input_value = getattr(payload, "input", None)
-    if not isinstance(input_value, list):
-        return None
-    parts: list[str] = []
-    for item in input_value:
-        if not isinstance(item, dict):
-            continue
-        if item.get("role") not in ("system", "developer"):
-            continue
-        content_text = _extract_message_content_text(item.get("content"))
-        if content_text:
-            parts.append(content_text)
-        else:
-            parts.append(json.dumps(item, sort_keys=True, ensure_ascii=False))
-        if sum(len(part) for part in parts) >= 512:
-            break
-    if not parts:
-        return None
-    return "\n".join(parts)[:512]
-
-
-def _extract_first_user_input(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
-    """Return a text representation of the first user input item for cache key derivation."""
-    input_value = getattr(payload, "input", None)
-    if isinstance(input_value, str):
-        return input_value[:512]
-    if not isinstance(input_value, list):
-        return None
-    for item in input_value:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        if role == "user":
-            content = item.get("content")
-            content_text = _extract_message_content_text(content)
-            if content_text:
-                return content_text[:512]
-            return json.dumps(item, sort_keys=True, ensure_ascii=False)[:512]
-    return None
-
-
-def _extract_message_content_text(content: object) -> str | None:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        content_mapping = cast(Mapping[str, object], content)
-        text = content_mapping.get("text")
-        return text if isinstance(text, str) else None
-    if not isinstance(content, list):
-        return None
-    parts: list[str] = []
-    for part in content:
-        if isinstance(part, str):
-            parts.append(part)
-            continue
-        if not isinstance(part, dict):
-            continue
-        part_mapping = cast(Mapping[str, object], part)
-        text = part_mapping.get("text")
-        if isinstance(text, str):
-            parts.append(text)
-    return "".join(parts) if parts else None
+    return _derive_prompt_cache_anchor(payload, api_key, max_age_seconds=max_age_seconds).sticky_key
 
 
 def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
@@ -651,27 +696,54 @@ def build_downstream_turn_state_response_headers(turn_state: str) -> dict[str, s
     return {"x-codex-turn-state": turn_state}
 
 
+@dataclass(frozen=True, slots=True)
+class _PromptCacheResolution:
+    """Routing key plus the provenance operators need to read a shape log."""
+
+    sticky_key: str | None
+    source: str
+    outcome: str
+
+
 def _resolve_prompt_cache_key(
     payload: ResponsesRequest | ResponsesCompactRequest,
     *,
     openai_cache_affinity: bool,
     api_key: ApiKeyData | None,
-) -> tuple[str | None, str]:
+    max_age_seconds: int = _DEFAULT_ANCHOR_TTL_SECONDS,
+) -> _PromptCacheResolution:
     cache_key = _prompt_cache_key_from_request_model(payload)
     if isinstance(cache_key, str):
         stripped = cache_key.strip()
         if stripped:
             if stripped != cache_key:
                 payload.prompt_cache_key = stripped
-            return stripped, "payload"
+            return _record_prompt_cache_resolution(
+                _PromptCacheResolution(stripped, "payload", DERIVATION_OUTCOME_PAYLOAD)
+            )
     if not openai_cache_affinity:
-        return None, "none"
-    settings = get_settings()
-    if not settings.openai_prompt_cache_key_derivation_enabled:
-        return None, "none"
-    cache_key = _derive_prompt_cache_key(payload, api_key)
-    payload.prompt_cache_key = cache_key
-    return cache_key, "derived"
+        return _record_prompt_cache_resolution(_PromptCacheResolution(None, "none", DERIVATION_OUTCOME_DISABLED))
+    anchor = _derive_prompt_cache_anchor(payload, api_key, max_age_seconds=max_age_seconds)
+    if anchor.sticky_key is None:
+        # Unanchorable: attach nothing. A value written here is indistinguishable
+        # from a client-supplied one when this same payload object is resolved
+        # again (bridge -> `_stream_with_retry` fallback), which would promote a
+        # constant per-API-key string into a real sticky key. There is also
+        # nothing for upstream to cache: the body carried no digestible
+        # transcript. `http_continuation_signal` falls through to
+        # `http_history_signal`, which still classifies a real transcript.
+        return _record_prompt_cache_resolution(_PromptCacheResolution(None, "none", anchor.outcome))
+    # Attached so that a re-resolution of this same body -- the bridge fallback,
+    # or another replica after ring forwarding -- reuses the identical key
+    # through the client-supplied branch instead of re-deriving it.
+    payload.prompt_cache_key = anchor.sticky_key
+    return _record_prompt_cache_resolution(_PromptCacheResolution(anchor.sticky_key, "derived", anchor.outcome))
+
+
+def _record_prompt_cache_resolution(resolution: _PromptCacheResolution) -> _PromptCacheResolution:
+    if PROMETHEUS_AVAILABLE and prompt_cache_key_derivation_total is not None:
+        prompt_cache_key_derivation_total.labels(outcome=resolution.outcome).inc()
+    return resolution
 
 
 def _sticky_key_for_responses_request(
@@ -688,11 +760,14 @@ def _sticky_key_for_responses_request(
     # This helper only classifies locality keys. Stored-object continuity such
     # as `previous_response_id` is resolved later by ProxyService and must stay
     # hard owner-bound even if this returns a prompt-cache affinity policy.
-    cache_key, _ = _resolve_prompt_cache_key(
+    resolution = _resolve_prompt_cache_key(
         payload,
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
+        max_age_seconds=openai_cache_affinity_max_age_seconds,
     )
+    cache_key = resolution.sticky_key
+    cache_key_source = resolution.source
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key and turn_state_key != synthesized_turn_state:
         policy = _AffinityPolicy(
@@ -721,12 +796,14 @@ def _sticky_key_for_responses_request(
             key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            prompt_cache_key_source=cache_key_source,
         )
     elif sticky_threads_enabled:
         policy = _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
+            prompt_cache_key_source=cache_key_source,
         )
     elif turn_state_key is not None and turn_state_key == synthesized_turn_state:
         policy = _AffinityPolicy(
@@ -749,4 +826,5 @@ def _sticky_key_for_responses_request(
         and _request_allows_unavailable_legacy_owner_abandonment(payload)
     ):
         policy = replace(policy, abandon_unavailable_legacy_owner=True)
+    policy = replace(policy, prompt_cache_derivation_outcome=resolution.outcome)
     return _affinity_with_payload_continuity(policy, payload)

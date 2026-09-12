@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
+import contextlib
+import json
 import logging
-from typing import Literal
+from typing import Final, Literal, cast
 
 import aiohttp
 from aiohttp_retry import ExponentialRetry, RetryClient
@@ -16,16 +19,31 @@ from app.core.clients.codex import (
 )
 from app.core.clients.headers import build_chatgpt_auth_headers
 from app.core.clients.http import _safe_json, lease_retry_client
+from app.core.clients.native_egress import (
+    NativeEgressClient,
+    NativeEgressError,
+    NativeEgressRequest,
+    NativeEgressResponse,
+    NativeEgressTransportError,
+    NativeEgressUnavailable,
+    discover_native_egress_client,
+)
 from app.core.clients.proxy import _codex_response_status
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.usage.models import UsagePayload
+from app.core.utils.proxy_env import resolve_http_proxy_from_env
 from app.core.utils.request_id import get_request_id
 
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 RETRY_START_TIMEOUT = 0.5
 RETRY_MAX_TIMEOUT = 2.0
+# Per-call total timeout and retry budget of the usage / reset-credits fetches
+# (fixed; issue #1340 / PRINCIPLES.md P2). Callers may still pass explicit
+# ``timeout_seconds`` / ``max_retries`` overrides.
+USAGE_FETCH_TIMEOUT_SECONDS: Final[float] = 10.0
+USAGE_FETCH_MAX_RETRIES: Final[int] = 2
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +94,8 @@ async def fetch_usage(
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
     url = _usage_url(usage_base)
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
-    retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS)
+    retries = max_retries if max_retries is not None else USAGE_FETCH_MAX_RETRIES
     headers = _usage_headers(access_token, account_id)
     retry_options = _retry_options(retries + 1)
     require_route_or_direct_egress_opt_in(
@@ -92,10 +110,22 @@ async def fetch_usage(
                 url=url,
                 route=route,
                 headers=headers,
-                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                 retries=retries,
                 codex_client=codex_client,
             )
+        native_client = discover_native_egress_client() if client is None else None
+        if native_client is not None:
+            try:
+                return await _fetch_usage_via_native(
+                    client=native_client,
+                    url=url,
+                    headers=headers,
+                    timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
+                    retries=retries,
+                )
+            except NativeEgressUnavailable:
+                pass
         async with lease_retry_client(client) as retry_client:
             async with retry_client.request(
                 "GET",
@@ -105,32 +135,74 @@ async def fetch_usage(
                 retry_options=retry_options,
             ) as resp:
                 data = await _safe_json(resp)
-                if resp.status >= 400:
-                    code = _extract_error_code(data)
-                    message = _extract_error_message(data) or f"Usage fetch failed ({resp.status})"
-                    logger.warning(
-                        "Usage fetch failed request_id=%s status=%s code=%s message=%s",
-                        get_request_id(),
-                        resp.status,
-                        code,
-                        message,
-                    )
-                    raise UsageFetchError(resp.status, message, code=code)
-                try:
-                    return UsagePayload.model_validate(data)
-                except ValidationError as exc:
-                    logger.warning(
-                        "Usage fetch invalid payload request_id=%s",
-                        get_request_id(),
-                    )
-                    raise UsageFetchError(502, "Invalid usage payload") from exc
-    except (aiohttp.ClientError, asyncio.TimeoutError, CodexTransportError) as exc:
+                return _usage_payload_or_raise(data, resp.status)
+    except (aiohttp.ClientError, asyncio.TimeoutError, CodexTransportError, NativeEgressError) as exc:
         logger.warning(
             "Usage fetch error request_id=%s error=%s",
             get_request_id(),
             exc,
         )
         raise UsageFetchError(0, f"Usage fetch failed: {exc}") from exc
+
+
+async def _fetch_usage_via_native(
+    *,
+    client: NativeEgressClient,
+    url: str,
+    headers: dict[str, str],
+    timeout_seconds: float,
+    retries: int,
+) -> UsagePayload:
+    attempts = max(1, retries + 1)
+    retry_options = _retry_options(attempts)
+    request = NativeEgressRequest(
+        method="GET",
+        url=url,
+        # The helper enables response decompression when negotiation is explicit.
+        headers={
+            "Accept-Encoding": aiohttp.ClientRequest.DEFAULT_HEADERS[aiohttp.hdrs.ACCEPT_ENCODING],
+            **headers,
+        },
+        timeout_seconds=timeout_seconds,
+        proxy_url=resolve_http_proxy_from_env(url),
+    )
+    for attempt in range(attempts):
+        try:
+            response = await client.request(request)
+        except NativeEgressUnavailable as exc:
+            if attempt == 0:
+                raise
+            # Do not restart the budget through Python after a native attempt.
+            raise NativeEgressError("native helper became unavailable during usage retries") from exc
+        except NativeEgressTransportError:
+            if attempt < attempts - 1:
+                await asyncio.sleep(retry_options.get_timeout(attempt + 1))
+                continue
+            raise
+        async with response:
+            status = response.status
+            if status not in RETRYABLE_STATUS or attempt == attempts - 1:
+                data = await _native_usage_json(response)
+                return _usage_payload_or_raise(data, status)
+        await asyncio.sleep(retry_options.get_timeout(attempt + 1))
+    raise RuntimeError("unreachable native usage retry state")
+
+
+async def _native_usage_json(response: NativeEgressResponse) -> JsonObject:
+    # Match the default aiohttp session's charset and empty-body behavior,
+    # keeping body/IPC failures outside the JSON-syntax exception handler.
+    body = await response.read()
+    encoding = "utf-8"
+    content_type = aiohttp.helpers.parse_mimetype(response.headers.get("Content-Type", "").lower())
+    charset = content_type.parameters.get("charset")
+    if charset:
+        with contextlib.suppress(LookupError, ValueError):
+            encoding = codecs.lookup(charset).name
+    try:
+        value = json.loads(body.strip().decode(encoding)) if body.strip() else None
+    except ValueError:
+        return {"error": {"message": body.decode(encoding).strip()}}
+    return cast(JsonObject, value) if isinstance(value, dict) else {"error": {"message": str(value)}}
 
 
 async def consume_rate_limit_reset_credit(
@@ -149,8 +221,8 @@ async def consume_rate_limit_reset_credit(
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
     url = _rate_limit_reset_url(usage_base)
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
-    retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS)
+    retries = max_retries if max_retries is not None else USAGE_FETCH_MAX_RETRIES
     headers = _usage_headers(access_token, account_id)
     payload = {"redeem_request_id": redeem_request_id}
     retry_options = _retry_options(retries + 1)
@@ -167,7 +239,7 @@ async def consume_rate_limit_reset_credit(
                 route=route,
                 headers=headers,
                 payload=payload,
-                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                 retries=retries,
                 codex_client=codex_client,
             )

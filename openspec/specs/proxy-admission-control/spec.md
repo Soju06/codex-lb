@@ -34,7 +34,12 @@ When the proxy rejects a request locally because an admission lane or expensive-
 
 ### Requirement: Expensive upstream work is admission controlled
 
-The proxy MUST enforce separate in-process admission limits for token refresh, upstream websocket connect, and first-turn response creation.
+The proxy MUST enforce separate in-process admission limits for token refresh, upstream websocket connect, and first-turn response creation. The token-refresh (64), upstream websocket connect (128) and compact response-create (64) gate sizes and the 10-second admission wait are fixed application constants in `app/modules/proxy/work_admission.py`; only the response-create gate (`proxy_response_create_limit`, default 256) remains operator-configurable because its binding point moves with the account count. Every gate MUST always exist (no gate is disabled by configuration).
+
+#### Scenario: Fixed gates are not environment settings
+
+- **WHEN** the process starts with `CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT`, `CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT`, `CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT` or `CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS` set
+- **THEN** the values are ignored, startup logs the removed-setting warning once, and the fixed gate sizes and wait apply
 
 #### Scenario: Owner-switch blocked websocket releases response-create admission
 
@@ -116,7 +121,7 @@ Local Responses overload failures MUST expose stable low-cardinality reason fiel
 
 - **WHEN** a visible HTTP bridge request has already claimed a bridge queue slot
 - **AND** the per-session `response_create_gate` is held by legitimate in-flight work
-- **THEN** each gate acquisition attempt waits until the configured `proxy_admission_wait_timeout_seconds` elapses
+- **THEN** each gate acquisition attempt waits until the fixed 10-second admission wait elapses
 - **AND** expired attempts re-enter a recoverable capacity wait bounded by the bridge request budget instead of failing terminally
 - **AND** `response_create_gate_timeout` remains the stable reason when the budget is exhausted
 - **AND** `bridge_queue_full` remains the bounded local-overload reason when the bridge queue itself is saturated
@@ -129,7 +134,7 @@ Local Responses overload failures MUST expose stable low-cardinality reason fiel
 
 ### Requirement: HTTP bridge startup admission waits are bounded
 
-The proxy MUST apply the configured proxy admission wait timeout to each HTTP bridge startup wait attempt for per-session response-create gate acquisition, bridge capacity waiters, and in-flight session creation waiters.
+The proxy MUST apply the fixed 10-second proxy admission wait timeout to each HTTP bridge startup wait attempt for per-session response-create gate acquisition, bridge capacity waiters, and in-flight session creation waiters.
 
 For per-session response-create gate acquisition by a bridged Responses request, an expired gate acquisition attempt MUST be treated as a recoverable capacity wait rather than a terminal failure: the request MUST release its queue slot and account lease, wait with capacity-wait progress semantics, and retry gate acquisition, bounded by the bridge request budget. Requests eligible for soft-affinity reroute MUST still attempt the reroute before entering the recoverable wait. When the bridge request budget is exhausted before the gate opens, the proxy MUST reject the request locally with HTTP 429, `error.code = "response_create_gate_timeout"`, and the stable local-overload reason.
 
@@ -141,7 +146,7 @@ If a request owns in-flight bridge session creation and is cancelled or fails af
 
 - **GIVEN** an HTTP bridge session whose response-create gate is held by a legitimate in-flight turn
 - **AND** a bridged Responses request that cannot soft-reroute (hard-affinity key or `previous_response_id` continuity)
-- **WHEN** a gate acquisition attempt exceeds the configured proxy admission wait timeout
+- **WHEN** a gate acquisition attempt exceeds the fixed proxy admission wait timeout
 - **THEN** the request emits capacity-wait keepalive progress on streaming surfaces and retries gate acquisition
 - **AND** the request completes normally once the in-flight turn releases the gate before the bridge request budget expires
 
@@ -167,14 +172,14 @@ If a request owns in-flight bridge session creation and is cancelled or fails af
 #### Scenario: In-flight bridge session creation does not finish
 
 - **WHEN** a bridged Responses request waits on another request's in-flight session creation
-- **AND** the in-flight creation does not finish before the configured proxy admission wait timeout
+- **AND** the in-flight creation does not finish before the fixed proxy admission wait timeout
 - **THEN** the waiter is rejected locally with HTTP 429 and `error.code = "proxy_overloaded"`
 - **AND** the stalled in-flight marker is evicted if it is still pending
 
 #### Scenario: Bridge capacity waiter does not make progress
 
 - **WHEN** the HTTP bridge is at capacity and a request waits for in-flight bridge work to free capacity
-- **AND** no capacity becomes available before the configured proxy admission wait timeout
+- **AND** no capacity becomes available before the fixed proxy admission wait timeout
 - **THEN** the waiter is rejected locally with HTTP 429 and `error.code = "proxy_overloaded"`
 
 #### Scenario: In-flight owner is cancelled during stale session close

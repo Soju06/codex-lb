@@ -10,13 +10,17 @@ Each ``CODEX_LB_*`` field belongs to exactly one tier:
 - ``T2`` secret: encrypted in the database, env is at most a seed.
 - ``T3`` behaviour tunable / feature flag: the dashboard (``dashboard_settings``)
   is the management surface. A T3 field that has no ``dashboard_settings``
-  column of the same name MUST be listed in ``MIGRATING`` until it gets one.
+  column of the same name MUST either name its existing database home in
+  ``DASHBOARD_HOMES`` (``table.column``) or be listed in ``MIGRATING`` until
+  it gets one.
 - ``T4`` incident debug: env allowed, dashboard toggle recommended.
 
 ``scripts/check_settings_tiers.py`` (run by ``make lint``) fails when a field
-is missing here, when a T3 field has neither a dashboard column nor a
-``MIGRATING`` entry, or when ``.env.example`` mentions a T2-T4 field. Entries
-for fields that no longer exist only warn, so removals can land in either order.
+is missing here, when a T3 field has none of a same-name dashboard column, a
+``DASHBOARD_HOMES`` mapping or a ``MIGRATING`` entry, when a ``DASHBOARD_HOMES``
+target names a column that does not exist, or when ``.env.example`` mentions a
+T2-T4 field. Entries for fields that no longer exist only warn, so removals can
+land in either order.
 """
 
 from __future__ import annotations
@@ -42,7 +46,6 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "database_migration_lock_timeout_seconds": "T0",
     "upstream_base_url": "T1",
     "upstream_connect_timeout_seconds": "T3",
-    "upstream_compact_timeout_seconds": "T3",
     "upstream_websocket_trust_env": "T1",
     "proxy_request_budget_seconds": "T3",
     "http_responses_stream_request_budget_seconds": "T3",
@@ -50,38 +53,19 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "stream_idle_timeout_seconds": "T3",
     "sse_keepalive_interval_seconds": "T3",
     "proxy_downstream_websocket_idle_timeout_seconds": "T3",
-    "max_sse_event_bytes": "T3",
-    "upstream_response_create_max_bytes": "T3",
-    "oauth_timeout_seconds": "T3",
     # bind host of the OAuth callback listener; policy §2 T1 example
     "oauth_callback_host": "T1",
-    "token_refresh_timeout_seconds": "T3",
-    "token_refresh_claim_ttl_seconds": "T3",
     "auth_guardian_enabled": "T3",
     "transcription_request_budget_seconds": "T3",
-    "token_refresh_interval_days": "T3",
-    "usage_fetch_timeout_seconds": "T3",
-    "usage_fetch_max_retries": "T3",
     # path to a replacement quota-key registry; deployment artefact, not behaviour
     "additional_quota_registry_file": "T1",
-    "usage_refresh_enabled": "T3",
-    "usage_refresh_interval_seconds": "T3",
-    "live_usage_ingestion_enabled": "T3",
     "rate_limit_reset_credits_refresh_enabled": "T3",
-    "rate_limit_reset_credits_refresh_interval_seconds": "T3",
-    "openai_prompt_cache_key_derivation_enabled": "T3",
-    "http_responses_session_bridge_enabled": "T3",
+    # K2 bridge: T4 kill switch for the request-path bridge, not a tunable.
+    "http_responses_session_bridge_enabled": "T4",
     "http_responses_session_bridge_request_budget_seconds": "T3",
-    "http_responses_session_bridge_idle_ttl_seconds": "T3",
-    "http_responses_session_bridge_codex_idle_ttl_seconds": "T3",
     "http_responses_session_bridge_codex_prewarm_enabled": "T3",
-    "http_responses_session_bridge_stuck_gate_retire_after_seconds": "T3",
-    "http_responses_session_bridge_anchor_poison_failure_threshold": "T3",
-    "http_responses_session_bridge_server_recovery_max_attempts": "T3",
     "http_responses_session_bridge_max_sessions": "T1",
     "http_responses_session_bridge_queue_limit": "T1",
-    "http_responses_session_bridge_clean_close_retry_jitter_max_seconds": "T3",
-    "http_responses_session_bridge_operation_ledger_enabled": "T3",
     "http_responses_session_bridge_operation_event_spool_max_bytes": "T1",
     "http_responses_session_bridge_operation_spool_format": "T1",
     "http_responses_session_bridge_operation_event_spool_batch_size": "T1",
@@ -89,13 +73,10 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "http_responses_session_bridge_operation_event_spool_max_pending_events": "T1",
     "http_responses_session_bridge_operation_event_spool_max_pending_bytes": "T1",
     "http_responses_session_bridge_operation_spool_retention_seconds": "T3",
-    "http_responses_session_bridge_ambiguous_continuation_recovery_mode": "T3",
     "http_responses_session_bridge_instance_id": "T1",
     "http_responses_session_bridge_instance_ring": "T1",
     "http_responses_session_bridge_advertise_base_url": "T1",
-    "sticky_session_cleanup_enabled": "T3",
     "upstream_route_cache_ttl_seconds": "T1",
-    "quota_planner_scheduler_enabled": "T3",
     "automations_scheduler_enabled": "T3",
     "telemetry_enabled": "T3",
     "telemetry_endpoint": "T1",
@@ -106,16 +87,12 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "conversation_archive_enabled": "T3",
     "conversation_archive_dir": "T1",
     "conversation_archive_queue_max_bytes": "T1",
-    "max_decompressed_body_bytes": "T3",
-    "max_decompressed_responses_body_bytes": "T3",
-    "image_inline_fetch_enabled": "T3",
-    "image_inline_allowed_hosts": "T3",
-    "images_default_model": "T3",
-    "model_registry_enabled": "T3",
     "model_registry_client_version": "T1",
     "model_registry_snapshot_max_age_seconds": "T1",
     "model_context_window_overrides": "T3",
-    "proxy_unauthenticated_client_cidrs": "T3",
+    # raw socket-peer CIDRs of this replica's network namespace; sibling of the
+    # trusted-proxy CIDRs below, not of the firewall allowlist (projected IPs)
+    "proxy_unauthenticated_client_cidrs": "T1",
     # trusted-proxy topology; policy §2 T1 example
     "firewall_trust_proxy_headers": "T1",
     # trusted-proxy topology; policy §2 T1 example
@@ -125,9 +102,13 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "forwarded_allow_ips": "T1",
     # reverse-proxy deployment dependent, self-lockout risk from the dashboard (policy D2)
     "dashboard_auth_mode": "T1",
-    "dashboard_trust_loopback_host_header_for_long_sessions": "T3",
+    # last link of the dashboard_auth_mode trust chain: whether a loopback Host
+    # header is believed is a per-deployment reverse-proxy fact (policy D2)
+    "dashboard_trust_loopback_host_header_for_long_sessions": "T1",
     # header name is fixed by the reverse-proxy deployment (policy D2)
     "dashboard_auth_proxy_header": "T1",
+    # the group header the same reverse proxy sets (policy D2)
+    "dashboard_auth_proxy_groups_header": "T1",
     "metrics_enabled": "T1",
     "metrics_port": "T1",
     "log_format": "T1",
@@ -136,6 +117,7 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "circuit_breaker_enabled": "T3",
     "soft_drain_enabled": "T3",
     "deterministic_failover_enabled": "T3",
+    "thread_cache_identity_mode": "T3",
     "backpressure_max_concurrent_requests": "T1",
     "bulkhead_proxy_limit": "T1",
     "bulkhead_dashboard_limit": "T1",
@@ -143,11 +125,8 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "dashboard_bootstrap_token": "T0",
     # advertised client-facing address; differs per deployment
     "connect_address": "T1",
-    "proxy_token_refresh_limit": "T3",
-    "proxy_upstream_websocket_connect_limit": "T3",
-    "proxy_response_create_limit": "T3",
-    "proxy_compact_response_create_limit": "T3",
-    "proxy_admission_wait_timeout_seconds": "T3",
+    # per-process asyncio.Semaphore capacity, same class as bulkhead_proxy_limit
+    "proxy_response_create_limit": "T1",
     "proxy_account_response_create_limit": "T3",
     "proxy_account_stream_limit": "T3",
     "proxy_account_stream_recovery_reserve": "T3",
@@ -159,8 +138,6 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "proxy_account_lease_ttl_seconds": "T3",
     "proxy_account_caps_scope": "T1",
     "proxy_account_cap_partition_scale_down_seconds": "T1",
-    "proxy_refresh_failure_cooldown_seconds": "T3",
-    "usage_refresh_auth_failure_cooldown_seconds": "T3",
     "timeout_invariant_validation_strict": "T4",
     "memory_reject_threshold_mb": "T1",
     "event_loop_lag_warn_threshold_seconds": "T1",
@@ -174,55 +151,24 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
 # T3 fields that still live only in env. Value = target dashboard home or
 # "backlog" while none has been designed. Remove the entry in the PR that adds
 # the ``dashboard_settings`` column (the checker warns once it is redundant).
-MIGRATING: Final[dict[str, str]] = {
-    "upstream_compact_timeout_seconds": "backlog",
-    "http_responses_stream_request_budget_seconds": "backlog",
-    "max_sse_event_bytes": "backlog",
-    "upstream_response_create_max_bytes": "backlog",
-    "oauth_timeout_seconds": "backlog",
-    "token_refresh_timeout_seconds": "backlog",
-    "token_refresh_claim_ttl_seconds": "backlog",
-    "auth_guardian_enabled": "backlog",
-    "token_refresh_interval_days": "backlog",
-    "usage_fetch_timeout_seconds": "backlog",
-    "usage_fetch_max_retries": "backlog",
-    "usage_refresh_enabled": "backlog",
-    "usage_refresh_interval_seconds": "backlog",
-    "live_usage_ingestion_enabled": "backlog",
-    "rate_limit_reset_credits_refresh_enabled": "fold into auto_redeem_reset_credits_before_expiry",
-    "rate_limit_reset_credits_refresh_interval_seconds": "backlog",
-    "openai_prompt_cache_key_derivation_enabled": "backlog",
-    "http_responses_session_bridge_enabled": "backlog",
-    "http_responses_session_bridge_request_budget_seconds": "backlog",
-    "http_responses_session_bridge_idle_ttl_seconds": "group with *_prompt_cache_idle_ttl_seconds",
-    "http_responses_session_bridge_codex_idle_ttl_seconds": "group with *_prompt_cache_idle_ttl_seconds",
-    "http_responses_session_bridge_codex_prewarm_enabled": "backlog",
-    "http_responses_session_bridge_stuck_gate_retire_after_seconds": "backlog",
-    "http_responses_session_bridge_anchor_poison_failure_threshold": "backlog",
-    "http_responses_session_bridge_server_recovery_max_attempts": "backlog",
-    "http_responses_session_bridge_clean_close_retry_jitter_max_seconds": "backlog",
-    "http_responses_session_bridge_operation_ledger_enabled": "backlog",
-    "http_responses_session_bridge_operation_spool_retention_seconds": "backlog",
-    "http_responses_session_bridge_ambiguous_continuation_recovery_mode": "backlog",
-    "sticky_session_cleanup_enabled": "backlog",
-    "quota_planner_scheduler_enabled": "gates quota_planner_settings.mode; fold into it",
-    "automations_scheduler_enabled": "backlog",
-    "telemetry_enabled": "dashboard_settings.telemetry_consent (env stays the pre-first-boot opt-out seed)",
-    "conversation_archive_enabled": "backlog",
-    "max_decompressed_body_bytes": "backlog",
-    "max_decompressed_responses_body_bytes": "backlog",
-    "image_inline_fetch_enabled": "backlog",
-    "image_inline_allowed_hosts": "backlog",
-    "images_default_model": "backlog",
-    "model_registry_enabled": "backlog",
-    "model_context_window_overrides": "backlog",
-    "proxy_unauthenticated_client_cidrs": "api_firewall_allowlist (related table)",
-    "dashboard_trust_loopback_host_header_for_long_sessions": "backlog",
-    "proxy_token_refresh_limit": "backlog",
-    "proxy_upstream_websocket_connect_limit": "backlog",
-    "proxy_response_create_limit": "backlog",
-    "proxy_compact_response_create_limit": "backlog",
-    "proxy_admission_wait_timeout_seconds": "backlog",
-    "proxy_refresh_failure_cooldown_seconds": "backlog",
-    "usage_refresh_auth_failure_cooldown_seconds": "backlog",
+#
+# Empty since ``constantize-token-refresh-interval``: every T3 field now has a
+# dashboard home (a same-name ``dashboard_settings`` column or a
+# ``DASHBOARD_HOMES`` mapping), and the last backlog entry
+# (``token_refresh_interval_days``) became the fixed
+# ``app/core/auth/refresh.TOKEN_REFRESH_INTERVAL_DAYS`` instead of getting a
+# card nobody would flip. An empty registry is the intended terminal state and
+# is not an error; the registry stays as the declared landing spot for a T3
+# field that must ship one release ahead of its column.
+MIGRATING: Final[dict[str, str]] = {}
+
+# T3 fields whose database home already exists under a different column name
+# (or in another configuration table). Value = ``table.column``; the checker
+# fails when the column does not exist. The field's environment variable is the
+# fallback while that column holds no decision, per the precedence rule.
+DASHBOARD_HOMES: Final[dict[str, str]] = {
+    # persisted decision > CODEX_LB_TELEMETRY_ENABLED > default (telemetry spec)
+    "telemetry_enabled": "dashboard_settings.telemetry_consent",
+    # M4 model catalogue: one row per slug; the env dict is the per-slug fallback
+    "model_context_window_overrides": "model_context_window_overrides.context_window",
 }

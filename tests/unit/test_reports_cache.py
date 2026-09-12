@@ -14,7 +14,7 @@ KEY = ReportCacheKey(date(2026, 1, 1), date(2026, 1, 7), "UTC", (), (), "", "")
 
 
 async def test_cache_coalesces_identical_loads_and_isolates_filter_keys():
-    cache = ReportCache[int]()
+    cache = ReportCache[ReportCacheKey, int]()
     compute = AsyncMock(return_value=42)
     assert await asyncio.gather(*(cache.get(KEY, compute) for _ in range(10))) == [42] * 10
     compute.assert_awaited_once()
@@ -27,7 +27,7 @@ async def test_cache_expiry_and_capacity(monkeypatch):
 
     clock = 1.0
     monkeypatch.setattr(module, "monotonic", lambda: clock)
-    cache = ReportCache[int](max_entries=1, ttl_seconds=60)
+    cache = ReportCache[ReportCacheKey, int](max_entries=1, ttl_seconds=60)
     compute = AsyncMock(return_value=1)
     await cache.get(KEY, compute)
     clock = 61
@@ -38,7 +38,7 @@ async def test_cache_expiry_and_capacity(monkeypatch):
 
 
 async def test_cache_failure_and_cancellation_release_waiters():
-    cache = ReportCache[int]()
+    cache = ReportCache[ReportCacheKey, int]()
     with pytest.raises(ValueError):
         await cache.get(KEY, AsyncMock(side_effect=ValueError("failed")))
     entered = asyncio.Event()
@@ -57,7 +57,7 @@ async def test_cache_failure_and_cancellation_release_waiters():
 
 
 async def test_cache_hits_bypass_slow_misses_while_distinct_computations_stay_bounded():
-    cache = ReportCache[int]()
+    cache = ReportCache[ReportCacheKey, int]()
     await cache.get(KEY, AsyncMock(return_value=42))
     entered = asyncio.Event()
     release = asyncio.Event()

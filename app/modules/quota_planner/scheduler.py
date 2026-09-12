@@ -6,11 +6,11 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import to_utc_naive
+from app.db.models import DashboardSettings
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.load_balancer import _build_states, effective_routing_tunables
@@ -84,7 +84,11 @@ class QuotaPlannerScheduler:
             if settings.mode == "off":
                 return False
             warmup_service = QuotaWarmupService(session)
-            await self._reconcile_expired_warmup_claims(planner_repo=planner_repo, warmup_service=warmup_service)
+            await self._reconcile_expired_warmup_claims(
+                planner_repo=planner_repo,
+                warmup_service=warmup_service,
+                dashboard_settings=dashboard_settings,
+            )
             accounts_repo = AccountsRepository(session)
             usage_repo = UsageRepository(session)
             accounts = await accounts_repo.list_accounts()
@@ -180,7 +184,11 @@ class QuotaPlannerScheduler:
                 ):
                     # An expired executing row is reclaimed inside warm_now;
                     # a still-live executing row is read back and left alone.
-                    await warmup_service.warm_now(account_id=action.account_id, decision_id=decision.id)
+                    await warmup_service.warm_now(
+                        account_id=action.account_id,
+                        decision_id=decision.id,
+                        dashboard_settings=dashboard_settings,
+                    )
             return True
 
     async def _reconcile_expired_warmup_claims(
@@ -188,15 +196,17 @@ class QuotaPlannerScheduler:
         *,
         planner_repo: QuotaPlannerRepository,
         warmup_service: QuotaWarmupService,
+        dashboard_settings: DashboardSettings,
     ) -> None:
         expired_claims = await planner_repo.list_expired_warmup_claims()
         for decision in expired_claims:
-            await warmup_service.warm_now(account_id=decision.account_id or "", decision_id=decision.id)
+            await warmup_service.warm_now(
+                account_id=decision.account_id or "",
+                decision_id=decision.id,
+                dashboard_settings=dashboard_settings,
+            )
 
 
 def build_quota_planner_scheduler() -> QuotaPlannerScheduler:
-    settings = get_settings()
-    return QuotaPlannerScheduler(
-        interval_seconds=_TICK_SECONDS,
-        enabled=getattr(settings, "quota_planner_scheduler_enabled", True),
-    )
+    # ``quota_planner_settings.mode == "off"`` (dashboard) is the only switch.
+    return QuotaPlannerScheduler(interval_seconds=_TICK_SECONDS, enabled=True)

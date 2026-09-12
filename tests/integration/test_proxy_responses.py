@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator, Mapping
+import logging
+from collections.abc import AsyncIterator, Iterator, Mapping
 from types import SimpleNamespace
 from typing import cast
 
@@ -13,9 +14,11 @@ from sqlalchemy import select
 
 import app.core.clients.proxy as proxy_client_module
 import app.modules.proxy.api as proxy_api_module
+import app.modules.proxy.downstream_delivery as downstream_delivery_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
+from app.core.http_protocol import HTTP_DISCONNECTED_STATE
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
@@ -24,6 +27,11 @@ from app.db.models import Account, DashboardSettings, RequestLog, StickySessionK
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
+from app.modules.proxy.downstream_delivery import (
+    OUTCOME_TERMINAL_AFTER_DISCONNECT,
+    OUTCOME_TERMINAL_WRITTEN,
+    DeliveryTracedStreamingResponse,
+)
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
 
@@ -125,12 +133,8 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         stream_idle_timeout_seconds=300.0,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
     dashboard_settings = DashboardSettings(
         id=1,
@@ -1937,12 +1941,8 @@ async def test_v1_responses_default_smart_policy_routes_http_downstream_by_stick
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         stream_idle_timeout_seconds=300.0,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
     dashboard_settings = DashboardSettings(
         id=1,
@@ -2032,12 +2032,8 @@ async def test_v1_responses_upstream_transport_metric_counts_terminal_errors(
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         stream_idle_timeout_seconds=300.0,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
     dashboard_settings = DashboardSettings(
         id=1,
@@ -2121,12 +2117,8 @@ async def test_v1_responses_without_http_bridge_honors_explicit_websocket_upstre
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         stream_idle_timeout_seconds=300.0,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
     dashboard_settings = DashboardSettings(
         id=1,
@@ -2152,8 +2144,6 @@ async def test_v1_responses_without_http_bridge_honors_explicit_websocket_upstre
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
-        max_sse_event_bytes = 1024
-        image_inline_fetch_enabled = False
         proxy_request_budget_seconds = 75.0
         trace_channels = frozenset()
 
@@ -2222,17 +2212,17 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         stream_idle_timeout_seconds=300.0,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
     dashboard_settings = DashboardSettings(
         id=1,
         sticky_threads_enabled=False,
-        upstream_stream_transport="websocket",
+        # The subject here is "the HTTP upstream does not slim", so the HTTP
+        # upstream is pinned explicitly. Before #2363 this test reached it only
+        # through the input_image transport pin, which no longer fires for a
+        # small inline image.
+        upstream_stream_transport="http",
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
         openai_cache_affinity_max_age_seconds=300,
@@ -2252,8 +2242,6 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
-        max_sse_event_bytes = 1024
-        image_inline_fetch_enabled = False
         proxy_request_budget_seconds = 75.0
         trace_channels = frozenset()
 
@@ -2327,6 +2315,114 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
             "type": "input_image",
             "image_url": "data:image/png;base64," + ("B" * 1200),
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_without_http_bridge_websocket_upstream_keeps_small_inline_images(
+    async_client,
+    monkeypatch,
+):
+    # Regression for #2363: an operator's explicit websocket pin is precedence
+    # item 1, so a request carrying a small inline image must follow it instead
+    # of being forced onto upstream HTTP, and its image must survive verbatim.
+    email = "stream-ws-inline@example.com"
+    raw_account_id = "acc_stream_ws_inline"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    app_settings = Settings(
+        http_responses_session_bridge_enabled=False,
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        stream_idle_timeout_seconds=300.0,
+        proxy_response_create_limit=64,
+    )
+    dashboard_settings = DashboardSettings(
+        id=1,
+        sticky_threads_enabled=False,
+        upstream_stream_transport="websocket",
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        openai_cache_affinity_max_age_seconds=300,
+        import_without_overwrite=False,
+        totp_required_on_login=False,
+        api_key_auth_enabled=False,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
+        http_downstream_transport_policy="smart",
+    )
+
+    class _SettingsCache:
+        async def get(self) -> DashboardSettings:
+            return dashboard_settings
+
+    class _CoreProxySettings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        proxy_request_budget_seconds = 75.0
+        trace_channels = frozenset()
+
+    captured: dict[str, object] = {}
+
+    async def fail_open_upstream_websocket(**kwargs):
+        del kwargs
+        raise AssertionError("HTTP /v1/responses must not open upstream websocket")
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        upstream_stream_transport_override=None,
+    ):
+        del headers, access_token, account_id, base_url, raise_for_status
+        captured["transport"] = upstream_stream_transport_override
+        captured["payload"] = payload.to_payload()
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_ws_stream_inline","object":"response",'
+            '"status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
+    monkeypatch.setattr(proxy_client_module, "get_settings", lambda: _CoreProxySettings())
+    monkeypatch.setattr(proxy_client_module, "_open_upstream_websocket", fail_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    inline_image = "data:image/png;base64," + ("B" * 1200)
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe this"},
+                        {"type": "input_image", "image_url": inline_image},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_ws_stream_inline"
+    assert captured["transport"] == "websocket"
+    request_input = cast(dict[str, object], captured["payload"])["input"]
+    assert isinstance(request_input, list)
+    assert cast(dict[str, object], request_input[0])["content"] == [
+        {"type": "input_text", "text": "describe this"},
+        {"type": "input_image", "image_url": inline_image},
     ]
 
 
@@ -3858,3 +3954,148 @@ async def test_public_responses_preserves_tool_search_output(
         assert response.headers["content-type"].startswith("application/json")
         completed = response.json()
     assert completed["output"] == items
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_stream_is_delivery_traced(async_client, monkeypatch, caplog):
+    """The real ``/v1/responses`` stream goes through ``DeliveryTracedStreamingResponse`` and logs one line."""
+    email = "delivery-trace@example.com"
+    raw_account_id = "acc_delivery_trace"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        yield 'data: {"type":"response.created","response":{"id":"resp_trace","status":"in_progress","output":[]}}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_trace","usage":'
+            '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    traced: list[DeliveryTracedStreamingResponse] = []
+
+    class _Recording(DeliveryTracedStreamingResponse):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            traced.append(self)
+
+    monkeypatch.setattr(proxy_api_module, "DeliveryTracedStreamingResponse", _Recording)
+
+    with caplog.at_level(logging.DEBUG, logger=downstream_delivery_module.__name__):
+        async with async_client.stream(
+            "POST",
+            "/v1/responses",
+            json={"model": "gpt-5.1", "input": "hi", "stream": True},
+            headers={"x-request-id": "req_delivery_trace"},
+        ) as resp:
+            assert resp.status_code == 200
+            lines = [line async for line in resp.aiter_lines() if line]
+
+    assert "event: response.completed" in lines
+    assert [item.outcome for item in traced] == [OUTCOME_TERMINAL_WRITTEN]
+    messages = [record.getMessage() for record in caplog.records if record.name == downstream_delivery_module.__name__]
+    assert len(messages) == 1
+    assert messages[0].startswith(
+        "responses_stream_terminal_delivery request_id=req_delivery_trace surface=responses "
+        "outcome=terminal_written terminal=response.completed chunks="
+    )
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_disconnect_stamp_reaches_traced_response_through_real_middleware_stack(
+    app_instance, async_client, monkeypatch, caplog
+):
+    """The server-created ``scope["state"]`` dict reaches the traced response by identity.
+
+    Drives the real ASGI app (full ``app.main`` middleware stack) with a hand-built
+    scope and stamps the disconnect into the *outer* ``state`` dict right after
+    the first SSE chunk was handed over, the way the protocol does in
+    ``connection_lost``. If any middleware replaced ``state`` with a copy the
+    stamp would be invisible and the outcome would degrade to ``terminal_written``.
+    """
+    email = "delivery-trace-stamp@example.com"
+    raw_account_id = "acc_delivery_trace_stamp"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        yield 'data: {"type":"response.created","response":{"id":"resp_stamp","status":"in_progress","output":[]}}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_stamp","usage":'
+            '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    traced: list[DeliveryTracedStreamingResponse] = []
+
+    class _Recording(DeliveryTracedStreamingResponse):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            traced.append(self)
+
+    monkeypatch.setattr(proxy_api_module, "DeliveryTracedStreamingResponse", _Recording)
+
+    body = json.dumps({"model": "gpt-5.1", "input": "hi", "stream": True}).encode("utf-8")
+    outer_state: dict[str, object] = {}
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode("ascii")),
+            (b"x-request-id", b"req_delivery_trace_stamp"),
+        ],
+        "client": ("127.0.0.1", 40000),
+        "server": ("testserver", 80),
+        "state": outer_state,
+    }
+    request_messages: Iterator[dict[str, object]] = iter([{"type": "http.request", "body": body, "more_body": False}])
+    sent: list[dict[str, object]] = []
+    body_chunks = 0
+
+    async def receive() -> dict[str, object]:
+        try:
+            return next(request_messages)
+        except StopIteration:
+            await asyncio.Event().wait()  # the peer never sends http.disconnect on its own
+            return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        nonlocal body_chunks
+        sent.append(message)
+        if message["type"] == "http.response.body" and message.get("body"):
+            body_chunks += 1
+            if body_chunks == 1:
+                # The peer went away right after the first frame; the protocol
+                # stamps the dict *it* created, not whatever the app sees.
+                outer_state[HTTP_DISCONNECTED_STATE] = "eof"
+
+    with caplog.at_level(logging.DEBUG, logger=downstream_delivery_module.__name__):
+        await app_instance(scope, receive, send)
+
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 200
+    forwarded = b"".join(cast(bytes, m["body"]) for m in sent if m["type"] == "http.response.body")
+    assert b"event: response.completed" in forwarded  # bytes are still forwarded, nothing is synthesized
+    assert [item.outcome for item in traced] == [OUTCOME_TERMINAL_AFTER_DISCONNECT]
+    records = [record for record in caplog.records if record.name == downstream_delivery_module.__name__]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert (
+        "request_id=req_delivery_trace_stamp surface=responses outcome=terminal_after_disconnect "
+        "terminal=response.completed"
+    ) in records[0].getMessage()

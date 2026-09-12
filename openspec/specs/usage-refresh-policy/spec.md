@@ -2,7 +2,9 @@
 
 ## Purpose
 Define how background usage refresh reacts to auth-like failures without permanently hammering bad accounts.
+
 ## Requirements
+
 ### Requirement: Usage refresh cools down repeated auth-like failures
 
 Background usage refresh MUST apply a cooldown to accounts that repeatedly fail usage refresh with ambiguous `401` or `403` responses. Accounts in that cooldown window MUST be skipped until the cooldown expires or a later successful refresh clears it.
@@ -635,7 +637,7 @@ The system SHALL NOT infer weekly secondary semantics solely because a primary-s
 
 ### Requirement: Background usage refresh is staggered across accounts
 
-Background usage refresh MUST distribute account refresh attempts across the configured usage refresh interval instead of refreshing every eligible account in one burst. Each scheduler slice MUST attempt at most one eligible account. Over a full cycle, all eligible accounts SHOULD be considered once.
+Background usage refresh MUST distribute account refresh attempts across the fixed 60-second usage refresh interval (`USAGE_REFRESH_INTERVAL_SECONDS` in `app/core/usage/refresh_policy.py`, which also derives the 180-second usage freshness horizon) instead of refreshing every eligible account in one burst. Background usage refresh MUST always run; the request-path refreshes (account import, post-`usage_limit_reached` request refresh) MUST NOT be gated by an operator switch, and `CODEX_LB_USAGE_REFRESH_ENABLED` / `CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS` are removed settings that startup reports and ignores. Each scheduler slice MUST attempt at most one eligible account. Over a full cycle, all eligible accounts SHOULD be considered once.
 
 Each slice MUST select its account before reading usage history and MUST scope its latest-usage lookups, updater input, warm-up candidate evaluation, and recoverable-status evaluation to that selected account. The scheduler MAY retain the full eligible account roster only to choose the deterministic rotation and calculate staggered warm-up phases; that roster MUST NOT cause usage-history reads, upstream refresh attempts, warm-up sends, or status mutations for an unrelated account in the slice. A selected-account refresh failure MUST NOT trigger same-slice fallback to another account. Database sessions used to load scheduler state MUST close before upstream network I/O begins, and concurrent follow-up work MUST NOT share an `AsyncSession`.
 
@@ -842,7 +844,7 @@ Usage refresh MUST write usage and change account status only for the credential
 
 ### Requirement: Proactive active account credential refresh
 
-Codex-LB SHALL periodically refresh account credentials in the background when an account's last refresh is older than a configured maximum age. Accounts with status `active` or `paused` SHALL be eligible for proactive credential refresh; accounts with status `reauth_required` or `deactivated` SHALL NOT be selected. Proactive credential refresh MUST NOT change a paused account's routing eligibility: a paused account remains excluded from request routing regardless of refresh outcome, except that a permanent refresh failure transitions the account to its documented permanent-failure status the same way it does for active accounts. The proactive refresh scheduler SHALL be enabled by default with zero required configuration, and `CODEX_LB_AUTH_GUARDIAN_ENABLED=false` SHALL disable it. The multi-replica leader guard remains a precondition for any refresh work.
+Codex-LB SHALL periodically refresh account credentials in the background when an account's last refresh is older than a configured maximum age. Accounts with status `active` or `paused` SHALL be eligible for proactive credential refresh; accounts with status `reauth_required` or `deactivated` SHALL NOT be selected. Proactive credential refresh MUST NOT change a paused account's routing eligibility: a paused account remains excluded from request routing regardless of refresh outcome, except that a permanent refresh failure transitions the account to its documented permanent-failure status the same way it does for active accounts. The proactive refresh scheduler SHALL be enabled by default with zero required configuration. Whether a refresh pass runs SHALL be decided by the dashboard setting `auth_guardian_enabled` (a nullable `dashboard_settings` column; NULL inherits the deprecated `CODEX_LB_AUTH_GUARDIAN_ENABLED` environment variable, then the default `true`), exposed with provenance on `GET`/`PUT /api/settings`. The scheduler loop SHALL always start; each refresh pass SHALL read the effective value from the dashboard-settings snapshot at the start of the pass and SHALL skip the pass while it is `false`, so a change made in the dashboard applies on the next pass on every replica without a restart. The multi-replica leader guard remains a precondition for any refresh work.
 
 #### Scenario: Idle active account becomes stale
 
@@ -869,9 +871,24 @@ Codex-LB SHALL periodically refresh account credentials in the background when a
 
 #### Scenario: Guardian runs on a default install
 
-- **GIVEN** a single-replica deployment with no `CODEX_LB_AUTH_GUARDIAN_*` configuration
+- **GIVEN** a single-replica deployment with no `CODEX_LB_AUTH_GUARDIAN_*` configuration and no dashboard value for `auth_guardian_enabled`
 - **WHEN** the Auth Guardian scheduler is built
-- **THEN** the scheduler is enabled
+- **THEN** the scheduler is enabled and its passes run
+
+#### Scenario: Dashboard pause applies on the next pass without a restart
+
+- **GIVEN** the scheduler was started with `auth_guardian_enabled` effectively `true`
+- **WHEN** an operator sets `auth_guardian_enabled` to `false` in the dashboard
+- **THEN** the next refresh pass skips without refreshing any account
+- **AND** when the operator sets it back to `true` (or clears it so the inherited `true` applies) the pass after that refreshes stale accounts again
+- **AND** no replica was restarted
+
+#### Scenario: Environment alias applies only while the dashboard value is unset
+
+- **GIVEN** `CODEX_LB_AUTH_GUARDIAN_ENABLED=false` and no dashboard value
+- **WHEN** an operator sets `auth_guardian_enabled` to `true` in the dashboard
+- **THEN** refresh passes run and `provenance.auth_guardian_enabled.source` is `dashboard`
+- **AND** clearing the dashboard value returns to the environment value (`source` `env`)
 
 ### Requirement: Auth Guardian bounded and safe execution
 
@@ -887,7 +904,7 @@ Auth Guardian SHALL bound each run by configured batch size and concurrency, add
 
 ### Requirement: Multi-replica leader guard
 
-Auth Guardian SHALL use the existing leader-election mechanism so only the elected replica performs proactive refresh work. When leader election is disabled, the guardian MUST detect multi-replica operation dynamically from live bridge ring membership (members with a heartbeat within the staleness threshold) in addition to the static instance ring, MUST skip the refresh pass when more than one live replica is detected, and MUST log a warning identifying the leader-election setting.
+Auth Guardian SHALL use the existing leader-election mechanism so only the elected replica performs proactive refresh work. When leader election is disabled, the guardian MUST detect multi-replica operation dynamically from live bridge ring membership (members with a heartbeat within the staleness threshold) in addition to the static instance ring, MUST skip the refresh pass when more than one live replica is detected, and MUST log a warning identifying the leader-election setting. The dashboard setting `auth_guardian_enabled` MUST NOT override this gate: with a static instance ring of more than one member and leader election disabled, every pass skips whatever the dashboard value is, and `GET /api/settings` SHALL report `auth_guardian_blocked_by_topology` as `true` so the dashboard can show why the guardian is idle.
 
 #### Scenario: Replica is not leader
 
@@ -904,6 +921,14 @@ Auth Guardian SHALL use the existing leader-election mechanism so only the elect
 - **WHEN** an Auth Guardian tick runs on either replica
 - **THEN** the guardian performs no refresh work
 - **AND** logs a warning identifying the leader-election setting
+
+#### Scenario: Dashboard cannot enable the guardian in a multi-replica ring without leader election
+
+- **GIVEN** a static instance ring of two members and leader election disabled
+- **AND** `auth_guardian_enabled` is `true` in the dashboard
+- **WHEN** an Auth Guardian tick runs
+- **THEN** the guardian performs no refresh work and logs a warning identifying the leader-election setting
+- **AND** `GET /api/settings` reports `auth_guardian_blocked_by_topology` as `true` while the effective `auth_guardian_enabled` stays `true`
 
 ### Requirement: Aggregated rate-limit surfaces expire elapsed windows
 
@@ -926,7 +951,7 @@ Aggregated downstream rate-limit surfaces — the pooled `x-codex-{window}-*` re
 
 ### Requirement: Cross-replica token refresh serialization
 
-Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. The claim expiry — BOTH the stored `claim_expires_at` AND the takeover predicate that treats an existing claim as expired — MUST be evaluated on the DATABASE server clock (`clock_timestamp()`/`now()` on PostgreSQL; in-statement `strftime(..., 'now')` on SQLite), never against a replica-local Python wall-clock instant captured before the statement executes, so inter-replica clock skew can never let one replica treat another replica's still-live claim as expired and steal it (which would let two replicas exchange the same single-use refresh token concurrently). This mirrors the clock-domain guarantee of the scheduler leader election. When the claim TTL is not explicitly configured, the system MUST derive its default to at least this floor from the related timeout settings, so a deployment that predates the claim-TTL setting but raised the refresh or admission timeouts still starts up (never crashing during settings construction against a fixed default); the system MUST reject only an explicitly configured TTL below the floor. The claimant identity MUST remain unique per OS process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix). The per-process suffix MUST be derived per OS process and resolved at claim-build time (for example incorporating `os.getpid()`), never frozen at module import: in pre-fork/multi-worker deployments a module imported before the fork boundary MUST NOT hand every forked child an identical suffix, so two sibling workers sharing one instance id build DISTINCT claimant identities (and thus distinct `claimed_by` values) rather than both satisfying the re-entrant claim upsert and refreshing the single-use token concurrently. The suffix MUST also remain stable across repeated calls within a single process so genuine same-process re-entrant claims still match. The same fork-safety MUST hold for the coordinator that composes claims: a process-default/auto-derived claimant identity MUST NOT be frozen when the coordinator is constructed (the process-default coordinator is commonly built during preload/startup, before a pre-fork server forks its workers, and a frozen identity would be inherited identically by every child). It MUST instead be resolved per OS process at use time so two forked children build DISTINCT claimant identities; a claimant identity that a caller explicitly injects MUST remain stable and unchanged (including across a fork), and repeated reads within one process MUST stay stable.
+Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. The claim expiry — BOTH the stored `claim_expires_at` AND the takeover predicate that treats an existing claim as expired — MUST be evaluated on the DATABASE server clock (`clock_timestamp()`/`now()` on PostgreSQL; in-statement `strftime(..., 'now')` on SQLite), never against a replica-local Python wall-clock instant captured before the statement executes, so inter-replica clock skew can never let one replica treat another replica's still-live claim as expired and steal it (which would let two replicas exchange the same single-use refresh token concurrently). This mirrors the clock-domain guarantee of the scheduler leader election. The claim TTL is not operator-configurable: it is the fixed helper `max(30 s, admission wait + 2 x refresh HTTP timeout)` in `app/modules/accounts/auth_manager.py` (30 s with the fixed 10 s admission wait and 8 s refresh timeout), so it always satisfies the floor by construction, and `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS` is a removed setting that startup reports and ignores. The claimant identity MUST remain unique per OS process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix). The per-process suffix MUST be derived per OS process and resolved at claim-build time (for example incorporating `os.getpid()`), never frozen at module import: in pre-fork/multi-worker deployments a module imported before the fork boundary MUST NOT hand every forked child an identical suffix, so two sibling workers sharing one instance id build DISTINCT claimant identities (and thus distinct `claimed_by` values) rather than both satisfying the re-entrant claim upsert and refreshing the single-use token concurrently. The suffix MUST also remain stable across repeated calls within a single process so genuine same-process re-entrant claims still match. The same fork-safety MUST hold for the coordinator that composes claims: a process-default/auto-derived claimant identity MUST NOT be frozen when the coordinator is constructed (the process-default coordinator is commonly built during preload/startup, before a pre-fork server forks its workers, and a frozen identity would be inherited identically by every child). It MUST instead be resolved per OS process at use time so two forked children build DISTINCT claimant identities; a claimant identity that a caller explicitly injects MUST remain stable and unchanged (including across a fork), and repeated reads within one process MUST stay stable.
 
 After acquiring the claim and re-reading the account fresh, and BEFORE starting a new upstream exchange, the system MUST honor a TERMINAL account status committed by a prior claim holder. When the fresh row's refresh-token fingerprint is UNCHANGED from the material the refresh was requested with (so no peer rotation repaired it) AND the fresh row's status is terminal (`REAUTH_REQUIRED` or `DEACTIVATED`) — for example a prior holder that hit a permanent `invalid_grant`, or the safe-terminal persist-conflict path that flags `REAUTH_REQUIRED` while leaving the consumed token stored — the system MUST NOT re-exchange that unchanged consumed/dead token; it MUST instead surface the terminal state as a PERMANENT refresh failure (fail closed), so a waiter that wins the released claim cannot blindly retry the consumed token and generate another permanent failure for an account a peer already removed from rotation. This decision MUST use the FRESH re-read status and fingerprint, never the stale selection snapshot, and MUST compose with the adopt-vs-exchange logic so that a CHANGED fingerprint (a peer genuinely re-authenticated/rotated and repaired the account) still causes the system to ADOPT the rotated stored tokens and proceed rather than treating a repaired account as terminal.
 
@@ -959,11 +984,10 @@ Removing the unconditional write resolves — structurally, not by picking a sid
 
 #### Scenario: Timeout-only config predating the claim TTL setting still boots
 
-- **GIVEN** a deployment that raised the refresh HTTP timeout or the admission wait timeout above the values that keep the fixed 30s default above the floor
-- **AND** that deployment does not explicitly configure the claim TTL
-- **WHEN** settings are constructed
-- **THEN** construction succeeds with a claim-TTL default derived to at least the floor (admission wait plus twice the refresh timeout)
-- **AND** an explicitly configured claim TTL below the floor is still rejected
+- **GIVEN** a deployment whose environment still sets `CODEX_LB_TOKEN_REFRESH_CLAIM_TTL_SECONDS`, `CODEX_LB_TOKEN_REFRESH_TIMEOUT_SECONDS` or `CODEX_LB_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS` to any value
+- **WHEN** settings are constructed and a replica later acquires a refresh claim
+- **THEN** construction succeeds (the values are ignored and startup logs the removed-setting warning once; nothing is rejected)
+- **AND** the claim TTL is the fixed 30 s (`max(30 s, 10 s admission wait + 2 x 8 s refresh timeout)`), which covers the admission wait plus twice the refresh timeout
 
 #### Scenario: Two refreshes in one process with different fingerprints contend
 
@@ -2185,3 +2209,17 @@ with zero configuration and MUST NOT require an operator setting.
 - **WHEN** two refreshes of that account observe `plan_type` `free` concurrently
 - **THEN** the recorded observation count reflects both observations rather than one
 
+### Requirement: Default account probe model selection
+Account probes without an explicit model MUST use the same ordered registry selection as Images: `gpt-5.6-luna`, then `gpt-5.5`, requiring nonempty plan visibility and no suppression, with `gpt-5.6-luna` as fallback. Explicit probe models MUST remain unchanged.
+
+#### Scenario: Cold registry prefers the current host
+- **WHEN** the registry uses the bootstrap catalog
+- **THEN** the internal model is `gpt-5.6-luna`
+
+#### Scenario: Preferred model unavailable in registry
+- **WHEN** only `gpt-5.5` has registry plan visibility without suppression
+- **THEN** the internal model is `gpt-5.5`
+
+#### Scenario: No candidate qualifies
+- **WHEN** neither candidate has plan visibility without suppression
+- **THEN** the selected host is `gpt-5.6-luna` and existing downstream error handling applies

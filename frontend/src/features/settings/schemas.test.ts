@@ -737,3 +737,35 @@ describe("subscription overflow fields", () => {
     });
   });
 });
+
+describe("local login policy", () => {
+  it("falls an unknown policy back to the open default when reading a response", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "auto",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      apiKeyAuthEnabled: false,
+      localLoginPolicy: "a_policy_this_build_does_not_know",
+    });
+
+    expect(parsed.localLoginPolicy).toBe("enabled");
+  });
+
+  it("rejects an unknown policy on an update request instead of relaxing it", () => {
+    // `updateSettings` takes `unknown`, so this schema is the only thing
+    // between a bad value and the wire. A fallback here would turn a typo into
+    // "everyone may sign in with a password" and the backend would accept it.
+    expect(() => SettingsUpdateRequestSchema.parse({ localLoginPolicy: "a_policy_this_build_does_not_know" })).toThrow();
+    expect(() => SettingsUpdateRequestSchema.parse({ localLoginPolicy: "" })).toThrow();
+    expect(SettingsUpdateRequestSchema.parse({ localLoginPolicy: "break_glass_only" }).localLoginPolicy).toBe(
+      "break_glass_only",
+    );
+    expect(SettingsUpdateRequestSchema.parse({}).localLoginPolicy).toBeUndefined();
+  });
+});

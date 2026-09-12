@@ -23,6 +23,7 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.clock import Clock
+from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
@@ -95,6 +96,76 @@ class SelectionInputsProtocol(Protocol):
 SelectionInputsT = TypeVar("SelectionInputsT", bound=SelectionInputsProtocol)
 
 
+class SelectionStatesOwner(Protocol):
+    """What ``prepare_selection_states`` needs from the balancer: runtime, clock, encryptor, lock-held maintenance."""
+
+    _clock: Clock
+    _runtime: dict[str, RuntimeState]
+    _encryptor: TokenEncryptor
+
+    def _reclaim_stale_account_leases_locked(
+        self,
+        *,
+        routing_tunables: RoutingTunables,
+        redact_sensitive_details: bool = False,
+    ) -> None: ...
+
+    def _prune_runtime(self, accounts: Iterable[Account]) -> None: ...
+
+
+def prepare_selection_states(
+    owner: SelectionStatesOwner,
+    selection_inputs: SelectionInputsProtocol,
+    *,
+    build_states: Callable[..., tuple[list[AccountState], dict[str, Account]]],
+    required_account_id: str | None,
+    redact_sensitive_details: bool,
+    routing_tunables: RoutingTunables,
+    soft_drain_enabled: bool | None = None,
+    model: str | None = None,
+) -> tuple[list[AccountState], dict[str, Account]]:
+    """Build the live selection states for one attempt of a selection path.
+
+    Runs under the owner's runtime lock: reclaims stale leases, prunes runtime
+    entries for accounts that left the pool, builds the states over the live
+    runtime with ``build_states`` (``load_balancer._build_states``; passed in
+    so the balancer module stays the seam tests patch) and, when the path is
+    pinned to ``required_account_id``, narrows the result to that account.
+    ``model`` is the requested model the latency cohort weight is scoped to.
+    """
+    owner._reclaim_stale_account_leases_locked(
+        routing_tunables=routing_tunables,
+        redact_sensitive_details=redact_sensitive_details,
+    )
+    owner._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
+    states, account_map = build_states(
+        accounts=selection_inputs.accounts,
+        latest_primary=selection_inputs.latest_primary,
+        latest_secondary=selection_inputs.latest_secondary,
+        latest_monthly=selection_inputs.latest_monthly,
+        runtime=owner._runtime,
+        now=owner._clock.time(),
+        routing_policy_override=selection_inputs.routing_policy_override,
+        ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+        encryptor=owner._encryptor,
+        routing_tunables=routing_tunables,
+        # C2-3 resilience toggles: an explicit value (opportunistic admission)
+        # wins; selection carries it on its inputs.
+        soft_drain_enabled=(
+            soft_drain_enabled
+            if soft_drain_enabled is not None
+            else getattr(selection_inputs, "soft_drain_enabled", None)
+        ),
+        model=model,
+    )
+    if required_account_id is None:
+        return states, account_map
+    return (
+        [state for state in states if state.account_id == required_account_id],
+        {account_id: account for account_id, account in account_map.items() if account_id == required_account_id},
+    )
+
+
 class StickySelectionOwner(Protocol):
     _clock: Clock
     _runtime: dict[str, RuntimeState]
@@ -108,6 +179,7 @@ class StickySelectionOwner(Protocol):
         required_account_id: str | None,
         redact_sensitive_details: bool,
         routing_tunables: RoutingTunables,
+        model: str | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
     def _sync_runtime_state(
@@ -209,6 +281,7 @@ class StickySelectionOwner(Protocol):
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
         sticky_refresh_skip_deadline: datetime | None = None,
+        redact_sensitive_details: bool = False,
     ) -> _StickySelectionOutcome: ...
 
     async def release_account_lease(self, lease: AccountLease | None) -> None: ...
@@ -253,6 +326,12 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     allow_usage_exhaustion_error: bool = True
     api_key_id: str | None = None
     api_key_stream_fair_share_threshold_pct: int = 0
+    # Accounts this request's retry loop already failed over from. Distinct
+    # from the pre-exclusion continuity pool, which also differs from the
+    # routable pool by catalog-evidence model filtering.
+    exclude_account_ids: frozenset[str] = frozenset()
+    # Requested model; scopes the per-model latency cohort weight of fresh draws.
+    model: str | None = None
     # First-iteration owner read performed by the caller inside its shared
     # owner-lookup session (see load_balancer.select_account). Consumed exactly
     # once; retries re-read fresh ownership evidence through a repo bundle.
@@ -291,6 +370,45 @@ class StickySelectionOutcome(Generic[SelectionInputsT]):
     error_code: str | None
     resets_at: int | None = None
     disposition: StickySelectionDisposition = "shared_result"
+    # Set only alongside ``hard_affinity_saturated`` when the resolved hard
+    # owner is one of the caller's own ``exclude_account_ids``
+    # (``_hard_affinity_owner_excluded_by_caller``).
+    hard_affinity_owner_excluded: bool = False
+
+
+def _hard_affinity_owner_excluded_by_caller(
+    *,
+    error_code: str | None,
+    owner_account_id: str | None | object,
+    exclude_account_ids: frozenset[str],
+) -> bool:
+    """Whether this ``hard_affinity_saturated`` was caused by the caller's own exclusion.
+
+    ``hard_affinity_saturated`` means "the resolved hard ``CODEX_SESSION``
+    owner is not selectable". Two causes reach the same code and the callers'
+    recovery wait (``_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS``) can only help
+    one of them:
+
+    * the owner is briefly unavailable (cap, health backoff, status) -- it may
+      recover inside the wait, which is exactly why the short wait exists;
+    * the caller passed the owner in ``exclude_account_ids`` -- the exclusion
+      filter drops it from the pool before ownership narrows selection to it
+      (``select_account``), so **no** amount of waiting can produce a
+      candidate while the caller keeps excluding it. Selection is not going to
+      spill to another account either: a resolved hard row is ownership
+      evidence, never a preference.
+
+    Only the selector can tell these apart, because only it knows which
+    account the row resolved to. Reporting the distinction (rather than the
+    owner id itself) keeps the account id out of surfaces that would have to
+    redact it, and answers exactly the question every caller asks: "is my own
+    exclusion set the reason, so is waiting futile?"
+    """
+    return (
+        error_code == "hard_affinity_saturated"
+        and isinstance(owner_account_id, str)
+        and owner_account_id in exclude_account_ids
+    )
 
 
 async def run_sticky_selection_path(
@@ -440,6 +558,7 @@ async def run_sticky_selection_path(
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
                 routing_tunables=routing_tunables,
+                model=request.model,
             )
             if retired_legacy_owner_account_ids:
                 # Retirement is authoritative even when this selector loaded a
@@ -588,6 +707,31 @@ async def run_sticky_selection_path(
                     or require_unambiguous_account
                 )
             )
+            if (
+                not preserve_existing_mapping
+                and isinstance(sticky_existing_account_id, str)
+                and not hard_sticky
+                and not reallocate_sticky
+                and sticky_max_age_seconds is not None
+                and not owner_overload_isolated
+                and all(state.account_id != sticky_existing_account_id for state in selection_states)
+            ):
+                # A soft TTL-bounded owner (prompt-cache thread row) missing
+                # from this request's candidates only because of request-local
+                # pressure -- the per-account cap filter dropped it, or the
+                # retry loop excluded it after a transient upstream failure
+                # while its persisted status is still recoverable -- keeps its
+                # mapping. Same rule as bare-session cap spillover: serve the
+                # alternate for this request so the conversation returns to
+                # its warm owner next turn. A PAUSED/DEACTIVATED owner or one
+                # outside the request's continuity scope is still rebound.
+                preserve_existing_mapping = any(state.account_id == sticky_existing_account_id for state in states) or (
+                    sticky_existing_account_id in request.exclude_account_ids
+                    and any(
+                        account.id == sticky_existing_account_id and account.status in _RECOVERABLE_STATUSES
+                        for account in selection_inputs.effective_continuity_owner_candidates
+                    )
+                )
             if suppress_recovery_probe_candidates:
                 selection_states = _filter_recovery_probe_candidates(
                     selection_states,
@@ -740,6 +884,7 @@ async def run_sticky_selection_path(
                         allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                         usage_exhaustion_states=states,
                         sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
+                        redact_sensitive_details=redact_sensitive_details,
                     )
                     result = sticky_outcome.selection
                     if (
@@ -1200,6 +1345,11 @@ async def run_sticky_selection_path(
         error_message=error_message,
         error_code=selection_error_code,
         resets_at=selection_resets_at,
+        hard_affinity_owner_excluded=_hard_affinity_owner_excluded_by_caller(
+            error_code=selection_error_code,
+            owner_account_id=sticky_existing_account_id,
+            exclude_account_ids=request.exclude_account_ids,
+        ),
     )
 
 
@@ -1230,6 +1380,7 @@ async def _select_with_stickiness(
     sticky_refresh_skip_deadline: datetime | None = None,
     overload_backoff_runtime: Mapping[str, RuntimeState] | None = None,
     clock: Clock,
+    redact_sensitive_details: bool = False,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
         return _StickySelectionOutcome(
@@ -1605,8 +1756,8 @@ async def _select_with_stickiness(
         # alone never turns this soft mapping into a distributed commit.
         logger.info(
             "internal_soft_affinity_spillover old_account_id=%s new_account_id=%s sticky_kind=%s",
-            existing,
-            chosen.account.account_id,
+            "<redacted>" if redact_sensitive_details else existing,
+            "<redacted>" if redact_sensitive_details else chosen.account.account_id,
             sticky_kind.value,
         )
     return finish_selection(chosen, effective_states=chosen_pool)

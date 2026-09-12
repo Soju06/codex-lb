@@ -62,6 +62,11 @@ from app.core.clients.native_egress import (
     discover_native_egress_client,
 )
 from app.core.clients.stream_errors import StreamEventTooLargeError, StreamIdleTimeoutError
+from app.core.clients.thread_cache_identity import (
+    ThreadCacheIdentity,
+    apply_thread_cache_identity,
+    scope_session_headers,
+)
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
@@ -215,9 +220,17 @@ _SSE_SEPARATOR_OVERLAP = 3
 _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_INLINE_CHUNK_SIZE = 64 * 1024
 _IMAGE_INLINE_TIMEOUT_SECONDS = 8.0
+# Applies to both upstream SSE event buffering and upstream websocket message
+# frames (fixed; issue #1340 / PRINCIPLES.md P2). Aligned with the common 16 MiB
+# websocket ceiling so large built-in tool payloads (for example image_generation
+# outputs) do not fail locally with a 1009 before upstream completion.
+MAX_SSE_EVENT_BYTES: Final[int] = 16 * 1024 * 1024
 _WEBSOCKET_TRANSPORT_HEADROOM_BYTES: Final[int] = 2 * 1024 * 1024
+# Serialized ``response.create`` budget for the upstream websocket: one MiB
+# under the 16 MiB frame ceiling so the envelope never trips the frame limit.
+UPSTREAM_RESPONSE_CREATE_MAX_BYTES: Final[int] = MAX_SSE_EVENT_BYTES - 1 * 1024 * 1024
 _BLOCKED_LITERAL_HOSTS = {"localhost", "localhost.localdomain"}
-_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = UPSTREAM_RESPONSE_CREATE_MAX_BYTES
 _UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
 _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
     "[codex-lb omitted historical tool output ({bytes} bytes) to fit upstream websocket budget]"
@@ -285,6 +298,10 @@ _HOP_BY_HOP_HEADER_NAMES = frozenset(
         "upgrade",
     }
 )
+# ``Accept`` and ``Content-Type`` are included above because the WebSocket
+# handshake policy rejects them. They are end-to-end HTTP fields, so filter
+# caller supplied copies while the builder regenerates their canonical values.
+_HTTP_HOP_BY_HOP_HEADER_NAMES = _HOP_BY_HOP_HEADER_NAMES - frozenset({"accept", "content-type"})
 _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({426})
 _WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS = frozenset({"background", "stream"})
 _WEBSOCKET_HANDSHAKE_ERROR_HINTS = (
@@ -578,6 +595,7 @@ class ProxyResponseError(Exception):
         retry_after_seconds: int | None = None,
         retry_after_header: str | None = None,
         reservation_released: bool = False,
+        local_pre_dispatch_refusal: bool = False,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -592,6 +610,14 @@ class ProxyResponseError(Exception):
         self.retry_after_seconds = retry_after_seconds
         self.retry_after_header = retry_after_header
         self.reservation_released = reservation_released
+        # True when the proxy refused the request itself before any upstream
+        # frame was sent, so the failure is not an observed upstream transport
+        # failure: the native Codex transport-failure lifecycle, which ends the
+        # body without a terminal event, must not be applied to it (issue
+        # #2364, where such a refusal reached the client as an empty 200). The
+        # refusing instance may be another replica: an internal bridge forward
+        # carries the provenance back so the origin reaches the same verdict.
+        self.local_pre_dispatch_refusal = local_pre_dispatch_refusal
 
 
 def _safe_retry_after_header(headers: Mapping[str, object] | None) -> str | None:
@@ -932,6 +958,17 @@ def _native_responses_header_order(headers: Mapping[str, str]) -> tuple[str, ...
     return tuple(order)
 
 
+def _connection_named_header_names(headers: Mapping[str, str]) -> set[str]:
+    """Return header names explicitly scoped to the inbound connection."""
+
+    named: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() != "connection" or not isinstance(value, str):
+            continue
+        named.update(token.strip().lower() for token in value.split(",") if token.strip())
+    return named
+
+
 def _build_upstream_headers(
     inbound: Mapping[str, str],
     access_token: str,
@@ -939,11 +976,18 @@ def _build_upstream_headers(
     accept: str = "text/event-stream",
     routing_hint: tuple[str, str | None] | None = None,
 ) -> dict[str, str]:
-    native = _is_native_codex_request(inbound)
+    connection_named_header_names = _connection_named_header_names(inbound)
+    blocked_header_names = _HTTP_HOP_BY_HOP_HEADER_NAMES | connection_named_header_names
+    sanitized_identity_headers = {
+        key: value for key, value in inbound.items() if key.lower() not in blocked_header_names
+    }
+    native = _is_native_codex_request(sanitized_identity_headers)
     if native:
         headers = {}
         for key, value in inbound.items():
             lowered = key.lower()
+            if lowered in blocked_header_names:
+                continue
             if lowered == "authorization":
                 if not any(existing.lower() == lowered for existing in headers):
                     headers[key] = f"Bearer {access_token}"
@@ -953,7 +997,11 @@ def _build_upstream_headers(
             elif not _should_drop_inbound_header(key):
                 headers[key] = value
     else:
-        headers = filter_inbound_headers(inbound)
+        headers = {
+            key: value
+            for key, value in filter_inbound_headers(inbound).items()
+            if key.lower() not in blocked_header_names
+        }
     lower_keys = {key.lower() for key in headers}
     if not native and "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
@@ -1334,13 +1382,11 @@ def _effective_compact_connect_timeout(configured_timeout_seconds: float) -> flo
     return max(0.001, min(configured_timeout_seconds, override))
 
 
-def _effective_compact_total_timeout(configured_timeout_seconds: float | None) -> float | None:
+def _effective_compact_total_timeout() -> float | None:
+    # Override-only: the dashboard ``compact_request_budget_seconds`` (pushed by
+    # the compact service as a per-request override) is the sole total cap.
     override = _COMPACT_TOTAL_TIMEOUT_OVERRIDE.get()
-    if configured_timeout_seconds is None:
-        return None if override is None else max(0.001, override)
-    if override is None:
-        return configured_timeout_seconds
-    return max(0.001, min(configured_timeout_seconds, override))
+    return None if override is None else max(0.001, override)
 
 
 def _effective_transcribe_connect_timeout(configured_timeout_seconds: float) -> float:
@@ -2372,17 +2418,14 @@ def _apply_responses_lite_http_header(
         _reorder_headers_like(headers, preferred_order)
 
 
-def _ws_transport_payload_budget_bytes(settings: Settings | object) -> int:
-    # Subtract 2 MiB headroom for control frames + envelope. ``getattr`` fallback
-    # keeps unit tests that pass narrowed ``SimpleNamespace`` settings working
-    # without forcing every fake to redeclare ``max_sse_event_bytes``.
-    max_sse_event_bytes = getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024)
-    return max(1 * 1024 * 1024, max_sse_event_bytes - _WEBSOCKET_TRANSPORT_HEADROOM_BYTES)
+def _ws_transport_payload_budget_bytes(max_sse_event_bytes: int | None = None) -> int:
+    # Subtract 2 MiB headroom for control frames + envelope.
+    frame_bytes = MAX_SSE_EVENT_BYTES if max_sse_event_bytes is None else max_sse_event_bytes
+    return max(1 * 1024 * 1024, frame_bytes - _WEBSOCKET_TRANSPORT_HEADROOM_BYTES)
 
 
 def _resolve_stream_transport(
     *,
-    settings: Settings | object,
     transport: str,
     transport_override: str | None,
     model: str | None,
@@ -2395,9 +2438,7 @@ def _resolve_stream_transport(
         return "websocket"
     if configured == "http":
         return "http"
-    if payload_size_estimate_bytes is not None and payload_size_estimate_bytes > _ws_transport_payload_budget_bytes(
-        settings
-    ):
+    if payload_size_estimate_bytes is not None and payload_size_estimate_bytes > _ws_transport_payload_budget_bytes():
         return "http"
     if has_image_generation_tool:
         return "http"
@@ -3452,10 +3493,6 @@ async def _resolve_safe_image_fetch_target(
     *,
     connect_timeout: float,
 ) -> SafeImageFetchTarget | None:
-    settings = get_settings()
-    if not settings.image_inline_fetch_enabled:
-        return None
-
     parsed = urlparse(url)
     if parsed.scheme != "https":
         return None
@@ -3468,10 +3505,6 @@ async def _resolve_safe_image_fetch_target(
     if not host:
         return None
     if host in _BLOCKED_LITERAL_HOSTS:
-        return None
-
-    allowed_hosts = settings.image_inline_allowed_hosts
-    if allowed_hosts and host not in allowed_hosts:
         return None
 
     literal_ip = _parse_ip_literal(host)
@@ -3598,6 +3631,7 @@ async def stream_responses(
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
     synthesize_routing_hint: bool = False,
+    thread_cache_identity: ThreadCacheIdentity | None = None,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     # aclosing() at every hop lets a consumer's aclose() reach the upstream
@@ -3624,6 +3658,7 @@ async def stream_responses(
                 suppress_live_usage=suppress_live_usage,
                 native_egress_client=native_egress_client,
                 synthesize_routing_hint=synthesize_routing_hint,
+                thread_cache_identity=thread_cache_identity,
             )
         ) as upstream_events,
     ):
@@ -3656,6 +3691,7 @@ async def _stream_responses_with_session(
     suppress_live_usage: bool = False,
     native_egress_client: NativeEgressClient | None = None,
     synthesize_routing_hint: bool = False,
+    thread_cache_identity: ThreadCacheIdentity | None = None,
 ) -> AsyncGenerator[str, None]:
     settings = with_dashboard_overrides(get_settings())
     headers = apply_codex_installation_headers(
@@ -3706,12 +3742,17 @@ async def _stream_responses_with_session(
     )
     payload_dict = dict(payload.to_payload())
     apply_codex_installation_metadata(payload_dict, codex_installation_id)
-    if settings.image_inline_fetch_enabled:
-        payload_dict = await _inline_input_image_urls(
-            payload_dict,
-            _as_image_fetch_session(client_session),
-            effective_connect_timeout,
-        )
+    # ``shared`` (the default) returns immediately, so the bytes below are
+    # unchanged. ``isolated`` must land here: above the http/websocket fork, so
+    # one call covers HTTP streaming, non-streaming HTTP and ``response.create``,
+    # and above ``payload_size_estimate_bytes`` so the transport decision sees
+    # the size actually sent.
+    apply_thread_cache_identity(payload_dict, thread_cache_identity)
+    payload_dict = await _inline_input_image_urls(
+        payload_dict,
+        _as_image_fetch_session(client_session),
+        effective_connect_timeout,
+    )
     http_payload_dict = dict(payload_dict)
     _strip_responses_lite_websocket_client_metadata(http_payload_dict)
     _finalize_responses_lite_reasoning_context(
@@ -3739,7 +3780,6 @@ async def _stream_responses_with_session(
         "http"
         if non_streaming_http
         else _resolve_stream_transport(
-            settings=settings,
             transport=_DEFAULT_UPSTREAM_STREAM_TRANSPORT,
             transport_override=upstream_stream_transport_override,
             model=payload.model,
@@ -3783,6 +3823,11 @@ async def _stream_responses_with_session(
             if transport == "websocket"
             else CODEX_0150_RESPONSES_HTTP_WIRE_PROFILE
         ),
+    )
+    scope_session_headers(
+        upstream_headers,
+        thread_cache_identity,
+        replace=_replace_header_preserving_position,
     )
     remaining_request_timeout = _remaining_total_timeout(
         request_total_timeout,
@@ -3837,7 +3882,7 @@ async def _stream_responses_with_session(
                 }
                 if not non_streaming_http:
                     request_kwargs["native_sse"] = NativeSseOptions(
-                        effective_idle_timeout, settings.max_sse_event_bytes, interpret_responses=True
+                        effective_idle_timeout, MAX_SSE_EVENT_BYTES, interpret_responses=True
                     )
                 request_with_metadata = getattr(active_codex_client, "request_with_route_metadata", None)
                 if callable(request_with_metadata):
@@ -3926,7 +3971,7 @@ async def _stream_responses_with_session(
                     _iter_sse_events(
                         cast(SSEResponse, resp),
                         effective_idle_timeout,
-                        settings.max_sse_event_bytes,
+                        MAX_SSE_EVENT_BYTES,
                     )
                 ) as routed_events:
                     async for event_block in routed_events:
@@ -3987,9 +4032,7 @@ async def _stream_responses_with_session(
                             response_head_timeout_seconds=current_timeout.sock_read,
                             proxy_url=resolve_http_proxy_from_env(url),
                             sse=(
-                                NativeSseOptions(
-                                    effective_idle_timeout, settings.max_sse_event_bytes, interpret_responses=True
-                                )
+                                NativeSseOptions(effective_idle_timeout, MAX_SSE_EVENT_BYTES, interpret_responses=True)
                                 if not non_streaming_http
                                 else None
                             ),
@@ -4086,7 +4129,7 @@ async def _stream_responses_with_session(
                 _iter_sse_events(
                     resp,
                     effective_idle_timeout,
-                    settings.max_sse_event_bytes,
+                    MAX_SSE_EVENT_BYTES,
                 )
             ) as direct_events:
                 async for event_block in direct_events:
@@ -4181,6 +4224,16 @@ async def _stream_responses_with_session(
             codex_installation_id,
             wire_profile=CODEX_0150_RESPONSES_HTTP_WIRE_PROFILE,
         )
+        # This fallback rebuilds the headers from the raw inbound set, which
+        # drops the scoping the websocket attempt applied. The body keeps it
+        # (``http_payload_dict`` was derived after ``apply_thread_cache_identity``),
+        # so without this the retry would go out with a scoped body and unscoped
+        # headers -- one thread presenting two identities on one account.
+        scope_session_headers(
+            upstream_headers,
+            thread_cache_identity,
+            replace=_replace_header_preserving_position,
+        )
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
             request_total_timeout,
@@ -4227,7 +4280,7 @@ async def _stream_responses_with_session(
                     effective_total_timeout=(remaining_request_timeout or settings.proxy_request_budget_seconds),
                     effective_connect_timeout=effective_connect_timeout,
                     effective_idle_timeout=effective_idle_timeout,
-                    max_event_bytes=settings.max_sse_event_bytes,
+                    max_event_bytes=MAX_SSE_EVENT_BYTES,
                     raise_for_status=raise_for_status,
                     account_id=account_id,
                     route=route,
@@ -4729,6 +4782,7 @@ async def compact_responses(
     chatgpt_account_id: str | None = None,
     allow_direct_egress: bool = True,
     synthesize_routing_hint: bool = False,
+    thread_cache_identity: ThreadCacheIdentity | None = None,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
         transport = _CompactCommandTransport(
@@ -4743,6 +4797,7 @@ async def compact_responses(
             chatgpt_account_id=chatgpt_account_id,
             allow_direct_egress=allow_direct_egress,
             synthesize_routing_hint=synthesize_routing_hint,
+            thread_cache_identity=thread_cache_identity,
         )
         return await transport.execute()
 
@@ -4760,6 +4815,7 @@ class _CompactCommandTransport:
     chatgpt_account_id: str | None = None
     allow_direct_egress: bool = False
     synthesize_routing_hint: bool = False
+    thread_cache_identity: ThreadCacheIdentity | None = None
 
     async def execute(self) -> CompactResponsePayload:
         settings = with_dashboard_overrides(get_settings())
@@ -4781,18 +4837,22 @@ class _CompactCommandTransport:
             accept="text/event-stream",
             routing_hint=(self.payload.model, self.payload.service_tier) if self.synthesize_routing_hint else None,
         )
+        scope_session_headers(
+            upstream_headers,
+            self.thread_cache_identity,
+            replace=_replace_header_preserving_position,
+        )
         pre_request_started_at = time.monotonic()
-        compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
+        compact_timeout_seconds = _effective_compact_total_timeout()
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
         payload_dict = _responses_compact_payload_for_responses_endpoint(self.payload)
         payload_dict["store"] = False
         payload_dict["stream"] = True
-        if settings.image_inline_fetch_enabled:
-            payload_dict = await _inline_input_image_urls(
-                payload_dict,
-                _as_image_fetch_session(self.session),
-                effective_connect_timeout,
-            )
+        payload_dict = await _inline_input_image_urls(
+            payload_dict,
+            _as_image_fetch_session(self.session),
+            effective_connect_timeout,
+        )
         _finalize_responses_lite_reasoning_context(
             payload_dict,
             responses_lite=_payload_uses_responses_lite(payload_dict),
@@ -4802,6 +4862,10 @@ class _CompactCommandTransport:
             payload_dict,
             preferred_order=native_header_order,
         )
+        # Strictly before the wire-budget check: a request sitting on the
+        # response.create byte ceiling must be validated against the size it is
+        # actually sent at, not the pre-injection size.
+        apply_thread_cache_identity(payload_dict, self.thread_cache_identity)
         try:
             validate_compact_input_wire_budget(payload_dict)
         except ClientPayloadError as exc:
@@ -4864,7 +4928,7 @@ class _CompactCommandTransport:
         )
         sse_options = NativeSseOptions(
             compact_timeout_seconds or settings.stream_idle_timeout_seconds,
-            settings.max_sse_event_bytes,
+            MAX_SSE_EVENT_BYTES,
             content_type_aware=True,
             collect_compact=True,
         )
@@ -4983,7 +5047,7 @@ class _CompactCommandTransport:
                     data = await _compact_response_payload_from_success_response(
                         resp,
                         idle_timeout_seconds=compact_timeout_seconds or settings.stream_idle_timeout_seconds,
-                        max_event_bytes=settings.max_sse_event_bytes,
+                        max_event_bytes=MAX_SSE_EVENT_BYTES,
                     )
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                     message = str(exc) or "Request to upstream timed out"

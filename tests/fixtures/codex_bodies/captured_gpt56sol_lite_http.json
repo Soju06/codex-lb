@@ -1,0 +1,359 @@
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "id": "at_00000000-0000-4000-8000-000000000001",
+      "role": "developer",
+      "tools": [
+        {
+          "description": "",
+          "name": "functions",
+          "tools": [
+            {
+              "description": "[synthetic input[0].tools[0].tools[0].description]",
+              "format": {
+                "definition": "[synthetic input[0].tools[0].tools[0].format.definition]",
+                "syntax": "lark",
+                "type": "grammar"
+              },
+              "name": "exec",
+              "type": "custom"
+            },
+            {
+              "description": "[synthetic input[0].tools[0].tools[1].description]",
+              "name": "wait",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "[synthetic input[0].tools[0].tools[1].parameters.properties.field01]": {
+                    "description": "[synthetic input[0].tools[0].tools[1].parameters.properties.field01.description]",
+                    "type": "string"
+                  },
+                  "[synthetic input[0].tools[0].tools[1].parameters.properties.field02]": {
+                    "description": "[synthetic input[0].tools[0].tools[1].parameters.properties.field02.description]",
+                    "type": "number"
+                  },
+                  "[synthetic input[0].tools[0].tools[1].parameters.properties.field03]": {
+                    "description": "[synthetic input[0].tools[0].tools[1].parameters.properties.field03.description]",
+                    "type": "boolean"
+                  },
+                  "[synthetic input[0].tools[0].tools[1].parameters.properties.field04]": {
+                    "description": "[synthetic input[0].tools[0].tools[1].parameters.properties.field04.description]",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "[synthetic input[0].tools[0].tools[1].parameters.properties.field01]"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "[synthetic input[0].tools[0].tools[2].description]",
+              "name": "request_user_input",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "[synthetic input[0].tools[0].tools[2].parameters.properties.field01]": {
+                    "description": "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.description]",
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field01]": {
+                          "description": "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field01.description]",
+                          "type": "string"
+                        },
+                        "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field02]": {
+                          "description": "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field02.description]",
+                          "type": "string"
+                        },
+                        "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field03]": {
+                          "description": "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field03.description]",
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field03.items.properties.field01]": {
+                                "description": "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field03.items.properties.field01.description]",
+                                "type": "string"
+                              },
+                              "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field03.items.properties.field02]": {
+                                "description": "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field03.items.properties.field02.description]",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field03.items.properties.field02]",
+                              "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field03.items.properties.field01]"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field04]": {
+                          "description": "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field04.description]",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field02]",
+                        "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field01]",
+                        "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field04]",
+                        "[synthetic input[0].tools[0].tools[2].parameters.properties.field01.items.properties.field03]"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "[synthetic input[0].tools[0].tools[2].parameters.properties.field01]"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            }
+          ],
+          "type": "namespace"
+        },
+        {
+          "description": "[synthetic input[0].tools[1].description]",
+          "name": "collaboration",
+          "tools": [
+            {
+              "description": "[synthetic input[0].tools[1].tools[0].description]",
+              "name": "followup_task",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "[synthetic input[0].tools[1].tools[0].parameters.properties.field01]": {
+                    "description": "[synthetic input[0].tools[1].tools[0].parameters.properties.field01.description]",
+                    "encrypted": true,
+                    "type": "string"
+                  },
+                  "[synthetic input[0].tools[1].tools[0].parameters.properties.field02]": {
+                    "description": "[synthetic input[0].tools[1].tools[0].parameters.properties.field02.description]",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "[synthetic input[0].tools[1].tools[0].parameters.properties.field02]",
+                  "[synthetic input[0].tools[1].tools[0].parameters.properties.field01]"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "[synthetic input[0].tools[1].tools[1].description]",
+              "name": "[synthetic input[0].tools[1].tools[1].name]",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "[synthetic input[0].tools[1].tools[1].parameters.properties.field01]": {
+                    "description": "[synthetic input[0].tools[1].tools[1].parameters.properties.field01.description]",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "[synthetic input[0].tools[1].tools[1].parameters.properties.field01]"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "[synthetic input[0].tools[1].tools[2].description]",
+              "name": "[synthetic input[0].tools[1].tools[2].name]",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "[synthetic input[0].tools[1].tools[2].parameters.properties.field01]": {
+                    "description": "[synthetic input[0].tools[1].tools[2].parameters.properties.field01.description]",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "[synthetic input[0].tools[1].tools[3].description]",
+              "name": "[synthetic input[0].tools[1].tools[3].name]",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "[synthetic input[0].tools[1].tools[3].parameters.properties.field01]": {
+                    "description": "[synthetic input[0].tools[1].tools[3].parameters.properties.field01.description]",
+                    "encrypted": true,
+                    "type": "string"
+                  },
+                  "[synthetic input[0].tools[1].tools[3].parameters.properties.field02]": {
+                    "description": "[synthetic input[0].tools[1].tools[3].parameters.properties.field02.description]",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "[synthetic input[0].tools[1].tools[3].parameters.properties.field02]",
+                  "[synthetic input[0].tools[1].tools[3].parameters.properties.field01]"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "[synthetic input[0].tools[1].tools[4].description]",
+              "name": "spawn_agent",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "[synthetic input[0].tools[1].tools[4].parameters.properties.field01]": {
+                    "description": "[synthetic input[0].tools[1].tools[4].parameters.properties.field01.description]",
+                    "type": "string"
+                  },
+                  "[synthetic input[0].tools[1].tools[4].parameters.properties.field02]": {
+                    "description": "[synthetic input[0].tools[1].tools[4].parameters.properties.field02.description]",
+                    "encrypted": true,
+                    "type": "string"
+                  },
+                  "[synthetic input[0].tools[1].tools[4].parameters.properties.field03]": {
+                    "description": "[synthetic input[0].tools[1].tools[4].parameters.properties.field03.description]",
+                    "type": "string"
+                  },
+                  "[synthetic input[0].tools[1].tools[4].parameters.properties.field04]": {
+                    "description": "[synthetic input[0].tools[1].tools[4].parameters.properties.field04.description]",
+                    "type": "string"
+                  },
+                  "[synthetic input[0].tools[1].tools[4].parameters.properties.field05]": {
+                    "description": "[synthetic input[0].tools[1].tools[4].parameters.properties.field05.description]",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "[synthetic input[0].tools[1].tools[4].parameters.properties.field05]",
+                  "[synthetic input[0].tools[1].tools[4].parameters.properties.field02]"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            },
+            {
+              "description": "[synthetic input[0].tools[1].tools[5].description]",
+              "name": "[synthetic input[0].tools[1].tools[5].name]",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "[synthetic input[0].tools[1].tools[5].parameters.properties.field01]": {
+                    "description": "[synthetic input[0].tools[1].tools[5].parameters.properties.field01.description]",
+                    "type": "number"
+                  }
+                },
+                "type": "object"
+              },
+              "strict": false,
+              "type": "function"
+            }
+          ],
+          "type": "namespace"
+        }
+      ],
+      "type": "additional_tools"
+    },
+    {
+      "content": [
+        {
+          "text": "[synthetic input[1].content[0].text]",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_00000000-0000-4000-8000-000000000002",
+      "role": "developer",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "[synthetic input[2].content[0].text]",
+          "type": "input_text"
+        },
+        {
+          "text": "[synthetic input[2].content[1].text]",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_00000000-0000-4000-8000-000000000003",
+      "role": "developer",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "[synthetic input[3].content[0].text]",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_00000000-0000-4000-8000-000000000004",
+      "role": "developer",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "[synthetic input[4].content[0].text]",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_00000000-0000-4000-8000-000000000005",
+      "role": "developer",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "[synthetic input[5].content[0].text]",
+          "type": "input_text"
+        },
+        {
+          "text": "[synthetic input[5].content[1].text]",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_00000000-0000-4000-8000-000000000006",
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "[synthetic input[6].content[0].text]",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_00000000-0000-4000-8000-000000000007",
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "gpt-5.6-sol",
+  "parallel_tool_calls": false,
+  "prompt_cache_key": "00000000-0000-4000-8000-000000000000",
+  "reasoning": {
+    "context": "all_turns",
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true,
+  "text": {
+    "verbosity": "low"
+  },
+  "tool_choice": "auto"
+}

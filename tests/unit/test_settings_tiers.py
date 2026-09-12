@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from app.core.config.settings import Settings
-from app.core.config.tiers import MIGRATING, SETTING_TIERS, TIERS
-from app.db.models import DashboardSettings
+from app.core.config.tiers import DASHBOARD_HOMES, MIGRATING, SETTING_TIERS, TIERS
+from app.db.models import Base, DashboardSettings
 from scripts import check_settings_tiers as checker
 
 pytestmark = pytest.mark.unit
@@ -28,14 +28,49 @@ def _dashboard_columns() -> list[str]:
     return [column.name for column in DashboardSettings.__table__.columns]
 
 
+def _table_columns() -> dict[str, list[str]]:
+    return {name: [column.name for column in table.columns] for name, table in Base.metadata.tables.items()}
+
+
 def test_every_live_settings_field_has_a_tier() -> None:
     report = checker.check_tier_coverage(Settings.model_fields, SETTING_TIERS, TIERS)
     assert report.errors == []
 
 
 def test_every_live_t3_field_has_a_dashboard_home_or_migrating_entry() -> None:
-    report = checker.check_t3_dashboard_home(Settings.model_fields, SETTING_TIERS, MIGRATING, _dashboard_columns())
+    report = checker.check_t3_dashboard_home(
+        Settings.model_fields, SETTING_TIERS, MIGRATING, _dashboard_columns(), DASHBOARD_HOMES, _table_columns()
+    )
     assert report.errors == []
+
+
+def test_live_dashboard_homes_are_not_duplicated_in_migrating() -> None:
+    # A live field is either migrating (env-only) or already homed; never both.
+    # Entries for removed fields are left to the checker's stale-entry warning.
+    live_homes = {name for name in DASHBOARD_HOMES if name in Settings.model_fields}
+    assert live_homes & set(MIGRATING) == set()
+    assert all(SETTING_TIERS.get(name) == "T3" for name in live_homes)
+
+
+def test_migration_backlog_is_empty_and_still_passes_the_checker() -> None:
+    """Every T3 field has a database home, so ``MIGRATING`` is empty.
+
+    ``constantize-token-refresh-interval`` removed the last backlog entry. An
+    empty mapping is the intended terminal state: the checker must keep
+    passing, and a new env-only T3 field must still be rejected.
+    """
+    assert MIGRATING == {}
+    report = checker.check_t3_dashboard_home(
+        Settings.model_fields, SETTING_TIERS, MIGRATING, _dashboard_columns(), DASHBOARD_HOMES, _table_columns()
+    )
+    assert report.errors == []
+    assert report.warnings == []
+
+    homeless = checker.check_t3_dashboard_home(("beta",), {"beta": "T3"}, {}, [], {}, {})
+    assert homeless.errors == [
+        "Settings.beta is T3 but has neither a dashboard_settings column of the same name, a "
+        "DASHBOARD_HOMES mapping, nor a MIGRATING entry in app/core/config/tiers.py"
+    ]
 
 
 def test_live_tree_passes_all_checks() -> None:
@@ -62,6 +97,78 @@ def test_t3_field_without_dashboard_column_or_migrating_entry_fails() -> None:
     report = checker.check_t3_dashboard_home(FIELDS, TIER_MAP, {}, ["unrelated_column"])
     assert len(report.errors) == 1
     assert report.errors[0].startswith("Settings.beta is T3 but has neither a dashboard_settings column")
+
+
+def test_t3_field_with_explicit_dashboard_home_passes() -> None:
+    homes = {"beta": "dashboard_settings.beta_decision"}
+    report = checker.check_t3_dashboard_home(FIELDS, TIER_MAP, {}, ["beta_decision"], homes)
+    assert report.errors == []
+    assert report.warnings == []
+    other_table = checker.check_t3_dashboard_home(
+        FIELDS, TIER_MAP, {}, [], {"beta": "beta_consent.decision"}, {"beta_consent": ["decision"]}
+    )
+    assert other_table.errors == []
+    assert other_table.warnings == []
+
+
+def test_explicit_dashboard_home_must_name_an_existing_column() -> None:
+    missing = checker.check_t3_dashboard_home(FIELDS, TIER_MAP, {}, ["unrelated"], {"beta": "dashboard_settings.nope"})
+    assert missing.errors == [
+        "DASHBOARD_HOMES maps 'beta' to 'dashboard_settings.nope', but no such database column exists"
+    ]
+    unknown_table = checker.check_t3_dashboard_home(FIELDS, TIER_MAP, {}, [], {"beta": "ghost_table.decision"})
+    assert unknown_table.errors == [
+        "DASHBOARD_HOMES maps 'beta' to 'ghost_table.decision', but no such database column exists"
+    ]
+    malformed = checker.check_t3_dashboard_home(FIELDS, TIER_MAP, {}, ["beta_decision"], {"beta": "beta_decision"})
+    assert malformed.errors == ["DASHBOARD_HOMES['beta'] = 'beta_decision' is not a 'table.column' target"]
+
+
+def test_redundant_dashboard_home_entries_warn() -> None:
+    homes = {
+        "beta": "dashboard_settings.beta",
+        "alpha": "dashboard_settings.alpha_decision",
+        "removed_field": "dashboard_settings.alpha_decision",
+    }
+    report = checker.check_t3_dashboard_home(FIELDS, TIER_MAP, {"beta": "backlog"}, ["beta", "alpha_decision"], homes)
+    assert report.errors == []
+    assert sorted(report.warnings) == sorted(
+        [
+            "DASHBOARD_HOMES lists 'alpha', which is 'T0', not T3; drop the entry",
+            "DASHBOARD_HOMES lists 'beta', but dashboard_settings.beta exists; drop the entry",
+            "DASHBOARD_HOMES lists 'removed_field', which is no longer a Settings field; drop the entry",
+            "MIGRATING lists 'beta', but dashboard_settings.beta exists; drop the entry",
+        ]
+    )
+    # Redundant entries whose old target is gone or malformed: still warnings, never errors
+    # (field removed, field re-tiered, or a same-name column landed and the old column was dropped).
+    stale_target_gone = checker.check_t3_dashboard_home(
+        FIELDS,
+        TIER_MAP,
+        {},
+        ["beta"],
+        {
+            "removed_field": "dashboard_settings.gone",
+            "also_removed": "not-a-target",
+            "alpha": "dashboard_settings.gone",
+            "beta": "not-a-target",
+        },
+    )
+    assert stale_target_gone.errors == []
+    assert stale_target_gone.warnings == [
+        "DASHBOARD_HOMES lists 'alpha', which is 'T0', not T3; drop the entry",
+        "DASHBOARD_HOMES lists 'also_removed', which is no longer a Settings field; drop the entry",
+        "DASHBOARD_HOMES lists 'beta', but dashboard_settings.beta exists; drop the entry",
+        "DASHBOARD_HOMES lists 'removed_field', which is no longer a Settings field; drop the entry",
+    ]
+    homed_and_migrating = checker.check_t3_dashboard_home(
+        FIELDS, TIER_MAP, {"beta": "backlog"}, ["beta_decision"], {"beta": "dashboard_settings.beta_decision"}
+    )
+    assert homed_and_migrating.errors == []
+    assert homed_and_migrating.warnings == [
+        "MIGRATING lists 'beta', but DASHBOARD_HOMES already maps it to 'dashboard_settings.beta_decision'; "
+        "drop the entry"
+    ]
 
 
 def test_t3_field_with_same_name_dashboard_column_passes() -> None:

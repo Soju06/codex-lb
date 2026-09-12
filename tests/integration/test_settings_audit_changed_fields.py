@@ -88,6 +88,7 @@ def _default_put_body() -> dict[str, Any]:
         ("hideUpstreamQuotaFromApiKeys", True, "hide_upstream_quota_from_api_keys"),
         ("requestLogRetentionOverrideDays", 30, "request_log_retention_override_days"),
         ("usageHistoryRetentionOverrideDays", 45, "usage_history_retention_override_days"),
+        ("conversationArchiveEnabled", True, "conversation_archive_enabled"),  # M5 conversation archive
     ],
 )
 @pytest.mark.asyncio
@@ -219,3 +220,134 @@ async def test_settings_audit_records_subscription_overflow_designation_and_drai
         "subscription_overflow_source_id",
         "subscription_overflow_drain_until",
     ]
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_writes_are_audited(async_client) -> None:
+    """A row that changes what the catalog advertises to every client is audited
+    like any other dashboard settings write, on both store and delete."""
+    path = "/api/settings/model-context-window-overrides"
+
+    stored = await async_client.put(f"{path}/gpt-5.4", json={"contextWindow": 515_000})
+    assert stored.status_code == 200
+    store_log = await _wait_for_settings_changed_audit_log()
+    assert store_log.details is not None
+    store_details = json.loads(store_log.details)
+    assert store_details["changed_fields"] == ["model_context_window_overrides"]
+    assert store_details["slug"] == "gpt-5.4"
+
+    removed = await async_client.delete(f"{path}/gpt-5.4")
+    assert removed.status_code == 200
+    delete_log = await _wait_for_settings_changed_audit_log(after_id=store_log.id)
+    assert delete_log.details is not None
+    assert json.loads(delete_log.details)["slug"] == "gpt-5.4"
+
+
+# M5 conversation archive
+async def _wait_for_audit_log(action: str, *, after_id: int | None = None, attempts: int = 20) -> AuditLog | None:
+    for _ in range(attempts):
+        async with SessionLocal() as session:
+            filters = [AuditLog.action == action]
+            if after_id is not None:
+                filters.append(AuditLog.id > after_id)
+            result = await session.execute(select(AuditLog).where(*filters).order_by(AuditLog.id.desc()))
+            row = result.scalars().first()
+            if row is not None:
+                return row
+        await asyncio.sleep(0.05)
+    return None
+
+
+@pytest.mark.asyncio
+async def test_conversation_archive_toggle_writes_a_dedicated_audit_event_with_actor(async_client) -> None:
+    """Every effective on/off flip of the prompt recorder is its own audit line naming the actor."""
+    from app.core.conversation_archive import CONVERSATION_ARCHIVE_TOGGLED_ACTION
+
+    enabled = await async_client.put("/api/settings", json={"conversationArchiveEnabled": True})
+    assert enabled.status_code == 200
+    on_event = await _wait_for_audit_log(CONVERSATION_ARCHIVE_TOGGLED_ACTION)
+    assert on_event is not None, "conversation_archive_toggled audit row not written when enabling"
+    assert on_event.details is not None
+    on_details = json.loads(on_event.details)
+    assert on_details["enabled"] is True
+    assert on_details["source"] == "dashboard"
+    assert on_details["actor_role"] == "admin"
+    assert "actor" in on_details
+    assert on_event.actor_ip is not None
+
+    # Storing the same value again is not a flip: no second event.
+    same = await async_client.put("/api/settings", json={"conversationArchiveEnabled": True})
+    assert same.status_code == 200
+    await _wait_for_settings_changed_audit_log(after_id=on_event.id)
+    assert await _wait_for_audit_log(CONVERSATION_ARCHIVE_TOGGLED_ACTION, after_id=on_event.id, attempts=3) is None
+
+    # Clearing the dashboard value with the env alias off is an effective flip
+    # to off and is audited as such.
+    cleared = await async_client.put("/api/settings", json={"conversationArchiveEnabled": None})
+    assert cleared.status_code == 200
+    off_event = await _wait_for_audit_log(CONVERSATION_ARCHIVE_TOGGLED_ACTION, after_id=on_event.id)
+    assert off_event is not None, "conversation_archive_toggled audit row not written when disabling"
+    assert off_event.details is not None
+    off_details = json.loads(off_event.details)
+    assert off_details["enabled"] is False
+    assert off_details["source"] == "default"
+    assert off_details["actor_role"] == "admin"
+
+
+# end M5 conversation archive
+
+
+@pytest.mark.asyncio
+async def test_conversation_archive_toggle_audit_names_the_actor_under_trusted_header_auth(
+    async_client, monkeypatch
+) -> None:
+    """When the auth mode carries an identity, the dedicated event records it.
+
+    A proxy-asserted identity is resolved to a dashboard account (provisioned on
+    first arrival), so the acting principal the event names is that account: its
+    username, which is the subject with ``@`` folded to ``.``. The companion
+    ``settings_changed`` row carries the same account in its actor columns.
+    """
+    from app.core.auth.dashboard_mode import DashboardAuthMode
+    from app.core.config.settings import get_settings
+    from app.core.conversation_archive import CONVERSATION_ARCHIVE_TOGGLED_ACTION
+    from app.modules.dashboard_users.identity_resolver import slugify_subject
+
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_MODE", DashboardAuthMode.TRUSTED_HEADER)
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS", "true")
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER", "Remote-User")
+    get_settings.cache_clear()
+
+    subject = "alice@example.com"
+    enabled = await async_client.put(
+        "/api/settings",
+        json={"conversationArchiveEnabled": True},
+        headers={"Remote-User": subject},
+    )
+    assert enabled.status_code == 200
+
+    event = await _wait_for_audit_log(CONVERSATION_ARCHIVE_TOGGLED_ACTION)
+    assert event is not None
+    assert event.details is not None
+    details = json.loads(event.details)
+    assert details["actor"] == slugify_subject(subject) == "alice.example.com"
+    assert details["actor_role"] == "admin"
+    assert details["enabled"] is True
+
+    settings_changed = await _wait_for_settings_changed_audit_log()
+    assert settings_changed.actor_username == details["actor"]
+    assert settings_changed.actor_user_id is not None
+    assert settings_changed.auth_method == "trusted_header"
+
+
+@pytest.mark.asyncio
+async def test_unrelated_settings_change_writes_no_conversation_archive_event(async_client) -> None:
+    """The dedicated event is reserved for effective archive flips."""
+    from app.core.conversation_archive import CONVERSATION_ARCHIVE_TOGGLED_ACTION
+
+    response = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert response.status_code == 200
+    await _wait_for_settings_changed_audit_log()
+
+    assert await _wait_for_audit_log(CONVERSATION_ARCHIVE_TOGGLED_ACTION, attempts=3) is None

@@ -38,17 +38,41 @@ DASHBOARD_TIMEOUT_SETTINGS: Final[tuple[str, ...]] = (
     "stream_idle_timeout_seconds",
     "proxy_downstream_websocket_idle_timeout_seconds",
     "sse_keepalive_interval_seconds",
+    # M1 stream/bridge budgets: the Responses stream request budget and the
+    # HTTP session bridge request budget share the Upstream timeouts card.
+    "http_responses_stream_request_budget_seconds",
+    "http_responses_session_bridge_request_budget_seconds",
+    # end M1 stream/bridge budgets
 )
+
+# M3 codex prewarm: dashboard-managed behaviour switches, overlaid exactly like
+# the timeouts. Keeping them here means their single consumer reads the field
+# off ``Settings`` as before -- no extra snapshot read, and in particular no
+# ``await`` in the hot path that reads them.
+DASHBOARD_SWITCH_SETTINGS: Final[tuple[str, ...]] = ("http_responses_session_bridge_codex_prewarm_enabled",)
+
+# Dashboard-managed *enumerated* values, overlaid the same way. Unlike the
+# switches these are strings, which is why ``DashboardOverrideValue`` admits
+# ``str``: the thread cache identity mode has to be overlaid here and not only
+# folded into the settings API response, or the proxy would keep serving
+# ``shared`` while ``GET /api/settings`` reported the operator's choice as the
+# effective value.
+DASHBOARD_MODE_SETTINGS: Final[tuple[str, ...]] = ("thread_cache_identity_mode",)
 
 # Every ``Settings`` field whose dashboard column overrides the environment
 # value at runtime (the account-capacity caps have their own consumer path
-# through ``SettingsService`` and are not overlaid here).
-DASHBOARD_OVERRIDE_SETTINGS: Final[tuple[str, ...]] = DASHBOARD_TIMEOUT_SETTINGS
+# through ``SettingsService``, and the resilience toggles their own task-bound
+# ``ResilienceToggles``; neither is overlaid here).
+DASHBOARD_OVERRIDE_SETTINGS: Final[tuple[str, ...]] = (
+    DASHBOARD_TIMEOUT_SETTINGS + DASHBOARD_SWITCH_SETTINGS + DASHBOARD_MODE_SETTINGS
+)
+
+type DashboardOverrideValue = float | bool | str
 
 
-def dashboard_overrides(row: DashboardSettings) -> dict[str, float]:
+def dashboard_overrides(row: DashboardSettings) -> dict[str, DashboardOverrideValue]:
     """Non-NULL dashboard values keyed by ``Settings`` field name."""
-    overrides: dict[str, float] = {}
+    overrides: dict[str, DashboardOverrideValue] = {}
     for name in DASHBOARD_OVERRIDE_SETTINGS:
         value = getattr(row, name, None)
         if value is not None:
@@ -65,8 +89,8 @@ class DashboardOverlay:
 
     __slots__ = ("_applied", "_base", "overrides")
 
-    def __init__(self, overrides: Mapping[str, float]) -> None:
-        self.overrides: Mapping[str, float] = dict(overrides)
+    def __init__(self, overrides: Mapping[str, DashboardOverrideValue]) -> None:
+        self.overrides: Mapping[str, DashboardOverrideValue] = dict(overrides)
         self._base: Settings | None = None
         self._applied: Settings | None = None
 

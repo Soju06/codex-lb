@@ -6,7 +6,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
 from urllib.parse import quote, urlencode
 
 import aiohttp
@@ -26,13 +26,17 @@ from app.core.config.settings import (
     OAUTH_ORIGINATOR,
     OAUTH_REDIRECT_URI,
     OAUTH_SCOPE,
-    get_settings,
 )
 from app.core.types import JsonObject
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
 
 logger = logging.getLogger(__name__)
+
+# Total timeout of one OAuth HTTP exchange (token, device-code, refresh via the
+# authorization-code path); fixed since issue #1340 / PRINCIPLES.md P2. Callers
+# may still pass an explicit ``timeout_seconds``.
+OAUTH_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
 @dataclass(frozen=True)
@@ -110,7 +114,6 @@ async def exchange_authorization_code(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
 ) -> OAuthTokens:
-    settings = get_settings()
     url = f"{(base_url or AUTH_BASE_URL).rstrip('/')}/oauth/token"
     payload = {
         "grant_type": "authorization_code",
@@ -120,7 +123,7 @@ async def exchange_authorization_code(
         "redirect_uri": redirect_uri or OAUTH_REDIRECT_URI,
     }
     encoded = urlencode(payload, quote_via=quote)
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or OAUTH_TIMEOUT_SECONDS)
 
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     request_id = get_request_id()
@@ -138,7 +141,7 @@ async def exchange_authorization_code(
             codex_client=codex_client,
             data=encoded,
             headers=headers,
-            timeout=timeout_seconds or settings.oauth_timeout_seconds,
+            timeout=timeout_seconds or OAUTH_TIMEOUT_SECONDS,
         )
         data = await _safe_codex_json(resp)
         payload = _validate_oauth_token_payload(data, "OAuth token response invalid")
@@ -184,13 +187,12 @@ async def request_device_code(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
 ) -> DeviceCode:
-    settings = get_settings()
     auth_base = (base_url or AUTH_BASE_URL).rstrip("/")
     url = f"{auth_base}/api/accounts/deviceauth/usercode"
     payload = {
         "client_id": client_id or OAUTH_CLIENT_ID,
     }
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or OAUTH_TIMEOUT_SECONDS)
 
     headers: dict[str, str] = {}
     request_id = get_request_id()
@@ -208,7 +210,7 @@ async def request_device_code(
             codex_client=codex_client,
             json=payload,
             headers=headers,
-            timeout=timeout_seconds or settings.oauth_timeout_seconds,
+            timeout=timeout_seconds or OAUTH_TIMEOUT_SECONDS,
         )
         data = await _safe_codex_json(resp)
         status = _codex_status(resp)
@@ -281,10 +283,9 @@ async def exchange_device_token(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
 ) -> OAuthTokens | None:
-    settings = get_settings()
     url = f"{(base_url or AUTH_BASE_URL).rstrip('/')}/api/accounts/deviceauth/token"
     payload = {"device_auth_id": device_auth_id, "user_code": user_code}
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds or OAUTH_TIMEOUT_SECONDS)
 
     headers: dict[str, str] = {}
     request_id = get_request_id()
@@ -302,7 +303,7 @@ async def exchange_device_token(
             codex_client=codex_client,
             json=payload,
             headers=headers,
-            timeout=timeout_seconds or settings.oauth_timeout_seconds,
+            timeout=timeout_seconds or OAUTH_TIMEOUT_SECONDS,
         )
         data = await _safe_codex_json(resp)
         payload_data = _validate_oauth_token_payload(data, "Device auth response invalid")

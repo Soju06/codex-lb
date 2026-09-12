@@ -75,6 +75,8 @@ class StatesBuilder(Protocol):
         encryptor: TokenEncryptor | None = None,
         routing_tunables: RoutingTunables | None = None,
         soft_drain_enabled: bool | None = None,
+        model: str | None = None,
+        log_weight_transitions: bool = True,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
 
@@ -101,6 +103,7 @@ class OpportunisticAdmissionOwner(Protocol):
         redact_sensitive_details: bool,
         routing_tunables: RoutingTunables,
         soft_drain_enabled: bool | None = None,
+        model: str | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
     def _detached_runtime_snapshot(self, *, routing_tunables: RoutingTunables) -> dict[str, RuntimeState]: ...
@@ -154,11 +157,21 @@ def detached_runtime_snapshot(
             leases=None if runtime.leases is None else dict(runtime.leases),
             stream_key_inflight=None if runtime.stream_key_inflight is None else dict(runtime.stream_key_inflight),
             overload_rejections=None if runtime.overload_rejections is None else list(runtime.overload_rejections),
+            soft_overload_rejections=(
+                None if runtime.soft_overload_rejections is None else list(runtime.soft_overload_rejections)
+            ),
             outcome_buckets=(
                 None
                 if runtime.outcome_buckets is None
                 else {bucket: list(counts) for bucket, counts in runtime.outcome_buckets.items()}
             ),
+            ttft_samples=None if runtime.ttft_samples is None else list(runtime.ttft_samples),
+            tps_samples=(
+                None
+                if runtime.tps_samples is None
+                else {model: list(samples) for model, samples in runtime.tps_samples.items()}
+            ),
+            tps_weights=None if runtime.tps_weights is None else dict(runtime.tps_weights),
         )
         for lease in list((detached.leases or {}).values()):
             if now - lease.acquired_at >= stale_lease_ttl_seconds(lease.kind):
@@ -205,6 +218,7 @@ def _observe_selection_states(
     build_states: StatesBuilder,
     routing_tunables: RoutingTunables,
     soft_drain_enabled: bool | None = None,
+    model: str | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     """Build the states ordinary selection would build, on a detached copy of the runtime.
 
@@ -228,6 +242,10 @@ def _observe_selection_states(
         encryptor=owner._encryptor,
         routing_tunables=routing_tunables,
         soft_drain_enabled=soft_drain_enabled,
+        model=model,
+        # The snapshot's cohort weight is discarded with it; logging from here
+        # would repeat the transition on the next live build.
+        log_weight_transitions=False,
     )
 
 
@@ -281,6 +299,7 @@ async def run_opportunistic_admission(
             build_states=request.build_states,
             routing_tunables=request.routing_tunables,
             soft_drain_enabled=request.soft_drain_enabled,
+            model=request.model,
         )
         selection_states, cap_closed = _account_cap_closed(request, states)
         if cap_closed is not None:
@@ -293,6 +312,7 @@ async def run_opportunistic_admission(
                 redact_sensitive_details=False,
                 routing_tunables=request.routing_tunables,
                 soft_drain_enabled=request.soft_drain_enabled,
+                model=request.model,
             )
             selection_states, cap_closed = _account_cap_closed(request, states)
             if cap_closed is not None:

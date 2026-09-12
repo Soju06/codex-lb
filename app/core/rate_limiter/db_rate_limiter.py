@@ -8,6 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import DashboardRateLimitError
 from app.db.models import RateLimitAttempt
 
+#: How long a recorded attempt is kept before the periodic sweep deletes it.
+#: Every limiter in the product counts over a window of at most a minute, so an
+#: hour is long past the point a row can still deny anyone. A sweep is needed
+#: at all because ``clear_for_key`` only runs on a *successful* sign-in: failed
+#: attempts are otherwise kept forever, and the failed-login key space includes
+#: a caller-supplied username, so an attacker chooses how many rows to leave
+#: behind.
+RATE_LIMIT_ATTEMPT_RETENTION_SECONDS = 3600
+
 
 class DatabaseRateLimiter:
     def __init__(self, max_attempts: int, window_seconds: int, type: str) -> None:
@@ -178,7 +187,29 @@ class DatabaseRateLimiter:
         )
         await session.commit()
 
-    async def cleanup(self, session: AsyncSession, older_than_seconds: int = 3600) -> None:
+    async def cleanup(
+        self, session: AsyncSession, older_than_seconds: int = RATE_LIMIT_ATTEMPT_RETENTION_SECONDS
+    ) -> None:
+        """Delete every attempt older than the retention window, whatever its ``type``.
+
+        Age is the only predicate, so one call sweeps the whole table and the
+        instance's own thresholds are never read. Called from the leader pass of
+        the periodic cleanup scheduler.
+        """
+
         cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
         await session.execute(delete(RateLimitAttempt).where(RateLimitAttempt.attempted_at < cutoff))
         await session.commit()
+
+
+#: ``cleanup`` sweeps by age across every ``type``, so the periodic pass needs
+#: one instance whose limits it never consults.
+_attempt_sweeper = DatabaseRateLimiter(
+    max_attempts=1, window_seconds=RATE_LIMIT_ATTEMPT_RETENTION_SECONDS, type="attempt_sweep"
+)
+
+
+def get_rate_limit_attempt_sweeper() -> DatabaseRateLimiter:
+    """The limiter the periodic cleanup pass sweeps expired attempt rows with."""
+
+    return _attempt_sweeper

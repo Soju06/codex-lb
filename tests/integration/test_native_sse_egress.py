@@ -280,8 +280,7 @@ async def test_native_proxy_frames_large_non_utf8_sse_without_python_scanning(
     assert len(raw_event) > 16 * 1024
     assert len(expected_event.encode("utf-8")) > len(raw_event)
 
-    settings = proxy_module.get_settings().model_copy(update={"max_sse_event_bytes": len(raw_event)})
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", len(raw_event))
 
     def forbidden_python_scan(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("Python SSE byte framing ran for a native framed response")
@@ -354,8 +353,7 @@ async def test_native_proxy_reports_public_event_size_failure(
     limit = 64
     first = b'data: {"type":"response.created"}\n\n'
     oversized = b"data: " + (b"x" * 80) + b"\n\n"
-    settings = proxy_module.get_settings().model_copy(update={"max_sse_event_bytes": limit})
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", limit)
 
     async def handler(
         _reader: asyncio.StreamReader,
@@ -615,8 +613,7 @@ async def test_routed_native_selection_stops_after_response_head(
     accepted_heads: list[bytes] = []
     unexpected_replays: list[bytes] = []
     completed = b'data: {"type":"response.completed","response":{"id":"resp_fallback"}}\n\n'
-    settings = proxy_module.get_settings().model_copy(update={"max_sse_event_bytes": 128})
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", 128)
     session = _UnexpectedPythonSession()
     monkeypatch.setattr(proxy_module, "create_codex_session", lambda: session)
 
@@ -789,6 +786,16 @@ async def test_routed_owned_client_finishes_closing_in_cancelled_scope(
             await cast(AsyncGenerator[str, None], stream).aclose()
 
 
+def _push_compact_total_timeout_override(request: pytest.FixtureRequest, total_timeout_seconds: float | None) -> None:
+    """Emulate the compact service pushing its remaining budget as the total cap.
+
+    The finalizer runs outside the test task's context, so it clears the
+    override by pushing the defaults instead of resetting the token.
+    """
+    proxy_module.push_compact_timeout_overrides(total_timeout_seconds=total_timeout_seconds)
+    request.addfinalizer(proxy_module.push_compact_timeout_overrides)
+
+
 async def _compact(
     base_url: str,
     native_worker: SubprocessNativeEgressClient,
@@ -893,7 +900,7 @@ async def test_native_compact_large_result_is_fragmented_and_stops_before_late_f
     ]
     blocks.append(json.dumps({"type": "response.completed", "response": {"object": "response.compact", "id": "large"}}))
     body = "".join("data: " + block + "\n\n" for block in blocks).encode() + b"data: " + b"x" * 100_000 + b"\n\n"
-    monkeypatch.setattr(proxy_module.get_settings(), "max_sse_event_bytes", 64 * 1024)
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", 64 * 1024)
     original_read = native_module._read_event
     fragments: list[int] = []
 
@@ -1002,7 +1009,7 @@ async def test_compact_non_sse_media_types_keep_raw_json(
 ) -> None:
     worker = SubprocessNativeEgressClient(tmp_path / "missing-helper") if missing_helper else native_worker
     payload = {"object": "response.compact", "id": "compact_json", "padding": "x" * 512}
-    monkeypatch.setattr(proxy_module.get_settings(), "max_sse_event_bytes", 128)
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", 128)
     hits: list[bytes] = []
 
     def forbidden_python_scan(*_args: object, **_kwargs: object) -> None:
@@ -1037,7 +1044,7 @@ async def test_native_compact_preserves_payloads_errors_and_no_replay(
     hits: list[bytes] = []
     error = {"error": {"code": "rate_limit_exceeded", "type": "rate_limit_error", "message": "try later"}}
     json_body = {"object": "response.compact", "id": "compact_json", "padding": "x" * 512}
-    monkeypatch.setattr(proxy_module.get_settings(), "max_sse_event_bytes", 128)
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", 128)
 
     async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, head: bytes, _body: bytes) -> None:
         hits.append(head)
@@ -1090,14 +1097,17 @@ async def test_native_compact_preserves_payloads_errors_and_no_replay(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["idle", "total", "active"])
 async def test_native_compact_preserves_idle_and_total_deadlines(
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     native_worker: SubprocessNativeEgressClient,
     routed: bool,
     mode: str,
 ) -> None:
     settings = proxy_module.get_settings()
-    monkeypatch.setattr(settings, "upstream_compact_timeout_seconds", 0.2 if mode == "total" else None)
     monkeypatch.setattr(settings, "stream_idle_timeout_seconds", 0.15)
+    # The compact total cap is override-only (the compact service pushes the
+    # remaining request budget); emulate that push for the "total" mode.
+    _push_compact_total_timeout_override(request, 0.2 if mode == "total" else None)
     closed = asyncio.Event()
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
@@ -1132,6 +1142,7 @@ async def test_native_compact_preserves_idle_and_total_deadlines(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_helper", [False, True])
 async def test_compact_explicit_timeout_preserves_dedicated_idle_budget(
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     native_worker: SubprocessNativeEgressClient,
     tmp_path: Path,
@@ -1139,7 +1150,7 @@ async def test_compact_explicit_timeout_preserves_dedicated_idle_budget(
     missing_helper: bool,
 ) -> None:
     worker = SubprocessNativeEgressClient(tmp_path / "missing-helper") if missing_helper else native_worker
-    monkeypatch.setattr(proxy_module.get_settings(), "upstream_compact_timeout_seconds", 1.0)
+    _push_compact_total_timeout_override(request, 1.0)
     monkeypatch.setattr(proxy_module.get_settings(), "stream_idle_timeout_seconds", 0.05)
 
     async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _head: bytes, _body: bytes) -> None:
@@ -1482,7 +1493,7 @@ async def test_native_http_terminal_releases_upstream_without_python_cancel(
             await reader.read()
         closed.set()
 
-    monkeypatch.setattr(proxy_module.get_settings(), "max_sse_event_bytes", 256 * 1024)
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", 256 * 1024)
     async with _serve_http(handler) as base_url:
         session = _UnexpectedPythonSession()
         route = (

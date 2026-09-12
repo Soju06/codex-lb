@@ -23,6 +23,7 @@ from yarl import URL
 import app.core.tracing.otel as otel
 import app.modules.proxy.service as proxy_module
 from app.core.audit import service as audit_service_module
+from app.core.auth.dashboard_access import DashboardAuthMode, DashboardPrincipal, admin_principal
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.config.settings import Settings
@@ -592,6 +593,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -633,14 +635,8 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     def _init_background_db() -> None:
         call_order.append("init_background_db")
 
-    async def _blocked_audit_write(
-        action: str,
-        actor_ip: str | None,
-        details: audit_service_module.AuditDetails | None,
-        request_id: str | None,
-    ) -> None:
-        _ = (action, actor_ip, details, request_id)
-        audit_write_actions.append(action)
+    async def _blocked_audit_write(event: audit_service_module.AuditEvent) -> None:
+        audit_write_actions.append(event.action)
         audit_write_started.set()
         await allow_audit_write.wait()
 
@@ -696,8 +692,8 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         last_used_at=None,
     )
 
-    async def _allow_dashboard_access() -> None:
-        return None
+    async def _allow_dashboard_access() -> DashboardPrincipal:
+        return admin_principal(auth_mode=DashboardAuthMode.STANDARD, auth_method="local_bootstrap")
 
     async def _accounts_context_override() -> SimpleNamespace:
         return SimpleNamespace(service=_BlockedAccountsService())
@@ -863,6 +859,7 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -994,6 +991,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -1162,6 +1160,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
         get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -1259,7 +1258,11 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
         http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_advertise_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock(), get=AsyncMock(return_value=SimpleNamespace()))
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace()),
+        get=AsyncMock(return_value=SimpleNamespace()),
+    )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     api_key_limit_reset_scheduler = _DummyScheduler()
@@ -1349,7 +1352,11 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
         metrics_enabled=False,
         shutdown_drain_timeout_seconds=1,
     )
-    settings_cache = SimpleNamespace(invalidate=AsyncMock(), get=AsyncMock(return_value=SimpleNamespace()))
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace()),
+        get=AsyncMock(return_value=SimpleNamespace()),
+    )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()
     api_key_limit_reset_scheduler = _DummyScheduler()
@@ -1393,7 +1400,9 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
         database_migrations_fail_fast=False,
     )
     settings_cache = SimpleNamespace(
-        invalidate=AsyncMock(), get=AsyncMock(return_value=SimpleNamespace(password_hash=None))
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
+        get=AsyncMock(return_value=SimpleNamespace(password_hash=None)),
     )
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
     usage_scheduler = _DummyScheduler()

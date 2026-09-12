@@ -5,7 +5,7 @@ import json
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache.invalidation import (
@@ -25,6 +25,7 @@ from app.db.models import (
     ApiKey,
     ApiKeyAccountAssignment,
     CacheInvalidation,
+    HttpBridgeOperationRecord,
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
@@ -42,7 +43,11 @@ from app.modules.accounts.repository import (
     _slot_lock_keys,
 )
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
-from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope, durable_bridge_hash
+from app.modules.proxy.durable_bridge_repository import (
+    DurableBridgeRepository,
+    durable_bridge_api_key_scope,
+    durable_bridge_hash,
+)
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -1438,3 +1443,91 @@ async def test_request_logs_repository_normalizes_whitespace_only_useragent_fiel
         assert stored.useragent is None
         assert stored.useragent_group is None
         assert stored.client_ip is None
+
+
+@pytest.mark.asyncio
+async def test_retire_stale_unavailable_bridge_owners_frees_a_reauth_pinned_thread(db_setup):
+    """The status that neither the DEACTIVATED cleanup nor the sticky grace covers.
+
+    ``test_accounts_update_status_preserves_bridge_for_reauth_required`` pins the
+    other half of this contract: the transition itself must not touch the row.
+    Retirement is the grace-gated sweep that eventually frees it.
+    """
+    async with SessionLocal() as session:
+        account = _make_account("acc_bridge_retire", "bridge-retire@example.com")
+        session_id = "bridge-retire-reauth"
+        session.add(account)
+        bridge = _add_durable_bridge_session(session, account_id=account.id, session_id=session_id)
+        await session.commit()
+
+        await AccountsRepository(session).update_status(
+            account.id,
+            AccountStatus.REAUTH_REQUIRED,
+            "Refresh token was revoked - re-login required",
+        )
+        # The transition alone leaves the weld in place.
+        assert (await _get_bridge_session(session, bridge.id)).account_id == account.id
+
+        now = utcnow()
+        repo = DurableBridgeRepository(session)
+        # Still inside the grace window: a transient outage is never retired.
+        assert await repo.retire_stale_unavailable_bridge_owners(now - timedelta(hours=6), now=now) == 0
+
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == bridge.id)
+            .values(last_seen_at=now - timedelta(hours=7))
+        )
+        await session.commit()
+
+        assert await repo.retire_stale_unavailable_bridge_owners(now - timedelta(hours=6), now=now) == 1
+
+        retired = await _get_bridge_session(session, bridge.id)
+        # The row and its operation ledger survive; only ownership is retired.
+        assert retired.continuity_abandoned_at is not None
+        assert retired.account_id == account.id
+        assert len(await _get_bridge_aliases(session, bridge.id)) == 3
+
+        lookup = await DurableBridgeSessionCoordinator(SessionLocal).lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-after-retirement",
+            api_key_id=None,
+            turn_state=f"http_turn_{session_id}",
+            session_header=f"sid-{session_id}",
+            previous_response_id=f"resp_{session_id}",
+        )
+        assert lookup is not None
+        assert lookup.continuity_abandoned is True
+        assert lookup.account_id is None
+        assert lookup.latest_response_id is None
+        assert lookup.retired_account_id == account.id
+
+        # Phase 2 on the real dialect: the correlated NOT EXISTS in a DELETE is
+        # where PostgreSQL and SQLite are most likely to diverge, so exercise
+        # both sides of the ledger guard here rather than only on SQLite.
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == bridge.id)
+            .values(continuity_abandoned_at=now - timedelta(hours=7))
+        )
+        session.add(
+            HttpBridgeOperationRecord(
+                operation_id=f"op-{session_id}",
+                session_id=bridge.id,
+                request_fingerprint="fp-retire",
+                state="completed",
+            )
+        )
+        await session.commit()
+        assert await repo.retire_stale_unavailable_bridge_owners(now - timedelta(hours=6), now=now) == 0
+        assert (await _get_bridge_session(session, bridge.id)) is not None
+
+        await session.execute(
+            delete(HttpBridgeOperationRecord).where(HttpBridgeOperationRecord.session_id == bridge.id)
+        )
+        await session.commit()
+        assert await repo.retire_stale_unavailable_bridge_owners(now - timedelta(hours=6), now=now) == 1
+        assert (
+            await session.execute(select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id == bridge.id))
+        ).scalar_one_or_none() is None
+        assert await _get_bridge_aliases(session, bridge.id) == []

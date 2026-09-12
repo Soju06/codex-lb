@@ -31,6 +31,12 @@ class RuntimeState:
     # the deprioritization deadline once tripped, the exponential level, and
     # when the level last tripped (for decay). Replica-local, never persisted.
     overload_rejections: list[float] | None = None
+    # Recent *soft* overload observations: bare ``server_error`` terminals that
+    # upstream returns for the same admission-rejection condition but without
+    # the explicit overload code. Counted at a fractional weight so a genuine
+    # one-off fault never trips the window on its own, while a sustained
+    # ``server_error`` refusal still deprioritizes the account.
+    soft_overload_rejections: list[float] | None = None
     overload_backoff_until: float | None = None
     overload_backoff_level: int = 0
     overload_last_trip_at: float | None = None
@@ -48,6 +54,19 @@ class RuntimeState:
     # minute bucket -> [successes, failures], pruned to the configured window.
     # Feeds the selection weight multiplier; replica-local, never persisted.
     outcome_buckets: dict[int, list[int]] | None = None
+    # Recent eligible first-token latencies (see ``_load_balancer/ttft_cohort.py``):
+    # ``(recorded_at, ttft_ms)`` pruned to the window/cap. Replica-local, never persisted.
+    ttft_samples: list[tuple[float, int]] | None = None
+    # Recent eligible output throughputs per model (see
+    # ``_load_balancer/throughput_cohort.py``): model -> ``(recorded_at, tokens_per_second)``
+    # pruned to the window/cap; models without in-window samples are dropped.
+    tps_samples: dict[str, list[tuple[float, float]]] | None = None
+    # Transition-log gates of ``_load_balancer/latency_cohort.py``: the last
+    # applied first-token multiplier (model-agnostic) and the last applied
+    # non-neutral throughput multiplier per model (neutral models are dropped,
+    # so the map only grows with models the account is discounted on).
+    ttft_weight: float = 1.0
+    tps_weights: dict[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)

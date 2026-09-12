@@ -179,7 +179,10 @@ def build_complete_replay_payload(
             return None
         if not isinstance(parsed, dict) or not isinstance(_output_items, list):
             return None
-        if index > 0 and not isinstance(parsed.get("previous_response_id"), str):
+        if index > 0 and (
+            not isinstance(parsed.get("previous_response_id"), str)
+            or parsed.get("previous_response_id") != materialized[index - 1].operation.response_id
+        ):
             # A missing parent on a non-root turn means the stored chain and
             # request body disagree; do not guess how to join it.
             return None

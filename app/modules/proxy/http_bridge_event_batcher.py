@@ -402,6 +402,8 @@ class HttpBridgeOperationEventBatcher:
         timer work.
         """
         self._cancel_generation_cleanup_locked(operation_id)
+        if self._closing:
+            return
 
         async def cleanup() -> None:
             """Expire only the captured idle generation after the retention window, preserving active successors."""
@@ -1348,12 +1350,27 @@ class HttpBridgeOperationEventBatcher:
         # in memory.
         async with self._lock:
             pending_operation_ids = tuple(self._pending)
+        # Drain through a bounded worker pool. Creating one task per pending
+        # operation can exhaust the database pool before shutdown progresses.
+        pending_queue: asyncio.Queue[str] = asyncio.Queue()
+        for operation_id in pending_operation_ids:
+            pending_queue.put_nowait(operation_id)
+
+        async def drain_pending_worker() -> None:
+            while True:
+                try:
+                    operation_id = pending_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    await self.flush_pending_operation(operation_id=operation_id)
+                finally:
+                    pending_queue.task_done()
+
+        worker_count = min(8, len(pending_operation_ids))
         pending_flush_tasks = tuple(
-            self._scheduler.create_task(
-                self.flush_pending_operation(operation_id=operation_id),
-                name=f"http-bridge-close-flush-{operation_id}",
-            )
-            for operation_id in pending_operation_ids
+            self._scheduler.create_task(drain_pending_worker(), name=f"http-bridge-close-flush-worker-{index}")
+            for index in range(worker_count)
         )
         await self._drain_terminal_tasks(pending_flush_tasks, kind="pending", cancel=False)
         # A bounded pending drain can itself have started a durable append just

@@ -1722,6 +1722,7 @@ async def _close_http_bridge_session_resources(
                 label="http bridge upstream reader",
                 cleanup_tasks=service._background_cleanup_tasks,
                 owner_session_id=durable_session_id,
+                owner_epoch=durable_owner_epoch,
                 scheduler=scheduler_for(service),
             )
             if session.upstream_reader is upstream_reader:
@@ -1781,7 +1782,14 @@ async def _close_http_bridge_session_resources(
         cleanup_tasks = {
             task
             for task in service._background_cleanup_tasks
-            if not task.done() and getattr(task, "_http_bridge_recovery_session_id", None) == durable_session_id
+            if (
+                not task.done()
+                and getattr(task, "_http_bridge_recovery_session_id", None) == durable_session_id
+                and (
+                    durable_owner_epoch is None
+                    or getattr(task, "_http_bridge_owner_epoch", durable_owner_epoch) == durable_owner_epoch
+                )
+            )
         }
         cleanup_owner_task = getattr(session, "upstream_reader_cleanup_task", None)
         cleanup_owner_completion: asyncio.Event | None = None
@@ -2914,7 +2922,9 @@ def _http_bridge_durable_release_allowed(service: Any, session: Any) -> bool:
     if session_id is None or owner_epoch is None:
         return False
     return not any(
-        not task.done() and getattr(task, "_http_bridge_recovery_session_id", None) == session_id
+        not task.done()
+        and getattr(task, "_http_bridge_recovery_session_id", None) == session_id
+        and (owner_epoch is None or getattr(task, "_http_bridge_owner_epoch", owner_epoch) == owner_epoch)
         for task in service._background_cleanup_tasks
     )
 
@@ -2929,6 +2939,7 @@ def _cancel_and_track_cancelled_task(
     label: str,
     cleanup_tasks: set[asyncio.Task[None]] | None,
     owner_session_id: str | None = None,
+    owner_epoch: int | None = None,
     cancel_task: bool = True,
     scheduler: Scheduler = REAL_SCHEDULER,
 ) -> None:
@@ -2939,6 +2950,8 @@ def _cancel_and_track_cancelled_task(
         # Keep ownership metadata on the detached cleanup task so a session
         # close can defer its durable release until this exact reader settles.
         setattr(cleanup_task, "_http_bridge_recovery_session_id", owner_session_id)
+    if owner_epoch is not None:
+        setattr(cleanup_task, "_http_bridge_owner_epoch", owner_epoch)
     if cleanup_tasks is not None:
         cleanup_tasks.add(cleanup_task)
         cleanup_task.add_done_callback(cleanup_tasks.discard)
@@ -2952,6 +2965,7 @@ async def _await_cancelled_task(
     cancel: bool = True,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
     owner_session_id: str | None = None,
+    owner_epoch: int | None = None,
     scheduler: Scheduler = REAL_SCHEDULER,
 ) -> bool:
     effective_timeout = max(float(timeout_seconds), 0.0)
@@ -2970,6 +2984,7 @@ async def _await_cancelled_task(
                 label=label,
                 cleanup_tasks=cleanup_tasks,
                 owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
                 scheduler=scheduler,
             )
             raise
@@ -2984,6 +2999,7 @@ async def _await_cancelled_task(
                 label=label,
                 cleanup_tasks=cleanup_tasks,
                 owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
                 cancel_task=False,
                 scheduler=scheduler,
             )
@@ -2995,6 +3011,7 @@ async def _await_cancelled_task(
             label=label,
             cleanup_tasks=cleanup_tasks,
             owner_session_id=owner_session_id,
+            owner_epoch=owner_epoch,
             cancel_task=False,
             scheduler=scheduler,
         )

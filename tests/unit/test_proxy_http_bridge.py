@@ -11857,7 +11857,9 @@ def test_response_output_capture_terminal_echo_status_and_identity(
     valid = terminal_id == "msg_1" and terminal_status in {None, "completed"}
     assert state.response_output_items_complete is valid
     assert state.response_output_items_event_invalid is not valid
-    assert state.response_output_items == ([terminal] if valid else [])
+    # Indexed ``output_item.done`` payloads remain canonical when a terminal
+    # echo omits compatible metadata such as ``status``.
+    assert state.response_output_items == ([item] if valid else [])
 
 
 def test_response_output_capture_accepts_object_terminal_with_omitted_output() -> None:

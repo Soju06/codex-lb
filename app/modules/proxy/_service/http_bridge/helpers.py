@@ -1652,14 +1652,6 @@ async def _close_http_bridge_session_resources(
                 preserve_response_ids=pending_denied_response_ids,
             )
 
-    # Ordinary retirement keeps the historical fast release ordering.  A
-    # detached reader can be waiting on this close path itself; starting the
-    # owner-fenced release first avoids a close/reader cycle while still
-    # deferring shutdown releases and any close with a pending terminal
-    # finalizer until those writers have drained.
-    if not drain_terminal_finalizers and not session_finalizers_pending:
-        await release_durable_session_and_cleanup()
-
     upstream_reader = session.upstream_reader
     detached_reader_pending = False
     if upstream_reader is not None:

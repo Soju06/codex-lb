@@ -73,6 +73,7 @@ nav:
       - Remote Access: deployment/remote.md
   - Reference:
       - Settings: reference/settings.md
+      - Session Retagging: session-retag.md
   - Traffic Parity: traffic-parity.md
   - Development:
       - Rust Migration Architecture: rust-architecture.md

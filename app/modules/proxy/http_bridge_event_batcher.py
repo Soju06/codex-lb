@@ -1074,9 +1074,12 @@ class HttpBridgeOperationEventBatcher:
                 self._dropped_operations.discard(operation_id)
                 self._cleanup_operation_state_locked(operation_id)
 
-    async def drain_terminal_finalizers(self) -> None:
-        """Await tracked terminal spool finalizers without stopping the batcher."""
-        await self._drain_terminal_tasks(tuple(self._terminal_finalize_tasks), kind="finalize", cancel=False)
+    async def drain_terminal_finalizers(self, *, session_id: str | None = None) -> None:
+        """Await tracked terminal spool finalizers, optionally scoped to one bridge session."""
+        tasks = tuple(self._terminal_finalize_tasks)
+        if session_id is not None:
+            tasks = tuple(task for task in tasks if getattr(task, "_http_bridge_session_id", None) == session_id)
+        await self._drain_terminal_tasks(tasks, kind="finalize", cancel=False)
 
     async def fence_operation(self, *, operation_id: str, recovery_dispatch_count: int) -> None:
         """Drop queued events from an attempt after its operation is rebound.

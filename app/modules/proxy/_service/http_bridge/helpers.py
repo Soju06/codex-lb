@@ -1607,6 +1607,25 @@ async def _close_http_bridge_session_resources(
             for task in getattr(event_batcher, "_terminal_finalize_tasks", ())
         )
     )
+    drain_finalizers_accepts_session_id = False
+    if callable(drain_finalizers) and durable_session_id is not None:
+        try:
+            drain_finalizers_accepts_session_id = any(
+                parameter.name == "session_id" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in inspect.signature(drain_finalizers).parameters.values()
+            )
+        except (TypeError, ValueError):
+            # Preserve compatibility with test doubles and legacy batchers whose
+            # callable signature cannot be inspected.
+            drain_finalizers_accepts_session_id = False
+
+    async def drain_session_finalizers() -> None:
+        if not callable(drain_finalizers):
+            return
+        if drain_finalizers_accepts_session_id:
+            await drain_finalizers(session_id=durable_session_id)
+        else:
+            await drain_finalizers()
 
     async def release_durable_session_and_cleanup() -> None:
         """Release the durable owner and retire process-local denial state when it is safe."""
@@ -1691,7 +1710,7 @@ async def _close_http_bridge_session_resources(
     async def drain_and_release(*, force_drain: bool = False) -> None:
         if callable(drain_finalizers) and (force_drain or drain_terminal_finalizers or session_finalizers_pending):
             try:
-                await drain_finalizers()
+                await drain_session_finalizers()
             except Exception:
                 logger.warning("Failed to drain HTTP bridge terminal finalizers before lease release", exc_info=True)
         await release_durable_session_and_cleanup()

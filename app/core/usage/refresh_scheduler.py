@@ -44,6 +44,15 @@ _BLOCK_RESET_MATCH_TOLERANCE_SECONDS = 5
 # primary/secondary slots and the free 30d window through the monthly slot, so
 # the anchor search covers all three instead of assuming one plan's shape.
 _RESET_EVIDENCE_WINDOWS: tuple[str, ...] = ("primary", "secondary", "monthly")
+# Cap for the anchored-evidence lookback. A blocked account keeps accumulating
+# one usage row per refresh interval per window, so scanning everything since
+# `blocked_at` would grow with how long the account has been benched -- the
+# query that rescues it would get more expensive the longer it stays stuck.
+# Both the baseline and the transition it anchors sit at the recent end of that
+# history, so the newest rows are the only ones that can produce evidence. A
+# transition older than this cap falls back to the ordinary persisted cooldown,
+# matching the existing fail-closed behavior when retention drops the pair.
+_RESET_EVIDENCE_HISTORY_ROW_CAP = 512
 
 
 def _normalized_usage_window(entry: UsageHistory) -> str:
@@ -570,7 +579,12 @@ async def _resolve_reset_evidence(
             continue
         since = datetime.fromtimestamp(account.blocked_at, timezone.utc).replace(tzinfo=None)
         for window in _RESET_EVIDENCE_WINDOWS:
-            history = await usage_repo.history_since(account.id, window, since)
+            history = await usage_repo.history_since(
+                account.id,
+                window,
+                since,
+                limit=_RESET_EVIDENCE_HISTORY_ROW_CAP,
+            )
             persisted = _latest_confirmed_reset_transition_after_baseline(
                 [entry for entry in history if entry.recorded_at > since],
                 expected_reset_at=account.reset_at,

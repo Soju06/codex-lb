@@ -4,6 +4,8 @@
 - [x] 1.2 Rename `_MonthlyResetEvidence` to `_ResetEvidence` and expose its window
 - [x] 1.3 Search every quota-window slot for the anchored post-block transition
 - [x] 1.4 Drop the Free-plan gate from the anchored lookup
+- [x] 1.5 Add an optional `limit` to `UsageRepository.history_since` and cap the
+      anchored lookback with `_RESET_EVIDENCE_HISTORY_ROW_CAP`
 
 ## 2. Recovery predicate
 
@@ -24,3 +26,4 @@
 - [x] 4.4 Unit: the anchored lookup searches non-monthly slots
 - [x] 4.5 Unit: retitle the Plus case to the sibling-exhaustion invariant
 - [x] 4.6 Integration: scheduler recovers a Pro account after an early 7d reset
+- [x] 4.7 Unit: the anchored lookup scans only the newest capped slice

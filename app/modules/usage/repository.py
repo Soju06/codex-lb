@@ -913,18 +913,36 @@ class UsageRepository:
         account_id: str,
         window: str,
         since: datetime,
+        *,
+        limit: int | None = None,
     ) -> list[UsageHistory]:
+        """Return post-``since`` rows for one window, oldest first.
+
+        ``limit`` bounds the scan to the newest N rows (still returned oldest
+        first). Callers that walk adjacent pairs looking for a recent
+        transition use it so the query cost does not grow with how far back
+        ``since`` reaches.
+        """
+
+        conditions = (
+            UsageHistory.account_id == account_id,
+            _window_clause(window),
+            UsageHistory.recorded_at >= since,
+        )
+        if limit is None:
+            stmt = (
+                select(UsageHistory).where(*conditions).order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())
+            )
+            result = await self._session.execute(stmt)
+            return list(result.scalars().all())
         stmt = (
             select(UsageHistory)
-            .where(
-                UsageHistory.account_id == account_id,
-                _window_clause(window),
-                UsageHistory.recorded_at >= since,
-            )
-            .order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())
+            .where(*conditions)
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(limit)
         )
         result = await self._session.execute(stmt)
-        return list(result.scalars().all())
+        return list(reversed(result.scalars().all()))
 
     async def bulk_history_since(
         self,

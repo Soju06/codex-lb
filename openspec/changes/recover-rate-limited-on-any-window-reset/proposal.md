@@ -40,6 +40,9 @@ quota window and therefore no window ambiguity to resolve.
 - Keep reset-confirmed warm-up on the monthly slot: evidence resolved from the
   primary or secondary slot is used for recovery only and is not substituted
   into the monthly before/after pair warm-up consumes.
+- Bound the anchored history lookback to the newest rows per slot, so the query
+  that rescues a blocked account does not get more expensive the longer it stays
+  blocked.
 - Add regression coverage at the scheduler path for paid early-window recovery,
   anchor mismatch, and the sibling-exhaustion and elapsed-sibling rules.
 

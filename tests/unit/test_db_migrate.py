@@ -1984,8 +1984,12 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
         pin_affinity_merge,
     )
     local_login_revision = "20260911_030000_add_local_login_policy"
-    recovery_repair_revision = "20260911_040000_repair_http_bridge_recovery_columns"
-    assert script_directory.get_revision(recovery_repair_revision).down_revision == local_login_revision
+    thread_cache_revision = "20260911_040000_add_thread_cache_identity_mode"
+    continuity_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
+    recovery_repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
+    assert script_directory.get_revision(thread_cache_revision).down_revision == local_login_revision
+    assert script_directory.get_revision(continuity_revision).down_revision == thread_cache_revision
+    assert script_directory.get_revision(recovery_repair_revision).down_revision == continuity_revision
     assert script_directory.get_heads() == [recovery_repair_revision]
 
 

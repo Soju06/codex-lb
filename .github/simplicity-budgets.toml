@@ -61,8 +61,10 @@ max_items = 5
 # operator must be able to roll back without a deploy, so it needs a dashboard
 # home; the environment leg exists only so an operator locked out of the
 # dashboard can still pin the mode at boot, and it is a fallback, never a seed).
-# backlog; 96 -> 105 complete HTTP bridge transcript recovery controls.
-max = 105
+# 96 -> 106: retain PR #1900 opt-in transcript and bounded recovery controls.
+# These already-approved branch fields carry storage/privacy and at-least-once
+# tradeoffs; defaults remain unchanged while their dashboard homes migrate.
+max = 106
 
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and

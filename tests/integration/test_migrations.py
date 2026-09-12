@@ -3537,7 +3537,7 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-column-repair.sqlite'}"
     deployed_head = "20260911_030000_add_local_login_policy"
-    repair_head = "20260911_040000_repair_http_bridge_recovery_columns"
+    repair_head = "20260911_070000_repair_http_bridge_recovery_columns"
     alias_table = "http_bridge_session_aliases"
     alias_column = "target_response_id"
     indexes_to_repair = {

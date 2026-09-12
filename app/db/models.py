@@ -2546,6 +2546,16 @@ class HttpBridgeRecoveryAttemptRecord(Base):
     )
 
 
+class HttpBridgeMigrationObjectOwnership(Base):
+    """Track additive objects created by HTTP bridge revisions."""
+
+    __tablename__ = "http_bridge_migration_object_ownership"
+
+    revision: Mapped[str] = mapped_column(String(128), primary_key=True)
+    object_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    object_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+
+
 class HttpBridgeOperationRecord(Base):
     """Durable identity and outcome for a continuity-bound response.create."""
 
@@ -2565,6 +2575,7 @@ class HttpBridgeOperationRecord(Base):
     state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'submitted'"))
     response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     recovery_dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    rebind_claim_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     event_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_spool_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     terminal_append_phase: Mapped[str] = mapped_column(
@@ -2579,6 +2590,19 @@ class HttpBridgeOperationRecord(Base):
         default=HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
         server_default=text("'rows_v1'"),
     )
+    # The raw response.create body is retained in ``request_text``.  Store the
+    # terminal response output separately so a complete parent chain can be
+    # reconstructed without depending on an SSE spool that may be pruned or
+    # deliberately bounded for latency.
+    transcript_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    response_output_items_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_output_items_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # A bounded, account-neutral input transcript that already includes the
+    # completed turn's output. This survives upstream response retention and
+    # lets recovery start a fresh response.create without a stale anchor.
+    response_replay_input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_replay_input_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    response_replay_input_turn_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
@@ -2598,7 +2622,14 @@ class HttpBridgeOperationRecord(Base):
             unique=True,
         ),
         Index("idx_http_bridge_operations_session_parent_state", "session_id", "parent_response_id", "state"),
+        Index(
+            "idx_http_bridge_operations_session_state_created",
+            "session_id",
+            "state",
+            "created_at",
+        ),
         Index("idx_http_bridge_operations_parent_state", "parent_response_id", "state", "updated_at"),
+        Index("idx_http_bridge_operations_response_state", "response_id", "state"),
         Index("idx_http_bridge_operations_state_updated", "state", "updated_at"),
     )
 
@@ -2671,6 +2702,7 @@ class HttpBridgeSessionAlias(Base):
     alias_value: Mapped[str] = mapped_column(Text, nullable=False)
     alias_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

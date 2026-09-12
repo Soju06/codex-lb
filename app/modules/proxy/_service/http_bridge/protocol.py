@@ -65,7 +65,12 @@ class _HTTPBridgeServiceProtocol(Protocol):
     async def _next_websocket_receive_timeout(self, *args: Any, **kwargs: Any) -> Any: ...
     async def close_all_http_bridge_sessions(self) -> bool: ...
     async def _close_http_bridge_session_bounded(self, session: _HTTPBridgeSession, *, reason: str) -> None: ...
-    async def _close_http_bridge_session(self, session: _HTTPBridgeSession) -> None: ...
+    async def _close_http_bridge_session(
+        self,
+        session: _HTTPBridgeSession,
+        *,
+        drain_terminal_finalizers: bool = False,
+    ) -> None: ...
     async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> bool: ...
     async def _fail_http_bridge_inflight_session_creation(
         self,
@@ -128,10 +133,15 @@ class _HTTPBridgeServiceProtocol(Protocol):
         session: _HTTPBridgeSession,
         response_id: str,
         *,
+        latest_response_id: str | None = None,
+        retained_replay: bool = False,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
         pending_tool_calls: Mapping[str, str] | None = None,
-    ) -> bool: ...
+    ) -> bool:
+        """Register response continuity, including an explicit target for retained replay aliases."""
+        ...
+
     async def _unregister_http_bridge_previous_response_id(
         self,
         session: _HTTPBridgeSession,

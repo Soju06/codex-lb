@@ -268,6 +268,7 @@ class _HTTPBridgeMixin(
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
                 or task.get_name().startswith("cancelled-task-cleanup-")
+                or task.get_name().startswith("http-bridge-deferred-release-")
             )
         ]
         if not tasks:
@@ -2348,8 +2349,7 @@ class _HTTPBridgeMixin(
 
         async def abort_selected_handoff() -> None:
             session.closed = True
-            # ``shield(coroutine)`` would ``ensure_future`` an unowned task; the
-            # scheduler spawns it so a simulation owns the outliving cleanup.
+            # Scheduler-owned shielded tasks avoid unowned cleanup coroutines.
             scheduler = scheduler_for(self)
             try:
                 await asyncio.shield(scheduler.create_task(upstream.close(), name="http-bridge-handoff-abort-close"))

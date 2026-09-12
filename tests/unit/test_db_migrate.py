@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 import sqlalchemy as sa
@@ -1898,6 +1899,114 @@ def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) ->
         run_upgrade(url, "head", bootstrap_legacy=False)
 
 
+def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp_path: Path) -> None:
+    """Graph ordering applies schema repair before ownership repair and converges all current heads."""
+    from alembic.script import ScriptDirectory
+
+    config = _build_alembic_config(_db_url(tmp_path / "compatibility-head.db"))
+    script_directory = ScriptDirectory.from_config(config)
+    compatibility_revision = "20260828_020000_merge_http_bridge_recovery_heads"
+    repair_revision = "20260901_000000_repair_persisted_schema_drift"
+    ownership_revision = "20260904_000000_repair_http_bridge_ownership_registry"
+    rebind_claim_revision = "20260906_000000_add_http_bridge_rebind_claim"
+    overflow_revision = "20260908_000000_add_subscription_overflow"
+    merge_revision = "20260908_010000_merge_http_bridge_and_subscription_overflow"
+    rehome_revision = "20260912_020000_rehome_recovery_repair_ownership"
+
+    assert script_directory.get_revision(compatibility_revision) is not None
+    assert script_directory.get_revision(repair_revision) is not None
+    assert script_directory.get_revision(repair_revision).down_revision == compatibility_revision
+    assert script_directory.get_revision(ownership_revision) is not None
+    assert script_directory.get_revision(ownership_revision).down_revision == repair_revision
+    assert script_directory.get_revision(rebind_claim_revision) is not None
+    assert script_directory.get_revision(rebind_claim_revision).down_revision == ownership_revision
+    assert script_directory.get_revision(merge_revision) is not None
+    assert script_directory.get_revision(merge_revision).down_revision == (
+        rebind_claim_revision,
+        overflow_revision,
+    )
+    assert (
+        script_directory.get_revision(overflow_revision).down_revision
+        == "20260830_000000_add_quota_warmup_claim_expiry"
+    )
+    transport_revision = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
+    final_merge_revision = "20260908_020000_merge_http_bridge_and_transport_default"
+    assert script_directory.get_revision(final_merge_revision).down_revision == (merge_revision, transport_revision)
+    assert (
+        script_directory.get_revision(transport_revision).down_revision
+        == "20260830_000000_add_quota_warmup_claim_expiry"
+    )
+    upstream_merge = "20260908_020000_merge_overflow_transport_heads"
+    latest_merge = "20260909_000000_merge_recovery_and_upstream_heads"
+    assert script_directory.get_revision(latest_merge).down_revision == (final_merge_revision, upstream_merge)
+    dashboard_merge = "20260909_050000_merge_recovery_and_dashboard_settings"
+    assert script_directory.get_revision(dashboard_merge).down_revision == (
+        latest_merge,
+        "20260909_040000_dashboard_timeout_settings",
+    )
+    routing_merge = "20260909_060000_merge_recovery_and_routing_settings"
+    assert script_directory.get_revision(routing_merge).down_revision == (
+        dashboard_merge,
+        "20260909_050000_dashboard_routing_overload_settings",
+    )
+    reports_merge = "20260909_070000_merge_recovery_and_report_rollup"
+    assert script_directory.get_revision(reports_merge).down_revision == (
+        routing_merge,
+        "20260909_060000_add_report_rollup",
+    )
+    automation_budget = "20260909_070000_automation_run_claim_budget"
+    assert script_directory.get_revision(automation_budget).down_revision == "20260909_060000_add_report_rollup"
+    automation_merge = "20260909_080000_merge_recovery_and_automation_budget"
+    assert script_directory.get_revision(automation_merge).down_revision == (reports_merge, automation_budget)
+    prewarm_revision = "20260909_100000_dashboard_codex_prewarm"
+    assert script_directory.get_revision(prewarm_revision).down_revision == automation_budget
+    prewarm_merge = "20260910_000000_merge_recovery_and_codex_prewarm"
+    assert script_directory.get_revision(prewarm_merge).down_revision == (automation_merge, prewarm_revision)
+    budget_revision = "20260909_080000_dashboard_stream_bridge_budgets"
+    assert script_directory.get_revision(budget_revision).down_revision == prewarm_revision
+    budget_merge = "20260910_010000_merge_recovery_and_request_budgets"
+    assert script_directory.get_revision(budget_merge).down_revision == (prewarm_merge, budget_revision)
+    settings_revision = "20260909_120000_dashboard_conversation_archive"
+    settings_merge = "20260910_020000_merge_recovery_and_round_three_settings"
+    assert script_directory.get_revision(settings_merge).down_revision == (budget_merge, settings_revision)
+    index_merge = "20260910_030000_merge_recovery_and_request_log_indexes"
+    assert script_directory.get_revision(index_merge).down_revision == (
+        settings_merge,
+        "20260908_000000_add_guest_session_generation",
+    )
+    pin_affinity_merge = "20260911_010000_merge_pin_index_and_affinity_heads"
+    assert script_directory.get_revision(pin_affinity_merge).down_revision == (
+        "20260911_000000_model_source_pins_kind_expires_index",
+        "20260910_220000_merge_affinity_invite_heads",
+    )
+    bridge_affinity_merge = "20260911_015000_merge_http_bridge_and_affinity_heads"
+    assert script_directory.get_revision(bridge_affinity_merge).down_revision == (
+        index_merge,
+        pin_affinity_merge,
+    )
+    local_login_revision = "20260911_030000_add_local_login_policy"
+    thread_cache_revision = "20260911_040000_add_thread_cache_identity_mode"
+    continuity_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
+    recovery_repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
+    recovery_merge_revision = "20260912_010000_merge_recovery_repair_and_thread_cache_heads"
+    terminal_phase_revision = "20260911_020000_add_http_bridge_terminal_append_phase"
+    lineage_merge_revision = "20260912_030000_merge_terminal_append_lineage"
+    assert script_directory.get_revision(thread_cache_revision).down_revision == local_login_revision
+    assert script_directory.get_revision(continuity_revision).down_revision == local_login_revision
+    assert script_directory.get_revision(recovery_repair_revision).down_revision == continuity_revision
+    assert script_directory.get_revision(recovery_merge_revision).down_revision == (
+        recovery_repair_revision,
+        "20260912_000000_merge_thread_cache_and_bridge_retirement_heads",
+    )
+    assert script_directory.get_revision(terminal_phase_revision).down_revision == pin_affinity_merge
+    assert script_directory.get_revision(rehome_revision).down_revision == recovery_merge_revision
+    assert script_directory.get_revision(lineage_merge_revision).down_revision == (
+        rehome_revision,
+        bridge_affinity_merge,
+    )
+    assert script_directory.get_heads() == [lineage_merge_revision]
+
+
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:
     class _FakeRevision:
         def __init__(self, revision: str, path: str) -> None:
@@ -2095,6 +2204,134 @@ def test_routing_policy_persistence_downgrade_does_not_drop_shared_columns(monke
     monkeypatch.setattr(migration, "op", _OpMustNotAlter())
 
     migration.downgrade()
+
+
+def test_persisted_recovery_schema_repair_downgrade_preserves_parent_objects(monkeypatch) -> None:
+    """Downgrading repair work does not remove objects owned by a historical parent migration."""
+    migration = importlib.import_module("app.db.alembic.versions.20260901_000000_repair_persisted_schema_drift")
+
+    class _OpMustNotAlter:
+        def get_bind(self):  # pragma: no cover - assertion helper
+            """Fail if a metadata-preserving repair downgrade attempts to inspect a database connection."""
+            raise AssertionError("repair downgrade must not inspect a bind")
+
+        def batch_alter_table(self, table_name: str):  # pragma: no cover - assertion helper
+            """Fail if repair downgrade tries to alter a parent-owned table."""
+            raise AssertionError(f"unexpected schema alteration for {table_name}")
+
+        def drop_index(self, index_name: str, *, table_name: str):  # pragma: no cover - assertion helper
+            """Fail if repair downgrade attempts to remove a parent-owned index."""
+            raise AssertionError(f"unexpected index drop {index_name} on {table_name}")
+
+    monkeypatch.setattr(migration, "op", _OpMustNotAlter())
+
+    migration.downgrade()
+
+
+def test_recent_unknown_index_migration_preserves_preexisting_index(monkeypatch) -> None:
+    """An already-present lookup index is retained rather than claimed and dropped by the migration."""
+    migration = importlib.import_module("app.db.alembic.versions.20260815_000000_add_http_bridge_recent_unknown_index")
+    bind = object()
+    create_index = Mock()
+    drop_index = Mock()
+    ensure_ownership_table = Mock()
+    mark_created = Mock()
+    forget_created = Mock()
+    was_created = Mock(return_value=False)
+    drop_ownership_table_if_empty = Mock()
+
+    monkeypatch.setattr(
+        migration,
+        "op",
+        SimpleNamespace(get_bind=lambda: bind, create_index=create_index, drop_index=drop_index),
+    )
+    monkeypatch.setattr(migration, "_has_table", lambda _bind: True)
+    monkeypatch.setattr(migration, "_has_index", lambda _bind: True)
+    monkeypatch.setattr(migration, "ensure_ownership_table", ensure_ownership_table)
+    monkeypatch.setattr(migration, "mark_created", mark_created)
+    monkeypatch.setattr(migration, "was_created", was_created)
+    monkeypatch.setattr(migration, "forget_created", forget_created)
+    monkeypatch.setattr(migration, "drop_ownership_table_if_empty", drop_ownership_table_if_empty)
+
+    migration.upgrade()
+    migration.downgrade()
+
+    create_index.assert_not_called()
+    ensure_ownership_table.assert_not_called()
+    mark_created.assert_not_called()
+    was_created.assert_called_once_with(bind, migration.revision, "index", migration._INDEX)
+    drop_index.assert_not_called()
+    forget_created.assert_not_called()
+    drop_ownership_table_if_empty.assert_called_once_with(bind)
+
+
+def test_persisted_recovery_schema_repair_records_parent_index_ownership(monkeypatch) -> None:
+    """Schema repair records the historical owner of restored parent indexes."""
+    migration = importlib.import_module("app.db.alembic.versions.20260901_000000_repair_persisted_schema_drift")
+    bind = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+    create_index = Mock()
+    ensure_ownership_table = Mock()
+    mark_created = Mock()
+
+    monkeypatch.setattr(
+        migration,
+        "op",
+        SimpleNamespace(get_bind=lambda: bind, create_index=create_index),
+    )
+    monkeypatch.setattr(migration, "_has_table", lambda _bind, table_name: table_name == migration._OPERATIONS_TABLE)
+    monkeypatch.setattr(migration, "_has_index", lambda _bind, _table_name, _index_name: False)
+    monkeypatch.setattr(migration, "ensure_ownership_table", ensure_ownership_table)
+    monkeypatch.setattr(migration, "mark_created", mark_created)
+
+    migration.upgrade()
+
+    ensure_ownership_table.assert_called_once_with(bind)
+    create_index.assert_called_once_with(
+        migration._OPERATIONS_INDEX,
+        migration._OPERATIONS_TABLE,
+        ["session_id", "state", "created_at"],
+        unique=False,
+    )
+    mark_created.assert_called_once_with(
+        bind,
+        migration._OPERATIONS_INDEX_REVISION,
+        "index",
+        migration._OPERATIONS_INDEX,
+    )
+
+
+def test_ownership_registry_repair_bootstraps_missing_table(monkeypatch) -> None:
+    """Repair can create a missing ownership registry without requiring existing registry metadata."""
+    migration = importlib.import_module("app.db.alembic.versions.20260904_000000_repair_http_bridge_ownership_registry")
+    bind = object()
+    ensure_ownership_table = Mock()
+
+    monkeypatch.setattr(migration, "op", SimpleNamespace(get_bind=lambda: bind))
+    monkeypatch.setattr(migration, "ensure_ownership_table", ensure_ownership_table)
+
+    migration.upgrade()
+
+    ensure_ownership_table.assert_called_once_with(bind)
+
+
+def test_ownership_registry_repair_restores_missing_table(tmp_path: Path) -> None:
+    """Forward ownership repair restores the absent registry and passes schema validation."""
+    url = _db_url(tmp_path / "missing-ownership-registry.db")
+    repair_revision = "20260901_000000_repair_persisted_schema_drift"
+
+    run_upgrade(url, repair_revision, bootstrap_legacy=False)
+
+    with create_engine(to_sync_database_url(url), future=True).begin() as connection:
+        connection.execute(text("DROP TABLE http_bridge_migration_object_ownership"))
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        assert inspect(engine).has_table("http_bridge_migration_object_ownership")
+    finally:
+        engine.dispose()
+    assert check_schema_drift(url) == ()
 
 
 def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path: Path) -> None:

@@ -1284,6 +1284,41 @@ async def test_proxy_responses_instructionless_array_input_gets_sdk_sse_contract
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/backend-api/codex/responses/"])
+async def test_native_responses_discards_vendor_data_after_terminal(async_client, monkeypatch, path):
+    """Native response handling ignores vendor frames that arrive after final response settlement."""
+    auth_json = _make_auth_json("acc_native_terminal", "native-terminal@example.com")
+    response = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert response.status_code == 200
+
+    async def fake_stream(*args, **kwargs):
+        """Emit vendor frames around response completion to test post-terminal filtering."""
+        yield 'data: {"type":"codex.rate_limits","plan_type":"before"}\n\n'
+        yield (
+            'data: {"type":"response.completed","sequence_number":1,'
+            '"response":{"id":"resp_native_terminal","object":"response","status":"completed","output":[]}}\n\n'
+        )
+        yield 'data: {"type":"codex.rate_limits","plan_type":"after"}\n\n'
+        yield 'data: {"type":"vendor.custom","value":"after"}\n\n'
+        yield ": keepalive\n\n"
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post(
+        path, json={"model": "gpt-5.1", "instructions": "hi", "input": "hello", "stream": True}
+    )
+    assert response.status_code == 200
+    events = list(_iter_sse_events(response.text.splitlines()))
+    assert [event["type"] for event in events] == ["codex.rate_limits", "response.completed"]
+    assert events[0]["plan_type"] == "before"
+    assert '"after"' not in response.text
+    assert ": keepalive\n\n" in response.text
+    assert "data: [DONE]\n\n" in response.text
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_native_string_input_with_instructions_preserves_vendor_events(
     async_client,
     monkeypatch,
@@ -3853,10 +3888,85 @@ async def test_v1_responses_normalizes_tool_messages(async_client, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("terminal_includes_output", [False, True])
-async def test_public_responses_preserves_tool_search_output(
-    async_client, monkeypatch, stream: bool, terminal_includes_output: bool
+@pytest.mark.parametrize(
+    "item_events,terminal_echo",
+    [("done", False), ("done", True), ("added_done", False), ("added_done", True), ("terminal_only", True)],
+)
+async def test_public_responses_normalizes_text_extension_without_failing(
+    async_client, monkeypatch, stream, item_events, terminal_echo
 ):
+    """Successful text normalization must not poison the later terminal event."""
+    auth_json = _make_auth_json("acc_text_extension", "text-extension@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert imported.status_code == 200
+    item = {"id": "final-answer", "type": "final_answer", "text": "Normalized answer"}
+
+    async def fake_stream(*args, **kwargs):
+        """Emit text-extension items with optional lifecycle events and terminal echoes."""
+        yield 'data: {"type":"response.created","response":{"id":"resp_extension","status":"in_progress"}}\n\n'
+        if item_events != "terminal_only":
+            if item_events == "added_done":
+                yield (
+                    "data: "
+                    + json.dumps({"type": "response.output_item.added", "output_index": 0, "item": item})
+                    + "\n\n"
+                )
+            yield "data: " + json.dumps({"type": "response.output_item.done", "output_index": 0, "item": item}) + "\n\n"
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_extension",
+                        "object": "response",
+                        "status": "completed",
+                        "output": [item] if terminal_echo else [],
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": "Answer", "stream": stream})
+    assert response.status_code == 200
+    expected = {
+        "id": "final-answer",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "Normalized answer"}],
+    }
+    if stream:
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+        assert not any(event["type"] in {"error", "response.failed", "response.incomplete"} for event in events)
+        completed = [event["response"] for event in events if event["type"] == "response.completed"]
+        assert len(completed) == 1
+        result = completed[0]
+        if item_events != "terminal_only":
+            assert [event["item"] for event in events if event["type"] == "response.output_item.done"] == [expected]
+    else:
+        result = response.json()
+    assert result["status"] == "completed"
+    assert result["output"] == [expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("terminal_includes_output,emit_item_events", [(False, True), (True, True), (True, False)])
+@pytest.mark.parametrize("include_unknown", [False, True])
+async def test_public_responses_preserves_tool_search_output(
+    async_client,
+    monkeypatch,
+    stream: bool,
+    terminal_includes_output: bool,
+    emit_item_events: bool,
+    include_unknown: bool,
+):
+    """Public response normalization retains supported tool-search output instead of dropping it."""
     auth_json = _make_auth_json("acc_tool_search_output", "tool-search@example.com")
     response = await async_client.post(
         "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
@@ -3902,9 +4012,10 @@ async def test_public_responses_preserves_tool_search_output(
     ]
     # This recognized item must not make arbitrary unknown output types pass through.
     unknown_item = {"type": "unknown_result", "id": "unknown_item", "payload": {"value": "opaque"}}
-    upstream_items = [*items, unknown_item]
+    upstream_items = [*items, unknown_item] if include_unknown else items
 
     async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        """Emit recognized tool-search output plus an optional unknown item through the real public normalizer."""
         del payload, headers, access_token, account_id, kwargs
         yield (
             "data: "
@@ -3916,9 +4027,10 @@ async def test_public_responses_preserves_tool_search_output(
             )
             + "\n\n"
         )
-        for index, item in enumerate(upstream_items):
-            for event_type in ("response.output_item.added", "response.output_item.done"):
-                yield "data: " + json.dumps({"type": event_type, "output_index": index, "item": item}) + "\n\n"
+        if emit_item_events:
+            for index, item in enumerate(upstream_items):
+                for event_type in ("response.output_item.added", "response.output_item.done"):
+                    yield "data: " + json.dumps({"type": event_type, "output_index": index, "item": item}) + "\n\n"
         yield (
             "data: "
             + json.dumps(
@@ -3940,6 +4052,25 @@ async def test_public_responses_preserves_tool_search_output(
     response = await async_client.post(
         "/v1/responses", json={"model": "gpt-5.4", "instructions": "", "input": "Discover the tool.", "stream": stream}
     )
+    if include_unknown:
+        # The strict lifecycle contract must not certify a successful partial
+        # result after dropping opaque output, even alongside supported tools.
+        if stream:
+            events = [
+                json.loads(line[6:])
+                for line in response.text.splitlines()
+                if line.startswith("data: ") and line != "data: [DONE]"
+            ]
+            assert not any(event.get("type") == "response.completed" for event in events)
+            errors = [event for event in events if event.get("type") in {"error", "response.failed"}]
+            assert errors
+            terminal = errors[-1]
+            error = terminal.get("error") or terminal["response"]["error"]
+            assert error["code"] == "invalid_output_item"
+        else:
+            assert response.status_code == 502
+            assert response.json()["error"]["code"] == "invalid_output_item"
+        return
     assert response.status_code == 200
     if stream:
         events = [
@@ -3948,7 +4079,9 @@ async def test_public_responses_preserves_tool_search_output(
             if line.startswith("data: ") and line != "data: [DONE]"
         ]
         for event_type in ("response.output_item.added", "response.output_item.done"):
-            assert [event["item"] for event in events if event.get("type") == event_type] == items
+            assert [event["item"] for event in events if event.get("type") == event_type] == (
+                items if emit_item_events else []
+            )
         completed = next(event["response"] for event in events if event.get("type") == "response.completed")
     else:
         assert response.headers["content-type"].startswith("application/json")

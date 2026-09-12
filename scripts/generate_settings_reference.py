@@ -23,7 +23,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from app.core.config.settings import _REMOVED_SETTINGS, Settings
-from app.core.config.tiers import DASHBOARD_HOMES, SETTING_TIERS
+from app.core.config.tiers import DASHBOARD_HOMES, MIGRATING, SETTING_TIERS
 from app.db.models import DashboardSettings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -172,6 +172,13 @@ _SECTION_ORDER: tuple[str, ...] = (
     _SECTION_OTHER,
 )
 
+_SECTION_SPEC_LINKS: dict[str, str] = {
+    "HTTP Responses session bridge": (
+        "*Spec: [responses-api-compat]"
+        "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat)*"
+    ),
+}
+
 
 def _section_for(name: str) -> str:
     exact = _EXACT_SECTIONS.get(name)
@@ -242,8 +249,11 @@ def _render_tier_cell(name: str) -> str:
     # A T3 setting with a same-name dashboard_settings column (or a DASHBOARD_HOMES
     # table) is managed from the dashboard; the env var is only the fallback while
     # the dashboard holds no value.
-    if tier == "T3" and (name in _DASHBOARD_COLUMNS or name in DASHBOARD_HOMES):
-        return "T3 (dashboard)"
+    if tier == "T3":
+        if name in _DASHBOARD_COLUMNS or name in DASHBOARD_HOMES:
+            return "T3 (dashboard)"
+        if name in MIGRATING:
+            return "T3 (env, migrating)"
     return tier
 
 
@@ -270,6 +280,7 @@ def _render_section_table(names: list[str], fields: dict[str, FieldInfo]) -> lis
 
 
 def render_settings_reference() -> str:
+    """Render every settings field in stable documented sections, rejecting unclassified sections."""
     fields = dict(Settings.model_fields)
     sections: dict[str, list[str]] = {}
     for name in sorted(fields):
@@ -356,6 +367,10 @@ def render_settings_reference() -> str:
         lines.append("")
         lines.append(f"## {section}")
         lines.append("")
+        section_spec_link = _SECTION_SPEC_LINKS.get(section)
+        if section_spec_link is not None:
+            lines.append(section_spec_link)
+            lines.append("")
         lines.extend(_render_section_table(names, fields))
 
     lines.extend(

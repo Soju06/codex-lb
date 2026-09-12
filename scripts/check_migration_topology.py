@@ -514,14 +514,42 @@ def check_branch_fork(revisions: Sequence[Revision], base_revisions: Sequence[Re
     Both graphs are needed. A parent that ``base_ref`` does not know is skipped
     (it is a branch-local revision, or the ref is behind the checkout), and a
     merge revision is exempt because merging two heads is the sanctioned repair.
+    A legacy branch may also contain a one-parent revision rooted at an older
+    base head when a later merge explicitly joins that branch lineage back to a
+    descendant of the old parent. Treat that as the same sanctioned repair:
+    changing the old migration's parent would reorder already-deployed schema
+    changes and can make intermediate upgrade targets skip them.
     """
     report = Report()
     base_ids = {revision.revision for revision in base_revisions}
+    current_parents = {revision.revision: revision.down_revisions for revision in revisions}
+    base_parents = {revision.revision: revision.down_revisions for revision in base_revisions}
     base_children: dict[str, list[str]] = defaultdict(list)
     for revision in base_revisions:
         for parent in revision.down_revisions:
             base_children[parent].append(revision.revision)
     base_heads = tuple(sorted(base_ids - set(base_children)))
+
+    def repaired_by_later_merge(revision: Revision, parent: str) -> bool:
+        """Whether a later merge joins this branch to the stale parent's base lineage."""
+        base_descendants = {
+            candidate for candidate in base_ids if candidate == parent or parent in _ancestors(candidate, base_parents)
+        }
+        if not base_descendants:
+            return False
+        for merge in revisions:
+            if len(merge.down_revisions) < 2:
+                continue
+            branch_parent = any(
+                candidate == revision.revision or revision.revision in _ancestors(candidate, current_parents)
+                for candidate in merge.down_revisions
+            )
+            if not branch_parent:
+                continue
+            if any(candidate in base_descendants for candidate in merge.down_revisions):
+                return True
+        return False
+
     for revision in revisions:
         if revision.revision in base_ids:
             continue
@@ -531,6 +559,8 @@ def check_branch_fork(revisions: Sequence[Revision], base_revisions: Sequence[Re
             continue
         parent = revision.down_revisions[0]
         if parent not in base_ids or parent not in base_children:
+            continue
+        if repaired_by_later_merge(revision, parent):
             continue
         report.error(
             f"alembic_branch_forks_base revision={revision.revision} parent={parent} base_ref={base_ref}: "

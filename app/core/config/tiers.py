@@ -34,6 +34,19 @@ TIERS: Final[tuple[Tier, ...]] = ("T0", "T1", "T2", "T3", "T4")
 # Declaration order follows ``Settings``; the tier is the policy answer to
 # "may this value differ between two replicas / must it exist before the DB?".
 SETTING_TIERS: Final[dict[str, Tier]] = {
+    # Recovery controls are fleet-wide behaviour and bounded storage/retry
+    # tunables. They remain environment fallbacks until their dashboard homes
+    # land; ``MIGRATING`` records that temporary home explicitly.
+    "http_responses_session_bridge_complete_transcript_recovery_enabled": "T3",
+    "http_responses_session_bridge_unsafe_partial_replay_enabled": "T3",
+    "http_responses_session_bridge_complete_transcript_max_turns": "T3",
+    "http_responses_session_bridge_complete_transcript_max_input_items": "T3",
+    "http_responses_session_bridge_complete_transcript_max_bytes": "T3",
+    "http_responses_session_bridge_parked_recovery_enabled": "T3",
+    "http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds": "T3",
+    "http_responses_session_bridge_parked_recovery_recent_unknown_limit": "T3",
+    "http_responses_session_bridge_pre_response_keepalive_max_count": "T3",
+    "http_responses_session_bridge_unsafe_new_response_recovery_enabled": "T3",
     "data_dir": "T0",
     "database_url": "T0",
     "database_pool_size": "T1",
@@ -160,7 +173,20 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
 # card nobody would flip. An empty registry is the intended terminal state and
 # is not an error; the registry stays as the declared landing spot for a T3
 # field that must ship one release ahead of its column.
-MIGRATING: Final[dict[str, str]] = {}
+MIGRATING: Final[dict[str, str]] = {
+    # Follow-up dashboard migration: add nullable dashboard_settings columns,
+    # shared resolver/cache wiring, and provenance/API coverage for each field.
+    "http_responses_session_bridge_complete_transcript_recovery_enabled": "backlog",
+    "http_responses_session_bridge_unsafe_partial_replay_enabled": "backlog",
+    "http_responses_session_bridge_complete_transcript_max_turns": "backlog",
+    "http_responses_session_bridge_complete_transcript_max_input_items": "backlog",
+    "http_responses_session_bridge_complete_transcript_max_bytes": "backlog",
+    "http_responses_session_bridge_parked_recovery_enabled": "backlog",
+    "http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds": "backlog",
+    "http_responses_session_bridge_parked_recovery_recent_unknown_limit": "backlog",
+    "http_responses_session_bridge_pre_response_keepalive_max_count": "backlog",
+    "http_responses_session_bridge_unsafe_new_response_recovery_enabled": "backlog",
+}
 
 # T3 fields whose database home already exists under a different column name
 # (or in another configuration table). Value = ``table.column``; the checker

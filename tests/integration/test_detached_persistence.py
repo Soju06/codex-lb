@@ -90,6 +90,64 @@ async def test_stream_close_does_not_wait_for_request_log_persistence(raw_client
 
 
 @pytest.mark.asyncio
+async def test_lifespan_drains_transcript_snapshot_before_bridge_lease_release(app_instance, monkeypatch):
+    """Shutdown finishes detached transcript persistence before relinquishing durable bridge ownership."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.core import shutdown as shutdown_state
+    from app.dependencies import get_proxy_service_for_app
+    from app.modules.proxy._service.http_bridge import upstream_events
+
+    order = []
+    drains = []
+    release = asyncio.Event()
+    owner_held = True
+    lifespan = app_instance.router.lifespan_context(app_instance)
+    await lifespan.__aenter__()
+    service = get_proxy_service_for_app(app_instance)
+    original_drain = service.drain_persistence_tasks
+    original_close = service.close_all_http_bridge_sessions
+
+    async def snapshot(service, session, request_state, **kwargs):
+        """Delay snapshot persistence and record whether bridge ownership still exists when it finishes."""
+        await release.wait()
+        order.append("snapshot" if owner_held else "snapshot-fenced")
+
+    async def observe_drain(**kwargs):
+        """Release the snapshot only when shutdown explicitly drains transcript persistence tasks."""
+        prefixes = kwargs.get("task_name_prefixes")
+        drains.append(kwargs)
+        if prefixes and "http-bridge-transcript-snapshot-" in prefixes:
+            release.set()
+        return await original_drain(**kwargs)
+
+    async def release_bridge_leases():
+        """Record lease release and unblock the snapshot to expose incorrect shutdown ordering."""
+        nonlocal owner_held
+        order.append("release")
+        owner_held = False
+        release.set()  # Old behavior unblocks only after the ownership fence is lost.
+        return await original_close()
+
+    monkeypatch.setattr(upstream_events, "_update_http_bridge_operation_state", snapshot)
+    monkeypatch.setattr(service, "drain_persistence_tasks", observe_drain)
+    monkeypatch.setattr(service, "close_all_http_bridge_sessions", release_bridge_leases)
+    upstream_events._schedule_http_bridge_transcript_snapshot(
+        service,
+        SimpleNamespace(durable_owner_epoch=1),
+        SimpleNamespace(operation_id="shutdown-snapshot"),
+        state="completed",
+        operation_attempt_generation=0,
+    )
+    # GracefulServer publishes the shared cleanup reserve before lifespan exit.
+    shutdown_state.set_post_drain_cleanup_timeout_seconds(5.0)
+    await lifespan.__aexit__(None, None, None)
+    assert order == ["snapshot", "release"], drains
+    assert not service._background_cleanup_tasks
+
+
+@pytest.mark.asyncio
 async def test_drain_persistence_tasks_reports_timeout():
     import asyncio
     from contextlib import asynccontextmanager

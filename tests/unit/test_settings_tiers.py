@@ -52,14 +52,22 @@ def test_live_dashboard_homes_are_not_duplicated_in_migrating() -> None:
     assert all(SETTING_TIERS.get(name) == "T3" for name in live_homes)
 
 
-def test_migration_backlog_is_empty_and_still_passes_the_checker() -> None:
-    """Every T3 field has a database home, so ``MIGRATING`` is empty.
-
-    ``constantize-token-refresh-interval`` removed the last backlog entry. An
-    empty mapping is the intended terminal state: the checker must keep
-    passing, and a new env-only T3 field must still be rejected.
-    """
-    assert MIGRATING == {}
+def test_recovery_controls_are_explicitly_in_the_migration_backlog() -> None:
+    """New recovery controls name their follow-up dashboard migration."""
+    expected = {
+        "http_responses_session_bridge_complete_transcript_recovery_enabled",
+        "http_responses_session_bridge_unsafe_partial_replay_enabled",
+        "http_responses_session_bridge_complete_transcript_max_turns",
+        "http_responses_session_bridge_complete_transcript_max_input_items",
+        "http_responses_session_bridge_complete_transcript_max_bytes",
+        "http_responses_session_bridge_parked_recovery_enabled",
+        "http_responses_session_bridge_parked_recovery_recent_unknown_max_age_seconds",
+        "http_responses_session_bridge_parked_recovery_recent_unknown_limit",
+        "http_responses_session_bridge_pre_response_keepalive_max_count",
+        "http_responses_session_bridge_unsafe_new_response_recovery_enabled",
+    }
+    assert set(MIGRATING) == expected
+    assert set(MIGRATING.values()) == {"backlog"}
     report = checker.check_t3_dashboard_home(
         Settings.model_fields, SETTING_TIERS, MIGRATING, _dashboard_columns(), DASHBOARD_HOMES, _table_columns()
     )

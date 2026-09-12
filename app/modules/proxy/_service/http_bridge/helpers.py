@@ -7,11 +7,11 @@ import logging
 import math
 import sys
 import time
-from collections.abc import Callable, Coroutine, Iterable, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Final, Literal, Mapping, TypeVar, cast
+from typing import Any, Final, Literal, TypeVar, cast
 from urllib.parse import urlparse
 
 from app.core import shutdown as shutdown_state
@@ -61,6 +61,7 @@ from app.core.metrics.prometheus import (
     bridge_reattach_total,
     bridge_unanchored_handoff_recovery_total,
     http_bridge_connections_total,
+    http_bridge_parked_recovery_total,
     http_bridge_prewarm_total,
     http_bridge_stuck_retire_total,
 )
@@ -209,6 +210,17 @@ from app.modules.proxy.ring_membership import (
 from app.modules.proxy.selection_errors import selection_failure_response
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+
+def _record_http_bridge_parked_recovery(*, outcome: str, reason: str) -> None:
+    """Increment the parked-recovery metric for the classified admission outcome."""
+    if PROMETHEUS_AVAILABLE and http_bridge_parked_recovery_total is not None:
+        http_bridge_parked_recovery_total.labels(
+            outcome=outcome,
+            reason=str(reason)[:80] or "unknown",
+        ).inc()
+
+
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _TaskResultT = TypeVar("_TaskResultT")
 _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS = 60.0
@@ -791,6 +803,11 @@ def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     )
     payload["error"]["param"] = "previous_response_id"
     return payload
+
+
+def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Keep the removed ambiguous-recovery hook fail-closed for old callers."""
+    return False
 
 
 def _proxy_admission_wait_timeout_seconds() -> float:
@@ -1559,11 +1576,11 @@ async def _close_http_bridge_session_resources(
     *,
     turn_state_lock_held: bool = False,
     release_durable_session: bool = True,
+    drain_terminal_finalizers: bool = False,
 ) -> None:
     session.closed = True
     durable_session_id = getattr(session, "durable_session_id", None)
     durable_owner_epoch = getattr(session, "durable_owner_epoch", None)
-    durable_release_allowed = release_durable_session and _http_bridge_durable_release_allowed(service, session)
     if turn_state_lock_held:
         service._unregister_http_bridge_turn_states_locked(session)
         service._unregister_http_bridge_previous_response_ids_locked(session)
@@ -1578,53 +1595,148 @@ async def _close_http_bridge_session_resources(
     finally:
         session.account_lease = None
     durable_release_succeeded = durable_owner_epoch is None
-    if durable_release_allowed:
-        try:
-            released = await service._durable_bridge.release_live_session(
-                session_id=durable_session_id,
-                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                owner_epoch=durable_owner_epoch,
-                draining=shutdown_state.is_bridge_drain_active(),
+    durable_release_attempted = False
+
+    event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    drain_finalizers = getattr(event_batcher, "drain_terminal_finalizers", None)
+
+    def session_finalizers_pending() -> bool:
+        """Return whether this durable owner still has terminal work in flight."""
+        return bool(
+            durable_session_id is not None
+            and event_batcher is not None
+            and any(
+                not task.done()
+                and getattr(task, "_http_bridge_session_id", None) == durable_session_id
+                and (
+                    durable_owner_epoch is None
+                    or getattr(task, "_http_bridge_owner_epoch", durable_owner_epoch) == durable_owner_epoch
+                )
+                for task in getattr(event_batcher, "_terminal_finalize_tasks", ())
             )
-            # Fenced releases return the current owner snapshot, while a
-            # missing row returns None. Only an ownerless snapshot (or a
-            # missing row) means this generation no longer owns a durable lease.
-            durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
-        except Exception:
-            logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
-    # Closing a generation retires its process-local denial slot as well as
-    # its routing aliases. Keep pinned requests fenced; the owner helper marks
-    # those entries superseded and lets their final pin release remove them.
-    # A deliberately retained lease or a failed/fenced release still belongs
-    # to a live durable owner, so its fence must remain for a successor.
-    if durable_release_succeeded:
-        owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
-        pending_denied_response_ids = tuple(getattr(session, "denied_proxy_injected_anchor_cleanup_pending", ()))
-        _forget_http_bridge_denied_anchor_fence_owner(
-            service,
-            owner_key,
-            owner_epoch=durable_owner_epoch,
-            preserve_response_ids=pending_denied_response_ids,
         )
-        _retire_http_bridge_denied_anchor_predecessors_after_durable_clear(
-            service,
-            owner_key,
-            owner_epoch=durable_owner_epoch,
-            preserve_response_ids=pending_denied_response_ids,
-        )
+
+    drain_finalizers_accepts_session_id = False
+    drain_finalizers_accepts_owner_epoch = False
+    if callable(drain_finalizers) and durable_session_id is not None:
+        try:
+            parameters = inspect.signature(drain_finalizers).parameters.values()
+            drain_finalizers_accepts_session_id = any(
+                parameter.name == "session_id" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+            parameters = inspect.signature(drain_finalizers).parameters.values()
+            drain_finalizers_accepts_owner_epoch = any(
+                parameter.name == "owner_epoch" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            # Preserve compatibility with test doubles and legacy batchers whose
+            # callable signature cannot be inspected.
+            drain_finalizers_accepts_session_id = False
+            drain_finalizers_accepts_owner_epoch = False
+
+    async def drain_session_finalizers() -> None:
+        if not callable(drain_finalizers):
+            return
+        drain_kwargs: dict[str, Any] = {}
+        if drain_finalizers_accepts_session_id:
+            drain_kwargs["session_id"] = durable_session_id
+        if drain_finalizers_accepts_owner_epoch and durable_owner_epoch is not None:
+            drain_kwargs["owner_epoch"] = durable_owner_epoch
+        await drain_finalizers(**drain_kwargs)
+
+    async def release_durable_session_and_cleanup() -> None:
+        """Release the durable owner and retire process-local denial state when it is safe."""
+        nonlocal durable_release_attempted, durable_release_succeeded
+        if (
+            release_durable_session
+            and not durable_release_attempted
+            and not getattr(session, "upstream_reader_cleanup_pending", False)
+            and _http_bridge_durable_release_allowed(service, session)
+        ):
+            durable_release_attempted = True
+            try:
+                released = await service._durable_bridge.release_live_session(
+                    session_id=durable_session_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=durable_owner_epoch,
+                    draining=shutdown_state.is_bridge_drain_active(),
+                )
+                # Fenced releases return the current owner snapshot, while a
+                # missing row returns None. Only an ownerless snapshot (or a
+                # missing row) means this generation no longer owns a durable lease.
+                durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
+            except Exception:
+                # A transient store failure must not consume the one-shot guard;
+                # the post-reader drain path can safely retry this owner-fenced
+                # idempotent release.
+                durable_release_attempted = False
+                logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
+        # Closing a generation retires its process-local denial slot as well as
+        # its routing aliases. Keep pinned requests fenced; the owner helper marks
+        # those entries superseded and lets their final pin release remove them.
+        # A deliberately retained lease or a failed/fenced release still belongs
+        # to a live durable owner, so its fence must remain for a successor.
+        if durable_release_succeeded:
+            owner_key = durable_session_id if durable_session_id is not None else f"local:{id(session)}"
+            pending_denied_response_ids = tuple(getattr(session, "denied_proxy_injected_anchor_cleanup_pending", ()))
+            _forget_http_bridge_denied_anchor_fence_owner(
+                service,
+                owner_key,
+                owner_epoch=durable_owner_epoch,
+                preserve_response_ids=pending_denied_response_ids,
+            )
+            _retire_http_bridge_denied_anchor_predecessors_after_durable_clear(
+                service,
+                owner_key,
+                owner_epoch=durable_owner_epoch,
+                preserve_response_ids=pending_denied_response_ids,
+            )
+
     upstream_reader = session.upstream_reader
+    cleanup_complete = getattr(session, "upstream_reader_cleanup_complete", None)
+    cleanup_owner_task = getattr(session, "upstream_reader_cleanup_task", None)
+    clean_close_without_pending_requests = getattr(session, "last_upstream_close_code", None) == 1000 and not getattr(
+        session, "pending_requests", ()
+    )
+    if clean_close_without_pending_requests and not drain_terminal_finalizers and not session_finalizers_pending():
+        # A graceful close with no pending request lifecycle can release before
+        # the reader task itself unwinds, but only after any reader-owned retry
+        # or poisoned-anchor settlement has completed. The completion event is
+        # set by the reader's cleanup wrapper before it proceeds to teardown.
+        # Resource closure is normally a child task. Waiting for a pending
+        # reader cleanup marker here can form a cycle when that reader awaits
+        # this resource-close task, so the durable release is deferred below;
+        # the reader's wrapper signals completion after this task returns.
+        if not getattr(session, "upstream_reader_cleanup_pending", False):
+            await release_durable_session_and_cleanup()
+
+    detached_reader_pending = False
     if upstream_reader is not None:
-        if upstream_reader is asyncio.current_task():
+        if upstream_reader is asyncio.current_task() or upstream_reader is cleanup_owner_task:
             session.upstream_reader = None
         else:
-            await _await_cancelled_task(
+            detached_reader_pending = not await _await_cancelled_task(
                 upstream_reader,
                 label="http bridge upstream reader",
                 cleanup_tasks=service._background_cleanup_tasks,
+                owner_session_id=durable_session_id,
+                owner_epoch=durable_owner_epoch,
                 scheduler=scheduler_for(service),
             )
             if session.upstream_reader is upstream_reader:
                 session.upstream_reader = None
+    if (
+        not detached_reader_pending
+        and not getattr(session, "upstream_reader_cleanup_pending", False)
+        and not drain_terminal_finalizers
+        and not session_finalizers_pending()
+    ):
+        # Once any reader has settled, a normal close can release its durable
+        # lease before unrelated teardown awaits. A cancellation-resistant
+        # reader keeps the owner fence until its cleanup continuation settles.
+        await release_durable_session_and_cleanup()
     try:
         await session.upstream.close()
     except Exception:
@@ -1645,6 +1757,92 @@ async def _close_http_bridge_session_resources(
             api_key=None,
             response_create_gate=response_create_gate,
         )
+
+    async def drain_and_release(*, force_drain: bool = False) -> None:
+        if callable(drain_finalizers) and (force_drain or drain_terminal_finalizers or session_finalizers_pending()):
+            try:
+                await drain_session_finalizers()
+            except Exception:
+                logger.warning("Failed to drain HTTP bridge terminal finalizers before lease release", exc_info=True)
+        await release_durable_session_and_cleanup()
+
+    release_blocked = (
+        release_durable_session
+        and durable_session_id is not None
+        and (
+            getattr(session, "upstream_reader_cleanup_pending", False)
+            or not _http_bridge_durable_release_allowed(service, session)
+        )
+    )
+    if (detached_reader_pending or release_blocked) and release_durable_session and durable_session_id is not None:
+        # A cancellation-resistant reader may still append a terminal event
+        # after this close returns. Keep the owner fence until that detached
+        # cleanup and any finalizer it schedules have settled, then release in
+        # an owner-fenced continuation.
+        cleanup_tasks = {
+            task
+            for task in service._background_cleanup_tasks
+            if (
+                not task.done()
+                and getattr(task, "_http_bridge_recovery_session_id", None) == durable_session_id
+                and (
+                    durable_owner_epoch is None
+                    or getattr(task, "_http_bridge_owner_epoch", durable_owner_epoch) == durable_owner_epoch
+                )
+            )
+        }
+        cleanup_owner_task = getattr(session, "upstream_reader_cleanup_task", None)
+        cleanup_owner_completion: asyncio.Event | None = None
+        if (
+            cleanup_owner_task is not None
+            and cleanup_owner_task is not asyncio.current_task()
+            and not cleanup_owner_task.done()
+        ):
+            if cleanup_complete is not None:
+                # The reader may be awaiting this resource-close task (and
+                # direct relay tests do not always retain it in
+                # ``session.upstream_reader``). Waiting on the owner task would
+                # deadlock; its completion event is the non-cyclic handoff.
+                cleanup_owner_completion = cleanup_complete
+            else:
+                cleanup_tasks.add(cleanup_owner_task)
+        cleanup_tasks = tuple(cleanup_tasks)
+        existing_deferred = session.deferred_durable_release_task
+        if (cleanup_tasks or cleanup_owner_completion is not None) and (
+            existing_deferred is None or existing_deferred.done()
+        ):
+
+            async def deferred_release() -> None:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+                if cleanup_owner_completion is not None:
+                    await cleanup_owner_completion.wait()
+                await drain_and_release(force_drain=True)
+
+            deferred_task = scheduler_for(service).create_task(
+                deferred_release(),
+                name=f"http-bridge-deferred-release-{_hash_identifier(session.key.affinity_key)}",
+            )
+            session.deferred_durable_release_task = deferred_task
+            service._background_cleanup_tasks.add(deferred_task)
+
+            def deferred_release_done(done_task: asyncio.Task[None]) -> None:
+                service._background_cleanup_tasks.discard(done_task)
+                if done_task.cancelled():
+                    return
+                try:
+                    done_task.result()
+                except Exception:
+                    logger.warning("Deferred HTTP bridge durable release failed", exc_info=True)
+
+            deferred_task.add_done_callback(deferred_release_done)
+        elif not cleanup_tasks and (existing_deferred is None or existing_deferred.done()):
+            # The cleanup marker may have completed between the release-fence
+            # snapshot above and this branch.  In that case there is no task
+            # left to defer behind; still perform the durable release instead
+            # of silently dropping it.
+            await drain_and_release()
+    else:
+        await drain_and_release()
     _log_http_bridge_event(
         "close",
         session.key,
@@ -1661,6 +1859,7 @@ async def _close_http_bridge_session(
     *,
     turn_state_lock_held: bool = False,
     release_durable_session: bool = True,
+    drain_terminal_finalizers: bool = False,
 ) -> None:
     # Direct close callers can be cancelled just like the bounded background
     # wrapper. Keep the resource owner alive until its reader, socket, and
@@ -1679,6 +1878,7 @@ async def _close_http_bridge_session(
                 session,
                 turn_state_lock_held=turn_state_lock_held,
                 release_durable_session=release_durable_session,
+                drain_terminal_finalizers=drain_terminal_finalizers,
             ),
             name=f"http-bridge-resource-close-{_hash_identifier(session.key.affinity_key)}",
         )
@@ -2698,8 +2898,16 @@ def _record_bridge_drain_recovery_allowed() -> None:
 
 
 def _is_missing_durable_bridge_table_error(exc: Exception) -> bool:
+    """Recognize missing durable bridge tables without treating unrelated database errors as absence."""
     message = str(exc).lower()
-    if "http_bridge_sessions" not in message and "http_bridge_session_aliases" not in message:
+    if not any(
+        table_name in message
+        for table_name in (
+            "http_bridge_sessions",
+            "http_bridge_session_aliases",
+            "http_bridge_recovery_attempts",
+        )
+    ):
         return False
     return "no such table" in message or "does not exist" in message or "undefinedtable" in message
 
@@ -2714,7 +2922,9 @@ def _http_bridge_durable_release_allowed(service: Any, session: Any) -> bool:
     if session_id is None or owner_epoch is None:
         return False
     return not any(
-        not task.done() and getattr(task, "_http_bridge_recovery_session_id", None) == session_id
+        not task.done()
+        and getattr(task, "_http_bridge_recovery_session_id", None) == session_id
+        and (owner_epoch is None or getattr(task, "_http_bridge_owner_epoch", owner_epoch) == owner_epoch)
         for task in service._background_cleanup_tasks
     )
 
@@ -2728,12 +2938,20 @@ def _cancel_and_track_cancelled_task(
     *,
     label: str,
     cleanup_tasks: set[asyncio.Task[None]] | None,
+    owner_session_id: str | None = None,
+    owner_epoch: int | None = None,
     cancel_task: bool = True,
     scheduler: Scheduler = REAL_SCHEDULER,
 ) -> None:
     if cancel_task:
         task.cancel()
     cleanup_task = scheduler.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
+    if owner_session_id is not None:
+        # Keep ownership metadata on the detached cleanup task so a session
+        # close can defer its durable release until this exact reader settles.
+        setattr(cleanup_task, "_http_bridge_recovery_session_id", owner_session_id)
+    if owner_epoch is not None:
+        setattr(cleanup_task, "_http_bridge_owner_epoch", owner_epoch)
     if cleanup_tasks is not None:
         cleanup_tasks.add(cleanup_task)
         cleanup_task.add_done_callback(cleanup_tasks.discard)
@@ -2746,6 +2964,8 @@ async def _await_cancelled_task(
     label: str,
     cancel: bool = True,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    owner_session_id: str | None = None,
+    owner_epoch: int | None = None,
     scheduler: Scheduler = REAL_SCHEDULER,
 ) -> bool:
     effective_timeout = max(float(timeout_seconds), 0.0)
@@ -2759,7 +2979,14 @@ async def _await_cancelled_task(
         try:
             await asyncio.sleep(0)
         except asyncio.CancelledError:
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, scheduler=scheduler)
+            _cancel_and_track_cancelled_task(
+                task,
+                label=label,
+                cleanup_tasks=cleanup_tasks,
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
+                scheduler=scheduler,
+            )
             raise
     if cancel:
         task.cancel()
@@ -2771,6 +2998,8 @@ async def _await_cancelled_task(
                 task,
                 label=label,
                 cleanup_tasks=cleanup_tasks,
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
                 cancel_task=False,
                 scheduler=scheduler,
             )
@@ -2781,6 +3010,8 @@ async def _await_cancelled_task(
             task,
             label=label,
             cleanup_tasks=cleanup_tasks,
+            owner_session_id=owner_session_id,
+            owner_epoch=owner_epoch,
             cancel_task=False,
             scheduler=scheduler,
         )
@@ -2867,6 +3098,29 @@ def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_s
     return generation
 
 
+def _remove_http_bridge_previous_response_alias_locked(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    response_id: str,
+    registration_generation: int,
+) -> None:
+    """Remove a locally published response alias if this registration still owns it."""
+
+    if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
+        return
+    session.previous_response_alias_registration_generations.pop(response_id, None)
+    session.previous_response_ids.discard(response_id)
+    alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
+    current_session = service._http_bridge_sessions.get(session.key)
+    current_generation_owns_alias = (
+        current_session is not None
+        and current_session is not session
+        and response_id in current_session.previous_response_ids
+    )
+    if not current_generation_owns_alias and service._http_bridge_previous_response_index.get(alias_key) == session.key:
+        service._http_bridge_previous_response_index.pop(alias_key, None)
+
+
 async def _persist_http_bridge_turn_state_alias(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,
@@ -2946,6 +3200,8 @@ async def _persist_http_bridge_previous_response_alias(
     session: _HTTPBridgeSession,
     *,
     response_id: str,
+    latest_response_id: str | None = None,
+    retained_replay: bool = False,
     registration_generation: int,
     input_item_count: int | None,
     input_full_fingerprint: str | None,
@@ -2954,6 +3210,7 @@ async def _persist_http_bridge_previous_response_alias(
     lease_ttl_seconds: float,
     local_alias_was_published: bool = True,
 ) -> DurableBridgeAliasRegistration | None:
+    """Persist an owned response alias and propagate whether continuity registration succeeded."""
     owner_epoch = session.durable_owner_epoch
     try:
         registered = await service._durable_bridge.register_previous_response_id(
@@ -2962,6 +3219,8 @@ async def _persist_http_bridge_previous_response_alias(
             instance_id=instance_id,
             owner_epoch=owner_epoch,
             response_id=response_id,
+            latest_response_id=latest_response_id or response_id,
+            retained_replay=retained_replay,
             lease_ttl_seconds=lease_ttl_seconds,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
@@ -2973,6 +3232,17 @@ async def _persist_http_bridge_previous_response_alias(
             async with service._http_bridge_lock:
                 if session.previous_response_alias_registration_generations.get(response_id) == registration_generation:
                     session.previous_response_alias_registration_generations.pop(response_id, None)
+        elif retained_replay:
+            # A retained client-visible ID is only safe when its replacement
+            # target survives in the durable alias table. Do not leave a
+            # local-only alias after an ambiguous write failure.
+            async with service._http_bridge_lock:
+                _remove_http_bridge_previous_response_alias_locked(
+                    service,
+                    session,
+                    response_id,
+                    registration_generation,
+                )
         return None
     if registered == DurableBridgeAliasRegistration.REGISTERED:
         return registered
@@ -2981,21 +3251,15 @@ async def _persist_http_bridge_previous_response_alias(
     async with service._http_bridge_lock:
         if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
             return
-        session.previous_response_alias_registration_generations.pop(response_id, None)
         if local_alias_was_published:
-            session.previous_response_ids.discard(response_id)
-            alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
-            current_session = service._http_bridge_sessions.get(session.key)
-            current_generation_owns_alias = (
-                current_session is not None
-                and current_session is not session
-                and response_id in current_session.previous_response_ids
+            _remove_http_bridge_previous_response_alias_locked(
+                service,
+                session,
+                response_id,
+                registration_generation,
             )
-            if (
-                not current_generation_owns_alias
-                and service._http_bridge_previous_response_index.get(alias_key) == session.key
-            ):
-                service._http_bridge_previous_response_index.pop(alias_key, None)
+        else:
+            session.previous_response_alias_registration_generations.pop(response_id, None)
         if registered == DurableBridgeAliasRegistration.OWNER_FENCED:
             fenced_out_session = _evict_fenced_out_http_bridge_session_locked(
                 service,
@@ -3463,17 +3727,36 @@ def _http_bridge_reconnect_connect_failure(
     raise exc
 
 
+def _http_bridge_previous_response_rejection_fields(
+    error: Mapping[str, Any],
+) -> tuple[str, str | None, str | None] | None:
+    """Normalize error fields while preserving blank parameters and rejecting malformed parameter types."""
+    code_value = error.get("code")
+    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
+    type_value = error.get("type")
+    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    code = _normalize_error_code(raw_code, error_type)
+    param_value = error.get("param")
+    if "param" in error and param_value is not None and not isinstance(param_value, str):
+        return None
+    param = param_value.strip() if isinstance(param_value, str) else None
+    message_value = error.get("message")
+    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
+    return code, param, message
+
+
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:
+    """Classify local recovery eligibility using explicit anchor errors and configured ambiguous-retry policy."""
     payload = exc.payload
     if not isinstance(payload, dict):
         return False
     error = payload.get("error")
     if not isinstance(error, dict):
         return False
-    code_value = error.get("code")
-    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
-    type_value = error.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    fields = _http_bridge_previous_response_rejection_fields(error)
+    if fields is None:
+        return False
+    code, _, message = fields
     param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
     if param_state.malformed:
         return False
@@ -3481,7 +3764,6 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
     # carry the classifiable code only in ``type`` (or omit both code and
     # param on the terse previous-response rejection), and a raw read would
     # misclassify them into the ambiguous transport class below (issue #1830).
-    code = _normalize_error_code(raw_code, error_type)
     if code in {
         "bridge_owner_unreachable",
         "bridge_previous_response_not_found",
@@ -3500,24 +3782,22 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
 
 
 def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError) -> bool:
+    """Recognize explicit stale-anchor rejection without accepting malformed error parameters."""
     payload = exc.payload
     if not isinstance(payload, dict):
         return False
     error = payload.get("error")
     if not isinstance(error, dict):
         return False
-    code_value = error.get("code")
-    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
-    type_value = error.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    fields = _http_bridge_previous_response_rejection_fields(error)
+    if fields is None:
+        return False
+    code, _, message = fields
     param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
     if param_state.malformed:
         return False
-    code = _normalize_error_code(raw_code, error_type)
     if code == "bridge_previous_response_not_found":
         return True
-    message_value = error.get("message")
-    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
     return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
 
 
@@ -3825,6 +4105,7 @@ def _log_http_bridge_event(
     response_events_seen: int | None = None,
     transport_classification: str | None = None,
 ) -> None:
+    """Emit structured bridge event diagnostics with request, session, and recovery context."""
     if event in {"create", "reuse", "reconnect", "close", "evict_idle"} and http_bridge_connections_total is not None:
         http_bridge_connections_total.labels(event=event).inc()
     level = logging.INFO
@@ -3846,6 +4127,13 @@ def _log_http_bridge_event(
         "reallocation_orphan",
         "context_overflow_rollover",
         "reader_failure",
+        "parked_recovery_ineligible",
+        # The production Compose entrypoint launches Uvicorn directly with
+        # its default WARNING threshold. Keep bounded recovery diagnostics
+        # visible there without raising global application log verbosity.
+        "parked_recovery_lookup",
+        "submit_retry_circuit_parked",
+        "parked_recovery_admitted",
     }:
         level = logging.WARNING
     logger.log(

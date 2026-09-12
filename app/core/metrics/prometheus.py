@@ -331,6 +331,18 @@ if PROMETHEUS_AVAILABLE:
         ["outcome"],
         registry=REGISTRY,
     )
+    http_bridge_parked_recovery_total = Counter(
+        "codex_lb_http_bridge_parked_recovery_total",
+        "Total HTTP bridge parked-recovery eligibility and admission outcomes",
+        ["outcome", "reason"],
+        registry=REGISTRY,
+    )
+    http_bridge_stuck_watchdog_skip_total = Counter(
+        "codex_lb_http_bridge_stuck_watchdog_skip_total",
+        "Total HTTP bridge stuck-gate watchdog skips",
+        ["affinity_kind", "model_class"],
+        registry=REGISTRY,
+    )
     http_bridge_spool_cleanup_runs_total = Counter(
         "codex_lb_http_bridge_spool_cleanup_runs_total",
         "Total durable HTTP bridge transcript cleanup passes by outcome",
@@ -536,6 +548,8 @@ else:
     http_bridge_prewarm_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
     http_bridge_retry_circuit_total: CounterLike | None = None
+    http_bridge_parked_recovery_total: CounterLike | None = None
+    http_bridge_stuck_watchdog_skip_total: CounterLike | None = None
     http_bridge_spool_cleanup_runs_total: CounterLike | None = None
     http_bridge_spool_cleanup_deleted_operations_total: CounterLike | None = None
     http_bridge_spool_cleanup_duration_seconds: HistogramLike | None = None
@@ -641,4 +655,6 @@ __all__ = [
     "upstream_transport_decisions_total",
     "http_bridge_routing_total",
     "http_bridge_connections_total",
+    "http_bridge_parked_recovery_total",
+    "http_bridge_stuck_watchdog_skip_total",
 ]

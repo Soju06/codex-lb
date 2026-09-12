@@ -37,6 +37,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _reconcile_durable_http_bridge_ownership,
     _record_bridge_reattach,
     _register_http_bridge_turn_state_aliases_locked,
+    _remove_http_bridge_previous_response_alias_locked,
     _renew_durable_http_bridge_lease,
     _service_get_settings_cache,
     _track_alias_registration,
@@ -204,7 +205,10 @@ class _HTTPBridgeSessionRegistryMixin:
             # released. Start every close concurrently, then await every result,
             # so cancellation cannot strand the tail of a sequential close loop.
             close_results = await asyncio.gather(
-                *(self._close_http_bridge_session(session) for session in sessions_to_close),
+                *(
+                    self._close_http_bridge_session(session, drain_terminal_finalizers=True)
+                    for session in sessions_to_close
+                ),
                 return_exceptions=True,
             )
             background_cleanup_drained = await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
@@ -373,15 +377,20 @@ class _HTTPBridgeSessionRegistryMixin:
         session: _HTTPBridgeSession,
         response_id: str,
         *,
+        latest_response_id: str | None = None,
+        retained_replay: bool = False,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
         pending_tool_calls: Mapping[str, str] | None = None,
     ) -> bool:
+        """Register the completed response through the bridge's alias-registration implementation."""
         if _requires_durable_recovery_alias_serialization(session):
             async with session.recovery_alias_lock:
                 return await self._register_http_bridge_previous_response_id_impl(
                     session,
                     response_id,
+                    latest_response_id=latest_response_id,
+                    retained_replay=retained_replay,
                     input_item_count=input_item_count,
                     input_full_fingerprint=input_full_fingerprint,
                     pending_tool_calls=pending_tool_calls,
@@ -389,6 +398,8 @@ class _HTTPBridgeSessionRegistryMixin:
         return await self._register_http_bridge_previous_response_id_impl(
             session,
             response_id,
+            latest_response_id=latest_response_id,
+            retained_replay=retained_replay,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
             pending_tool_calls=pending_tool_calls,
@@ -399,10 +410,13 @@ class _HTTPBridgeSessionRegistryMixin:
         session: _HTTPBridgeSession,
         response_id: str,
         *,
+        latest_response_id: str | None = None,
+        retained_replay: bool = False,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
         pending_tool_calls: Mapping[str, str] | None = None,
     ) -> bool:
+        """Reconcile local response aliases with durable registration, retaining explicit replay targets."""
         stripped_response_id = response_id.strip()
         if not stripped_response_id:
             return False
@@ -449,11 +463,22 @@ class _HTTPBridgeSessionRegistryMixin:
                 self._http_bridge_previous_response_index[alias_key] = session.key
                 session.previous_response_ids.add(stripped_response_id)
         if session.durable_session_id is None or session.durable_owner_epoch is None:
+            if retained_replay:
+                async with self._http_bridge_lock:
+                    _remove_http_bridge_previous_response_alias_locked(
+                        self,
+                        session,
+                        stripped_response_id,
+                        registration_generation,
+                    )
+                return False
             return True
         durable_result = await _persist_http_bridge_previous_response_alias(
             self,
             session,
             response_id=stripped_response_id,
+            latest_response_id=latest_response_id or stripped_response_id,
+            retained_replay=retained_replay,
             registration_generation=registration_generation,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,

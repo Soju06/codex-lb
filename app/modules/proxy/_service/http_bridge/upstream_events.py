@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import inspect
+import json
 import logging
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any, TypeVar, cast
+from uuid import uuid4
 
 import anyio
 
@@ -38,7 +42,7 @@ from app.core.clients.proxy_websocket import (
     is_account_neutral_websocket_error_code,
 )
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
-from app.core.errors import response_failed_event
+from app.core.errors import OpenAIErrorParam, coerce_error_param, response_failed_event
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import (
     _LIFECYCLE_EVENT_TYPES,
@@ -111,6 +115,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _is_previous_response_not_found_error,
     _is_security_work_authorization_required_error,
     _match_websocket_request_state_for_anonymous_event,
+    _match_websocket_request_state_for_precreated_terminal_event,
     _matching_websocket_request_states_for_missing_tool_output_error,
     _matching_websocket_request_states_for_previous_response_error,
     _maybe_rewrite_websocket_previous_response_not_found_event,
@@ -163,6 +168,7 @@ from app.modules.proxy._service.support import (
     _PENDING_TOOL_CALL_ITEM_TYPES,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
+    _call_with_supported_optional_kwargs,
     _clear_websocket_deferred_reasoning_downstream_texts,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
@@ -216,7 +222,20 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.affinity import (
     _extract_model_class,
 )
+from app.modules.proxy.complete_transcript import (
+    _items_match_for_echo,
+    _output_item_identities_match,
+    _output_item_identity,
+    _output_item_identity_is_valid,
+    _terminal_output_is_valid,
+    build_complete_replay_payload,
+    build_replay_input_snapshot,
+    build_unanchored_root_replay_payload,
+    derive_replay_input_turn_count,
+    materialize_output_items_from_events,
+)
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
+from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationSnapshot, durable_bridge_api_key_scope
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     is_upstream_model_capacity_error,
@@ -230,6 +249,41 @@ from app.modules.proxy.tool_call_dedupe import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+
+def _http_bridge_precreated_retry_recovery_kwargs(retry_method: Any) -> dict[str, bool]:
+    """Pass the recovery gate only to retry hooks that expose it."""
+    try:
+        parameters = inspect.signature(retry_method).parameters
+    except (TypeError, ValueError):
+        return {"allow_complete_transcript_recovery": True}
+    if "allow_complete_transcript_recovery" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        return {"allow_complete_transcript_recovery": True}
+    return {}
+
+
+def _http_bridge_unsafe_new_response_anchor_error(
+    *,
+    code: str | None,
+    param: OpenAIErrorParam | str | None,
+    message: str | None,
+) -> bool:
+    """Classify the upstream's terse invalid-anchor error only when opted in."""
+    settings = _service_get_settings()
+    if not (
+        getattr(settings, "http_responses_session_bridge_complete_transcript_recovery_enabled", False)
+        and getattr(settings, "http_responses_session_bridge_unsafe_new_response_recovery_enabled", False)
+    ):
+        return False
+    if code != "invalid_request_error":
+        return False
+    param_state = coerce_error_param(param)
+    # Keep the unsafe recovery gate aligned with the shared stale-anchor
+    # classifier: the parameter alone is not enough to prove an anchor error.
+    return _is_previous_response_not_found_error(code=code, param=param_state, message=message)
+
 
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     0.25,
@@ -317,13 +371,24 @@ async def _record_http_bridge_account_timeout_signal(
         )
 
 
+def _http_bridge_transcript_recovery_enabled(settings: Any | None = None) -> bool:
+    """Read the complete-transcript recovery feature gate from effective service settings."""
+    settings = settings or _service_get_settings()
+    return bool(
+        getattr(settings, "http_responses_session_bridge_complete_transcript_recovery_enabled", False)
+        or getattr(settings, "http_responses_session_bridge_unsafe_partial_replay_enabled", False)
+    )
+
+
 async def _update_http_bridge_operation_state(
     service: Any,
     session: "_HTTPBridgeSession",
     request_state: Any,
     *,
     state: str,
+    operation_attempt_generation: int | None = None,
     response_id: str | None = None,
+    materialize_transcript: bool = True,
 ) -> None:
     """Persist operation outcome without allowing journaling to break streaming."""
     operation_id = getattr(request_state, "operation_id", None)
@@ -333,14 +398,247 @@ async def _update_http_bridge_operation_state(
     if not operation_id or session_id is None or owner_epoch is None or not callable(update_operation):
         return
     try:
-        marked = await update_operation(
-            operation_id=operation_id,
-            session_id=session_id,
-            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-            owner_epoch=owner_epoch,
-            state=state,
-            response_id=response_id,
-        )
+        response_output_items_json: str | None = None
+        response_output_items_complete = False
+        response_replay_input_json: str | None = None
+        response_replay_input_complete = False
+        response_replay_input_turn_count = 0
+        if materialize_transcript and state == "completed" and _http_bridge_transcript_recovery_enabled():
+            request_model = getattr(request_state, "model", None)
+            request_model_class = _extract_model_class(request_model) if isinstance(request_model, str) else None
+            response_output_items = getattr(request_state, "response_output_items", [])
+            response_output_items_complete = bool(getattr(request_state, "response_output_items_complete", False))
+            # Codex may put the actual output items in output_item.done events
+            # while leaving response.completed.response.output empty. Once the
+            # terminal event has been spooled, materialize that canonical event
+            # representation before persisting the transcript.
+            event_spool_complete = False
+            get_operation = getattr(
+                getattr(service, "_durable_bridge", None),
+                "get_operation",
+                None,
+            )
+            if callable(get_operation):
+                try:
+                    operation = await get_operation(operation_id=operation_id)
+                    event_spool_complete = bool(getattr(operation, "event_spool_complete", False))
+                except Exception:
+                    logger.warning(
+                        "Failed to read HTTP bridge output spool status operation_id=%s",
+                        operation_id,
+                        exc_info=True,
+                    )
+            if not event_spool_complete:
+                # A live collector can have items even when one of the
+                # durable event writes failed. Never persist that partial view
+                # as a complete transcript; the spool is the completeness
+                # fence for both the in-memory and materialized paths.
+                response_output_items = []
+                response_output_items_complete = False
+            elif not response_output_items and not getattr(request_state, "response_output_items_event_invalid", False):
+                get_operation_events = getattr(
+                    getattr(service, "_durable_bridge", None),
+                    "get_operation_events",
+                    None,
+                )
+                if callable(get_operation_events):
+                    try:
+                        event_spool = await get_operation_events(operation_id=operation_id)
+                        materialized_output = materialize_output_items_from_events(event_spool)
+                    except Exception:
+                        materialized_output = None
+                        logger.warning(
+                            "Failed to materialize HTTP bridge output items operation_id=%s",
+                            operation_id,
+                            exc_info=True,
+                        )
+                    if materialized_output is not None:
+                        response_output_items = materialized_output
+                        response_output_items_complete = True
+                        _log_http_bridge_event(
+                            "complete_transcript_output_materialized",
+                            session.key,
+                            account_id=session.account.id,
+                            model=getattr(request_state, "model", None),
+                            detail=f"items={len(materialized_output)}",
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=request_model_class,
+                        )
+            if response_output_items_complete:
+                response_output_items_json = json.dumps(
+                    response_output_items,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                response_output_items_complete = len(response_output_items_json.encode("utf-8")) <= int(
+                    getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_complete_transcript_max_bytes",
+                        8 * 1024 * 1024,
+                    )
+                )
+                if not response_output_items_complete:
+                    response_output_items_json = None
+                else:
+                    # Persist a self-contained bounded input snapshot while
+                    # the parent chain is still available. This is best
+                    # effort: a missing/ambiguous parent must never delay or
+                    # fail the live terminal response.
+                    request_text = getattr(request_state, "request_text", None)
+                    parent_response_id = getattr(request_state, "operation_parent_response_id", None) or getattr(
+                        request_state, "previous_response_id", None
+                    )
+                    parent_turns: list[Any] = []
+                    parent_transcript_available = not bool(parent_response_id)
+                    if request_text:
+                        try:
+                            if parent_response_id:
+                                get_transcript = getattr(
+                                    getattr(service, "_durable_bridge", None),
+                                    "get_complete_transcript",
+                                    None,
+                                )
+                                if callable(get_transcript):
+                                    resolved_parent_turns = await get_transcript(
+                                        response_id=parent_response_id,
+                                        max_turns=int(
+                                            getattr(
+                                                _service_get_settings(),
+                                                "http_responses_session_bridge_complete_transcript_max_turns",
+                                                256,
+                                            )
+                                        ),
+                                        max_bytes=int(
+                                            getattr(
+                                                _service_get_settings(),
+                                                "http_responses_session_bridge_complete_transcript_max_bytes",
+                                                8 * 1024 * 1024,
+                                            )
+                                        ),
+                                        api_key_scope=durable_bridge_api_key_scope(session.key.api_key_id),
+                                    )
+                                    parent_turns = resolved_parent_turns or []
+                                    parent_transcript_available = bool(parent_turns)
+                            if parent_transcript_available:
+                                snapshot = build_replay_input_snapshot(
+                                    parent_turns,
+                                    request_text=request_text,
+                                    response_output_items_json=response_output_items_json,
+                                    max_input_items=int(
+                                        getattr(
+                                            _service_get_settings(),
+                                            "http_responses_session_bridge_complete_transcript_max_input_items",
+                                            4096,
+                                        )
+                                    ),
+                                    max_bytes=int(
+                                        getattr(
+                                            _service_get_settings(),
+                                            "http_responses_session_bridge_complete_transcript_max_bytes",
+                                            8 * 1024 * 1024,
+                                        )
+                                    ),
+                                )
+                            else:
+                                snapshot = None
+                        except Exception:
+                            snapshot = None
+                            logger.warning(
+                                "Failed to build HTTP bridge replay snapshot operation_id=%s",
+                                operation_id,
+                                exc_info=True,
+                            )
+                        if snapshot is not None:
+                            recovered_turn_count = int(getattr(request_state, "recovery_replay_turn_count", 0))
+                            derived_root_turn_count: int | None = None
+                            if recovered_turn_count == 0 and not parent_turns and not parent_response_id:
+                                derived_root_turn_count = derive_replay_input_turn_count(request_text)
+                            unknown_root_depth = recovered_turn_count < 0 or (
+                                recovered_turn_count == 0
+                                and not parent_turns
+                                and not parent_response_id
+                                and derived_root_turn_count is None
+                            )
+                            if unknown_root_depth:
+                                # A client-supplied root history has no
+                                # trustworthy represented-turn count. Keep
+                                # the terminal output, but never persist a
+                                # replay snapshot that claims it contains
+                                # only the replacement turn.
+                                snapshot = None
+                                _log_http_bridge_event(
+                                    "complete_transcript_replay_snapshot_skipped",
+                                    session.key,
+                                    account_id=session.account.id,
+                                    model=getattr(request_state, "model", None),
+                                    detail="represented_turn_count_unknown",
+                                    cache_key_family=session.key.affinity_kind,
+                                    model_class=request_model_class,
+                                )
+                        if snapshot is not None:
+                            recovered_turn_count = max(0, recovered_turn_count)
+                            # A recovery replay contains the completed ancestor
+                            # turns; the operation being persisted is one more
+                            # represented turn. Root snapshots have no durable
+                            # ancestors and therefore use the ordinary parent
+                            # calculation below.
+                            response_replay_input_turn_count = (
+                                recovered_turn_count + 1
+                                if recovered_turn_count
+                                else derived_root_turn_count
+                                if derived_root_turn_count is not None
+                                else sum(
+                                    max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in parent_turns
+                                )
+                                + 1
+                            )
+                            max_turns = int(
+                                getattr(
+                                    _service_get_settings(),
+                                    "http_responses_session_bridge_complete_transcript_max_turns",
+                                    256,
+                                )
+                            )
+                            if response_replay_input_turn_count <= max_turns:
+                                response_replay_input_json = snapshot
+                                response_replay_input_complete = True
+                                _log_http_bridge_event(
+                                    "complete_transcript_replay_snapshot_persisted",
+                                    session.key,
+                                    account_id=session.account.id,
+                                    model=getattr(request_state, "model", None),
+                                    detail=f"bytes={len(snapshot.encode('utf-8'))}",
+                                    cache_key_family=session.key.affinity_kind,
+                                    model_class=request_model_class,
+                                )
+                            else:
+                                _log_http_bridge_event(
+                                    "complete_transcript_replay_snapshot_skipped",
+                                    session.key,
+                                    account_id=session.account.id,
+                                    model=getattr(request_state, "model", None),
+                                    detail=(
+                                        f"represented_turns={response_replay_input_turn_count};max_turns={max_turns}"
+                                    ),
+                                    cache_key_family=session.key.affinity_kind,
+                                    model_class=request_model_class,
+                                )
+        update_kwargs: dict[str, Any] = {
+            "operation_id": operation_id,
+            "session_id": session_id,
+            "instance_id": _service_get_settings().http_responses_session_bridge_instance_id,
+            "owner_epoch": owner_epoch,
+            "state": state,
+            "response_id": response_id,
+            "response_output_items_json": response_output_items_json,
+            "response_output_items_complete": response_output_items_complete,
+            "response_replay_input_json": response_replay_input_json,
+            "response_replay_input_complete": response_replay_input_complete,
+            "response_replay_input_turn_count": response_replay_input_turn_count,
+        }
+        if operation_attempt_generation is not None:
+            update_kwargs["expected_recovery_dispatch_count"] = operation_attempt_generation
+        marked = await update_operation(**update_kwargs)
         if marked and response_id is not None:
             request_state.operation_persisted_response_id = response_id
         if not marked:
@@ -358,6 +656,101 @@ async def _update_http_bridge_operation_state(
         )
 
 
+_HTTP_BRIDGE_SNAPSHOT_TASK_PREFIX = "http-bridge-transcript-snapshot-"
+_HTTP_BRIDGE_SNAPSHOT_MAX_TASKS = 32
+_HTTP_BRIDGE_SNAPSHOT_TIMEOUT_SECONDS = 2.0
+
+
+def _http_bridge_terminal_finalizer_for_snapshot(
+    service: Any,
+    *,
+    operation_id: str | None,
+    owner_epoch: int | None,
+) -> asyncio.Task[Any] | None:
+    """Find the terminal spool finalizer for one owner-fenced operation."""
+    if operation_id is None:
+        return None
+    batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    for task in getattr(batcher, "_terminal_finalize_tasks", ()):
+        if task.done() or getattr(task, "_http_bridge_operation_id", None) != operation_id:
+            continue
+        if owner_epoch is not None and getattr(task, "_http_bridge_owner_epoch", owner_epoch) != owner_epoch:
+            continue
+        return task
+    return None
+
+
+def _schedule_http_bridge_transcript_snapshot(service: Any, session: Any, request_state: Any, **kwargs: Any) -> None:
+    """Best-effort post-delivery persistence, bounded and owned until shutdown."""
+    tasks = getattr(service, "_background_cleanup_tasks", None)
+    if tasks is None:
+        return
+    active = [
+        task for task in tasks if task.get_name().startswith(_HTTP_BRIDGE_SNAPSHOT_TASK_PREFIX) and not task.done()
+    ]
+    name = (
+        f"{_HTTP_BRIDGE_SNAPSHOT_TASK_PREFIX}{request_state.operation_id}-"
+        f"{session.durable_owner_epoch}-{kwargs.get('operation_attempt_generation', 0)}"
+    )
+    if len(active) >= _HTTP_BRIDGE_SNAPSHOT_MAX_TASKS or any(task.get_name() == name for task in active):
+        return
+    # Ownership can change before the task runs. Never borrow a successor's
+    # epoch, response identity or attempt generation from the live objects.
+    frozen_session = copy.copy(session)
+    frozen_state = copy.copy(request_state)
+
+    async def persist() -> None:
+        """Persist the captured transcript snapshot inside the background task's bounded lifetime."""
+        finalizer = _http_bridge_terminal_finalizer_for_snapshot(
+            service,
+            operation_id=getattr(frozen_state, "operation_id", None),
+            owner_epoch=getattr(frozen_session, "durable_owner_epoch", None),
+        )
+        if finalizer is not None:
+            # The append deliberately leaves ``event_spool_complete`` false
+            # until this owner-fenced marker commits.  Await the exact
+            # finalizer before reading that flag; otherwise a fast snapshot
+            # can race a slow database writer and discard a valid transcript.
+            try:
+                await scheduler_for(service).wait_for(
+                    asyncio.shield(finalizer),
+                    timeout=_HTTP_BRIDGE_SNAPSHOT_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.debug(
+                    "HTTP bridge terminal spool finalizer deadline exceeded before transcript snapshot operation_id=%s",
+                    getattr(frozen_state, "operation_id", None),
+                )
+                return
+            except Exception:
+                logger.debug(
+                    "HTTP bridge terminal spool finalizer failed before transcript snapshot operation_id=%s",
+                    getattr(frozen_state, "operation_id", None),
+                    exc_info=True,
+                )
+                return
+        try:
+            await scheduler_for(service).wait_for(
+                _update_http_bridge_operation_state(service, frozen_session, frozen_state, **kwargs),
+                timeout=_HTTP_BRIDGE_SNAPSHOT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.debug(
+                "HTTP bridge optional transcript snapshot deadline exceeded operation_id=%s", request_state.operation_id
+            )
+
+    snapshot_task = _schedule_http_bridge_background_cleanup(
+        service, persist(), name=name, error_message="HTTP bridge optional transcript snapshot failed"
+    )
+    if snapshot_task is not None:
+        # Resource teardown uses this ownership marker to retain the durable
+        # lease until snapshot persistence has settled, including normal
+        # (non-shutdown) session retirement.
+        setattr(snapshot_task, "_http_bridge_operation_id", getattr(frozen_state, "operation_id", None))
+        setattr(snapshot_task, "_http_bridge_recovery_session_id", getattr(frozen_session, "durable_session_id", None))
+        setattr(snapshot_task, "_http_bridge_owner_epoch", getattr(frozen_session, "durable_owner_epoch", None))
+
+
 def _http_bridge_operation_state_for_event(event_type: str | None) -> str | None:
     return {
         "response.created": "acknowledged",
@@ -368,12 +761,40 @@ def _http_bridge_operation_state_for_event(event_type: str | None) -> str | None
     }.get(event_type)
 
 
+def _rewrite_http_bridge_replay_sequence_number(
+    payload: dict[str, JsonValue],
+    request_state: _WebSocketRequestState,
+) -> tuple[dict[str, JsonValue], int | None]:
+    """Keep replacement SSE sequence numbers monotonic for one client response."""
+    sequence_number = payload.get("sequence_number")
+    if not isinstance(sequence_number, int) or isinstance(sequence_number, bool):
+        return payload, None
+    output_sequence_number = sequence_number
+    if request_state.replay_downstream_response_id is not None:
+        if request_state.replay_downstream_sequence_offset is None:
+            prior_watermark = request_state.last_downstream_sequence_number
+            request_state.replay_downstream_sequence_offset = (
+                prior_watermark + 1 if prior_watermark is not None else 0
+            ) - sequence_number
+        output_sequence_number = sequence_number + request_state.replay_downstream_sequence_offset
+        prior_watermark = request_state.last_downstream_sequence_number
+        if prior_watermark is not None and output_sequence_number <= prior_watermark:
+            output_sequence_number = prior_watermark + 1
+            request_state.replay_downstream_sequence_offset = output_sequence_number - sequence_number
+    if output_sequence_number == sequence_number:
+        return payload, output_sequence_number
+    rewritten = dict(payload)
+    rewritten["sequence_number"] = output_sequence_number
+    return rewritten, output_sequence_number
+
+
 async def _persist_http_bridge_operation_event(
     service: Any,
     session: "_HTTPBridgeSession",
     request_state: Any,
     event_block: str,
     *,
+    operation_attempt_generation: int | None = None,
     terminal: bool = False,
     terminal_state: str | None = None,
     terminal_event_queue: Any | None = None,
@@ -448,6 +869,23 @@ async def _persist_http_bridge_operation_event(
         return await _await_task_deferring_cancellation(delivery_task)
 
     try:
+        effective_operation_attempt_generation = (
+            int(operation_attempt_generation)
+            if operation_attempt_generation is not None
+            else int(getattr(request_state, "operation_attempt_generation", 0))
+        )
+        downstream_response_id = _websocket_downstream_response_id(request_state)
+        # Partial replay keeps the original response id visible to the
+        # client while the replacement response has a different upstream
+        # identity. Persist the upstream id on the durable operation;
+        # ``event_block`` is rewritten separately for downstream delivery.
+        # Keep the downstream id as a fallback for anonymous or error
+        # terminal events that have no upstream response id.
+        operation_response_id = (
+            getattr(request_state, "response_id", None)
+            or getattr(request_state, "operation_persisted_response_id", None)
+            or downstream_response_id
+        )
         batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
         append_terminal_batch = getattr(batcher, "append_terminal_event", None)
         if terminal and terminal_state is not None and callable(append_terminal_batch):
@@ -465,9 +903,9 @@ async def _persist_http_bridge_operation_event(
             )
             expected_response_id = expected_response_ids[0] if expected_response_ids else None
             alternate_expected_response_id = expected_response_ids[1] if len(expected_response_ids) > 1 else None
-            response_id = _websocket_downstream_response_id(request_state)
 
             async def append_terminal_batch_capturing_error() -> tuple[Any | None, Exception | None]:
+                """Capture terminal append failure for settlement without delaying the early-delivery barrier."""
                 try:
                     return (
                         await append_terminal_batch(
@@ -484,7 +922,8 @@ async def _persist_http_bridge_operation_event(
                                 )
                             ),
                             state=terminal_state,
-                            response_id=response_id,
+                            expected_recovery_dispatch_count=effective_operation_attempt_generation,
+                            response_id=operation_response_id,
                         ),
                         None,
                     )
@@ -511,8 +950,30 @@ async def _persist_http_bridge_operation_event(
             persisted = bool(append_result)
             if not persisted:
                 logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
+            elif terminal_event_queue is not None:
+                # Make the already-received terminal event visible to the
+                # client before doing any optional transcript reconstruction.
+                # Snapshot persistence may walk a long parent chain and must
+                # never hold the live response behind that best-effort work.
+                terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
+                deferred_cancellation = deferred_cancellation or delivery_cancellation
+                if terminal_delivery_barrier is not None:
+                    barrier_cancellation = await release_terminal_delivery_barrier()
+                    deferred_cancellation = deferred_cancellation or barrier_cancellation
+            if persisted and terminal_state is not None and _http_bridge_transcript_recovery_enabled():
+                # The terminal append is the spool completeness fence. Only
+                # after it commits may the collected output and replay
+                # snapshot be persisted as a complete transcript.
+                _schedule_http_bridge_transcript_snapshot(
+                    service,
+                    session,
+                    request_state,
+                    state=terminal_state,
+                    operation_attempt_generation=effective_operation_attempt_generation,
+                    response_id=operation_response_id,
+                )
             settlement_required = bool(getattr(append_result, "settlement_required", False))
-            if settlement_required:
+            if settlement_required and not terminal_enqueued:
                 terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                 deferred_cancellation = deferred_cancellation or delivery_cancellation
             if terminal_delivery_barrier is not None:
@@ -525,6 +986,7 @@ async def _persist_http_bridge_operation_event(
                 settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
 
                 async def settle_terminal_append_failure() -> None:
+                    """Settle a failed terminal append using the captured response identity and ownership fences."""
                     if callable(settle_terminal_batch):
                         await settle_terminal_batch(
                             operation_id=operation_id,
@@ -533,8 +995,9 @@ async def _persist_http_bridge_operation_event(
                             owner_epoch=owner_epoch,
                             state=terminal_state,
                             expected_response_id=expected_response_id,
+                            expected_recovery_dispatch_count=effective_operation_attempt_generation,
                             alternate_expected_response_id=alternate_expected_response_id,
-                            response_id=response_id,
+                            response_id=downstream_response_id,
                         )
                     else:
                         await _update_http_bridge_operation_state(
@@ -542,7 +1005,9 @@ async def _persist_http_bridge_operation_event(
                             session,
                             request_state,
                             state=terminal_state,
-                            response_id=response_id,
+                            operation_attempt_generation=effective_operation_attempt_generation,
+                            response_id=operation_response_id,
+                            materialize_transcript=False,
                         )
 
                 settlement_task = scheduler.create_task(
@@ -563,6 +1028,7 @@ async def _persist_http_bridge_operation_event(
                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                 owner_epoch=owner_epoch,
                 event_text=event_block,
+                recovery_dispatch_count=effective_operation_attempt_generation,
                 terminal=terminal,
             )
             return False
@@ -584,15 +1050,33 @@ async def _persist_http_bridge_operation_event(
         )
         if not persisted:
             logger.info("HTTP bridge operation event spool became incomplete operation_id=%s", operation_id)
-        if terminal and terminal_state is not None:
+        if terminal and terminal_state is not None and _http_bridge_transcript_recovery_enabled():
             await _update_http_bridge_operation_state(
                 service,
                 session,
                 request_state,
                 state=terminal_state,
-                response_id=_websocket_downstream_response_id(request_state),
+                operation_attempt_generation=effective_operation_attempt_generation,
+                response_id=operation_response_id,
+                materialize_transcript=False,
             )
-        return False
+            if terminal_event_queue is not None:
+                terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
+                deferred_cancellation = deferred_cancellation or delivery_cancellation
+            if terminal_delivery_barrier is not None:
+                barrier_cancellation = await release_terminal_delivery_barrier()
+                deferred_cancellation = deferred_cancellation or barrier_cancellation
+            _schedule_http_bridge_transcript_snapshot(
+                service,
+                session,
+                request_state,
+                state=terminal_state,
+                operation_attempt_generation=effective_operation_attempt_generation,
+                response_id=operation_response_id,
+            )
+        if deferred_cancellation is not None:
+            raise deferred_cancellation
+        return terminal_enqueued
     except Exception:
         # The upstream result is still delivered. A reconnect can only replay
         # when every event was durably persisted, so never fail a live stream
@@ -701,13 +1185,15 @@ def _schedule_http_bridge_recovery_settlement_retry(
     session: Any,
     **kwargs: Any,
 ) -> None:
-    _schedule_http_bridge_background_cleanup(
+    retry_task = _schedule_http_bridge_background_cleanup(
         service,
         _retry_http_bridge_recovery_settlement(service, session, **kwargs),
         name=f"http-bridge-recovery-settlement-{_hash_identifier(kwargs['request_fingerprint'])}",
         error_message="HTTP bridge recovery settlement retry failed",
         attribute=("_http_bridge_recovery_session_id", kwargs["session_id"]),
     )
+    if retry_task is not None:
+        setattr(retry_task, "_http_bridge_owner_epoch", kwargs["owner_epoch"])
 
 
 async def _retry_denied_http_bridge_anchor_clear(
@@ -866,6 +1352,7 @@ def _schedule_denied_http_bridge_anchor_clear_retry(
     owner_epoch: int | None = None,
     durable_cleared: bool = False,
 ) -> None:
+    """Schedule owned background cleanup with captured durable identity for a denied response anchor."""
     session_id = session.durable_session_id if session_id is None else session_id
     owner_epoch = session.durable_owner_epoch if owner_epoch is None else owner_epoch
     api_key_id = session.key.api_key_id if api_key_id is None else api_key_id
@@ -874,7 +1361,7 @@ def _schedule_denied_http_bridge_anchor_clear_retry(
     )
     if instance_id is None:
         return
-    _schedule_http_bridge_background_cleanup(
+    retry_task = _schedule_http_bridge_background_cleanup(
         service,
         _retry_denied_http_bridge_anchor_clear(
             service,
@@ -889,16 +1376,37 @@ def _schedule_denied_http_bridge_anchor_clear_retry(
         name=f"http-bridge-denied-anchor-clear-{_hash_identifier(response_id)}",
         error_message="HTTP bridge denied-anchor clear retry failed",
     )
+    if retry_task is not None and owner_epoch is not None:
+        setattr(retry_task, "_http_bridge_recovery_session_id", session_id)
+        setattr(retry_task, "_http_bridge_owner_epoch", owner_epoch)
 
 
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _UNSUPPORTED_DURABLE_TOOL_CALL_ITEM_TYPES = frozenset(
     {
+        "code_interpreter_call",
+        "code_interpreter_call_output",
         "computer_call",
+        "computer_call_output",
+        "file_search_call",
+        "image_generation_call",
         "mcp_approval_request",
+        "mcp_approval_response",
+        "mcp_call",
+        "mcp_call_output",
+        "mcp_list_tools",
+        "mcp_list_tools_output",
+        "item_reference",
+        "tool_search_call",
+        "tool_search_output",
+        "web_search_call",
     }
 )
+_UNSUPPORTED_DURABLE_TOOL_CALL_EVENT_PREFIXES = tuple(
+    f"response.{item_type}." for item_type in _UNSUPPORTED_DURABLE_TOOL_CALL_ITEM_TYPES
+)
+_SAFE_DURABLE_OUTPUT_ITEM_TYPES = frozenset({"compaction", "message", "reasoning"})
 
 
 def _record_http_bridge_tool_call_lifecycle(
@@ -907,6 +1415,21 @@ def _record_http_bridge_tool_call_lifecycle(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
 ) -> None:
+    """Track validated tool identities and invalidate replay proof for unknown or unsafe lifecycle events."""
+    if isinstance(event_type, str) and event_type.startswith(_UNSUPPORTED_DURABLE_TOOL_CALL_EVENT_PREFIXES):
+        request_state.tool_call_manifest_invalid = True
+        return
+    if event_type in {"response.function_call_arguments.delta", "response.output_tool_call.delta"}:
+        # A tool delta without a previously validated output-item lifecycle
+        # is ambiguous: the client may already have observed side effects,
+        # so an unsafe partial retry must not regenerate it.
+        call_id = payload.get("call_id") if isinstance(payload, dict) else None
+        item_id = payload.get("item_id") if isinstance(payload, dict) else None
+        if (not isinstance(call_id, str) or call_id not in request_state.added_tool_call_types) and (
+            not isinstance(item_id, str) or item_id not in request_state.added_tool_call_item_ids
+        ):
+            request_state.tool_call_manifest_invalid = True
+        return
     if event_type not in {"response.output_item.added", "response.output_item.done"}:
         return
     item = payload.get("item") if isinstance(payload, dict) else None
@@ -924,8 +1447,17 @@ def _record_http_bridge_tool_call_lifecycle(
         # look complete, so keep the whole durable manifest unknown.
         request_state.tool_call_manifest_invalid = True
         return
-    if item_type not in _PENDING_TOOL_CALL_ITEM_TYPES:
+    if item_type not in _PENDING_TOOL_CALL_ITEM_TYPES and item_type not in _SAFE_DURABLE_OUTPUT_ITEM_TYPES:
+        # Keep this an allowlist: an extension-defined output item may carry a
+        # hosted tool or other side effect even when its name is unfamiliar.
+        request_state.tool_call_manifest_invalid = True
         return
+    if item_type in _SAFE_DURABLE_OUTPUT_ITEM_TYPES:
+        return
+    if event_type == "response.output_item.added":
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id:
+            request_state.added_tool_call_item_ids.add(item_id)
     call_id = item.get("call_id")
     if not isinstance(call_id, str) or not call_id:
         request_state.tool_call_manifest_invalid = True
@@ -940,6 +1472,1333 @@ def _record_http_bridge_tool_call_lifecycle(
         request_state.tool_call_manifest_invalid = True
         return
     target[call_id] = item_type
+
+
+def _invalidate_http_bridge_output_capture(request_state: _WebSocketRequestState) -> None:
+    """Mark capture unusable and release retained output items, identities, and byte accounting."""
+    request_state.response_output_items_event_invalid = True
+    request_state.response_output_items_complete = False
+    request_state.response_output_items = []
+    request_state.response_output_items_by_index = {}
+    request_state.response_output_item_added_indexes = set()
+    request_state.response_output_item_added_identities = {}
+    request_state.response_output_items_bytes = 0
+
+
+def _http_bridge_output_item_bytes(item: Any) -> int:
+    """Measure canonical JSON bytes plus the separator allowance used by bounded output capture."""
+    return len(json.dumps(item, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) + 1
+
+
+def _reserve_http_bridge_output_bytes(
+    request_state: _WebSocketRequestState, item: Any, *, released_bytes: int = 0
+) -> bool:
+    """Reserve replacement-aware output capacity or invalidate and release capture when limits are exceeded."""
+    retained_bytes = max(1, getattr(request_state, "response_output_items_bytes", 0))
+    retained_bytes += _http_bridge_output_item_bytes(item) - released_bytes
+    settings = _service_get_settings()
+    limit = int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_bytes", 8 * 1024 * 1024))
+    item_count = len(request_state.response_output_items_by_index) + len(
+        getattr(request_state, "response_output_item_added_identities", {})
+    )
+    item_count += 0 if released_bytes else 1
+    if retained_bytes > limit or item_count > int(
+        getattr(settings, "http_responses_session_bridge_complete_transcript_max_input_items", 4096)
+    ):
+        _invalidate_http_bridge_output_capture(request_state)
+        return False
+    request_state.response_output_items_bytes = retained_bytes
+    return True
+
+
+def _record_http_bridge_response_output(
+    request_state: _WebSocketRequestState,
+    *,
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+) -> None:
+    """Capture the canonical terminal output for durable transcript replay."""
+    if not isinstance(payload, dict):
+        return
+    if event_type in {"response.output_item.added", "response.output_item.done", "response.completed"} and (
+        request_state.response_output_items_complete or request_state.response_output_items_event_invalid
+    ):
+        _invalidate_http_bridge_output_capture(request_state)
+        return
+    if event_type == "response.output_item.added":
+        output_index = payload.get("output_index")
+        item = payload.get("item")
+        if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
+            request_state.response_output_items_event_invalid = True
+            return
+        if not _output_item_identity_is_valid(_output_item_identity(item)):
+            request_state.response_output_items_event_invalid = True
+            return
+        if (
+            output_index in request_state.response_output_item_added_indexes
+            or output_index in request_state.response_output_items_by_index
+        ):
+            request_state.response_output_items_event_invalid = True
+            return
+        if not _reserve_http_bridge_output_bytes(request_state, _output_item_identity(item)):
+            return
+        request_state.response_output_item_added_indexes.add(output_index)
+        added_identities = getattr(request_state, "response_output_item_added_identities", None)
+        if not isinstance(added_identities, dict):
+            added_identities = {}
+            request_state.response_output_item_added_identities = added_identities
+        added_identities[output_index] = _output_item_identity(item)
+        return
+    if event_type == "response.output_item.done":
+        output_index = payload.get("output_index")
+        item = payload.get("item")
+        if type(output_index) is not int or output_index < 0 or not isinstance(item, dict):
+            request_state.response_output_items_event_invalid = True
+            return
+        if not _output_item_identity_is_valid(_output_item_identity(item)):
+            request_state.response_output_items_event_invalid = True
+            return
+        if output_index in request_state.response_output_items_by_index:
+            request_state.response_output_items_event_invalid = True
+            return
+        added_identities = getattr(request_state, "response_output_item_added_identities", {})
+        if output_index in added_identities and not _output_item_identities_match(
+            added_identities[output_index], _output_item_identity(item)
+        ):
+            request_state.response_output_items_event_invalid = True
+            return
+        released_bytes = (
+            _http_bridge_output_item_bytes(added_identities[output_index]) if output_index in added_identities else 0
+        )
+        if not _reserve_http_bridge_output_bytes(request_state, item, released_bytes=released_bytes):
+            return
+        added_identities.pop(output_index, None)
+        request_state.response_output_item_added_indexes.discard(output_index)
+        request_state.response_output_items_by_index[output_index] = cast(JsonValue, item)
+        return
+    if event_type != "response.completed":
+        return
+    unfinished_added_indexes = request_state.response_output_item_added_indexes.difference(
+        request_state.response_output_items_by_index
+    )
+    if unfinished_added_indexes or request_state.response_output_items_event_invalid:
+        request_state.response_output_items = []
+        request_state.response_output_items_complete = False
+        request_state.response_output_items_event_invalid = True
+        return
+    response = payload.get("response")
+    if not _terminal_output_is_valid(response):
+        request_state.response_output_items = []
+        request_state.response_output_items_complete = False
+        request_state.response_output_items_event_invalid = True
+        return
+    output = response.get("output") if isinstance(response, dict) else None
+    if not isinstance(output, list) or not all(isinstance(item, dict) for item in output):
+        if request_state.response_output_items_by_index:
+            output_indexes = sorted(request_state.response_output_items_by_index)
+            if output_indexes != list(range(len(output_indexes))):
+                request_state.response_output_items = []
+                request_state.response_output_items_complete = False
+                request_state.response_output_items_event_invalid = True
+                return
+            request_state.response_output_items = [
+                request_state.response_output_items_by_index[index] for index in output_indexes
+            ]
+            request_state.response_output_items_complete = not request_state.response_output_items_event_invalid
+            return
+        # An absent/partial output must never be mistaken for a complete
+        # transcript. The operation will remain fail-closed for reconstruction.
+        request_state.response_output_items = []
+        request_state.response_output_items_complete = False
+        request_state.response_output_items_event_invalid = True
+        return
+    if request_state.response_output_items_by_index:
+        output_indexes = sorted(request_state.response_output_items_by_index)
+        if output_indexes != list(range(len(output_indexes))):
+            request_state.response_output_items = []
+            request_state.response_output_items_complete = False
+            request_state.response_output_items_event_invalid = True
+            return
+    indexed_output: list[JsonValue] | None = None
+    if output and request_state.response_output_items_by_index:
+        indexed_output = [
+            request_state.response_output_items_by_index[index]
+            for index in sorted(request_state.response_output_items_by_index)
+        ]
+        if len(output) != len(indexed_output) or any(
+            not isinstance(indexed_item, dict)
+            or not isinstance(terminal_item, dict)
+            or not _output_item_identities_match(
+                _output_item_identity(indexed_item), _output_item_identity(terminal_item)
+            )
+            or not _output_item_identities_match(
+                _output_item_identity(terminal_item), _output_item_identity(indexed_item)
+            )
+            or not _items_match_for_echo(terminal_item, indexed_item)
+            for terminal_item, indexed_item in zip(output, indexed_output)
+        ):
+            request_state.response_output_items = []
+            request_state.response_output_items_complete = False
+            request_state.response_output_items_event_invalid = True
+            return
+        # Indexed done events are byte-accounted as they arrive. Terminal
+        # echoes may differ in unindexed metadata, so retain the indexed form
+        # as the canonical bounded transcript after reconciliation.
+        output = indexed_output
+    if output == [] and request_state.response_output_items_by_index:
+        if not request_state.response_output_items_event_invalid:
+            request_state.response_output_items = [
+                request_state.response_output_items_by_index[index]
+                for index in sorted(request_state.response_output_items_by_index)
+            ]
+            request_state.response_output_items_complete = True
+            return
+        request_state.response_output_items = []
+        request_state.response_output_items_complete = False
+        return
+    if not request_state.response_output_items_by_index:
+        if len(output) > int(
+            getattr(_service_get_settings(), "http_responses_session_bridge_complete_transcript_max_input_items", 4096)
+        ):
+            _invalidate_http_bridge_output_capture(request_state)
+            return
+        for item in output:
+            if not _reserve_http_bridge_output_bytes(request_state, item):
+                return
+    request_state.response_output_items = cast(list[JsonValue], output)
+    request_state.response_output_items_complete = True
+
+
+def _retain_rebind_for_cleanup(
+    request_state: _WebSocketRequestState,
+    rebound_operation: DurableBridgeOperationSnapshot,
+    *,
+    rebind_claim_id: str,
+    expected_generation: int,
+) -> None:
+    """Preserve the exact claim for another pre-dispatch compensation attempt."""
+    request_state.operation_id = rebound_operation.operation_id
+    request_state.operation_registered = True
+    request_state.operation_created = False
+    request_state.operation_rebound = True
+    request_state.operation_rebind_required = True
+    request_state.operation_dispatched = False
+    request_state.operation_recovery_claimed = False
+    request_state.operation_rebind_claim_id = rebind_claim_id
+    request_state.operation_recovery_expected_generation = expected_generation
+    request_state.operation_attempt_generation = expected_generation + 1
+    request_state.operation_rebound_from_session_id = rebound_operation.rebound_from_session_id
+    request_state.operation_rebound_from_account_id = rebound_operation.rebound_from_account_id
+    request_state.operation_rebound_from_model = rebound_operation.rebound_from_model
+    request_state.operation_rebound_from_parent_response_id = rebound_operation.rebound_from_parent_response_id
+
+
+async def _try_complete_transcript_recovery(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    request_state: _WebSocketRequestState,
+) -> bool:
+    """Retry a stale anchor using a durable, complete transcript when enabled."""
+    settings = _service_get_settings()
+    if not bool(getattr(settings, "http_responses_session_bridge_complete_transcript_recovery_enabled", False)):
+        return False
+    previous_response_id = request_state.previous_response_id
+    recovery_anchor = previous_response_id or getattr(request_state, "complete_transcript_recovery_anchor", None)
+    root_recovery = bool(
+        previous_response_id is None
+        and recovery_anchor
+        and getattr(request_state, "replay_count", 0) == 0
+        and getattr(request_state, "request_text", None)
+        and getattr(request_state, "operation_id", None)
+        and getattr(request_state, "operation_registered", False)
+        and getattr(request_state, "operation_dispatched", False)
+    )
+    if not recovery_anchor or not request_state.request_text:
+        return False
+    # A stale-anchor error is only safe to replay when this attempt has not
+    # already emitted response progress. Preserve the evidence instead of
+    # resetting it and accidentally passing the eventless retry guard.
+    if (
+        request_state.response_event_count > 0
+        or getattr(request_state, "replay_count", 0) > 0
+        or (previous_response_id is None and getattr(request_state, "replay_count", 0) == 0 and not root_recovery)
+        or (root_recovery and getattr(request_state, "complete_transcript_recovery_count", 0) >= 1)
+        or getattr(request_state, "unsafe_partial_replay_count", 0) >= 1
+        or request_state.upstream_model_output_seen
+        or request_state.downstream_visible
+        or request_state.last_downstream_sequence_number is not None
+    ):
+        return False
+    # Capture the admitted operation generation before any awaited lookup.
+    # A concurrent recovery must CAS the same generation observed here; it
+    # must not read a winner's already-advanced generation and dispatch again.
+    expected_recovery_dispatch_count = int(getattr(request_state, "operation_attempt_generation", 0))
+    request_state.operation_recovery_expected_generation = expected_recovery_dispatch_count
+    if session.key.strength == "hard":
+        get_retry_circuit_generation = getattr(service, "_http_bridge_retry_circuit_generation", None)
+        if not callable(get_retry_circuit_generation):
+            return False
+        try:
+            generation_captured, generation = await get_retry_circuit_generation(session)
+        except Exception:
+            logger.warning(
+                "Complete HTTP bridge transcript recovery circuit lookup failed request_id=%s",
+                request_state.request_id,
+                exc_info=True,
+            )
+            return False
+        if not generation_captured:
+            return False
+        request_state.verified_stale_anchor_retry_circuit_generation_captured = True
+        request_state.verified_stale_anchor_retry_circuit_key = session.key
+        request_state.verified_stale_anchor_retry_circuit_generation = generation
+    get_transcript = getattr(getattr(service, "_durable_bridge", None), "get_complete_transcript", None)
+    if not callable(get_transcript):
+        return False
+    replay_turn_count = 0
+    replay_text: str | None = None
+    try:
+        turns = await get_transcript(
+            response_id=recovery_anchor,
+            max_turns=int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_turns", 256)),
+            max_bytes=int(
+                getattr(settings, "http_responses_session_bridge_complete_transcript_max_bytes", 8 * 1024 * 1024)
+            ),
+            api_key_scope=durable_bridge_api_key_scope(session.key.api_key_id),
+        )
+        max_input_items = int(
+            getattr(settings, "http_responses_session_bridge_complete_transcript_max_input_items", 4096)
+        )
+        max_turns = int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_turns", 256))
+        max_bytes = int(
+            getattr(settings, "http_responses_session_bridge_complete_transcript_max_bytes", 8 * 1024 * 1024)
+        )
+        if turns:
+            replay_turn_count = sum(max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in turns)
+            if replay_turn_count + 1 <= max_turns:
+                replay_text = build_complete_replay_payload(
+                    turns,
+                    continuation_request_text=request_state.request_text,
+                    allow_unanchored_continuation=root_recovery,
+                    max_input_items=max_input_items,
+                    max_bytes=max_bytes,
+                )
+        elif root_recovery:
+            # The client supplied a complete root snapshot, but its
+            # historical turn depth is not durable or independently
+            # verifiable. Keep that unknown depth explicit so terminal
+            # persistence cannot record an under-counted replay snapshot.
+            root_turn_count = derive_replay_input_turn_count(request_state.request_text)
+            replay_turn_count = root_turn_count - 1 if root_turn_count is not None else -1
+            # Sessions created before durable transcript persistence may have
+            # no completed operation chain at all.  A client-supplied root is
+            # usable only when its complete history has a trustworthy depth
+            # within the configured bound; otherwise fail closed before
+            # constructing or dispatching the replay.
+            if root_turn_count is not None and root_turn_count <= max_turns:
+                replay_text = build_unanchored_root_replay_payload(
+                    request_state.request_text,
+                    max_input_items=max_input_items,
+                    max_bytes=max_bytes,
+                )
+            else:
+                replay_text = None
+            if replay_text is not None:
+                _log_http_bridge_event(
+                    "complete_transcript_recovery_client_snapshot",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    detail="transcript_not_found_or_incomplete",
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+        else:
+            replay_text = None
+        if not turns and replay_text is None:
+            _log_http_bridge_event(
+                "complete_transcript_recovery_ineligible",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail="transcript_not_found_or_incomplete",
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+            return False
+    except Exception:
+        logger.warning(
+            "Complete HTTP bridge transcript recovery lookup failed request_id=%s",
+            request_state.request_id,
+            exc_info=True,
+        )
+        return False
+    if not replay_text:
+        _log_http_bridge_event(
+            "complete_transcript_recovery_ineligible",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail="transcript_reconstruction_failed",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        return False
+
+    operation_id = request_state.operation_id
+    operation_fingerprint = request_state.operation_fingerprint
+    rebind_operation = getattr(
+        getattr(service, "_durable_bridge", None),
+        "rebind_operation_for_complete_transcript",
+        None,
+    )
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id
+        or not isinstance(operation_fingerprint, str)
+        or not operation_fingerprint
+        or not callable(rebind_operation)
+        or session.durable_session_id is None
+        or session.durable_owner_epoch is None
+    ):
+        return False
+
+    operation_event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    rebind_claim_id = str(uuid4())
+    fence_operation = getattr(operation_event_batcher, "fence_operation", None)
+    rollback_fence_operation = getattr(operation_event_batcher, "rollback_fence_operation", None)
+
+    async def fence_rebound_operation() -> bool:
+        """Install the newly claimed recovery generation in the event batcher before safe replay."""
+        if not callable(fence_operation):
+            return True
+        try:
+            await fence_operation(
+                operation_id=operation_id,
+                recovery_dispatch_count=expected_recovery_dispatch_count + 1,
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "Complete HTTP bridge transcript recovery event fence failed request_id=%s",
+                request_state.request_id,
+                exc_info=True,
+            )
+            return False
+
+    async def rollback_rebound_operation(rebound_operation: Any) -> bool:
+        """Compensate the exact undispatched safe-replay rebind through the durable repository."""
+        rollback_task = scheduler_for(service).create_task(rollback_rebound_operation_impl(rebound_operation))
+        rolled_back, cancellation = await _await_task_deferring_cancellation(rollback_task)
+        if not rolled_back:
+            _retain_rebind_for_cleanup(
+                request_state,
+                rebound_operation,
+                rebind_claim_id=rebind_claim_id,
+                expected_generation=expected_recovery_dispatch_count,
+            )
+        if cancellation is not None:
+            raise cancellation
+        return rolled_back
+
+    async def rollback_rebound_operation_impl(rebound_operation: Any) -> bool:
+        """Undo a durable rebind when event fencing blocks dispatch."""
+        rollback_operation = getattr(
+            getattr(service, "_durable_bridge", None),
+            "rollback_operation_before_dispatch",
+            None,
+        )
+        if not callable(rollback_operation):
+            logger.warning(
+                "Complete HTTP bridge transcript recovery rollback is unavailable request_id=%s",
+                request_state.request_id,
+            )
+            return False
+        try:
+            rolled_back = bool(
+                await rollback_operation(
+                    operation_id=operation_id,
+                    session_id=session.durable_session_id,
+                    instance_id=settings.http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    restore_rebound=True,
+                    rebound_from_session_id=getattr(rebound_operation, "rebound_from_session_id", None),
+                    rebound_from_account_id=getattr(rebound_operation, "rebound_from_account_id", None),
+                    rebound_from_model=getattr(rebound_operation, "rebound_from_model", None),
+                    rebound_from_parent_response_id=getattr(rebound_operation, "rebound_from_parent_response_id", None),
+                    expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+                    rebind_claim_id=rebind_claim_id,
+                )
+            )
+            if rolled_back and callable(rollback_fence_operation):
+                await rollback_fence_operation(
+                    operation_id=operation_id,
+                    recovery_dispatch_count=expected_recovery_dispatch_count,
+                )
+            return rolled_back
+        except Exception:
+            logger.warning(
+                "Complete HTTP bridge transcript recovery rollback failed request_id=%s",
+                request_state.request_id,
+                exc_info=True,
+            )
+            return False
+
+    async def recovery_claimed_by_concurrent_call(*, include_durable_lookup: bool = True) -> bool:
+        """Detect a competing recovery that won the durable CAS claim."""
+        # A local generation advance is unambiguous evidence that another
+        # recovery task updated this request state while we were suspended.
+        # A durable generation advance alone is ambiguous after a database
+        # connection loss: our own rebind may have committed before its result
+        # was delivered, so do not treat that as a concurrent winner on the
+        # exception path unless the in-memory request was advanced too.
+        if getattr(request_state, "operation_attempt_generation", 0) > expected_recovery_dispatch_count and getattr(
+            request_state, "operation_registered", False
+        ):
+            return True
+        if not include_durable_lookup:
+            return False
+        lookup_sessions = getattr(getattr(service, "_durable_bridge", None), "lookup_sessions", None)
+        if not callable(lookup_sessions) or session.durable_session_id is None:
+            return False
+        try:
+            durable_sessions = await lookup_sessions(session_ids=[session.durable_session_id])
+        except Exception:
+            return False
+        if len(durable_sessions) != 1:
+            return False
+        current_session = durable_sessions[0]
+        if (
+            getattr(current_session, "session_id", None) != session.durable_session_id
+            or getattr(current_session, "owner_instance_id", None)
+            != getattr(settings, "http_responses_session_bridge_instance_id", None)
+            or getattr(current_session, "owner_epoch", None) != session.durable_owner_epoch
+        ):
+            return False
+        get_operation = getattr(getattr(service, "_durable_bridge", None), "get_operation", None)
+        if not callable(get_operation):
+            return False
+        try:
+            current_operation = await get_operation(operation_id=operation_id)
+        except Exception:
+            return False
+        # The winning replacement may already have settled by the time the
+        # losing observer finishes its lookup.  The generation advance plus
+        # local ownership is the claim proof; terminal state is not a reason
+        # to clear the winner's shared registration.
+        return bool(
+            current_operation is not None
+            and getattr(current_operation, "recovery_dispatch_count", 0) > expected_recovery_dispatch_count
+        )
+
+    # Retain the pre-transaction metadata independently of the rebind result:
+    # a commit can succeed even when its result never reaches this caller.
+    original_operation = None
+    get_original_operation = getattr(getattr(service, "_durable_bridge", None), "get_operation", None)
+    if callable(get_original_operation):
+        try:
+            original_operation = await get_original_operation(operation_id=operation_id)
+        except Exception:
+            logger.warning("Failed to read pre-rebind HTTP bridge operation", exc_info=True)
+            return False
+
+    rebind_task = scheduler_for(service).create_task(
+        rebind_operation(
+            operation_id=operation_id,
+            session_id=session.durable_session_id,
+            instance_id=settings.http_responses_session_bridge_instance_id,
+            owner_epoch=session.durable_owner_epoch,
+            account_id=session.account.id,
+            model=request_state.model,
+            request_text=replay_text,
+            expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+            rebind_claim_id=rebind_claim_id,
+        )
+    )
+    try:
+        rebound_operation, rebind_cancellation = await _await_task_deferring_cancellation(rebind_task)
+    except asyncio.CancelledError:
+        # If the rebind task itself was cancelled, it did not return a
+        # committed snapshot that can prove ownership of a durable mutation.
+        # Do not compensate another recovery's generation without that proof.
+        raise
+    except Exception:
+        if await recovery_claimed_by_concurrent_call(include_durable_lookup=False):
+            if not await fence_rebound_operation():
+                return False
+            _log_http_bridge_event(
+                "complete_transcript_recovery_concurrent_claim",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail="rebind_exception_after_concurrent_claim",
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+            return True
+        # The rebind may have committed before its response was lost. Roll it
+        # back under the owner fence instead of mistaking our own generation
+        # advance for a competing recovery and suppressing the retry.
+        if (
+            original_operation is not None
+            and original_operation.recovery_dispatch_count == expected_recovery_dispatch_count
+            and original_operation.session_id == session.durable_session_id
+        ):
+            rollback_snapshot = replace(
+                original_operation,
+                rebound_from_session_id=original_operation.session_id,
+                rebound_from_account_id=original_operation.account_id,
+                rebound_from_model=original_operation.model,
+                rebound_from_parent_response_id=original_operation.parent_response_id,
+            )
+            with anyio.CancelScope(shield=True):
+                if not await rollback_rebound_operation(rollback_snapshot):
+                    return False
+        logger.warning(
+            "Complete HTTP bridge transcript recovery operation rebind failed request_id=%s",
+            request_state.request_id,
+            exc_info=True,
+        )
+        request_state.operation_id = None
+        request_state.operation_registered = False
+        request_state.operation_created = False
+        request_state.operation_rebound = False
+        request_state.operation_rebind_required = True
+        request_state.operation_dispatched = False
+        request_state.operation_recovery_claimed = False
+        return False
+    if rebind_cancellation is not None:
+        # A completed snapshot is the ownership proof for compensation. A
+        # ``None`` result means this call lost the durable CAS to another
+        # recovery and must not roll the winner back.
+        if rebound_operation is not None and bool(getattr(rebound_operation, "rebound", False)):
+            with anyio.CancelScope(shield=True):
+                await rollback_rebound_operation(rebound_operation)
+        raise rebind_cancellation
+    if rebound_operation is None and await recovery_claimed_by_concurrent_call():
+        if not await fence_rebound_operation():
+            return False
+        _log_http_bridge_event(
+            "complete_transcript_recovery_concurrent_claim",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail="rebind_cas_lost_to_concurrent_claim",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        return True
+    if rebound_operation is None or not bool(getattr(rebound_operation, "rebound", False)):
+        _log_http_bridge_event(
+            "complete_transcript_recovery_ineligible",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail="operation_rebind_failed",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        request_state.operation_id = None
+        request_state.operation_registered = False
+        request_state.operation_created = False
+        request_state.operation_rebound = False
+        request_state.operation_rebind_required = True
+        request_state.operation_dispatched = False
+        request_state.operation_recovery_claimed = False
+        return False
+    try:
+        fenced = await fence_rebound_operation()
+    except asyncio.CancelledError:
+        # Cancellation is a pre-dispatch failure too.  The durable rebind
+        # must be restored before propagating cancellation, otherwise the
+        # advanced generation can strand the operation with no replacement.
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(rebound_operation)
+        raise
+    if not fenced:
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(rebound_operation)
+        return False
+    # Do not authorize an unanchored retry until the durable operation has
+    # been rebound successfully. If the owner fence or database write fails,
+    # preserve the original state so the ordinary retry path cannot resend
+    # ambiguous work without a durable recovery claim.
+    request_state.request_text = replay_text
+    request_state.recovery_replay_turn_count = replay_turn_count if replay_turn_count < 0 else max(0, replay_turn_count)
+    request_state.fresh_upstream_request_text = replay_text
+    request_state.fresh_upstream_request_is_retry_safe = True
+    request_state.complete_transcript_recovery_anchor = recovery_anchor
+    request_state.previous_response_id = None
+    request_state.proxy_injected_previous_response_id = False
+    request_state.hard_continuity_anchor = False
+    request_state.response_id = None
+    request_state.response_event_count = 0
+    request_state.upstream_model_output_seen = False
+    request_state.deferred_reasoning_downstream_texts = []
+    request_state.suppress_next_created_downstream = False
+    request_state.awaiting_response_created = True
+    request_state.operation_parent_response_id = None
+    request_state.operation_created = False
+    request_state.operation_recovery_claimed = False
+    request_state.operation_dispatched = False
+    request_state.response_output_items = []
+    request_state.response_output_items_by_index = {}
+    request_state.response_output_items_bytes = 0
+    request_state.response_output_item_added_indexes = set()
+    request_state.response_output_item_added_identities = {}
+    request_state.response_output_items_event_invalid = False
+    request_state.response_output_items_complete = False
+    request_state.operation_id = operation_id
+    request_state.operation_fingerprint = operation_fingerprint
+    request_state.operation_registered = True
+    request_state.operation_rebind_required = False
+    request_state.operation_rebound = True
+    request_state.operation_rebind_claim_id = rebind_claim_id
+    request_state.operation_rebound_from_session_id = getattr(rebound_operation, "rebound_from_session_id", None)
+    request_state.operation_rebound_from_account_id = getattr(rebound_operation, "rebound_from_account_id", None)
+    request_state.operation_rebound_from_model = getattr(rebound_operation, "rebound_from_model", None)
+    request_state.operation_rebound_from_parent_response_id = getattr(
+        rebound_operation, "rebound_from_parent_response_id", None
+    )
+    request_state.operation_attempt_generation = int(getattr(rebound_operation, "recovery_dispatch_count", 0))
+    request_state.verified_stale_anchor_replay = True
+    request_state.complete_transcript_recovery_count = (
+        getattr(request_state, "complete_transcript_recovery_count", 0) + 1
+    )
+    request_state.complete_transcript_recovery_retry_authorized = True
+    request_enqueued = False
+    request_counted_in_queue = False
+    try:
+        async with session.pending_lock:
+            if request_state not in session.pending_requests:
+                session.pending_requests.appendleft(request_state)
+                request_enqueued = True
+                if _http_bridge_request_counts_against_queue(request_state):
+                    session.queued_request_count += 1
+                    request_counted_in_queue = True
+    except asyncio.CancelledError:
+        # Cancellation while waiting for the queue lock still occurs before
+        # the replacement send.  Run the same pre-dispatch compensation used
+        # by the retry path so a fenced rebind cannot strand the operation.
+        cleanup_task = scheduler_for(service).create_task(
+            service._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=request_enqueued,
+                counted_in_queue=request_counted_in_queue,
+            )
+        )
+        await _await_task_deferring_cancellation(cleanup_task)
+        raise
+    _log_http_bridge_event(
+        "complete_transcript_recovery_retry",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail=f"previous_response_id={recovery_anchor}",
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+    )
+    try:
+        retried = await service._retry_http_bridge_request_on_fresh_upstream(
+            session,
+            request_state=request_state,
+            text_data=replay_text,
+            require_same_account=True,
+        )
+        if retried:
+            return True
+    except asyncio.CancelledError:
+        # Reconnect/admission may be cancelled before the replacement send.
+        # Finish the pre-dispatch cleanup before propagating cancellation so
+        # the rebound operation and pending ownership are not stranded.
+        cleanup_task = scheduler_for(service).create_task(
+            service._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=True,
+                counted_in_queue=_http_bridge_request_counts_against_queue(request_state),
+            )
+        )
+        await _await_task_deferring_cancellation(cleanup_task)
+        raise
+    except UpstreamWebSocketTransportError:
+        raise
+    except Exception:
+        logger.warning(
+            "Complete HTTP bridge transcript recovery retry failed request_id=%s",
+            request_state.request_id,
+            exc_info=True,
+        )
+    try:
+        # A false return means the replacement was not dispatched.  Undo the
+        # durable rebind while the operation is still proven pre-dispatch so
+        # a later identical request can retry instead of inheriting a stale
+        # submitted generation.
+        await service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=False,
+            request_enqueued=True,
+            counted_in_queue=_http_bridge_request_counts_against_queue(request_state),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to clean up pre-dispatch complete transcript recovery request_id=%s",
+            request_state.request_id,
+            exc_info=True,
+        )
+    return False
+
+
+async def _try_unsafe_partial_transcript_recovery(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    request_state: _WebSocketRequestState,
+) -> bool:
+    """Replace one interrupted response with a bounded fresh-root replay.
+
+    This path is deliberately separate from the safe complete-transcript
+    recovery. It is enabled only by an explicit operator flag and only after
+    the request has emitted response progress without any tool-call boundary.
+    The interrupted response is discarded; the durable parent transcript and
+    the original request input are sent as one new account-neutral response.
+    """
+    rebind_claim_id = str(uuid4())
+    settings = _service_get_settings()
+    # Capture the compare-and-set generation before any transcript lookup
+    # await. A concurrent recovery may advance the shared state while this
+    # helper is suspended; every entrant must still claim the same generation
+    # it observed at admission.
+    expected_recovery_dispatch_count = int(getattr(request_state, "operation_attempt_generation", 0))
+    request_state.operation_recovery_expected_generation = expected_recovery_dispatch_count
+    if not bool(getattr(settings, "http_responses_session_bridge_unsafe_partial_replay_enabled", False)):
+        return False
+    partial_event_count = int(getattr(request_state, "response_event_count", 0))
+    if partial_event_count <= 0:
+        return False
+    if getattr(request_state, "unsafe_partial_replay_count", 0) >= 1:
+        return False
+    request_text = request_state.request_text
+    rejection_detail: str | None = None
+    if not isinstance(request_text, str) or not request_text:
+        rejection_detail = "request_text_missing"
+    elif not getattr(request_state, "operation_id", None) or not getattr(request_state, "operation_registered", False):
+        rejection_detail = "operation_not_registered"
+    elif not getattr(request_state, "operation_dispatched", False):
+        rejection_detail = "operation_not_dispatched"
+    elif (
+        getattr(request_state, "pending_function_call_ids", None)
+        or getattr(request_state, "pending_tool_call_types", None)
+        or getattr(request_state, "added_tool_call_types", None)
+        or getattr(request_state, "tool_call_manifest_invalid", False)
+        or getattr(request_state, "response_output_items_event_invalid", False)
+        or getattr(request_state, "suppressed_duplicate_tool_call", False)
+        or getattr(request_state, "suppressed_downstream_tool_call", False)
+    ):
+        rejection_detail = "ambiguous_tool_side_effect"
+    if rejection_detail is not None:
+        _log_http_bridge_event(
+            "unsafe_partial_transcript_recovery_ineligible",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail=rejection_detail,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        return False
+    assert isinstance(request_text, str) and request_text
+
+    recovery_anchor = (
+        getattr(request_state, "operation_parent_response_id", None)
+        or request_state.previous_response_id
+        or getattr(request_state, "complete_transcript_recovery_anchor", None)
+    )
+    get_transcript = getattr(getattr(service, "_durable_bridge", None), "get_complete_transcript", None)
+    max_input_items = int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_input_items", 4096))
+    max_bytes = int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_bytes", 8 * 1024 * 1024))
+    turns: list[Any] | None = None
+    replay_text: str | None = None
+    replay_turn_count = 0
+    try:
+        if recovery_anchor and callable(get_transcript):
+            turns = await get_transcript(
+                response_id=recovery_anchor,
+                max_turns=int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_turns", 256)),
+                max_bytes=max_bytes,
+                api_key_scope=durable_bridge_api_key_scope(session.key.api_key_id),
+            )
+            if turns:
+                replay_turn_count = sum(max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in turns)
+                if replay_turn_count + 1 <= int(
+                    getattr(settings, "http_responses_session_bridge_complete_transcript_max_turns", 256)
+                ):
+                    replay_text = build_complete_replay_payload(
+                        turns,
+                        continuation_request_text=request_text,
+                        allow_unanchored_continuation=True,
+                        max_input_items=max_input_items,
+                        max_bytes=max_bytes,
+                    )
+        elif not recovery_anchor:
+            # A root request can still be replayed if its body is already a
+            # complete, account-neutral history. Never invent a parent for a
+            # delta-only continuation with an unavailable anchor.
+            # There are no durable ancestor turns in this path, so the
+            # client-supplied historical depth is unknown. Keep that sentinel
+            # so terminal persistence cannot under-count the replay snapshot.
+            root_turn_count = derive_replay_input_turn_count(request_text)
+            replay_turn_count = root_turn_count - 1 if root_turn_count is not None else -1
+            max_turns = int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_turns", 256))
+            if root_turn_count is not None and root_turn_count <= max_turns:
+                replay_text = build_unanchored_root_replay_payload(
+                    request_text,
+                    max_input_items=max_input_items,
+                    max_bytes=max_bytes,
+                )
+            else:
+                replay_text = None
+    except Exception:
+        logger.warning(
+            "Unsafe HTTP bridge partial transcript recovery lookup failed request_id=%s",
+            getattr(request_state, "request_id", None),
+            exc_info=True,
+        )
+        replay_text = None
+    if not replay_text:
+        _log_http_bridge_event(
+            "unsafe_partial_transcript_recovery_ineligible",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail="transcript_reconstruction_failed" if turns else "parent_transcript_missing",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        return False
+
+    operation_id = request_state.operation_id
+    operation_fingerprint = request_state.operation_fingerprint
+    rebind_operation = getattr(
+        getattr(service, "_durable_bridge", None),
+        "rebind_operation_for_complete_transcript",
+        None,
+    )
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id
+        or not isinstance(operation_fingerprint, str)
+        or not operation_fingerprint
+        or not callable(rebind_operation)
+        or session.durable_session_id is None
+        or session.durable_owner_epoch is None
+    ):
+        _log_http_bridge_event(
+            "unsafe_partial_transcript_recovery_ineligible",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail="operation_rebind_prerequisites_missing",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        return False
+
+    operation_event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    fence_operation = getattr(operation_event_batcher, "fence_operation", None)
+    rollback_fence_operation = getattr(operation_event_batcher, "rollback_fence_operation", None)
+
+    async def fence_rebound_operation() -> bool:
+        """Fence the interrupted generation before opted-in partial replay can emit replacement events."""
+        if not callable(fence_operation):
+            return True
+        try:
+            await fence_operation(
+                operation_id=operation_id,
+                recovery_dispatch_count=expected_recovery_dispatch_count + 1,
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "Unsafe HTTP bridge partial transcript recovery event fence failed request_id=%s",
+                getattr(request_state, "request_id", None),
+                exc_info=True,
+            )
+            return False
+
+    async def rollback_rebound_operation(rebound_operation: Any) -> bool:
+        """Refund only this partial-replay rebind, retaining any concurrent winner's claim."""
+        rollback_task = scheduler_for(service).create_task(rollback_rebound_operation_impl(rebound_operation))
+        rolled_back, cancellation = await _await_task_deferring_cancellation(rollback_task)
+        if not rolled_back:
+            _retain_rebind_for_cleanup(
+                request_state,
+                rebound_operation,
+                rebind_claim_id=rebind_claim_id,
+                expected_generation=expected_recovery_dispatch_count,
+            )
+        if cancellation is not None:
+            raise cancellation
+        return rolled_back
+
+    async def rollback_rebound_operation_impl(rebound_operation: Any) -> bool:
+        """Undo a durable rebind when event fencing blocks dispatch."""
+        rollback_operation = getattr(
+            getattr(service, "_durable_bridge", None),
+            "rollback_operation_before_dispatch",
+            None,
+        )
+        if not callable(rollback_operation):
+            logger.warning(
+                "Unsafe HTTP bridge partial transcript recovery rollback is unavailable request_id=%s",
+                getattr(request_state, "request_id", None),
+            )
+            return False
+        try:
+            rolled_back = bool(
+                await rollback_operation(
+                    operation_id=operation_id,
+                    session_id=session.durable_session_id,
+                    instance_id=settings.http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    restore_rebound=True,
+                    rebound_from_session_id=getattr(rebound_operation, "rebound_from_session_id", None),
+                    rebound_from_account_id=getattr(rebound_operation, "rebound_from_account_id", None),
+                    rebound_from_model=getattr(rebound_operation, "rebound_from_model", None),
+                    rebound_from_parent_response_id=getattr(rebound_operation, "rebound_from_parent_response_id", None),
+                    expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+                    rebind_claim_id=rebind_claim_id,
+                )
+            )
+            if rolled_back and callable(rollback_fence_operation):
+                await rollback_fence_operation(
+                    operation_id=operation_id,
+                    recovery_dispatch_count=expected_recovery_dispatch_count,
+                )
+            return rolled_back
+        except Exception:
+            logger.warning(
+                "Unsafe HTTP bridge partial transcript recovery rollback failed request_id=%s",
+                getattr(request_state, "request_id", None),
+                exc_info=True,
+            )
+            return False
+
+    async def recovery_claimed_by_concurrent_call(*, include_durable_lookup: bool = True) -> bool:
+        # A CAS miss is expected when the other recovery task won the durable
+        # claim. Never clear its shared in-memory state; doing so would detach
+        # the winning retry from its operation fence before terminal settle.
+        """Detect a newer locally or durably claimed generation before clearing shared recovery state."""
+        if getattr(request_state, "operation_attempt_generation", 0) > expected_recovery_dispatch_count and getattr(
+            request_state, "operation_registered", False
+        ):
+            return True
+        if not include_durable_lookup:
+            return False
+        get_session_by_id = getattr(getattr(service, "_durable_bridge", None), "get_session_by_id", None)
+        if not callable(get_session_by_id) or session.durable_session_id is None:
+            return False
+        try:
+            current_session = await get_session_by_id(session.durable_session_id)
+        except Exception:
+            return False
+        if (
+            current_session is None
+            or getattr(current_session, "owner_instance_id", None)
+            != getattr(settings, "http_responses_session_bridge_instance_id", None)
+            or getattr(current_session, "owner_epoch", None) != session.durable_owner_epoch
+        ):
+            return False
+        if getattr(request_state, "unsafe_partial_replay_count", 0) >= 1 or (
+            getattr(request_state, "operation_attempt_generation", 0) > expected_recovery_dispatch_count
+            and getattr(request_state, "operation_registered", False)
+        ):
+            return True
+        get_operation = getattr(getattr(service, "_durable_bridge", None), "get_operation", None)
+        if not callable(get_operation):
+            return False
+        try:
+            current_operation = await get_operation(operation_id=operation_id)
+        except Exception:
+            return False
+        return bool(
+            current_operation is not None
+            and getattr(current_operation, "recovery_dispatch_count", 0) > expected_recovery_dispatch_count
+            and getattr(current_operation, "state", None) in {"submitted", "acknowledged"}
+        )
+
+    original_operation = None
+    get_original_operation = getattr(getattr(service, "_durable_bridge", None), "get_operation", None)
+    if callable(get_original_operation):
+        try:
+            original_operation = await get_original_operation(operation_id=operation_id)
+        except Exception:
+            logger.warning("Failed to read pre-rebind unsafe HTTP bridge operation", exc_info=True)
+            return False
+
+    rebind_task = scheduler_for(service).create_task(
+        rebind_operation(
+            operation_id=operation_id,
+            session_id=session.durable_session_id,
+            instance_id=settings.http_responses_session_bridge_instance_id,
+            owner_epoch=session.durable_owner_epoch,
+            account_id=session.account.id,
+            model=request_state.model,
+            request_text=replay_text,
+            allow_acknowledged=True,
+            expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+            rebind_claim_id=rebind_claim_id,
+        )
+    )
+    try:
+        rebound_operation, rebind_cancellation = await _await_task_deferring_cancellation(rebind_task)
+    except asyncio.CancelledError:
+        # If the rebind task itself was cancelled, it did not return a
+        # committed snapshot that can prove ownership of a durable mutation.
+        # Do not compensate another recovery's generation without that proof.
+        raise
+    except Exception:
+        if await recovery_claimed_by_concurrent_call(include_durable_lookup=False):
+            if not await fence_rebound_operation():
+                return False
+            _log_http_bridge_event(
+                "unsafe_partial_transcript_recovery_concurrent_claim",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail="rebind_exception_after_concurrent_claim",
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+            return True
+        if (
+            original_operation is not None
+            and original_operation.recovery_dispatch_count == expected_recovery_dispatch_count
+            and original_operation.session_id == session.durable_session_id
+        ):
+            rollback_snapshot = replace(
+                original_operation,
+                rebound_from_session_id=original_operation.session_id,
+                rebound_from_account_id=original_operation.account_id,
+                rebound_from_model=original_operation.model,
+                rebound_from_parent_response_id=original_operation.parent_response_id,
+            )
+            with anyio.CancelScope(shield=True):
+                if not await rollback_rebound_operation(rollback_snapshot):
+                    return False
+        logger.warning(
+            "Unsafe HTTP bridge partial transcript recovery operation rebind failed request_id=%s",
+            getattr(request_state, "request_id", None),
+            exc_info=True,
+        )
+        request_state.operation_id = None
+        request_state.operation_registered = False
+        request_state.operation_created = False
+        request_state.operation_rebound = False
+        request_state.operation_rebind_required = True
+        request_state.operation_dispatched = False
+        request_state.operation_recovery_claimed = False
+        return False
+    if rebind_cancellation is not None:
+        # A completed snapshot is the ownership proof for compensation. A
+        # ``None`` result means this call lost the durable CAS to another
+        # recovery and must not roll the winner back.
+        if rebound_operation is not None and bool(getattr(rebound_operation, "rebound", False)):
+            with anyio.CancelScope(shield=True):
+                await rollback_rebound_operation(rebound_operation)
+        raise rebind_cancellation
+    if rebound_operation is None:
+        if await recovery_claimed_by_concurrent_call():
+            if not await fence_rebound_operation():
+                return False
+            _log_http_bridge_event(
+                "unsafe_partial_transcript_recovery_concurrent_claim",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail="rebind_cas_lost_to_concurrent_claim",
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+            return True
+    if rebound_operation is None or not bool(getattr(rebound_operation, "rebound", False)):
+        _log_http_bridge_event(
+            "unsafe_partial_transcript_recovery_ineligible",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail="operation_rebind_failed",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        request_state.operation_id = None
+        request_state.operation_registered = False
+        request_state.operation_created = False
+        request_state.operation_rebound = False
+        request_state.operation_rebind_required = True
+        request_state.operation_dispatched = False
+        request_state.operation_recovery_claimed = False
+        return False
+    try:
+        fenced = await fence_rebound_operation()
+    except asyncio.CancelledError:
+        # Cancellation is a pre-dispatch failure too.  The durable rebind
+        # must be restored before propagating cancellation, otherwise the
+        # advanced generation can strand the operation with no replacement.
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(rebound_operation)
+        raise
+    if not fenced:
+        with anyio.CancelScope(shield=True):
+            await rollback_rebound_operation(rebound_operation)
+        return False
+
+    # The interrupted attempt may already have exposed ``response.created``
+    # and output deltas to the client. Keep that downstream identity stable
+    # while the replacement upstream response is streamed; otherwise one HTTP
+    # response would contain two unrelated response lifecycles. The normal
+    # event path rewrites replacement frames and suppresses its new
+    # ``response.created`` using these fields.
+    if request_state.response_id is not None:
+        request_state.replay_downstream_response_id = request_state.response_id
+        request_state.replay_downstream_sequence_offset = None
+        request_state.suppress_next_created_downstream = True
+    request_state.request_text = replay_text
+    request_state.recovery_replay_turn_count = replay_turn_count if replay_turn_count < 0 else max(0, replay_turn_count)
+    request_state.fresh_upstream_request_text = replay_text
+    request_state.fresh_upstream_request_is_retry_safe = True
+    request_state.complete_transcript_recovery_anchor = recovery_anchor
+    request_state.previous_response_id = None
+    request_state.proxy_injected_previous_response_id = False
+    request_state.hard_continuity_anchor = False
+    request_state.response_id = None
+    request_state.response_event_count = 0
+    request_state.upstream_model_output_seen = False
+    request_state.deferred_reasoning_downstream_texts = []
+    if request_state.replay_downstream_response_id is None:
+        request_state.suppress_next_created_downstream = False
+        request_state.replay_downstream_sequence_offset = None
+    request_state.awaiting_response_created = True
+    request_state.operation_parent_response_id = None
+    request_state.operation_created = False
+    request_state.operation_recovery_claimed = False
+    request_state.operation_dispatched = False
+    request_state.pending_function_call_ids = []
+    request_state.pending_tool_call_types = {}
+    request_state.added_tool_call_types = {}
+    request_state.added_tool_call_item_ids = set()
+    request_state.tool_call_manifest_invalid = False
+    request_state.response_output_items = []
+    request_state.response_output_items_by_index = {}
+    request_state.response_output_items_bytes = 0
+    request_state.response_output_item_added_indexes = set()
+    request_state.response_output_item_added_identities = {}
+    request_state.response_output_items_event_invalid = False
+    request_state.response_output_items_complete = False
+    request_state.operation_id = operation_id
+    request_state.operation_fingerprint = operation_fingerprint
+    request_state.operation_registered = True
+    request_state.operation_rebind_required = False
+    request_state.operation_rebound = True
+    request_state.operation_rebound_from_session_id = getattr(rebound_operation, "rebound_from_session_id", None)
+    request_state.operation_rebound_from_account_id = getattr(rebound_operation, "rebound_from_account_id", None)
+    request_state.operation_rebound_from_model = getattr(rebound_operation, "rebound_from_model", None)
+    request_state.operation_rebound_from_parent_response_id = getattr(
+        rebound_operation, "rebound_from_parent_response_id", None
+    )
+    request_state.operation_attempt_generation = int(getattr(rebound_operation, "recovery_dispatch_count", 0))
+    request_state.unsafe_partial_replay_count = getattr(request_state, "unsafe_partial_replay_count", 0) + 1
+    request_state.operation_rebind_claim_id = rebind_claim_id
+    request_state.unsafe_partial_replay_retry_authorized = True
+    request_enqueued = False
+    request_counted_in_queue = False
+    try:
+        async with session.pending_lock:
+            if request_state not in session.pending_requests:
+                session.pending_requests.appendleft(request_state)
+                request_enqueued = True
+                if _http_bridge_request_counts_against_queue(request_state):
+                    session.queued_request_count += 1
+                    request_counted_in_queue = True
+    except asyncio.CancelledError:
+        # Cancellation while waiting for the queue lock is still a
+        # pre-dispatch failure; compensate the fenced rebind before
+        # propagating it so later retries are not stranded.
+        cleanup_task = scheduler_for(service).create_task(
+            service._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=request_enqueued,
+                counted_in_queue=request_counted_in_queue,
+            )
+        )
+        await _await_task_deferring_cancellation(cleanup_task)
+        raise
+    _log_http_bridge_event(
+        "unsafe_partial_transcript_recovery_retry",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        pending_count=len(session.pending_requests),
+        detail=f"previous_response_id={recovery_anchor or 'none'}, partial_events={partial_event_count}",
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+    )
+    try:
+        retried = await service._retry_http_bridge_request_on_fresh_upstream(
+            session,
+            request_state=request_state,
+            text_data=replay_text,
+            require_same_account=True,
+        )
+        if retried:
+            return True
+    except asyncio.CancelledError:
+        # Reconnect/admission may be cancelled before the replacement send.
+        # Finish the pre-dispatch cleanup before propagating cancellation so
+        # the rebound operation and pending ownership are not stranded.
+        cleanup_task = scheduler_for(service).create_task(
+            service._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=True,
+                counted_in_queue=_http_bridge_request_counts_against_queue(request_state),
+            )
+        )
+        await _await_task_deferring_cancellation(cleanup_task)
+        raise
+    except UpstreamWebSocketTransportError:
+        raise
+    except Exception:
+        logger.warning(
+            "Unsafe HTTP bridge partial transcript recovery retry failed request_id=%s",
+            getattr(request_state, "request_id", None),
+            exc_info=True,
+        )
+    try:
+        # A false return means the replacement was not dispatched.  Restore
+        # the durable operation before releasing pending ownership; otherwise
+        # this opt-in at-least-once path would consume a generation without a
+        # request ever reaching upstream.
+        await service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=False,
+            request_enqueued=True,
+            counted_in_queue=_http_bridge_request_counts_against_queue(request_state),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to clean up pre-dispatch unsafe partial recovery request_id=%s",
+            getattr(request_state, "request_id", None),
+            exc_info=True,
+        )
+    return False
 
 
 def _response_completed_tool_call_types(payload: dict[str, JsonValue] | None) -> dict[str, str] | None:
@@ -1202,6 +3061,8 @@ async def _cancel_http_bridge_reader_child(
     label: str,
     scheduler_owner: Any,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    owner_session_id: str | None = None,
+    owner_epoch: int | None = None,
 ) -> bool:
     if task is None:
         return True
@@ -1219,12 +3080,44 @@ async def _cancel_http_bridge_reader_child(
                 task,
                 label=label,
                 cleanup_tasks=cleanup_tasks,
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
                 scheduler=scheduler_for(scheduler_owner),
             )
         )
     except Exception:
         logger.debug("Failed to cancel HTTP bridge reader child label=%s", label, exc_info=True)
         return task.done()
+
+
+async def _cancel_http_bridge_reader_child_compat(
+    task: asyncio.Task[Any] | None,
+    *,
+    label: str,
+    scheduler_owner: Any,
+    cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    owner_session_id: str | None = None,
+    owner_epoch: int | None = None,
+) -> bool:
+    """Invoke reader cancellation while tolerating legacy test facades."""
+    try:
+        return await _cancel_http_bridge_reader_child(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            scheduler_owner=scheduler_owner,
+            owner_session_id=owner_session_id,
+            owner_epoch=owner_epoch,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return await _cancel_http_bridge_reader_child(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            scheduler_owner=scheduler_owner,
+        )
 
 
 async def _clear_durable_http_bridge_response_anchor(
@@ -1699,18 +3592,40 @@ async def _retire_denied_http_bridge_anchor(
 class _HTTPBridgeUpstreamEventsMixin:
     def _spawn_http_bridge_upstream_reader(self: Any, session: "_HTTPBridgeSession") -> asyncio.Task[None]:
         """Start the per-session upstream reader on the owner's scheduler."""
+        reader = scheduler_for(self).create_task(self._relay_http_bridge_upstream_messages(session))
+        setattr(reader, "_http_bridge_recovery_session_id", session.durable_session_id)
+        setattr(reader, "_http_bridge_owner_epoch", session.durable_owner_epoch)
+        return reader
 
-        return scheduler_for(self).create_task(self._relay_http_bridge_upstream_messages(session))
-
-    async def _cancel_http_bridge_previous_reader(self: Any, old_reader: asyncio.Task[Any]) -> bool:
+    async def _cancel_http_bridge_previous_reader(
+        self: Any,
+        old_reader: asyncio.Task[Any],
+    ) -> bool:
         """Cancel and drain a replaced upstream reader before a reconnect."""
 
-        return await _await_cancelled_task(
-            old_reader,
-            label="http bridge upstream reader",
-            cleanup_tasks=self._background_cleanup_tasks,
-            scheduler=scheduler_for(self),
-        )
+        owner_session_id = getattr(old_reader, "_http_bridge_recovery_session_id", None)
+        owner_epoch = getattr(old_reader, "_http_bridge_owner_epoch", None)
+
+        try:
+            return await _await_cancelled_task(
+                old_reader,
+                label="http bridge upstream reader",
+                cleanup_tasks=self._background_cleanup_tasks,
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
+                scheduler=scheduler_for(self),
+            )
+        except TypeError as exc:
+            # Keep compatibility with legacy test doubles/facades that expose
+            # the pre-epoch cancellation signature.
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            return await _await_cancelled_task(
+                old_reader,
+                label="http bridge upstream reader",
+                cleanup_tasks=self._background_cleanup_tasks,
+                scheduler=scheduler_for(self),
+            )
 
     async def _await_http_bridge_registry_wait(self: Any, future: asyncio.Future[T], *, timeout: float) -> T:
         """Await a shared inflight/capacity registry future with a bounded timeout.
@@ -1724,6 +3639,33 @@ class _HTTPBridgeUpstreamEventsMixin:
         return await wait_on_shared_future(future, timeout=timeout, scheduler=scheduler_for(self))
 
     async def _fail_http_bridge_reader_and_maybe_retire(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        **kwargs: Any,
+    ) -> bool:
+        """Mark reader-owned cleanup until failure settlement and retirement finish."""
+        session.upstream_reader_cleanup_pending = True
+        session.upstream_reader_cleanup_task = asyncio.current_task()
+        cleanup_complete = asyncio.Event()
+        session.upstream_reader_cleanup_complete = cleanup_complete
+        try:
+            return await self._fail_http_bridge_reader_and_maybe_retire_impl(session, **kwargs)
+        finally:
+            session.upstream_reader_cleanup_pending = False
+            session.upstream_reader_cleanup_task = None
+            cleanup_complete.set()
+            # A resource-close child may have deferred the fenced durable
+            # release behind this reader's cleanup marker. Once the marker is
+            # published, finish that continuation before the reader exits so
+            # direct relay callers observe a fully settled owner, while still
+            # preserving any cancellation requested during the wait.
+            deferred_task = getattr(session, "deferred_durable_release_task", None)
+            if deferred_task is not None and deferred_task is not asyncio.current_task() and not deferred_task.done():
+                _, deferred_cancellation = await _await_task_deferring_cancellation(deferred_task)
+                if deferred_cancellation is not None:
+                    raise deferred_cancellation
+
+    async def _fail_http_bridge_reader_and_maybe_retire_impl(
         self: Any,
         session: "_HTTPBridgeSession",
         *,
@@ -2049,13 +3991,38 @@ class _HTTPBridgeUpstreamEventsMixin:
         self: Any,
         session: "_HTTPBridgeSession",
     ) -> None:
+        """Receive upstream frames and route them using the captured connection generation and retry policy."""
         scheduler = scheduler_for(self)
         clock = clock_for(self)
         runtime_settings = _service_get_settings()
         relay_upstream = session.upstream
         receive_task: asyncio.Task[UpstreamWebSocketMessage] | None = None
+        receive_operation_attempt_generations: dict[str, int] | None = None
         wakeup_task: asyncio.Task[bool] | None = None
         reader_failure_retry_circuit_attempt_selection: _HTTPBridgeRetryCircuitAttemptSelection | None = None
+
+        async def _retry_after_receive_exception() -> bool:
+            """Attempt eligible recovery for a receive exception without exposing stale connection state."""
+            nonlocal receive_task, receive_operation_attempt_generations, wakeup_task
+            # ``receive_task.result()`` raises before the normal message/close
+            # branches can invoke the bounded pre-created recovery hook.
+            # Clear the completed task and its sibling wakeup waiter before
+            # retrying so a successful recovery starts a fresh receive cycle
+            # instead of re-observing the same exception forever.
+            receive_task = None
+            receive_operation_attempt_generations = None
+            await _cancel_http_bridge_reader_child_compat(
+                wakeup_task,
+                label="HTTP bridge reader wakeup after receive exception",
+                cleanup_tasks=self._background_cleanup_tasks,
+                scheduler_owner=self,
+                owner_session_id=session.durable_session_id,
+                owner_epoch=session.durable_owner_epoch,
+            )
+            wakeup_task = None
+            retry_method = self._retry_http_bridge_precreated_request
+            return await retry_method(session, **_http_bridge_precreated_retry_recovery_kwargs(retry_method))
+
         try:
             while True:
                 reader_failure_retry_circuit_attempt_selection = None
@@ -2088,12 +4055,22 @@ class _HTTPBridgeUpstreamEventsMixin:
                     stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
                 )
                 if receive_task is None:
+                    async with session.pending_lock:
+                        receive_operation_attempt_generations = {
+                            request_state.request_id: int(getattr(request_state, "operation_attempt_generation", 0))
+                            for request_state in session.pending_requests
+                        }
                     receive_task = scheduler.create_task(session.upstream.receive())
 
                 message: UpstreamWebSocketMessage | None = None
                 timed_out = False
                 if receive_task.done():
-                    message = receive_task.result()
+                    try:
+                        message = receive_task.result()
+                    except Exception:
+                        if await _retry_after_receive_exception():
+                            continue
+                        raise
                     receive_task = None
                 elif receive_timeout is not None and receive_timeout.timeout_seconds <= 0:
                     timed_out = True
@@ -2113,11 +4090,28 @@ class _HTTPBridgeUpstreamEventsMixin:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if receive_task in done:
-                        message = receive_task.result()
+                        try:
+                            message = receive_task.result()
+                        except Exception:
+                            if await _retry_after_receive_exception():
+                                continue
+                            raise
                         receive_task = None
                     elif wakeup_task in done:
                         wakeup_task.result()
                         wakeup_task = None
+                        # A persistent reader may have started while the
+                        # socket had no pending requests. Add newly admitted
+                        # request generations without overwriting generations
+                        # already captured for the in-flight receive attempt.
+                        async with session.pending_lock:
+                            if receive_operation_attempt_generations is None:
+                                receive_operation_attempt_generations = {}
+                            for request_state in session.pending_requests:
+                                receive_operation_attempt_generations.setdefault(
+                                    request_state.request_id,
+                                    int(getattr(request_state, "operation_attempt_generation", 0)),
+                                )
                         continue
                     else:
                         timed_out = True
@@ -2176,11 +4170,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                             # before its forced retirement.
                             force_retire = False
                             if receive_task is not None:
-                                receive_cancelled = await _cancel_http_bridge_reader_child(
+                                receive_cancelled = await _cancel_http_bridge_reader_child_compat(
                                     receive_task,
                                     label="HTTP bridge upstream receive after missing response.created",
                                     cleanup_tasks=self._background_cleanup_tasks,
                                     scheduler_owner=self,
+                                    owner_session_id=session.durable_session_id,
+                                    owner_epoch=session.durable_owner_epoch,
                                 )
                                 if receive_task.done() and not receive_task.cancelled():
                                     # A response (or a typed receive failure)
@@ -2190,6 +4186,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 force_retire = not receive_cancelled and not receive_task.cancelled()
                                 if not force_retire:
                                     receive_task = None
+                                    receive_operation_attempt_generations = None
                             async with session.pending_lock:
                                 for request_state in session.pending_requests:
                                     if request_state.failure_phase_override is None:
@@ -2251,7 +4248,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                             # its retry gate would reject the request as
                             # already retired. Continuity-bound requests still
                             # fail closed in _retry_http_bridge_precreated_request.
-                            retried = await self._retry_http_bridge_precreated_request(session)
+                            retry_method = self._retry_http_bridge_precreated_request
+                            retried = await retry_method(
+                                session,
+                                **_http_bridge_precreated_retry_recovery_kwargs(retry_method),
+                            )
                             if retried:
                                 continue
                             session.closed = True
@@ -2274,16 +4275,23 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                         reader_failure_retry_circuit_attempt_selection = retry_circuit_attempt_selection
                     if receive_task is not None:
-                        receive_cancelled = await _cancel_http_bridge_reader_child(
+                        receive_cancelled = await _cancel_http_bridge_reader_child_compat(
                             receive_task,
                             label="HTTP bridge upstream receive after timeout",
                             cleanup_tasks=self._background_cleanup_tasks,
                             scheduler_owner=self,
+                            owner_session_id=session.durable_session_id,
+                            owner_epoch=session.durable_owner_epoch,
                         )
                         if not receive_cancelled:
                             raise RuntimeError("HTTP bridge upstream receive did not cancel after timeout")
                         receive_task = None
-                    retried = await self._retry_http_bridge_precreated_request(session)
+                        receive_operation_attempt_generations = None
+                    retry_method = self._retry_http_bridge_precreated_request
+                    retried = await retry_method(
+                        session,
+                        **_http_bridge_precreated_retry_recovery_kwargs(retry_method),
+                    )
                     if retried:
                         continue
                     async with session.lifecycle_lock:
@@ -2305,12 +4313,22 @@ class _HTTPBridgeUpstreamEventsMixin:
                             account_id=session.account.id,
                             chatgpt_account_id=session.account.chatgpt_account_id,
                         )
-                    await self._process_http_bridge_upstream_text(
+                    event_operation_attempt_generations = receive_operation_attempt_generations
+                    receive_operation_attempt_generations = None
+                    await _call_with_supported_optional_kwargs(
+                        self._process_http_bridge_upstream_text,
                         session,
                         message.text,
-                        message=message,
-                        scheduler=scheduler,
-                        clock=clock,
+                        optional_kwargs={
+                            "message": message,
+                            **(
+                                {"operation_attempt_generations": event_operation_attempt_generations}
+                                if event_operation_attempt_generations
+                                else {}
+                            ),
+                            "scheduler": scheduler,
+                            "clock": clock,
+                        },
                     )
                     if await self._retire_http_bridge_after_drain_if_ready(session):
                         break
@@ -2353,7 +4371,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # an accepted turn: a protocol-invalid binary frame did not end
                 # the socket, so it keeps the pre-created retry semantics only.
                 if not account_neutral and (message.kind in {"close", "error"} or not accepted_response_pending):
-                    retried = await self._retry_http_bridge_precreated_request(session)
+                    retry_method = self._retry_http_bridge_precreated_request
+                    retried = await retry_method(
+                        session,
+                        **_http_bridge_precreated_retry_recovery_kwargs(retry_method),
+                    )
                 if retried:
                     continue
                 close_classification = (
@@ -2466,17 +4488,21 @@ class _HTTPBridgeUpstreamEventsMixin:
             # swapping ``session.upstream``.
             if session.upstream is relay_upstream:
                 session.closed = True
-            await _cancel_http_bridge_reader_child(
+            await _cancel_http_bridge_reader_child_compat(
                 wakeup_task,
                 label="HTTP bridge reader wakeup wait",
                 cleanup_tasks=self._background_cleanup_tasks,
                 scheduler_owner=self,
+                owner_session_id=session.durable_session_id,
+                owner_epoch=session.durable_owner_epoch,
             )
-            await _cancel_http_bridge_reader_child(
+            await _cancel_http_bridge_reader_child_compat(
                 receive_task,
                 label="HTTP bridge upstream receive",
                 cleanup_tasks=self._background_cleanup_tasks,
                 scheduler_owner=self,
+                owner_session_id=session.durable_session_id,
+                owner_epoch=session.durable_owner_epoch,
             )
 
     async def _process_http_bridge_upstream_text(
@@ -2485,11 +4511,13 @@ class _HTTPBridgeUpstreamEventsMixin:
         text: str,
         *,
         message: UpstreamWebSocketMessage | None = None,
+        operation_attempt_generations: Mapping[str, int] | None = None,
         scheduler: Scheduler | None = None,
         clock: Clock | None = None,
     ) -> None:
         # The relay loop resolves the collaborators once per session and passes
         # them down; the fallback only serves direct callers (tests).
+        """Decode an upstream text frame and pass its parsed event through bridge lifecycle processing."""
         if scheduler is None:
             scheduler = scheduler_for(self)
         if clock is None:
@@ -2529,6 +4557,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 response_id=_websocket_response_id(event, payload, routing=routing),
                 completed_delivery_scope=completed_delivery_scope,
                 claimed_terminal_request_states=claimed_terminal_request_states,
+                operation_attempt_generations=operation_attempt_generations,
                 scheduler=scheduler,
                 clock=clock,
             )
@@ -2645,9 +4674,11 @@ class _HTTPBridgeUpstreamEventsMixin:
         response_id: str | None,
         completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None,
         claimed_terminal_request_states: list[_WebSocketRequestState],
+        operation_attempt_generations: Mapping[str, int] | None = None,
         scheduler: Scheduler,
         clock: Clock,
     ) -> None:
+        """Apply upstream events to request state, fenced persistence, output capture, and downstream delivery."""
         original_text = text
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
@@ -2679,9 +4710,41 @@ class _HTTPBridgeUpstreamEventsMixin:
             event=event,
         )
 
+        def event_operation_attempt_generation(request_state: _WebSocketRequestState) -> int | None:
+            """Select the operation generation captured for this receive attempt rather than a successor's state."""
+            if operation_attempt_generations is None:
+                return None
+            generation = operation_attempt_generations.get(request_state.request_id)
+            return generation if isinstance(generation, int) and not isinstance(generation, bool) else None
+
+        def stale_receive_generation(request_state: _WebSocketRequestState) -> tuple[int, int] | None:
+            """Return the captured/current generations when this event is stale.
+
+            A receive task can finish after recovery has rebound the same
+            request state to a new upstream response.  Such a frame must not
+            be allowed to mutate, finalize, or reach the downstream stream
+            for the replacement attempt.  Missing entries are intentional:
+            they represent requests admitted after this receive began.
+            """
+            captured_generation = event_operation_attempt_generation(request_state)
+            if captured_generation is None:
+                return None
+            current_generation = request_state.operation_attempt_generation
+            if captured_generation == current_generation:
+                return None
+            return captured_generation, current_generation
+
         completed_event_queue: asyncio.Queue[str | None] | None = None
         completed_event_queue_claimed = False
+        emitted_sequence_number: int | None = None
         async with session.pending_lock:
+            # A pre-created retry has completed its final sibling-visibility
+            # check and is about to replace this shared reader. Frames that
+            # arrive from the superseded reader during that handoff must not
+            # publish lifecycle/output visibility for a sibling; the retry
+            # admission fence will re-establish a fresh reader afterwards.
+            if getattr(session, "reconnect_admission_in_progress", False):
+                return
             matched_request_state = None
             created_request_state = None
             suppress_downstream_event = False
@@ -2698,6 +4761,23 @@ class _HTTPBridgeUpstreamEventsMixin:
                     session.pending_requests,
                     response_id,
                 )
+                if matched_request_state is None and event_type in {
+                    "response.completed",
+                    "response.failed",
+                    "response.incomplete",
+                    "error",
+                }:
+                    # A replay keeps the downstream response identity while
+                    # the replacement upstream response is still pre-created.
+                    # Associate terminal frames with that state before the
+                    # downstream-id rewrite; otherwise a replacement terminal
+                    # can leak its new response id to the client.
+                    matched_request_state = _match_websocket_request_state_for_precreated_terminal_event(
+                        session.pending_requests,
+                        require_replay_downstream_response_id=True,
+                    )
+                    if matched_request_state is not None:
+                        matched_request_state.response_id = response_id
                 release_create_gate = False
             elif response_id is None:
                 matched_request_state = _match_websocket_request_state_for_anonymous_event(
@@ -2713,6 +4793,35 @@ class _HTTPBridgeUpstreamEventsMixin:
                 release_create_gate = False
             else:
                 release_create_gate = False
+
+            if matched_request_state is not None:
+                stale_generations = stale_receive_generation(matched_request_state)
+                if stale_generations is not None:
+                    captured_generation, current_generation = stale_generations
+                    # The pre-created terminal fallback temporarily assigns
+                    # the old upstream id so the normal downstream rewrite
+                    # can run.  Undo that assignment before dropping the
+                    # stale frame; otherwise a later replacement terminal
+                    # could be matched to the retired response id.
+                    if (
+                        response_id is not None
+                        and event_type
+                        in {"response.created", "response.completed", "response.failed", "response.incomplete", "error"}
+                        and matched_request_state.response_id == response_id
+                    ):
+                        matched_request_state.response_id = None
+                    _log_http_bridge_event(
+                        "stale_receive_generation_event_dropped",
+                        session.key,
+                        account_id=session.account.id,
+                        model=matched_request_state.model,
+                        pending_count=len(session.pending_requests),
+                        detail=(
+                            f"event_type={event_type or 'unknown'} request_id={matched_request_state.request_id} "
+                            f"captured_generation={captured_generation} current_generation={current_generation}"
+                        ),
+                    )
+                    return
 
             _archive_http_bridge_upstream_text(session, original_text, matched_request_state)
             pending_request_count = len(session.pending_requests)
@@ -2743,6 +4852,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type=event_type,
                     payload=payload,
                 )
+                if _http_bridge_transcript_recovery_enabled():
+                    _record_http_bridge_response_output(
+                        matched_request_state,
+                        event_type=event_type,
+                        payload=payload,
+                    )
                 completed_tool_call = _response_output_item_done_tool_call(payload)
                 if completed_tool_call is not None:
                     completed_call_id, completed_call_type = completed_tool_call
@@ -2769,6 +4884,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                     suppress_downstream_event = True
                 if payload is not None:
                     rewritten_payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
+                    rewritten_payload, emitted_sequence_number = _rewrite_http_bridge_replay_sequence_number(
+                        rewritten_payload,
+                        matched_request_state,
+                    )
                     # ``text`` is the serialization ``payload`` was parsed from (or the
                     # tool-call rewrite's compact re-dump). Relaying it verbatim is
                     # only valid while nothing above mutated ``payload`` in place:
@@ -2794,6 +4913,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     matched_request_state.upstream_model_output_seen = True
                     if not suppress_downstream_event:
                         matched_request_state.downstream_visible = True
+                if emitted_sequence_number is not None and not suppress_downstream_event:
+                    matched_request_state.last_downstream_sequence_number = emitted_sequence_number
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -3079,6 +5200,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             async def persist_one_grouped_terminal_event(
                 grouped_terminal_event: tuple[Any, str, OpenAIEvent | None, Any, str | None, str | None],
             ) -> None:
+                """Persist one grouped terminal under its request's ownership and recovery generation."""
                 (
                     grouped_request_state,
                     grouped_event_block,
@@ -3093,6 +5215,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session,
                         grouped_request_state,
                         grouped_event_block,
+                        operation_attempt_generation=event_operation_attempt_generation(grouped_request_state),
                         terminal=True,
                         terminal_state=grouped_operation_state,
                         terminal_event_queue=grouped_request_state.event_queue,
@@ -3110,16 +5233,26 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session,
                         grouped_request_state,
                         grouped_event_block,
+                        operation_attempt_generation=event_operation_attempt_generation(grouped_request_state),
                         terminal=True,
                         terminal_state=grouped_operation_state,
                     )
-                if grouped_operation_state is not None and grouped_operation_state != "failed":
-                    await _update_http_bridge_operation_state(
+                if (
+                    grouped_operation_state is not None
+                    and grouped_operation_state != "failed"
+                    and _http_bridge_transcript_recovery_enabled()
+                ):
+                    _schedule_http_bridge_transcript_snapshot(
                         self,
                         session,
                         grouped_request_state,
                         state=grouped_operation_state,
-                        response_id=_websocket_downstream_response_id(grouped_request_state),
+                        operation_attempt_generation=event_operation_attempt_generation(grouped_request_state),
+                        response_id=(
+                            getattr(grouped_request_state, "response_id", None)
+                            or getattr(grouped_request_state, "operation_persisted_response_id", None)
+                            or _websocket_downstream_response_id(grouped_request_state)
+                        ),
                     )
 
             async def persist_grouped_terminal_events() -> Exception | None:
@@ -3368,6 +5501,10 @@ class _HTTPBridgeUpstreamEventsMixin:
             event_block = f"data: {rewritten_text}\n\n"
 
         if status_request_state is not None and is_previous_response_not_found_event:
+            if await _try_unsafe_partial_transcript_recovery(self, session, status_request_state):
+                return
+            if await _try_complete_transcript_recovery(self, session, status_request_state):
+                return
             status_request_state.error_http_status_override = 502
             status_request_state.previous_response_not_found_rewritten = (
                 response_id is None and not has_other_pending_requests
@@ -3846,17 +5983,35 @@ class _HTTPBridgeUpstreamEventsMixin:
                 anchor_advance_supersession = await self._http_bridge_suppress_poison_clear_after_anchor_advance(
                     session
                 )
+            retained_response_id = matched_request_state.replay_downstream_response_id
+            alias_input_item_count = (
+                matched_request_state.input_item_count if matched_request_state.input_item_count > 0 else None
+            )
+            alias_input_full_fingerprint = (
+                matched_request_state.input_full_fingerprint if matched_request_state.input_item_count > 0 else None
+            )
+            alias_pending_tool_calls = _durable_pending_tool_call_manifest(matched_request_state, payload)
             alias_registered = await self._register_http_bridge_previous_response_id(
                 session,
                 response_id,
-                input_item_count=(
-                    matched_request_state.input_item_count if matched_request_state.input_item_count > 0 else None
-                ),
-                input_full_fingerprint=(
-                    matched_request_state.input_full_fingerprint if matched_request_state.input_item_count > 0 else None
-                ),
-                pending_tool_calls=_durable_pending_tool_call_manifest(matched_request_state, payload),
+                input_item_count=alias_input_item_count,
+                input_full_fingerprint=alias_input_full_fingerprint,
+                pending_tool_calls=alias_pending_tool_calls,
             )
+            if alias_registered and retained_response_id is not None and retained_response_id != response_id:
+                # Partial replay keeps the response id already exposed to the
+                # client. Register that retained id as a durable alias of the
+                # replacement response while keeping the replacement as the
+                # session's latest upstream anchor.
+                alias_registered = await self._register_http_bridge_previous_response_id(
+                    session,
+                    retained_response_id,
+                    latest_response_id=response_id,
+                    retained_replay=True,
+                    input_item_count=alias_input_item_count,
+                    input_full_fingerprint=alias_input_full_fingerprint,
+                    pending_tool_calls=alias_pending_tool_calls,
+                )
             completion_anchor_registration_confirmed = alias_registered
             if not alias_registered and anchor_advance_supersession is not None:
                 await self._http_bridge_restore_poison_clear_after_failed_anchor_advance(
@@ -3886,9 +6041,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 await self._http_bridge_restore_poison_row_after_failed_registration(
                     session, completion_pre_settle_poison_detail
                 )
-            if not alias_registered and is_http_bridge_account_neutral_replay(
-                kind=session.key.affinity_kind,
-                key=session.key.affinity_key,
+            retained_replay_alias = retained_response_id is not None and retained_response_id != response_id
+            if not alias_registered and (
+                retained_replay_alias
+                or is_http_bridge_account_neutral_replay(
+                    kind=session.key.affinity_kind,
+                    key=session.key.affinity_key,
+                )
             ):
                 session.upstream_control.reconnect_requested = True
                 session.upstream_control.retire_after_drain = True
@@ -3966,7 +6125,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     session,
                     operation_request_state,
                     state=request_operation_state,
+                    operation_attempt_generation=event_operation_attempt_generation(operation_request_state),
                     response_id=response_id,
+                    materialize_transcript=False,
                 )
 
         recovery_attempt_session_id = (
@@ -4100,6 +6261,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 payload=payload,
                 request_state=terminal_request_state or matched_request_state,
             )
+            if matched_request_state is not None and payload is not None:
+                # Error normalization builds a fresh response.failed payload
+                # from the upstream response id. Reapply the replay identity
+                # rewrite to that new payload before it reaches the client;
+                # durable settlement still keeps the upstream id on state.
+                downstream_payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
+                event_block = format_sse_event(downstream_payload)
             settlement_payload = payload
             settlement_event = event
             settlement_event_type = event_type

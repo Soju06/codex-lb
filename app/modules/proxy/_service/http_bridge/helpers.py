@@ -1581,7 +1581,6 @@ async def _close_http_bridge_session_resources(
     session.closed = True
     durable_session_id = getattr(session, "durable_session_id", None)
     durable_owner_epoch = getattr(session, "durable_owner_epoch", None)
-    durable_release_allowed = release_durable_session and _http_bridge_durable_release_allowed(service, session)
     if turn_state_lock_held:
         service._unregister_http_bridge_turn_states_locked(session)
         service._unregister_http_bridge_previous_response_ids_locked(session)
@@ -1600,7 +1599,7 @@ async def _close_http_bridge_session_resources(
     async def release_durable_session_and_cleanup() -> None:
         """Release the durable owner and retire process-local denial state when it is safe."""
         nonlocal durable_release_succeeded
-        if durable_release_allowed:
+        if release_durable_session and _http_bridge_durable_release_allowed(service, session):
             try:
                 released = await service._durable_bridge.release_live_session(
                     session_id=durable_session_id,
@@ -1635,20 +1634,17 @@ async def _close_http_bridge_session_resources(
                 preserve_response_ids=pending_denied_response_ids,
             )
 
-    # Preserve the historical fast close path for ordinary session retirement;
-    # only the shutdown path defers release until terminal finalizers drain.
-    if not drain_terminal_finalizers:
-        await release_durable_session_and_cleanup()
-
     upstream_reader = session.upstream_reader
+    detached_reader_pending = False
     if upstream_reader is not None:
         if upstream_reader is asyncio.current_task():
             session.upstream_reader = None
         else:
-            await _await_cancelled_task(
+            detached_reader_pending = not await _await_cancelled_task(
                 upstream_reader,
                 label="http bridge upstream reader",
                 cleanup_tasks=service._background_cleanup_tasks,
+                owner_session_id=durable_session_id,
                 scheduler=scheduler_for(service),
             )
             if session.upstream_reader is upstream_reader:
@@ -1673,17 +1669,66 @@ async def _close_http_bridge_session_resources(
             api_key=None,
             response_create_gate=response_create_gate,
         )
-    if drain_terminal_finalizers:
-        event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
-        drain_finalizers = getattr(event_batcher, "drain_terminal_finalizers", None)
-        if callable(drain_finalizers):
+    event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    drain_finalizers = getattr(event_batcher, "drain_terminal_finalizers", None)
+    session_finalizers_pending = bool(
+        durable_session_id is not None
+        and event_batcher is not None
+        and any(
+            not task.done() and getattr(task, "_http_bridge_session_id", None) == durable_session_id
+            for task in getattr(event_batcher, "_terminal_finalize_tasks", ())
+        )
+    )
+
+    async def drain_and_release(*, force_drain: bool = False) -> None:
+        if callable(drain_finalizers) and (force_drain or drain_terminal_finalizers or session_finalizers_pending):
             try:
                 await drain_finalizers()
             except Exception:
                 logger.warning("Failed to drain HTTP bridge terminal finalizers before lease release", exc_info=True)
-        # Keep the durable bridge lease until pending terminal events have been
-        # appended and their asynchronous spool finalizers have committed.
         await release_durable_session_and_cleanup()
+
+    release_blocked = (
+        release_durable_session
+        and durable_session_id is not None
+        and not _http_bridge_durable_release_allowed(service, session)
+    )
+    if (detached_reader_pending or release_blocked) and release_durable_session and durable_session_id is not None:
+        # A cancellation-resistant reader may still append a terminal event
+        # after this close returns. Keep the owner fence until that detached
+        # cleanup and any finalizer it schedules have settled, then release in
+        # an owner-fenced continuation.
+        cleanup_tasks = tuple(
+            task
+            for task in service._background_cleanup_tasks
+            if not task.done() and getattr(task, "_http_bridge_recovery_session_id", None) == durable_session_id
+        )
+        existing_deferred = session.deferred_durable_release_task
+        if cleanup_tasks and (existing_deferred is None or existing_deferred.done()):
+
+            async def deferred_release() -> None:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+                await drain_and_release(force_drain=True)
+
+            deferred_task = scheduler_for(service).create_task(
+                deferred_release(),
+                name=f"http-bridge-deferred-release-{_hash_identifier(session.key.affinity_key)}",
+            )
+            session.deferred_durable_release_task = deferred_task
+            service._background_cleanup_tasks.add(deferred_task)
+
+            def deferred_release_done(done_task: asyncio.Task[None]) -> None:
+                service._background_cleanup_tasks.discard(done_task)
+                if done_task.cancelled():
+                    return
+                try:
+                    done_task.result()
+                except Exception:
+                    logger.warning("Deferred HTTP bridge durable release failed", exc_info=True)
+
+            deferred_task.add_done_callback(deferred_release_done)
+    else:
+        await drain_and_release()
     _log_http_bridge_event(
         "close",
         session.key,
@@ -2777,12 +2822,17 @@ def _cancel_and_track_cancelled_task(
     *,
     label: str,
     cleanup_tasks: set[asyncio.Task[None]] | None,
+    owner_session_id: str | None = None,
     cancel_task: bool = True,
     scheduler: Scheduler = REAL_SCHEDULER,
 ) -> None:
     if cancel_task:
         task.cancel()
     cleanup_task = scheduler.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
+    if owner_session_id is not None:
+        # Keep ownership metadata on the detached cleanup task so a session
+        # close can defer its durable release until this exact reader settles.
+        setattr(cleanup_task, "_http_bridge_recovery_session_id", owner_session_id)
     if cleanup_tasks is not None:
         cleanup_tasks.add(cleanup_task)
         cleanup_task.add_done_callback(cleanup_tasks.discard)
@@ -2795,6 +2845,7 @@ async def _await_cancelled_task(
     label: str,
     cancel: bool = True,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    owner_session_id: str | None = None,
     scheduler: Scheduler = REAL_SCHEDULER,
 ) -> bool:
     effective_timeout = max(float(timeout_seconds), 0.0)
@@ -2808,7 +2859,13 @@ async def _await_cancelled_task(
         try:
             await asyncio.sleep(0)
         except asyncio.CancelledError:
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, scheduler=scheduler)
+            _cancel_and_track_cancelled_task(
+                task,
+                label=label,
+                cleanup_tasks=cleanup_tasks,
+                owner_session_id=owner_session_id,
+                scheduler=scheduler,
+            )
             raise
     if cancel:
         task.cancel()
@@ -2820,6 +2877,7 @@ async def _await_cancelled_task(
                 task,
                 label=label,
                 cleanup_tasks=cleanup_tasks,
+                owner_session_id=owner_session_id,
                 cancel_task=False,
                 scheduler=scheduler,
             )
@@ -2830,6 +2888,7 @@ async def _await_cancelled_task(
             task,
             label=label,
             cleanup_tasks=cleanup_tasks,
+            owner_session_id=owner_session_id,
             cancel_task=False,
             scheduler=scheduler,
         )

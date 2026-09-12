@@ -7563,6 +7563,44 @@ async def test_retry_http_bridge_precreated_request_refuses_accepted_replay_whil
     assert accepted_request_state.suppress_next_created_downstream is False
     assert accepted_request_state.suppress_next_in_progress_downstream is False
     assert accepted_request_state.response_create_gate_acquired is False
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_rejects_accepted_id_still_waiting_with_visible_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An accepted response id must not bypass the shared-socket sibling guard."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    visible_request_state = _visible_sibling_bridge_request_state()
+    accepted_request_state = _accepted_bridge_request_state(
+        request_id="req-accepted-id-waiting",
+        response_id="resp-accepted-id-waiting",
+        awaiting_response_created=True,
+        response_event_count=0,
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-accepted-id-waiting", None),
+        key_value="bridge-accepted-id-waiting",
+        pending_requests=deque([visible_request_state, accepted_request_state]),
+        queued_request_count=2,
+    )
+    session.last_upstream_close_code = 1011
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_websocket_request_can_replay_before_visible_output",
+        lambda request_state, **_kwargs: request_state is accepted_request_state,
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    reconnect.assert_not_awaited()
+    assert list(session.pending_requests) == [visible_request_state, accepted_request_state]
+    assert accepted_request_state.response_id == "resp-accepted-id-waiting"
+    assert accepted_request_state.awaiting_response_created is True
     assert session.response_create_gate.locked() is False
 
 
@@ -43564,6 +43602,109 @@ async def test_closing_http_bridge_session_drains_terminal_finalizers_before_lea
     )
 
     assert order == ["fail_pending", "drain_finalizers", "release_live_session"]
+
+
+@pytest.mark.asyncio
+async def test_closing_http_bridge_session_drains_its_existing_finalizer_on_normal_close() -> None:
+    """Normal retirement keeps the owner fence until an already-created finalizer settles."""
+    session = _denied_anchor_session()
+    order: list[str] = []
+    release_finalizer = asyncio.Event()
+
+    async def pending_finalizer() -> None:
+        await release_finalizer.wait()
+
+    finalizer = asyncio.create_task(pending_finalizer(), name="http-bridge-terminal-spool-finalize-existing")
+    setattr(finalizer, "_http_bridge_session_id", session.durable_session_id)
+
+    async def fail_pending(**_kwargs: Any) -> bool:
+        order.append("fail_pending")
+        return True
+
+    async def drain_finalizers() -> None:
+        order.append("drain_finalizers")
+        release_finalizer.set()
+        await asyncio.gather(finalizer)
+
+    async def release_live_session(**_kwargs: Any) -> SimpleNamespace:
+        order.append("release_live_session")
+        return SimpleNamespace(owner_instance_id=None, owner_epoch=session.durable_owner_epoch)
+
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(release_live_session=release_live_session),
+        _fail_pending_websocket_requests=fail_pending,
+        _http_bridge_operation_event_batcher=SimpleNamespace(
+            _terminal_finalize_tasks={finalizer},
+            drain_terminal_finalizers=drain_finalizers,
+        ),
+    )
+
+    await http_bridge_helpers_module._close_http_bridge_session_resources(service, session, turn_state_lock_held=True)
+
+    assert order == ["fail_pending", "drain_finalizers", "release_live_session"]
+
+
+@pytest.mark.asyncio
+async def test_closing_http_bridge_session_defers_release_for_detached_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancellation-resistant reader keeps the durable owner until deferred cleanup settles."""
+    session = _denied_anchor_session()
+    reader_started = asyncio.Event()
+    release_reader = asyncio.Event()
+
+    async def reader() -> None:
+        reader_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release_reader.wait()
+
+    reader_task = asyncio.create_task(reader(), name="http-bridge-upstream-reader-deferred-release")
+    session.upstream_reader = reader_task
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock()))
+    await reader_started.wait()
+
+    async def fake_await_cancelled_task(task: asyncio.Task[Any], *, cleanup_tasks: set[Any], **_kwargs: Any) -> bool:
+        task.cancel()
+        cleanup_task = asyncio.create_task(
+            http_bridge_helpers_module._drain_cancelled_task(task),
+            name="cancelled-task-cleanup-http bridge upstream reader",
+        )
+        setattr(cleanup_task, "_http_bridge_recovery_session_id", session.durable_session_id)
+        cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(cleanup_tasks.discard)
+        return False
+
+    monkeypatch.setattr(http_bridge_helpers_module, "_await_cancelled_task", fake_await_cancelled_task)
+    release_live_session = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id=None, owner_epoch=session.durable_owner_epoch)
+    )
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(release_live_session=release_live_session),
+        _fail_pending_websocket_requests=AsyncMock(),
+        _http_bridge_operation_event_batcher=SimpleNamespace(
+            drain_terminal_finalizers=AsyncMock(),
+        ),
+    )
+
+    await http_bridge_helpers_module._close_http_bridge_session_resources(service, session, turn_state_lock_held=True)
+
+    release_live_session.assert_not_awaited()
+    assert service._background_cleanup_tasks
+    deferred_task = session.deferred_durable_release_task
+    assert deferred_task is not None
+    release_reader.set()
+    await asyncio.wait_for(deferred_task, timeout=1.0)
+    release_live_session.assert_awaited_once()
 
 
 @pytest.mark.asyncio

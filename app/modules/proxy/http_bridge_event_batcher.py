@@ -8,6 +8,7 @@ from typing import Any
 from app.core import shutdown as shutdown_state
 from app.core.clock import REAL_SCHEDULER, Scheduler, clock_for
 from app.core.config.settings import get_settings
+from app.core.utils.shared_future import _await_result_deferring_cancellation
 from app.db.models import HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2, HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
 from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationEventInput
 
@@ -458,6 +459,7 @@ class HttpBridgeOperationEventBatcher:
         operation_lock = await self._operation_lock_for(operation_id)
         acquired = False
         batch: list[_PendingOperationEvent] = []
+        defer_cancellation = True
         try:
             try:
                 await operation_lock.acquire()
@@ -479,6 +481,11 @@ class HttpBridgeOperationEventBatcher:
                     return
                 current_generation = self._operation_generations.get(operation_id, 0)
                 current_context = self._contexts.get(operation_id)
+                # Terminal drains have their own bounded cancellation and
+                # settlement path.  Ordinary background/explicit flushes,
+                # however, keep the durable writer owned until its outcome is
+                # known so a committed batch is never requeued as a duplicate.
+                defer_cancellation = operation_id not in self._closing_operations
                 batch = [
                     item
                     for item in batch
@@ -511,15 +518,27 @@ class HttpBridgeOperationEventBatcher:
                     for item in batch
                 ]
                 if self._spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:
-                    persisted = await self._durable_bridge.append_operation_event_chunk(
+                    append = self._durable_bridge.append_operation_event_chunk(
                         events=events,
                         max_bytes=self._max_bytes,
                     )
                 else:
-                    persisted = await self._durable_bridge.append_operation_events(
+                    append = self._durable_bridge.append_operation_events(
                         events=events,
                         max_bytes=self._max_bytes,
                     )
+                # Keep the durable write in its own task so cancellation of
+                # the flusher cannot interrupt a commit that is already in
+                # progress.  Resolve the append outcome before deciding
+                # whether the dequeued batch needs to be restored.
+                if defer_cancellation:
+                    persisted, deferred_cancellation = await _await_result_deferring_cancellation(
+                        append,
+                        scheduler=self._scheduler,
+                    )
+                else:
+                    persisted = await append
+                    deferred_cancellation = None
                 if not persisted:
                     failed_batch = batch
                     batch = []
@@ -529,6 +548,8 @@ class HttpBridgeOperationEventBatcher:
                     # The durable append completed; do not requeue this batch
                     # if cancellation arrives while final bookkeeping runs.
                     batch = []
+                if deferred_cancellation is not None:
+                    raise deferred_cancellation
             except asyncio.CancelledError:
                 # Consume cancellation long enough to restore the dequeued
                 # events and let the inflight bookkeeping in ``finally`` run.
@@ -1297,6 +1318,15 @@ class HttpBridgeOperationEventBatcher:
         # normal settlement-required result; cancelling the public caller here
         # would leak CancelledError to its owner instead.
         await self._drain_terminal_tasks(tuple(self._terminal_append_tasks), kind="append", cancel=True)
+        # A flusher cancellation can restore an ordinary batch after dequeue
+        # (for example if the durable task itself is cancelled before it
+        # starts).  Drain that queue while the batcher still owns its durable
+        # writer; otherwise close() would return with transcript data stranded
+        # in memory.
+        async with self._lock:
+            pending_operation_ids = tuple(self._pending)
+        for operation_id in pending_operation_ids:
+            await self.flush_pending_operation(operation_id=operation_id)
         # Yield once so a caller completing its finalizer handoff after the
         # append-task drain is visible before taking the finalizer snapshot.
         await asyncio.sleep(0)

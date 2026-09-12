@@ -33,9 +33,7 @@ from app.core.balancer import (
     handle_rate_limit,
     plausible_rate_limit_reset_at,
 )
-from app.core.balancer import (
-    select_account as select_account,
-)
+from app.core.balancer import select_account as select_account
 from app.core.balancer.types import UpstreamError
 from app.core.clock import REAL_CLOCK, Clock
 from app.core.config.dashboard_overrides import with_dashboard_overrides
@@ -2417,8 +2415,9 @@ def _state_from_account(
     ):
         effective_runtime_reset = None
 
-    # Post-block evidence clears resets after debounce. Quota recovery uses persisted
-    # markers; early rate-limit recovery requires this replica's runtime block evidence.
+    # Clear runtime reset only after post-block refresh and debounce. Persisted
+    # QUOTA_EXCEEDED blocks are cross-replica; RATE_LIMITED early recovery stays
+    # local to the replica that observed the current block.
     cooldown_ready = False
     if account.status == AccountStatus.QUOTA_EXCEEDED:
         cooldown_ready = (
@@ -2475,11 +2474,8 @@ def _state_from_account(
                 and _usage_entry_recorded_after_block(rejected_reset_freshness_entry, effective_blocked_at)
             )
 
-    # A resetless rate limit whose runtime cooldown was lost (e.g. a restart
-    # after a 429 without reset metadata) has no deadline to expire and no
-    # post-block evidence trail; a long-window sample alone must not clear
-    # it. Evidence-gated clearing above always starts from a persisted or
-    # runtime reset, so this only matches the truly resetless case.
+    # A resetless rate limit has no deadline or post-block evidence trail, so a
+    # long-window sample alone must not clear it.
     resetless_rate_limit_without_evidence = (
         status_seed == AccountStatus.RATE_LIMITED and account.reset_at is None and runtime.reset_at is None
     )

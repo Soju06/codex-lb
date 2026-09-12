@@ -25,6 +25,8 @@ export type ApiKeysSectionProps = {
   apiKeyAuthEnabled: boolean;
   hideUpstreamQuotaFromApiKeys: boolean;
   disabled?: boolean;
+  /** The auth and quota-privacy toggles are security settings (`security:write`). */
+  policyControlsDisabled?: boolean;
   onApiKeyAuthEnabledChange: (enabled: boolean) => void;
   onHideUpstreamQuotaFromApiKeysChange: (enabled: boolean) => void;
 };
@@ -33,6 +35,7 @@ export function ApiKeysSection({
   apiKeyAuthEnabled,
   hideUpstreamQuotaFromApiKeys,
   disabled = false,
+  policyControlsDisabled = disabled,
   onApiKeyAuthEnabledChange,
   onHideUpstreamQuotaFromApiKeysChange,
 }: ApiKeysSectionProps) {
@@ -99,13 +102,13 @@ export function ApiKeysSection({
 
       <ApiKeyAuthToggle
         enabled={apiKeyAuthEnabled}
-        disabled={busy}
+        disabled={busy || policyControlsDisabled}
         onChange={onApiKeyAuthEnabledChange}
       />
 
       <ApiKeyQuotaPrivacyToggle
         enabled={hideUpstreamQuotaFromApiKeys}
-        disabled={busy}
+        disabled={busy || policyControlsDisabled}
         onChange={onHideUpstreamQuotaFromApiKeysChange}
       />
 

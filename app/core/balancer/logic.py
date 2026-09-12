@@ -1269,7 +1269,7 @@ QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0
 # protects clients from waiting the worst-case persisted ``reset_at`` after
 # OpenAI-side reset events that propagate lazily through ``/wham/usage`` (see
 # https://github.com/Soju06/codex-lb/issues/676). codex-lb's background usage
-# refresh runs every ``usage_refresh_interval_seconds`` (default 60s) and the
+# refresh runs every ``USAGE_REFRESH_INTERVAL_SECONDS`` (60 s) and the
 # per-status cooldowns are 120s, so a 300s ceiling lets clients reattempt
 # inside the auto-recovery window. The underlying ``AccountState.reset_at``
 # and ``AccountState.cooldown_until`` fields are not clamped.

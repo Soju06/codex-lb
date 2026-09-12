@@ -41,11 +41,7 @@ class TimeoutSettings(Protocol):
     transcription_request_budget_seconds: float
     sse_keepalive_interval_seconds: float
     http_responses_session_bridge_request_budget_seconds: float
-    http_responses_session_bridge_stuck_gate_retire_after_seconds: float
-    http_responses_session_bridge_clean_close_retry_jitter_max_seconds: float
-    proxy_admission_wait_timeout_seconds: float
     proxy_account_lease_ttl_seconds: float
-    model_registry_enabled: bool
 
     @property
     def model_registry_snapshot_max_age_seconds(self) -> int | float: ...
@@ -103,19 +99,23 @@ PROXY_BUDGET = _field("proxy_request_budget_seconds", "app/core/config/settings.
 TRANSCRIPTION_BUDGET = _field("transcription_request_budget_seconds", "app/core/clients/proxy.py:5733")
 STREAM_BUDGET = _field(
     "http_responses_stream_request_budget_seconds",
-    "app/modules/proxy/_service/streaming/helpers.py:724",
+    "app/modules/proxy/_service/streaming/helpers.py:927",
 )
 COMPACT_BUDGET = _field("compact_request_budget_seconds", "app/modules/proxy/_service/compact.py:585")
 BRIDGE_BUDGET = _field(
     "http_responses_session_bridge_request_budget_seconds",
-    "app/modules/proxy/_service/http_bridge/helpers.py:2469",
+    "app/modules/proxy/_service/http_bridge/helpers.py:3685",
 )
-ADMISSION_WAIT = _field("proxy_admission_wait_timeout_seconds", "app/modules/proxy/service.py:768")
+ADMISSION_WAIT = _expr(
+    "ADMISSION_WAIT_TIMEOUT_SECONDS",
+    "app/modules/proxy/work_admission.py:25",
+    lambda settings: _admission_wait_timeout_seconds(),
+)
 ACCOUNT_LEASE_TTL = _field("proxy_account_lease_ttl_seconds", "app/modules/proxy/load_balancer.py:1993")
 BRIDGE_STUCK_GATE_HARD_ANCHOR_RETIRE = _expr(
-    "2 * http_responses_session_bridge_stuck_gate_retire_after_seconds",
-    "app/modules/proxy/_service/http_bridge/helpers.py:686",
-    lambda settings: 2.0 * settings.http_responses_session_bridge_stuck_gate_retire_after_seconds,
+    "2 * HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
+    "app/modules/proxy/_service/http_bridge/helpers.py:224",
+    lambda settings: 2.0 * _http_bridge_stuck_gate_retire_after_seconds(),
 )
 MODEL_REGISTRY_SNAPSHOT_MAX_AGE = _field(
     "model_registry_snapshot_max_age_seconds",
@@ -138,10 +138,22 @@ DURABLE_BRIDGE_RETRY_CIRCUIT_MIN_TTL = _expr(
 )
 
 
+def _http_bridge_stuck_gate_retire_after_seconds() -> float:
+    from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
+
+    return float(http_bridge_helpers.HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS)
+
+
 def _model_registry_refresh_interval_seconds() -> float:
     from app.core.openai.model_refresh_scheduler import _REFRESH_INTERVAL_SECONDS
 
     return float(_REFRESH_INTERVAL_SECONDS)
+
+
+def _admission_wait_timeout_seconds() -> float:
+    from app.modules.proxy.work_admission import ADMISSION_WAIT_TIMEOUT_SECONDS
+
+    return float(ADMISSION_WAIT_TIMEOUT_SECONDS)
 
 
 def _durable_bridge_retry_circuit_state_ttl_seconds() -> float:
@@ -182,6 +194,21 @@ TIMEOUT_INVARIANT_RULES: tuple[TimeoutInvariantRule, ...] = (
         "Transcription requests connect inside their own budget; a connect timeout above it can never be honoured.",
     ),
     TimeoutInvariantRule(
+        "upstream-connect-within-stream-budget",
+        UPSTREAM_CONNECT_TIMEOUT,
+        "<=",
+        STREAM_BUDGET,
+        "Responses streams connect inside the stream request budget; a connect timeout above it is never honoured.",
+    ),
+    TimeoutInvariantRule(
+        "upstream-connect-within-bridge-budget",
+        UPSTREAM_CONNECT_TIMEOUT,
+        "<=",
+        BRIDGE_BUDGET,
+        "HTTP session bridge requests connect inside the bridge request budget; a connect timeout above it "
+        "is never honoured.",
+    ),
+    TimeoutInvariantRule(
         "admission-wait-within-proxy-budget",
         ADMISSION_WAIT,
         "<=",
@@ -207,8 +234,8 @@ TIMEOUT_INVARIANT_RULES: tuple[TimeoutInvariantRule, ...] = (
         BRIDGE_STUCK_GATE_HARD_ANCHOR_RETIRE,
         "<",
         BRIDGE_BUDGET,
-        "Hard-continuity stuck gate retirement waits up to 2x the configured threshold and must happen before "
-        "the bridge request budget is exhausted.",
+        "Hard-continuity stuck gate retirement waits up to 2x the fixed stuck-gate threshold and must happen "
+        "before the bridge request budget is exhausted.",
     ),
     TimeoutInvariantRule(
         "account-lease-ttl-covers-proxy-budget",
@@ -243,7 +270,6 @@ TIMEOUT_INVARIANT_RULES: tuple[TimeoutInvariantRule, ...] = (
 
 # TODO(timeout_sem_001): database_migration_lock_timeout_seconds is independent startup DB migration policy.
 # TODO(timeout_sem_008): proxy_downstream_websocket_idle_timeout_seconds has no verified ordering with bridge TTL.
-# TODO(timeout_sem_009): oauth_timeout_seconds is used in OAuth/client flows, not a verified proxy-path deadline.
 # TODO(timeout_sem_015): openai_cache_affinity_max_age_seconds participates with dashboard prompt-cache TTL in
 # cleanup retention.
 # TODO(timeout_sem_021): upstream_route_cache_ttl_seconds is invalidation freshness policy; no timeout inequality
@@ -254,8 +280,6 @@ TIMEOUT_INVARIANT_RULES: tuple[TimeoutInvariantRule, ...] = (
 # inequality.
 # TODO(timeout_sem_027): proxy_account_cap_partition_scale_down_seconds is a stability window; exact heartbeat relation
 # is internal.
-# TODO(timeout_sem_029): usage_refresh_auth_failure_cooldown_seconds is policy cooldown, not a verified scheduler
-# inequality.
 # TODO(timeout_sem_030): shutdown_drain_timeout_seconds depends on deployment termination grace outside Settings.
 # timeout_sem_031 is enforced by durable-bridge-retry-circuit-ttl-covers-backoff-and-half-open.
 # TODO(timeout_sem_032/033): SQLite busy retry constants are module-local and not Settings-field rules.
@@ -273,8 +297,6 @@ _RELATIONS: dict[str, Callable[[float, float], bool]] = {
 def find_timeout_invariant_violations(settings: TimeoutSettings) -> list[TimeoutInvariantViolation]:
     violations: list[TimeoutInvariantViolation] = []
     for rule in TIMEOUT_INVARIANT_RULES:
-        if rule.id == "model-registry-snapshot-outlives-refresh-interval" and not settings.model_registry_enabled:
-            continue
         lhs_value = rule.lhs.evaluate(settings)
         rhs_value = rule.rhs.evaluate(settings)
         if not _RELATIONS[rule.relation](lhs_value, rhs_value):

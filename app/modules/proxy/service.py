@@ -444,6 +444,11 @@ from app.modules.proxy._service.response_create import (
     _inline_top_level_input_image_urls as _inline_top_level_input_image_urls,
 )
 from app.modules.proxy._service.response_create import (
+    _input_image_request_requires_http_upstream,  # noqa: F401
+    _responses_request_contains_input_image,  # noqa: F401
+    _responses_request_uses_image_generation,  # noqa: F401
+)
+from app.modules.proxy._service.response_create import (
     _input_part_is_image as _input_part_is_image,
 )
 from app.modules.proxy._service.response_create import (
@@ -478,12 +483,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _response_output_item_done_tool_call as _response_output_item_done_tool_call,
-)
-from app.modules.proxy._service.response_create import (
-    _responses_request_contains_input_image as _responses_request_contains_input_image,
-)
-from app.modules.proxy._service.response_create import (
-    _responses_request_uses_image_generation as _responses_request_uses_image_generation,
 )
 from app.modules.proxy._service.response_create import (
     _safe_dump_slug as _safe_dump_slug,
@@ -772,7 +771,13 @@ from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
 from app.modules.proxy.selection_errors import selection_failure_response
-from app.modules.proxy.work_admission import WorkAdmissionController
+from app.modules.proxy.work_admission import (
+    ADMISSION_WAIT_TIMEOUT_SECONDS,
+    COMPACT_RESPONSE_CREATE_LIMIT,
+    TOKEN_REFRESH_LIMIT,
+    UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+    WorkAdmissionController,
+)
 
 
 def get_settings() -> _Settings:
@@ -795,21 +800,12 @@ _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 # error probe window. If a keepalive becomes the first yielded chunk, the HTTP
 # status is committed as 200 and startup ProxyResponseError handling is masked.
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
-_DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
 
 
-def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
-    settings = settings or get_settings()
-    raw_timeout = getattr(
-        settings,
-        "proxy_admission_wait_timeout_seconds",
-        _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS,
-    )
-    try:
-        timeout = float(raw_timeout)
-    except (TypeError, ValueError):
-        timeout = _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS
-    return max(0.001, timeout)
+def _proxy_admission_wait_timeout_seconds() -> float:
+    # Module-level indirection so the HTTP bridge helpers and tests share one
+    # patch point for the fixed admission wait.
+    return ADMISSION_WAIT_TIMEOUT_SECONDS
 
 
 # Maximum time (seconds) to wait for a prewarm upstream response before
@@ -972,13 +968,12 @@ class ProxyService(
 
     def _get_work_admission(self) -> WorkAdmissionController:
         if self._work_admission is None:
-            settings = get_settings()
             self._work_admission = WorkAdmissionController(
-                token_refresh_limit=settings.proxy_token_refresh_limit,
-                websocket_connect_limit=settings.proxy_upstream_websocket_connect_limit,
-                response_create_limit=settings.proxy_response_create_limit,
-                compact_response_create_limit=settings.proxy_compact_response_create_limit,
-                admission_wait_timeout_seconds=getattr(settings, "proxy_admission_wait_timeout_seconds", 10.0),
+                token_refresh_limit=TOKEN_REFRESH_LIMIT,
+                websocket_connect_limit=UPSTREAM_WEBSOCKET_CONNECT_LIMIT,
+                response_create_limit=get_settings().proxy_response_create_limit,
+                compact_response_create_limit=COMPACT_RESPONSE_CREATE_LIMIT,
+                admission_wait_timeout_seconds=_proxy_admission_wait_timeout_seconds(),
                 scheduler=self._scheduler,
             )
         return self._work_admission
@@ -1290,6 +1285,7 @@ class ProxyService(
         account_id: str | None = None,
         surface: str = "websocket",
         routing_tunables: RoutingTunables | None = None,
+        dashboard_settings: DashboardSettings | None = None,
     ) -> None:
         scheduler = self._scheduler
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
@@ -1300,9 +1296,16 @@ class ProxyService(
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = self._clock.monotonic()
         if account_id is not None:
-            # One cached snapshot for this lease operation; a caller that already
-            # resolved the tunables for the same turn (bridge submit) passes them.
-            settings = await get_settings_cache().get()
+            # One cached snapshot for this lease operation. A caller that
+            # already resolved the row for the same turn passes it in, and then
+            # this helper awaits nothing here at all -- which the prewarm path
+            # needs: it admits its warm-up while holding the session's
+            # ``prewarm_lock``, and a cache refresh behind this read runs a DB
+            # query under a process-global lock, so one stalled refresh would
+            # suspend that critical section (issues #1971/#1972 wedged every
+            # keyed submit on exactly this pattern). Tunables resolved by the
+            # caller (bridge submit) still override the snapshot's.
+            settings = dashboard_settings if dashboard_settings is not None else await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=account_id,
                 request_id=request_state.request_id,
@@ -1420,6 +1423,14 @@ class ProxyService(
             await self._release_request_state_account_response_create_lease(request_state)
             await _release_websocket_response_create_gate(request_state, response_create_gate, scheduler=scheduler)
             raise
+        # The global response-create admission is a queue wait too, and a direct
+        # WebSocket has no bridge-queue measurement: fold it into the gate wait
+        # so the row carries the whole pre-send wait (the TTFT cohort sampler
+        # skips any row with a non-zero wait).
+        if request_state.response_create_gate_wait_started_at is not None:
+            request_state.latency_response_create_gate_wait_ms = int(
+                max(0.0, self._clock.monotonic() - request_state.response_create_gate_wait_started_at) * 1000
+            )
 
     async def _release_request_state_account_response_create_lease(
         self,

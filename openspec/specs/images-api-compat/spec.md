@@ -4,10 +4,12 @@
 Define the OpenAI-compatible Images API adapter that exposes public `gpt-image-*`
 requests while routing through the existing Responses `image_generation` tool
 pipeline.
+
 ## Requirements
+
 ### Requirement: OpenAI-compatible image generation endpoint
 
-The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Images API request shape (`model`, `prompt`, `n`, `size`, `quality`, `background`, `output_format`, `output_compression`, `moderation`, `partial_images`, `stream`, `user`). The endpoint MUST require `model` to start with `gpt-image-` and MUST treat `gpt-image-2` as the default if unspecified. The endpoint MUST NOT expose the internal "host" Responses model used to invoke the built-in `image_generation` tool.
+The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Images API request shape (`model`, `prompt`, `n`, `size`, `quality`, `background`, `output_format`, `output_compression`, `moderation`, `partial_images`, `stream`, `user`). The endpoint MUST require `model` to start with `gpt-image-` and MUST treat `gpt-image-2` as the default if unspecified; the default is the fixed constant `DEFAULT_PUBLIC_IMAGE_MODEL` in `app/core/openai/images.py` and MUST NOT be operator-configurable. The endpoint MUST NOT expose the internal "host" Responses model used to invoke the built-in `image_generation` tool.
 
 #### Scenario: Compatible image generation request returns a JSON envelope
 
@@ -38,7 +40,8 @@ The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Imag
 #### Scenario: Missing model defaults to images_default_model
 
 - **WHEN** a client sends `/v1/images/generations` or `/v1/images/edits` without `model`
-- **THEN** the service uses `images_default_model` (default `gpt-image-2`) as the publicly-effective model for validation, request log accounting, and the internal `image_generation` tool config
+- **THEN** the service uses `gpt-image-2` as the publicly-effective model for validation, request log accounting, and the internal `image_generation` tool config
+- **AND** a `CODEX_LB_IMAGES_DEFAULT_MODEL` value in the environment does not change that default (startup logs the removed-setting warning once)
 
 ### Requirement: OpenAI-compatible image edit endpoint
 
@@ -270,3 +273,17 @@ The Codex-base and `/v1` image generation and edit routes MUST require a valid p
 - **WHEN** an Images request omits the required-capability carrier
 - **THEN** the route retains its existing authentication, validation, account-routing, observability, and response behavior
 
+### Requirement: Internal host selection
+Images generation and edit routes MUST select the first candidate with nonempty registry plan visibility and no suppression, ordered as `gpt-5.6-luna`, `gpt-5.5`. If none qualifies, they MUST use `gpt-5.6-luna`. Public image model IDs MUST remain unchanged.
+
+#### Scenario: Cold registry prefers the current host
+- **WHEN** the registry uses the bootstrap catalog
+- **THEN** the internal model is `gpt-5.6-luna`
+
+#### Scenario: Preferred model unavailable in registry
+- **WHEN** only `gpt-5.5` has registry plan visibility without suppression
+- **THEN** the internal model is `gpt-5.5`
+
+#### Scenario: No candidate qualifies
+- **WHEN** neither candidate has plan visibility without suppression
+- **THEN** the selected host is `gpt-5.6-luna` and existing downstream error handling applies

@@ -55,6 +55,12 @@ class DurableBridgeLookup:
     model: str | None = None
     latest_pending_tool_calls: dict[str, str] | None = None
     owner_process_epoch: str | None = None
+    # True when a writer retired this row's continuity owner. The lookup then
+    # carries no owner and no anchor, and the request proceeds as if this
+    # thread had never been pinned — which is different from "no row exists",
+    # because callers must not fail closed on the missing owner.
+    continuity_abandoned: bool = False
+    retired_account_id: str | None = None
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -770,8 +776,9 @@ class DurableBridgeSessionCoordinator:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
+        complete_spool: bool = True,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).append_terminal_operation_event(
@@ -784,6 +791,7 @@ class DurableBridgeSessionCoordinator:
                 state=state,
                 expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 response_id=response_id,
+                complete_spool=complete_spool,
             )
 
     async def append_operation_events(
@@ -820,8 +828,9 @@ class DurableBridgeSessionCoordinator:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
+        complete_spool: bool = True,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).append_terminal_operation_chunk(
@@ -834,6 +843,7 @@ class DurableBridgeSessionCoordinator:
                 state=state,
                 expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 response_id=response_id,
+                complete_spool=complete_spool,
             )
 
     async def finalize_operation_event_spool(
@@ -843,6 +853,7 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_state: str | None = None,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).finalize_operation_event_spool(
@@ -850,6 +861,7 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_state=expected_state,
             )
 
     async def settle_terminal_append_failure(
@@ -861,7 +873,7 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         state: str,
         expected_response_id: str | None,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         alternate_expected_response_id: str | None = None,
         response_id: str | None = None,
     ) -> bool:
@@ -1020,6 +1032,21 @@ class DurableBridgeSessionCoordinator:
                 request_fingerprint=request_fingerprint,
             )
 
+    async def retire_continuity_owner_if_unavailable(
+        self,
+        *,
+        session_id: str,
+        expected_account_id: str,
+        recovery_deadline_epoch: int,
+    ) -> bool:
+        """Retire a row's owner now when it cannot return before the deadline."""
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).retire_continuity_owner_if_unavailable(
+                session_id,
+                expected_account_id=expected_account_id,
+                recovery_deadline_epoch=recovery_deadline_epoch,
+            )
+
     async def mark_instance_draining(self, *, instance_id: str) -> int:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_owner_draining(instance_id=instance_id)
@@ -1147,21 +1174,44 @@ class DurableBridgeSessionCoordinator:
 
 
 def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
+    # Every lookup path funnels through here, so retirement is applied once
+    # rather than at each call site — the detached-row filter above had to be
+    # repeated and ended up covering only two of the four paths.
+    #
+    # A retired row keeps its identity (callers still need the session id and
+    # canonical key to claim it) but surrenders every piece of continuity
+    # evidence: the owner, the response anchor and the turn state. Dropping
+    # the anchors alongside the owner is what makes the retirement coherent —
+    # an anchor without its account is upstream state no replacement account
+    # can read, and leaving it would have the next request inject a pointer
+    # that only the retired owner could resolve.
+    retired = snapshot.continuity_abandoned
     return DurableBridgeLookup(
         session_id=snapshot.id,
         canonical_kind=snapshot.session_key_kind,
         canonical_key=snapshot.session_key_value,
         api_key_scope=snapshot.api_key_scope,
-        account_id=snapshot.account_id,
-        owner_instance_id=snapshot.owner_instance_id,
-        owner_process_epoch=snapshot.owner_process_epoch,
+        account_id=None if retired else snapshot.account_id,
+        # The owning replica goes with the owner. ``_durable_bridge_lookup_active_owner``
+        # would otherwise still name it and forward the request there, and the
+        # takeover gates would treat the row as live. The sweep only retires
+        # rows that have been idle for the whole grace window, so no lease can
+        # realistically still be running — but leaving these set makes the
+        # invariant depend on the lease TTL staying below the grace window,
+        # which is a setting nobody would think to check before changing.
+        owner_instance_id=None if retired else snapshot.owner_instance_id,
+        owner_process_epoch=None if retired else snapshot.owner_process_epoch,
+        # The epoch is fencing state, not continuity evidence: a later claim
+        # must still advance past it, so it is preserved.
         owner_epoch=snapshot.owner_epoch,
-        lease_expires_at=snapshot.lease_expires_at,
+        lease_expires_at=None if retired else snapshot.lease_expires_at,
         state=snapshot.state,
-        latest_turn_state=snapshot.latest_turn_state,
-        latest_response_id=snapshot.latest_response_id,
-        latest_input_item_count=snapshot.latest_input_item_count,
-        latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
+        latest_turn_state=None if retired else snapshot.latest_turn_state,
+        latest_response_id=None if retired else snapshot.latest_response_id,
+        latest_input_item_count=None if retired else snapshot.latest_input_item_count,
+        latest_input_full_fingerprint=None if retired else snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
-        latest_pending_tool_calls=snapshot.latest_pending_tool_calls,
+        latest_pending_tool_calls=None if retired else snapshot.latest_pending_tool_calls,
+        continuity_abandoned=retired,
+        retired_account_id=snapshot.abandoned_account_id,
     )

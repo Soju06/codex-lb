@@ -36,7 +36,7 @@ from app.modules.model_sources.forwarding import (
     SourceUsageHolder,
 )
 from app.modules.proxy import source_dispatch as dispatch_module
-from app.modules.proxy.model_source_pins import PinIntent, PinWrite
+from app.modules.proxy.model_source_pins import PinIntent, PinWrite, PinWriteExecutor, PinWriteOutcome
 from app.modules.proxy.source_admission import SourceAdmission, SourceBulkhead
 from app.modules.proxy.source_dispatch import (
     ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
@@ -165,6 +165,19 @@ class _Recorder:
         return cast(asyncio.Task[None], None)
 
 
+class _FakeTrial:
+    """``TrialClaim`` double: records the first-item observation and the terminal result, in order."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def observe_first_output_item(self) -> None:
+        self.events.append("first_output_item")
+
+    def settle(self, result: str) -> None:
+        self.events.append(f"settle:{result}")
+
+
 @pytest.fixture
 def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
     recorded = _Recorder()
@@ -195,12 +208,13 @@ def _owner(
     bulkhead: SourceBulkhead | None = None,
     source: ModelSource | None = None,
     admission_budget: ApiKeyRequestUsageBudget | None = None,
+    trial: _FakeTrial | None = None,
     **overrides: object,
 ) -> SourceDispatch:
     active_source = source or _source()
     active_bulkhead = bulkhead or SourceBulkhead()
     slot = active_bulkhead.try_acquire(active_source.id, active_source.max_concurrency)
-    claims = SourceAdmission(slot=slot, bulkhead=active_bulkhead)
+    claims = SourceAdmission(slot=slot, trial=trial, bulkhead=active_bulkhead)
     kwargs: dict[str, Any] = {
         "request": (request or _FakeRequest()).request,
         "source": active_source,
@@ -1971,3 +1985,577 @@ async def test_missing_usage_increments_usage_estimated_total_with_source_and_ca
 
     assert counter.calls == [{"source_id": owner.source.id, "cause": "missing_usage"}]
     assert counter.incs == 1
+
+
+# -- on_finished hook and anchor resolution (#2123 WP-C2, C1 gaps 9/10) ------------------------------
+
+
+@dataclass(slots=True)
+class _HookRecorder:
+    calls: list[tuple[SourceDispatch, str]] = field(default_factory=list)
+    error: Exception | None = None
+
+    def __call__(self, owner: SourceDispatch, status: str) -> None:
+        self.calls.append((owner, status))
+        if self.error is not None:
+            raise self.error
+
+
+@pytest.mark.asyncio
+async def test_on_finished_is_called_exactly_once_even_when_release_and_row_raise(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder.release_error = RuntimeError("db down")
+    hook = _HookRecorder()
+    owner = _owner(recorder, reservation=_reservation(), on_finished=hook)
+    _attach_stream(owner)
+
+    async def failing_row(self: SourceDispatch, **kwargs: object) -> None:
+        raise RuntimeError("row down")
+
+    monkeypatch.setattr(SourceDispatch, "write_row", failing_row)
+    with pytest.raises(RuntimeError, match="row down"):
+        await owner.finish(status="error", error_code="model_source_timeout")
+    await owner.finish(status="error", error_code="model_source_timeout")
+    await owner.finish(status="success")
+    await owner.abandon(ABANDON_CLIENT_DISCONNECTED_DURING_OPEN)
+
+    assert hook.calls == [(owner, "error")]
+    assert owner.finished is True
+
+
+@pytest.mark.asyncio
+async def test_on_finished_receives_the_settlement_corrected_status(recorder: _Recorder) -> None:
+    recorder.settle_result = False
+    hook = _HookRecorder()
+    owner = _owner(recorder, reservation=_reservation(limited=False), on_finished=hook)
+    _attach_stream(owner)
+    await owner.finish(status="success", usage=SourceUsage(input_tokens=3, output_tokens=2))
+    assert hook.calls == [(owner, "error")]
+    assert recorder.rows[0]["error_code"] == "usage_settlement_failed"
+
+
+@pytest.mark.asyncio
+async def test_on_finished_failure_never_breaks_the_latch(recorder: _Recorder, caplog) -> None:
+    hook = _HookRecorder(error=RuntimeError("metrics down"))
+    bulkhead = SourceBulkhead()
+    owner = _owner(recorder, reservation=_reservation(), bulkhead=bulkhead, on_finished=hook)
+    _attach_stream(owner)
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.source_dispatch")
+    await owner.finish(status="success", usage=SourceUsage(input_tokens=1, output_tokens=1))
+    assert len(hook.calls) == 1
+    assert len(recorder.rows) == 1
+    assert bulkhead.in_flight(owner.source.id) == 0
+    assert "source_dispatch_on_finished_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_on_finished_defaults_to_none_for_direct_routing(recorder: _Recorder) -> None:
+    owner = _owner(recorder)
+    assert owner.on_finished is None
+    _attach_stream(owner)
+    await owner.finish(status="success")
+    assert len(recorder.rows) == 1
+
+
+class _ResolvingExecutor:
+    def __init__(self) -> None:
+        self.intents: list[PinIntent] = []
+
+    async def commit(self, intent: PinIntent, *, drain_until: object, scheduler: object, clock: object) -> str:
+        self.intents.append(intent)
+        return "written"
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_commits_the_intent_resolved_against_the_source_response_id(recorder: _Recorder) -> None:
+    """The anchor row for an SDK chain lands in the same transaction as the thread pin (design §3, §6.3)."""
+
+    executor = _ResolvingExecutor()
+    intent = PinIntent(
+        writes=(PinWrite(pin_key="thread\nabc", kind="thread", source_id="src", api_key_id="key-1"),),
+        thread_key="abc",
+        source_id="src",
+        anchor_api_key_id="key-1",
+        anchor=True,
+    )
+    owner = _owner(recorder, pin_intent=intent, pin_executor=executor)
+    await owner.on_first_content(SourceUsageHolder(response_id="resp_source_1"))
+
+    assert len(executor.intents) == 1
+    committed = executor.intents[0]
+    assert [write.pin_key for write in committed.writes] == ["thread\nabc", "anchor\nkey-1\nresp_source_1"]
+    assert committed.writes[1].kind == "anchor"
+    assert committed.writes[1].source_id == "src"
+    assert committed.anchor_resolved is True
+    assert owner.pin_outcome == "written"
+
+
+class _IssueRecordingExecutor(PinWriteExecutor):
+    """The real ``commit`` (so its anchor pre-check and empty-write short-circuit run) over a stubbed statement phase.
+
+    ``_run`` is the first thing ``commit`` reaches once it has decided to issue
+    a statement, so an empty ``issued`` list is proof that nothing was written
+    -- which the module's own ``_ResolvingExecutor``/``_FakeExecutor`` doubles
+    cannot show, because they replace ``commit`` itself.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(session_factory=_unreachable_session_factory, writer_section=_unreachable_writer_section)
+        self.issued: list[str] = []
+
+    async def _run(self, operation: Any, verify: Any, *, scheduler: Any, action: str, kinds: str) -> PinWriteOutcome:
+        self.issued.append(kinds)
+        return "written"
+
+
+@contextlib.asynccontextmanager
+async def _unreachable_session_factory() -> AsyncIterator[Any]:
+    raise AssertionError("the stubbed statement phase must not open a session")
+    yield  # pragma: no cover - async generator marker
+
+
+@contextlib.asynccontextmanager
+async def _unreachable_writer_section() -> AsyncIterator[None]:
+    raise AssertionError("the stubbed statement phase must not enter the writer section")
+    yield  # pragma: no cover - async generator marker
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_fails_closed_when_the_dispatch_owes_an_anchor_the_source_never_minted(
+    recorder: _Recorder,
+) -> None:
+    """Decision 78: ``store`` not ``false`` + no source ``response.id`` at the trigger -> nothing written, no frame."""
+
+    executor = _IssueRecordingExecutor()
+    intent = PinIntent(
+        writes=(PinWrite(pin_key="thread\nabc", kind="thread", source_id="src", api_key_id=None),),
+        thread_key="abc",
+        source_id="src",
+        anchor=True,
+    )
+    owner = _owner(recorder, pin_intent=intent, pin_executor=executor)
+
+    with pytest.raises(SourcePinCommitError) as excinfo:
+        await owner.on_first_content(SourceUsageHolder())
+
+    assert excinfo.value.outcome == "not_written"
+    assert owner.pin_outcome == "not_written"
+    assert owner.pin_failure_row_code == owner.pin_failure_error_code
+    assert executor.issued == [], "the thread pin must not be written either: nothing was delivered"
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_commits_the_thread_pin_only_when_no_anchor_is_owed(recorder: _Recorder) -> None:
+    """The native ``store: false`` shape stays servable through its thread pin alone, without any response id."""
+
+    executor = _IssueRecordingExecutor()
+    intent = PinIntent(
+        writes=(PinWrite(pin_key="thread\nabc", kind="thread", source_id="src", api_key_id=None),),
+        thread_key="abc",
+        source_id="src",
+    )
+    owner = _owner(recorder, pin_intent=intent, pin_executor=executor)
+
+    await owner.on_first_content(SourceUsageHolder())
+
+    assert executor.issued == ["thread"]
+    assert owner.pin_outcome == "written"
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_store_false_intent_never_anchors(recorder: _Recorder) -> None:
+    """Mutant: anchor written for ``store: false`` (``anchor=False``)."""
+
+    executor = _ResolvingExecutor()
+    owner = _owner(recorder, pin_intent=_intent(), pin_executor=executor)
+    await owner.on_first_content(SourceUsageHolder(response_id="resp_source_1"))
+    assert [write.kind for write in executor.intents[0].writes] == ["thread"]
+    assert executor.intents[0].anchor_resolved is False
+
+
+# -- breaker trial: first output item and the terminal classification (design §8.3) ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_settles_the_trial_at_the_first_output_item_before_the_stream_ends(
+    recorder: _Recorder,
+) -> None:
+    """The first output item yielded closes a half-open breaker while the slot stays held until ``finish()``.
+
+    Mutant (the trial settles only in the ``finally``): a recovered source streaming a long answer keeps the
+    breaker half-open with the lease held, and every other overflow request is declined ``breaker_open`` until
+    the stream ends or the 120 s lease expires.
+    """
+
+    trial = _FakeTrial()
+    bulkhead = SourceBulkhead()
+    owner = _owner(recorder, reservation=_reservation(limited=False), bulkhead=bulkhead, trial=trial)
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        # The parser saw ``response.output_item.added`` and the body released it past the pin hook.
+        holder.first_content_seen = True
+        holder.first_output_item_seen = True
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        yield "event: response.output_text.delta\ndata: {}\n\n"
+        holder.terminal_kind = "completed"
+        yield "event: response.completed\ndata: {}\n\n"
+
+    chunks: list[str] = []
+    async for chunk in settlement_stream(owner, inner()):
+        chunks.append(chunk)
+        if len(chunks) == 1:
+            assert trial.events == [], "bookkeeping frames never conclude the trial"
+        if len(chunks) == 2:
+            # The item frame has been handed to the transport: the trial is concluded, the slot still held.
+            assert trial.events == ["first_output_item"]
+            assert bulkhead.in_flight(owner.source.id) == 1
+            assert owner.claims.released is False
+
+    assert len(chunks) == 4
+    assert trial.events == ["first_output_item", "settle:success"]
+    assert bulkhead.in_flight(owner.source.id) == 0 and owner.claims.released is True
+    assert recorder.rows[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_cancel_after_the_first_item_keeps_the_early_trial_conclusion(
+    recorder: _Recorder,
+) -> None:
+    """A client cancel after any frame is never counted: the trial was concluded at the item, the terminal is
+    ``inconclusive`` and the slot is released exactly once."""
+
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(limited=True), trial=trial)
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def inner() -> AsyncIterator[str]:
+        holder.first_content_seen = True
+        holder.first_output_item_seen = True
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        await gate
+        yield "data: never\n\n"
+
+    body = settlement_stream(owner, inner())
+
+    async def consume() -> list[str]:
+        return [chunk async for chunk in body]
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert trial.events == ["first_output_item"]
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert trial.events == ["first_output_item", "settle:inconclusive"]
+    assert owner.claims.released is True
+    assert recorder.rows[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_pin_failure_never_concludes_the_trial(recorder: _Recorder) -> None:
+    """The item frame is still withheld when the pin commit fails, so a pin failure is ``inconclusive`` (spec)."""
+
+    trial = _FakeTrial()
+    executor = _FakeExecutor("not_written")
+    owner = _owner(
+        recorder,
+        reservation=_reservation(),
+        pin_intent=_intent(),
+        pin_executor=executor,
+        trial=trial,
+        pin_failure_error_code="pin_failed",
+        pin_unverified_error_code="pin_unverified",
+    )
+    holder = SourceUsageHolder(
+        first_content_seen=True, first_output_item_seen=True, created_envelope={"id": "resp_src", "object": "response"}
+    )
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        await owner.on_first_content(holder)
+        yield "data: never delivered\n\n"
+
+    chunks = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert len(chunks) == 2
+    assert trial.events == ["settle:inconclusive"]
+    assert owner.claims.released is True
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_success_without_an_output_item_is_inconclusive(recorder: _Recorder) -> None:
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(limited=False), trial=trial)
+    _attach_stream(owner, holder=SourceUsageHolder(terminal_kind="completed"))
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.completed\ndata: {}\n\n"
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+    assert trial.events == ["settle:inconclusive"]
+
+
+@pytest.mark.asyncio
+async def test_first_output_item_observation_failure_never_breaks_the_stream(recorder: _Recorder, caplog) -> None:
+    class _Exploding(_FakeTrial):
+        def observe_first_output_item(self) -> None:
+            raise RuntimeError("breaker gauge down")
+
+    trial = _Exploding()
+    owner = _owner(recorder, reservation=_reservation(limited=False), trial=trial)
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True, terminal_kind="completed")
+    _attach_stream(owner, holder=holder)
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.source_dispatch")
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        yield "event: response.completed\ndata: {}\n\n"
+
+    chunks = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert len(chunks) == 2
+    assert trial.events == ["settle:success"]
+    assert "source_dispatch_first_output_item_failed" in caplog.text
+    assert recorder.rows[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raiser",
+    [
+        ModelSourceForwardingError(
+            status_code=504,
+            payload={"error": {"code": "model_source_idle_timeout", "message": "idle", "type": "upstream_error"}},
+            timeout_phase="idle",
+        ),
+        ValueError("connection reset by peer"),
+    ],
+    ids=["idle-timeout", "transport-drop"],
+)
+async def test_settlement_stream_stream_break_after_the_first_item_is_a_counted_failure(
+    recorder: _Recorder, raiser: Exception
+) -> None:
+    """Spec: after the first frame an idle timeout or a transport drop is counted. Mutant (``inconclusive`` once an
+    item was seen): a source that emits one item and then stalls costs a full idle window per attempt and never
+    opens the breaker; pinned conversations keep paying it."""
+
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(), trial=trial)
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        raise raiser
+
+    with pytest.raises(type(raiser)):
+        _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert trial.events == ["first_output_item", "settle:failure"]
+    assert recorder.rows[0]["status"] == "error"
+    assert recorder.release_calls == [owner.reservation]
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_truncation_after_the_first_item_is_a_counted_failure(recorder: _Recorder) -> None:
+    """A clean end of the stream without a terminal is a transport drop for the breaker: the client received the
+    wrapper's synthesized ``response.failed``, the source did not finish its answer."""
+
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(), trial=trial)
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True, delta_chars=400)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        yield _SYNTHESIZED_TRUNCATION
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert recorder.rows[0]["error_code"] == "model_source_stream_truncated"
+    assert trial.events == ["first_output_item", "settle:failure"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_kind", ["failed", "error"])
+async def test_settlement_stream_failure_terminal_after_the_first_item_is_not_counted(
+    recorder: _Recorder, terminal_kind: str
+) -> None:
+    """Spec: a failure terminal is counted before the first output item only (after it the answer was cut by the
+    source's own terminal, not by the transport)."""
+
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(), trial=trial)
+    holder = SourceUsageHolder(first_content_seen=True, first_output_item_seen=True)
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.output_item.added\ndata: {}\n\n"
+        holder.terminal_kind = cast(Any, terminal_kind)
+        yield (
+            f"event: response.{terminal_kind}\ndata: {{}}\n\n"
+            if terminal_kind == "failed"
+            else ('event: error\ndata: {"type":"error"}\n\n')
+        )
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert recorder.rows[0]["error_code"] == "model_source_response_failed"
+    assert trial.events == ["first_output_item", "settle:inconclusive"]
+
+
+@pytest.mark.asyncio
+async def test_settlement_stream_failure_terminal_before_the_first_item_is_counted(recorder: _Recorder) -> None:
+    trial = _FakeTrial()
+    owner = _owner(recorder, reservation=_reservation(), trial=trial)
+    _attach_stream(owner, holder=SourceUsageHolder(terminal_kind="failed"))
+
+    async def inner() -> AsyncIterator[str]:
+        yield "event: response.created\ndata: {}\n\n"
+        yield "event: response.failed\ndata: {}\n\n"
+
+    _ = [chunk async for chunk in settlement_stream(owner, inner())]
+    assert trial.events == ["settle:failure"]
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code", "first_item", "forwarding", "expected"),
+    [
+        ("success", None, True, None, "success"),
+        ("success", None, False, None, "inconclusive"),
+        ("cancelled", "client_disconnected", True, None, "inconclusive"),
+        ("cancelled", "client_disconnected", False, None, "inconclusive"),
+        ("error", "model_source_stream_error", True, None, "failure"),
+        ("error", "model_source_stream_truncated", True, None, "failure"),
+        ("error", "model_source_response_failed", True, None, "inconclusive"),
+        ("error", "model_source_response_failed", False, None, "failure"),
+        ("error", "model_source_response_invalid", True, None, "inconclusive"),
+        ("error", "model_source_response_invalid", False, None, "failure"),
+        ("error", "model_source_idle_timeout", True, "idle", "failure"),
+        ("error", "invalid_upstream_response", True, "none", "failure"),
+    ],
+)
+def test_stream_trial_result_table(
+    status: str, error_code: str | None, first_item: bool, forwarding: str | None, expected: str
+) -> None:
+    from app.modules.proxy.source_dispatch import stream_trial_result
+
+    forwarding_error: ModelSourceForwardingError | None = None
+    if forwarding is not None:
+        forwarding_error = ModelSourceForwardingError(
+            status_code=502,
+            payload={"error": {"code": error_code, "message": "x", "type": "upstream_error"}},
+            timeout_phase="idle" if forwarding == "idle" else None,
+        )
+    result = stream_trial_result(
+        cast(Any, status),
+        error_code=error_code,
+        first_output_item_seen=first_item,
+        forwarding_error=forwarding_error,
+    )
+    assert result == expected
+
+
+# -- pin-commit outcome counter through the ``on_finished`` hook (spec: pin_commit_failed / _unverified) ---------
+
+
+class _OutcomeCounter:
+    def __init__(self) -> None:
+        self.outcomes: list[tuple[str, str]] = []
+        self._pending: tuple[str, str] | None = None
+
+    def labels(self, **labels: str) -> _OutcomeCounter:
+        self._pending = (labels["route"], labels["outcome"])
+        return self
+
+    def inc(self, amount: float = 1) -> None:
+        assert self._pending is not None
+        self.outcomes.append(self._pending)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "expected"), [("not_written", "pin_commit_failed"), ("unknown", "pin_commit_unverified")]
+)
+async def test_settlement_stream_pin_failure_records_the_pin_commit_outcome_once(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch, outcome: str, expected: str
+) -> None:
+    """Streaming path: ``on_first_content`` sets ``pin_outcome`` before the pin-failure ``finish()``, whose single
+    ``on_finished`` call records the outcome under the decision's route exactly once."""
+
+    from app.modules.proxy import overflow as overflow_module
+
+    counter = _OutcomeCounter()
+    monkeypatch.setattr(overflow_module, "subscription_overflow_total", counter)
+    executor = _FakeExecutor(outcome)
+    owner = _owner(
+        recorder,
+        reservation=_reservation(),
+        pin_intent=_intent(),
+        pin_executor=executor,
+        on_finished=overflow_module.OverflowFinishedHook("codex_responses"),
+    )
+    holder = SourceUsageHolder(first_content_seen=True, created_envelope={"id": "resp_src", "object": "response"})
+    _attach_stream(owner, holder=holder)
+
+    async def inner() -> AsyncIterator[str]:
+        await owner.on_first_content(holder)
+        yield "data: never delivered\n\n"
+
+    chunks = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert len(chunks) == 2
+    assert counter.outcomes == [("codex_responses", expected)]
+    await owner.finish(status="error", error_code="again")  # the latch: no second count
+    assert counter.outcomes == [("codex_responses", expected)]
+
+
+@pytest.mark.asyncio
+async def test_non_stream_pin_failure_finish_records_the_pin_commit_outcome_once(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-streaming path (``_finish_non_stream_source_dispatch``): ``pin_outcome`` is set on the owner and the
+    pin-failure ``finish()`` runs the same hook."""
+
+    from app.modules.proxy import overflow as overflow_module
+
+    counter = _OutcomeCounter()
+    monkeypatch.setattr(overflow_module, "subscription_overflow_total", counter)
+    hook = overflow_module.OverflowFinishedHook("v1_responses")
+    owner = _owner(recorder, reservation=_reservation(), on_finished=hook)
+    _attach_stream(owner)
+    owner.pin_outcome = "unknown"
+
+    await owner.finish(status="error", error_code=owner.pin_failure_row_code)
+
+    assert counter.outcomes == [("v1_responses", "pin_commit_unverified")]
+    assert recorder.release_calls == [owner.reservation]
+
+
+@pytest.mark.asyncio
+async def test_written_pin_records_no_pin_commit_outcome(recorder: _Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.modules.proxy import overflow as overflow_module
+
+    counter = _OutcomeCounter()
+    monkeypatch.setattr(overflow_module, "subscription_overflow_total", counter)
+    owner = _owner(
+        recorder,
+        pin_intent=_intent(),
+        pin_executor=_FakeExecutor("written"),
+        on_finished=overflow_module.OverflowFinishedHook("codex_responses"),
+    )
+    _attach_stream(owner, holder=SourceUsageHolder(terminal_kind="completed"))
+    await owner.on_first_content(SourceUsageHolder())
+    await owner.finish(status="success")
+    assert counter.outcomes == []

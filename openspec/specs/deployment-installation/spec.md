@@ -707,6 +707,25 @@ The following values MUST be fixed at their previously documented defaults:
   drain threshold 90%, error window 60 seconds, error count 2, probe quiet
   window 60 seconds, probe success streak 3), fixed in
   `app/core/balancer/logic.py`.
+- The never-tuned core tunables constantized by `constantize-core-tunables`:
+  the upstream SSE event / websocket frame budget (16 MiB) and the derived
+  serialized `response.create` budget (15 MiB); the OAuth exchange timeout
+  (30 s), token-refresh exchange timeout (8 s), refresh-failure negative
+  cache (5 s) and the token-refresh claim TTL (`max(30 s, admission wait +
+  2 x refresh timeout)`, all in code); the admission wait (10 s) and the
+  token-refresh (64), upstream websocket connect (128) and compact
+  response-create (64) gates; the usage / reset-credits fetch timeout (10 s)
+  and retry budget (2), the usage refresh interval (60 s) with its derived
+  freshness horizon, the usage auth-failure cooldown (300 s) and the
+  reset-credits polling interval (60 s); the always-on switches for usage
+  refresh, live usage ingestion, sticky-session cleanup, the model registry
+  and the quota planner scheduler (the dashboard `quota_planner_settings.mode
+  = "off"` remains the only planner switch); the HTTP ingress body budgets
+  (32 MiB general, 128 MiB Responses); inline image fetching (always on, no
+  host allowlist); the public default image model (`gpt-image-2`); and
+  proxy-generated prompt-cache-key derivation (always on). There is no
+  separate upstream compact timeout: the dashboard compact request budget is
+  the only cap.
 
 The following values MUST be derived rather than configured:
 
@@ -728,9 +747,30 @@ environment alias (see `data-retention`).
 Incident-debugging trace logging SHALL be controlled by the single
 `CODEX_LB_TRACE` comma-separated channel list, whose empty default disables
 all trace channels. The Codex HTTP-bridge prewarm rollout scoping SHALL NOT
-be operator-configurable: prewarm eligibility MUST be the
-`CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` flag alone,
-with no canary sampling percent and no API-key allow/deny cohort lists.
+be operator-configurable: prewarm eligibility MUST be the single
+`http_responses_session_bridge_codex_prewarm_enabled` switch alone, with no
+canary sampling percent and no API-key allow/deny cohort lists. That switch
+MUST be a dashboard runtime setting (a nullable `dashboard_settings` column of
+the same name, NULL on the first-created row and never seeded from the
+environment) whose
+`CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` variable is a
+deprecated alias that applies only while the column is NULL and that joins the
+removed-settings warning list in the next minor release. The bridge MUST
+resolve the switch before it takes a session's prewarm lock, from the dashboard
+overrides the request entry point already bound. The prewarm's own helpers
+MUST NOT read the dashboard row for themselves while that lock is held: the
+values the response-create admission gate needs (account concurrency caps and
+routing tunables) and the row the reconnect on the prewarm timeout path
+resolves MUST come from one snapshot taken before the lock and passed in, and
+that snapshot MUST be resolved only when a warm-up will actually be sent. If
+that snapshot cannot be loaded, the bridge MUST fall back to the last
+dashboard row the replica loaded, exactly as the request entry point does, and
+where no row has ever been loaded it MUST skip the prewarm rather than serve
+it without a snapshot; a prewarm MUST NOT fail a request the bridge can
+otherwise serve. Work the recovery path reaches beyond those two helpers --
+account selection, token refresh, and upstream route resolution, each with its
+own settings read or database session -- is out of scope for this requirement
+and keeps its existing behaviour.
 `database_pool_size` and `database_max_overflow` MUST remain
 operator-configurable settings, and `soft_drain_enabled` and
 `deterministic_failover_enabled` MUST remain the failover subsystem's only
@@ -744,7 +784,8 @@ warning list in the next minor release.
 #### Scenario: Removed env vars are ignored with one startup warning
 
 - **GIVEN** a deployment whose environment still sets removed settings such
-  as `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and `CODEX_LB_WARMUP_MODEL`
+  as `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` and
+  `CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS`
 - **WHEN** the application starts
 - **THEN** startup succeeds and the dashboard runtime values are used
 - **AND** exactly one warning log lists both removed names without their
@@ -849,18 +890,61 @@ warning list in the next minor release.
 
 #### Scenario: Prewarm stays off by default
 
-- **GIVEN** a default install with no prewarm variables set
+- **GIVEN** a default install with no prewarm variables set and the dashboard
+  prewarm switch unset (NULL)
 - **WHEN** Codex bridge requests are served
 - **THEN** no session prewarm is attempted and visible requests record
   `prewarm_status=not_applicable`
 
 #### Scenario: Prewarm eligibility is the enabled flag alone
 
-- **GIVEN** `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED=true`
+- **GIVEN** the Codex session prewarm switch is on, either in the dashboard or
+  through `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED=true`
+  while the dashboard value is unset
 - **WHEN** a first-turn Codex bridge request arrives on a session that has
   not been prewarmed
 - **THEN** the session prewarm is attempted for that request
 - **AND** no request is excluded by canary sampling or an allow/deny cohort
+
+#### Scenario: A prewarm's own helpers read no settings under its lock
+
+- **GIVEN** the Codex session prewarm switch is on in the dashboard
+- **WHEN** a session prewarm runs its body under the prewarm lock -- the
+  warm-up request built, response-create admission taken for it, and the
+  warm-up sent upstream to a stream that completes
+- **THEN** the dashboard settings row is read once, before the lock is taken
+- **AND** the admission gate takes no settings read of its own while the lock
+  is held, and that path opens no database session
+
+#### Scenario: An unreadable settings row does not fail the request
+
+- **GIVEN** the Codex session prewarm switch is on and the settings row cannot
+  be loaded when a first-turn Codex bridge request arrives
+- **WHEN** the bridge resolves its pre-lock snapshot
+- **THEN** the last dashboard row this replica loaded is used and the prewarm
+  proceeds
+- **AND** where no row has ever been loaded, the prewarm records
+  `prewarm_status=skipped` and the request is still served
+
+#### Scenario: A payload with no warm-up resolves no snapshot
+
+- **GIVEN** the Codex session prewarm switch is on and a first-turn Codex
+  bridge request whose payload yields no warm-up to send
+- **WHEN** the bridge evaluates the prewarm
+- **THEN** it records `prewarm_status=skipped` without reading the dashboard
+  settings row at all
+
+#### Scenario: Prewarm env alias applies only until the dashboard sets a value
+
+- **GIVEN** `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED=true`
+  and a `dashboard_settings` row whose
+  `http_responses_session_bridge_codex_prewarm_enabled` column is NULL
+- **WHEN** an operator turns the Codex session prewarm off in the dashboard
+- **THEN** the next new Codex bridge session on every replica is served
+  without a prewarm and without a restart, and the settings API reports
+  `source: "dashboard"`
+- **AND** clearing the dashboard value returns to the environment alias
+  (`source: "env"`) until that alias is removed in the next minor release
 
 #### Scenario: Resilience toggle env aliases apply only until the dashboard sets a value
 
@@ -871,4 +955,29 @@ warning list in the next minor release.
   a restart, and the settings API reports `source: "dashboard"`
 - **AND** clearing the dashboard value returns to the environment alias
   (`source: "env"`) until that alias is removed in the next minor release
+
+### Requirement: Helm chart renders no pre-1.13 controller-migration shim
+
+The Helm chart MUST NOT render the pre-1.13 `Deployment` -> `StatefulSet` controller-migration shim. Specifically: no `legacy-prepare` `pre-upgrade` hook and no `legacy-cleanup` `post-upgrade` hook (nor their ServiceAccount, Role and RoleBinding), no `legacy` traffic-lane selector helper, and no `migration.serviceSelectorMode` value. The public Service's selector MUST be the StatefulSet workload lane unconditionally, on install and on upgrade alike, and MUST NOT depend on a `lookup` of the live Service. A `migration.serviceSelectorMode` key left over in an operator's values file MUST be inert.
+
+The chart README's `Upgrading` section MUST state that the shim is removed in this release and MUST give releases still on a chart older than 1.13.0 the supported path: upgrade to a `1.24.x` chart first so the cutover runs there, verify that the Service selects the StatefulSet lane and the legacy `Deployment` is gone, then upgrade to this release. That section MUST NOT promise a future removal date for the shim.
+
+#### Scenario: Upgrade renders no migration-shim hooks
+
+- **GIVEN** any release of the chart
+- **WHEN** the chart is rendered with `--is-upgrade`
+- **THEN** no `legacy-prepare` or `legacy-cleanup` Job, ServiceAccount, Role or RoleBinding is rendered
+- **AND** no rendered resource carries the `codex-lb.soju.dev/traffic: legacy` lane
+
+#### Scenario: Public Service always selects the StatefulSet lane
+
+- **WHEN** the public Service is rendered on install, on upgrade, or with a stale `migration.serviceSelectorMode` override
+- **THEN** its selector is exactly the workload selector labels, including `codex-lb.soju.dev/traffic: workload`
+
+#### Scenario: Operator on a pre-1.13 chart reads the upgrade path
+
+- **GIVEN** a release installed from a chart older than 1.13.0
+- **WHEN** the operator reads the chart README's `Upgrading` section
+- **THEN** it states that the shim is removed in this release
+- **AND** it tells the operator to upgrade to a `1.24.x` chart first, plan that step as a maintenance window, verify the cutover, and only then upgrade to this release
 

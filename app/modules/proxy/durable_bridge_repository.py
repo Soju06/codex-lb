@@ -16,10 +16,14 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.utils.time import to_utc_naive, utcnow
+from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import (
     HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2,
     HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
+    HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED,
+    HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING,
+    HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED,
+    Account,
     HttpBridgeOperationEvent,
     HttpBridgeOperationEventChunk,
     HttpBridgeOperationRecord,
@@ -31,6 +35,7 @@ from app.db.models import (
     HttpBridgeSessionState,
 )
 from app.db.session import sqlite_writer_section
+from app.modules.proxy.account_eligibility import HARD_OWNER_UNAVAILABLE_STATUSES
 from app.modules.proxy.continuity import (
     HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
     HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND,
@@ -60,6 +65,9 @@ DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL = "anchor_abandoned"
 DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
+# Marks a retirement taken on the request path rather than by the sweep.
+# The sweep writes the global timestamp form instead; both read as retired.
+_REQUEST_PATH_ABANDONMENT_SCOPE = "request_path"
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
 # same-row claim contention.
@@ -75,6 +83,14 @@ _PROTECTED_OPERATION_ID_SAFE_LIMIT = _SESSION_ID_LOOKUP_CHUNK_SIZE
 # a large protected prefix cannot hold the SQLite writer section indefinitely.
 _PROTECTED_OPERATION_SCAN_BUDGET = 128
 _ABANDONMENT_LOG_AGE_CAP_SECONDS = 30 * 24 * 60 * 60
+# Operation states that publish a final upstream outcome. ``abandoned`` is a
+# duplicate-suppression fence rather than an outcome and is handled separately.
+_HTTP_BRIDGE_TERMINAL_OPERATION_STATES = frozenset({"completed", "incomplete", "failed"})
+# A terminal transcript outcome was already recorded for this dispatch, so a
+# second terminal append must not rewrite it.
+_HTTP_BRIDGE_TERMINAL_APPEND_RECORDED_PHASES = frozenset(
+    {HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED, HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED}
+)
 
 
 # Sentinel: rebind continuity clears without an anchor fence (legacy callers).
@@ -178,6 +194,11 @@ class DurableBridgeSessionSnapshot:
     closed_at: datetime | None
     latest_pending_tool_calls: dict[str, str] | None = None
     owner_process_epoch: str | None = None
+    # True once a writer retired this row's continuity owner. Readers must
+    # treat ``account_id`` as absent and may use ``abandoned_account_id`` only
+    # as exclusion evidence, never as a routing target.
+    continuity_abandoned: bool = False
+    abandoned_account_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +369,16 @@ class DurableBridgeRepository:
         if owner_exists is None or operation is None or operation.state == "abandoned":
             await self._session.rollback()
             return None
+        # This dispatch already recorded a terminal transcript outcome (an
+        # append committed, or a fallback settlement published it), so the row
+        # is final: refuse the lock rather than let a duplicate or late
+        # terminal write rewrite it. The predicate is the dedicated phase
+        # marker, never ``event_spool_complete`` — an ordinary operation is
+        # ``state = completed`` with an incomplete spool for the whole window
+        # in which its terminal append runs, because the relay publishes the
+        # operation state before appending.
+        if operation.terminal_append_phase in _HTTP_BRIDGE_TERMINAL_APPEND_RECORDED_PHASES:
+            return operation, False
         if operation.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:
             if await self._operation_has_legacy_events(operation_id):
                 return operation, False
@@ -1119,6 +1150,19 @@ class DurableBridgeRepository:
             state_closed = existing.state == HttpBridgeSessionState.CLOSED
             owner_absent = existing.owner_instance_id is None
             account_changed = existing.account_id != account_id
+            # Reclaiming a retired row discards continuity for the same reason
+            # an account change does. ``_to_lookup`` masked the anchors while
+            # the marker stood, so the request that triggered this claim was
+            # planned as an unanchored fresh start. Clearing only the marker
+            # would leave the old response id, turn state, fingerprints and
+            # pending calls behind, and the next lookup would serve that
+            # abandoned anchor as ordinary continuity — including when the
+            # retired account itself recovers and is selected again, where
+            # ``account_changed`` is False.
+            continuity_retired = _bridge_continuity_is_abandoned(
+                existing.continuity_abandoned_at,
+                existing.continuity_abandonment_scope,
+            )
             owner_changed = existing.owner_instance_id != instance_id
             if owner_changed:
                 lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
@@ -1156,8 +1200,14 @@ class DurableBridgeRepository:
                 "service_tier": service_tier,
                 "last_seen_at": now,
                 "closed_at": None,
+                # A successful claim re-establishes ownership, so any prior
+                # retirement is over. Clearing both markers here is what makes
+                # retirement reversible: the same row, re-pinned to a healthy
+                # account, becomes ordinary hard ownership again.
+                "continuity_abandoned_at": None,
+                "continuity_abandonment_scope": None,
             }
-            if account_changed:
+            if account_changed or continuity_retired:
                 values["latest_turn_state"] = latest_turn_state
                 values["latest_response_id"] = latest_response_id
                 values["latest_input_item_count"] = None
@@ -1191,7 +1241,7 @@ class DurableBridgeRepository:
                         contended = True
                         continue
                     raise RuntimeError("Failed to claim durable bridge session after retry")
-                if account_changed:
+                if account_changed or continuity_retired:
                     await self._clear_aliases_for_session(existing.id)
                 await self._session.commit()
             # Build the snapshot from the values THIS CAS wrote rather than a
@@ -1858,6 +1908,7 @@ class DurableBridgeRepository:
                     await self._delete_operation_spool_material((operation.operation_id,))
                     operation.event_bytes = 0
                     operation.event_spool_complete = False
+                    operation.terminal_append_phase = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING
                     operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
                     operation.updated_at = utcnow()
                     rebound = True
@@ -2149,6 +2200,10 @@ class DurableBridgeRepository:
             await self._delete_operation_spool_material((operation_id,))
             operation.event_bytes = 0
             operation.event_spool_complete = False
+            # The phase fences the terminal write of one attempt only. A fresh
+            # transcript is a fresh attempt, so it must not inherit a previous
+            # attempt's recorded outcome (``failed`` rows are resettable).
+            operation.terminal_append_phase = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING
             operation.spool_format = HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
             operation.updated_at = utcnow()
             await self._session.commit()
@@ -2626,8 +2681,9 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
+        complete_spool: bool = True,
     ) -> bool:
         """Append a terminal v2 chunk and expose its outcome atomically."""
         event_bytes = len(event_text.encode("utf-8"))
@@ -2660,6 +2716,12 @@ class DurableBridgeRepository:
                 return False
             operation, append_allowed = locked_operation
             if not append_allowed:
+                if operation.terminal_append_phase in _HTTP_BRIDGE_TERMINAL_APPEND_RECORDED_PHASES:
+                    # A terminal outcome is already recorded for this dispatch:
+                    # keep it verbatim instead of restamping ``state`` from a
+                    # duplicate or late terminal write.
+                    await self._session.rollback()
+                    return False
                 operation.event_spool_complete = False
                 operation.state = state
                 if response_id is not None:
@@ -2700,7 +2762,12 @@ class DurableBridgeRepository:
             operation.state = state
             if response_id is not None:
                 operation.response_id = response_id
-            operation.event_spool_complete = True
+            operation.event_spool_complete = complete_spool
+            # The terminal transcript block is committed with the outcome.
+            # Recording the phase here is what makes a duplicate or late
+            # terminal write observe a finished dispatch and refuse, while a
+            # deferred ``complete_spool=False`` finalization is still allowed.
+            operation.terminal_append_phase = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED
             operation.updated_at = utcnow()
             await self._session.commit()
         return True
@@ -2773,8 +2840,9 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         response_id: str | None = None,
+        complete_spool: bool = True,
     ) -> bool:
         """Append a terminal event and expose its operation state atomically."""
         async with sqlite_writer_section():
@@ -2787,17 +2855,29 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
-            operation = await self._session.scalar(
-                select(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
-                    HttpBridgeOperationRecord.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
-                )
-                .with_for_update()
+            # ``expected_recovery_dispatch_count`` is opt-in: a caller that
+            # claimed a recovery dispatch pins the generation it observed, and
+            # a caller that never claimed one passes nothing rather than a
+            # literal 0, so an operation retained from an older release with a
+            # non-zero counter still settles.
+            terminal_event_statement = select(HttpBridgeOperationRecord).where(
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
             )
+            if expected_recovery_dispatch_count is not None:
+                terminal_event_statement = terminal_event_statement.where(
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+                )
+            operation = await self._session.scalar(terminal_event_statement.with_for_update())
             if owner_exists is None or operation is None or operation.state == "abandoned":
+                await self._session.rollback()
+                return False
+            # Scoped to rows whose terminal outcome is already recorded: an
+            # ordinary terminal append always observes its own row as
+            # ``state = completed`` with an incomplete spool, because the relay
+            # updates the operation state before appending.
+            if operation.terminal_append_phase in _HTTP_BRIDGE_TERMINAL_APPEND_RECORDED_PHASES:
                 await self._session.rollback()
                 return False
             event_size = len(event_text.encode("utf-8"))
@@ -2833,7 +2913,11 @@ class DurableBridgeRepository:
             operation.state = state
             if response_id is not None:
                 operation.response_id = response_id
-            operation.event_spool_complete = True
+            operation.event_spool_complete = complete_spool
+            # Reached only when the terminal block was actually spooled (the
+            # over-cap branch above returns early), so the dispatch's terminal
+            # transcript outcome is now recorded.
+            operation.terminal_append_phase = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED
             operation.updated_at = utcnow()
             await self._session.commit()
         return persisted
@@ -2923,8 +3007,11 @@ class DurableBridgeRepository:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_state: str | None = None,
     ) -> bool:
         """Mark a terminal operation replay-complete after its queue drained."""
+        if expected_state is not None and expected_state not in {"completed", "incomplete", "failed"}:
+            return False
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
                 select(HttpBridgeSessionRecord.id)
@@ -2935,14 +3022,24 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
+            predicates = [
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.event_spool_complete.is_(False),
+                # A settled row was published without a confirmed append, so it
+                # is not replayable no matter which attempt reaches finalization
+                # (a terminal append can commit just as its bound expires, which
+                # runs settlement and leaves a finalize in flight).
+                HttpBridgeOperationRecord.terminal_append_phase != HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED,
+            ]
+            predicates.append(
+                HttpBridgeOperationRecord.state == expected_state
+                if expected_state is not None
+                else HttpBridgeOperationRecord.state.in_(("completed", "incomplete"))
+            )
             result = await self._session.execute(
                 update(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state.in_(("completed", "incomplete")),
-                    HttpBridgeOperationRecord.event_spool_complete.is_(False),
-                )
+                .where(*predicates)
                 .values(event_spool_complete=True, updated_at=utcnow())
             )
             if owner_exists is None:
@@ -3012,7 +3109,7 @@ class DurableBridgeRepository:
         owner_epoch: int,
         state: str,
         expected_response_id: str | None,
-        expected_recovery_dispatch_count: int = 0,
+        expected_recovery_dispatch_count: int | None = None,
         alternate_expected_response_id: str | None = None,
         response_id: str | None = None,
     ) -> bool:
@@ -3050,25 +3147,41 @@ class DurableBridgeRepository:
                 "event_spool_complete": False,
                 "updated_at": utcnow(),
             }
+            if state in _HTTP_BRIDGE_TERMINAL_OPERATION_STATES:
+                # A terminal outcome is now published without a confirmed
+                # transcript append. SETTLED makes the row final for this
+                # dispatch so the append that lost the race can neither rewrite
+                # the state nor flip the spool back to replayable.
+                #
+                # Only genuinely terminal settlements set it. A continuity
+                # failure after acknowledgement settles back to
+                # ``acknowledged``, where the operation is still live and its
+                # later appends must keep working.
+                values["terminal_append_phase"] = HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED
             if response_id is not None:
                 values["response_id"] = response_id
-            result = await self._session.execute(
-                update(HttpBridgeOperationRecord)
-                .where(
-                    HttpBridgeOperationRecord.operation_id == operation_id,
-                    HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state != "abandoned",
-                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
-                    or_(
-                        and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
-                        and_(
-                            HttpBridgeOperationRecord.state == state,
-                            or_(acknowledged_response_matches, terminal_response_matches),
-                        ),
+            # Opt-in recovery-dispatch fence, as in
+            # ``append_terminal_operation_event``. The newer-attempt rejection
+            # below does not depend on it: a retry that reset the row to
+            # ``submitted`` matches neither ``acknowledged`` nor the terminal
+            # state being settled, so the update touches no row.
+            settlement_statement = update(HttpBridgeOperationRecord).where(
+                HttpBridgeOperationRecord.operation_id == operation_id,
+                HttpBridgeOperationRecord.session_id == session_id,
+                HttpBridgeOperationRecord.state != "abandoned",
+                or_(
+                    and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
+                    and_(
+                        HttpBridgeOperationRecord.state == state,
+                        or_(acknowledged_response_matches, terminal_response_matches),
                     ),
-                )
-                .values(**values)
+                ),
             )
+            if expected_recovery_dispatch_count is not None:
+                settlement_statement = settlement_statement.where(
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count
+                )
+            result = await self._session.execute(settlement_statement.values(**values))
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 
@@ -3454,6 +3567,166 @@ class DurableBridgeRepository:
                 )
                 await self._session.commit()
             deleted_count += len(deleted.scalars().all())
+
+    async def retire_continuity_owner_if_unavailable(
+        self,
+        session_id: str,
+        *,
+        expected_account_id: str,
+        recovery_deadline_epoch: int,
+    ) -> bool:
+        """Retire one row's owner now, when it cannot return before the deadline.
+
+        The scheduled sweep frees a thread six hours after its last turn. This
+        is the request-path counterpart, and it asks a narrower question: can
+        this owner come back before the request that is waiting on it gives up?
+        ``reset_at`` is the answer for a rate or quota limit; ``paused``,
+        ``reauth_required`` and ``deactivated`` carry no horizon at all, so the
+        answer for them is always no.
+
+        Mirrors ``StickySessionsRepository.abandon_legacy_session_header_owner_if_unavailable``,
+        including why the account row is locked first: PostgreSQL evaluates the
+        status subquery from the UPDATE's snapshot, so without the lock a
+        concurrent recovery can commit while this statement waits on the
+        session row and the stale snapshot would still authorize a retirement.
+        The status predicate stays inside the UPDATE as a second, database-level
+        invariant so a later refactor cannot turn a prior observation into an
+        unconditional write.
+
+        Writes the scope marker alone and leaves the timestamp NULL, so a
+        replica running the previous build keeps treating ``account_id`` as
+        hard ownership for the rest of a rolling deploy.
+        """
+        if not session_id or not expected_account_id:
+            return False
+        owner_status_lock = (
+            select(Account.status, Account.reset_at).where(Account.id == expected_account_id).with_for_update()
+        )
+        unavailable_owner = select(Account.id).where(
+            Account.id == expected_account_id,
+            Account.status.in_(HARD_OWNER_UNAVAILABLE_STATUSES),
+            or_(Account.reset_at.is_(None), Account.reset_at >= recovery_deadline_epoch),
+        )
+        statement = (
+            update(HttpBridgeSessionRecord)
+            .where(
+                HttpBridgeSessionRecord.id == session_id,
+                HttpBridgeSessionRecord.account_id == expected_account_id,
+                HttpBridgeSessionRecord.continuity_abandoned_at.is_(None),
+                HttpBridgeSessionRecord.continuity_abandonment_scope.is_(None),
+                HttpBridgeSessionRecord.account_id.in_(unavailable_owner),
+            )
+            .values(continuity_abandonment_scope=_REQUEST_PATH_ABANDONMENT_SCOPE)
+            .returning(HttpBridgeSessionRecord.id)
+        )
+        async with sqlite_writer_section():
+            locked = (await self._session.execute(owner_status_lock)).one_or_none()
+            if locked is None or locked[0] not in HARD_OWNER_UNAVAILABLE_STATUSES:
+                await self._session.commit()
+                return False
+            owner_reset_at = locked[1]
+            if owner_reset_at is not None and owner_reset_at < recovery_deadline_epoch:
+                # The owner is expected back inside the window the caller is
+                # willing to wait, so waiting keeps the upstream prompt cache
+                # instead of forcing a full resend onto another account.
+                await self._session.commit()
+                return False
+            result = await self._session.execute(statement)
+            await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def retire_stale_unavailable_bridge_owners(self, cutoff: datetime, *, now: datetime) -> int:
+        """Retire continuity owners that have been unroutable since ``cutoff``.
+
+        The durable-bridge counterpart of
+        ``StickySessionsRepository.purge_stale_hard_codex_session_mappings``,
+        and it exists for the same reason. Deleting the row outright would be
+        indistinguishable from "this key was never seen", which leaves the
+        anchored lookup failing closed forever; a tombstone instead says the
+        owner was deliberately abandoned, so a later request may pick a fresh
+        one. Two phases:
+
+        1. Tombstone a row whose owner has sat in
+           :data:`HARD_OWNER_UNAVAILABLE_STATUSES` past its reset horizon while
+           the row itself went untouched for the whole grace window.
+        2. Delete a tombstone that then sat another full window with nobody
+           claiming it, as long as it owns no operation rows.
+
+        Unlike the row deletes elsewhere in this module, phase 1 is **not**
+        gated on ``~exists(operation)``. That guard protects the durable
+        recovery ledger from a ``CASCADE``, which retirement does not trigger:
+        it writes two columns and keeps every operation row intact. Gating it
+        would reproduce the 2026-09-04 outage, where every poisoned row
+        happened to own operations and so was never reachable by cleanup.
+        """
+        now_naive = to_utc_naive(now)
+        cutoff_naive = to_utc_naive(cutoff)
+        now_epoch = naive_utc_to_epoch(now_naive)
+        unavailable_account_ids = select(Account.id).where(
+            Account.status.in_(HARD_OWNER_UNAVAILABLE_STATUSES),
+            or_(Account.reset_at.is_(None), Account.reset_at < now_epoch),
+        )
+        tombstone_stmt = (
+            update(HttpBridgeSessionRecord)
+            .where(
+                HttpBridgeSessionRecord.continuity_abandoned_at.is_(None),
+                HttpBridgeSessionRecord.last_seen_at < cutoff_naive,
+                or_(
+                    # A request-path retirement wrote the scope marker alone.
+                    # Promote it once the row goes stale, exactly as the sticky
+                    # sweep promotes its own younger scoped marker: without
+                    # this, such a row satisfies neither phase — phase 1 wants
+                    # both columns NULL and phase 2 wants a timestamp — and
+                    # would sit in the table forever.
+                    HttpBridgeSessionRecord.continuity_abandonment_scope.is_not(None),
+                    and_(
+                        HttpBridgeSessionRecord.continuity_abandonment_scope.is_(None),
+                        HttpBridgeSessionRecord.account_id.is_not(None),
+                        HttpBridgeSessionRecord.account_id.in_(unavailable_account_ids),
+                    ),
+                ),
+            )
+            # Timestamp with NULL scope is the global form: this sweep has no
+            # per-source question to answer, and a replica that predates the
+            # scope column still understands the timestamp.
+            .values(continuity_abandoned_at=now_naive, continuity_abandonment_scope=None)
+            .returning(HttpBridgeSessionRecord.id)
+        )
+        expired_tombstone_filter = (
+            HttpBridgeSessionRecord.continuity_abandoned_at.is_not(None),
+            HttpBridgeSessionRecord.continuity_abandonment_scope.is_(None),
+            HttpBridgeSessionRecord.continuity_abandoned_at < cutoff_naive,
+            ~exists(
+                select(HttpBridgeOperationRecord.operation_id).where(
+                    HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                )
+            ),
+        )
+        async with sqlite_writer_section():
+            tombstoned = len((await self._session.execute(tombstone_stmt)).scalars().all())
+            # Aliases first, matching ``purge_closed_before``: the FK cascade
+            # would cover it, but SQLite builds without foreign-key enforcement
+            # would leave orphans that later resolve to a deleted session.
+            await self._session.execute(
+                delete(HttpBridgeSessionAlias).where(
+                    HttpBridgeSessionAlias.session_id.in_(
+                        select(HttpBridgeSessionRecord.id).where(*expired_tombstone_filter)
+                    )
+                )
+            )
+            deleted = len(
+                (
+                    await self._session.execute(
+                        delete(HttpBridgeSessionRecord)
+                        .where(*expired_tombstone_filter)
+                        .returning(HttpBridgeSessionRecord.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            await self._session.commit()
+        return tombstoned + deleted
 
     async def purge_abandoned_before(self, cutoff: datetime, *, batch_size: int = _PURGE_CLOSED_BATCH_SIZE) -> int:
         """Purge ACTIVE/DRAINING rows whose lease expired and whose activity predates the cutoff."""
@@ -4084,11 +4357,17 @@ _SNAPSHOT_COLUMNS = (
     HttpBridgeSessionRecord.latest_pending_tool_calls_json,
     HttpBridgeSessionRecord.last_seen_at,
     HttpBridgeSessionRecord.closed_at,
+    HttpBridgeSessionRecord.continuity_abandoned_at,
+    HttpBridgeSessionRecord.continuity_abandonment_scope,
 )
 
 
 def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSessionSnapshot:
     mapping = row._mapping
+    continuity_abandoned = _bridge_continuity_is_abandoned(
+        mapping[HttpBridgeSessionRecord.continuity_abandoned_at],
+        mapping[HttpBridgeSessionRecord.continuity_abandonment_scope],
+    )
     return DurableBridgeSessionSnapshot(
         id=mapping[HttpBridgeSessionRecord.id],
         session_key_kind=mapping[HttpBridgeSessionRecord.session_key_kind],
@@ -4113,12 +4392,33 @@ def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSess
         ),
         last_seen_at=mapping[HttpBridgeSessionRecord.last_seen_at],
         closed_at=mapping[HttpBridgeSessionRecord.closed_at],
+        continuity_abandoned=continuity_abandoned,
+        abandoned_account_id=(mapping[HttpBridgeSessionRecord.account_id] if continuity_abandoned else None),
     )
+
+
+def _bridge_continuity_is_abandoned(
+    abandoned_at: datetime | None,
+    abandonment_scope: str | None,
+) -> bool:
+    """Return whether a writer retired this row's continuity owner.
+
+    Mirrors ``sticky_repository._continuity_is_abandoned_for_source``. The
+    bridge has one continuity source, so any scope marker retires the owner;
+    the legacy-timestamp form retires it globally. Scope is written alone so a
+    pre-migration replica, which knows neither column, keeps treating
+    ``account_id`` as hard ownership through a rolling deploy.
+    """
+    return abandonment_scope is not None or abandoned_at is not None
 
 
 def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSnapshot | None:
     if row is None:
         return None
+    continuity_abandoned = _bridge_continuity_is_abandoned(
+        row.continuity_abandoned_at,
+        row.continuity_abandonment_scope,
+    )
     return DurableBridgeSessionSnapshot(
         id=row.id,
         session_key_kind=row.session_key_kind,
@@ -4143,6 +4443,8 @@ def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSna
         ),
         last_seen_at=row.last_seen_at,
         closed_at=row.closed_at,
+        continuity_abandoned=continuity_abandoned,
+        abandoned_account_id=row.account_id if continuity_abandoned else None,
     )
 
 

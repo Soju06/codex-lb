@@ -185,6 +185,7 @@ class _OwnerForwardRequestError(ProxyResponseError):
             upstream_status_code=source.upstream_status_code,
             upstream_error_code=source.upstream_error_code,
             failed_session=source.failed_session,
+            local_pre_dispatch_refusal=source.local_pre_dispatch_refusal,
         )
         self.outcome = outcome
 

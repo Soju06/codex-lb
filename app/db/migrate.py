@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import time
 import warnings
 from contextlib import contextmanager
@@ -86,6 +87,10 @@ _MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
             "idx_logs_status_error_time",
             "idx_logs_source_requested_at",
             "idx_logs_dash_usage_covering",
+            "idx_logs_missing_cost",
+            "idx_logs_live_api_key",
+            "idx_logs_live_model_effort",
+            "idx_logs_live_status_error",
         }
     ),
     "additional_usage_history": frozenset(
@@ -619,6 +624,20 @@ def _is_ignored_schema_drift(connection: Connection, diff: object) -> bool:
     return False
 
 
+_OBJECT_ADDRESS_RE = re.compile(r" object at 0x[0-9a-fA-F]+>")
+
+
+def _stable_diff_repr(diff: object) -> str:
+    """Render an autogenerate diff without CPython object addresses.
+
+    SQLAlchemy renders constraint members as ``<... object at 0x7f...>``, so the
+    repr of an otherwise identical foreign-key diff differs between two calls in
+    the same process. Drift output is compared and shown to operators, so it has
+    to be stable.
+    """
+    return _OBJECT_ADDRESS_RE.sub(" object>", repr(diff))
+
+
 def check_schema_drift(database_url: str) -> tuple[str, ...]:
     config = _build_alembic_config(database_url)
     sync_database_url = _required_sqlalchemy_url(config)
@@ -648,7 +667,7 @@ def check_schema_drift(database_url: str) -> tuple[str, ...]:
             ]
         manual_diffs = _manual_schema_drift_diffs(connection)
 
-    return tuple(repr(diff) for diff in diffs) + manual_diffs
+    return tuple(_stable_diff_repr(diff) for diff in diffs) + manual_diffs
 
 
 _NO_LEGACY_BOOTSTRAP = LegacyBootstrapResult(

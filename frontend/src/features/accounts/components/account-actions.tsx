@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { usePermission } from "@/features/auth/hooks/use-auth";
 import type {
   AccountRoutingPolicy,
   AccountSummary,
@@ -64,8 +65,14 @@ export function AccountActions({
   onRoutingPolicyChange,
 }: AccountActionsProps) {
   const { t } = useTranslation();
+  // Credential export is its own permission (`accounts:export`), not part of account writes.
+  const canExport = usePermission("accounts:export");
   const showOperatorRecoveryAction =
     account.status === "reauth_required" || account.status === "deactivated";
+  // A deactivated account can be returned to active directly: the reactivate
+  // endpoint clears the deactivation reason and only refuses
+  // `reauth_required`, where the stored refresh token really is unusable.
+  const canResume = account.status === "paused" || account.status === "deactivated";
   const probeDisabled =
     busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
   const resetCountdown = showResetCreditExpiryBadge && account.resetCreditNearestExpiresAt
@@ -133,7 +140,7 @@ export function AccountActions({
       </label>
 
       <div className="flex flex-wrap gap-2">
-        {account.status === "paused" ? (
+        {canResume ? (
           <Button
             type="button"
             size="sm"
@@ -198,17 +205,19 @@ export function AccountActions({
           {account.limitWarmupEnabled ? t("accounts.actions.disableWarmup") : t("accounts.actions.enableWarmup")}
         </Button>
 
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-8 gap-1.5 text-xs"
-          onClick={() => onExportAuth(account.accountId)}
-          disabled={busy || readOnly}
-        >
-          <Download className="h-3.5 w-3.5" />
-          {t("common.actions.export")}
-        </Button>
+        {canExport ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => onExportAuth(account.accountId)}
+            disabled={busy || readOnly}
+          >
+            <Download className="h-3.5 w-3.5" />
+            {t("common.actions.export")}
+          </Button>
+        ) : null}
 
         {hasResetCredits ? (
           <Button

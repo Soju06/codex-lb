@@ -189,9 +189,8 @@ pre-response failure classes (`stream_incomplete`, `clean_close`, and
 the stream classes while keeping its own durable detail). Every funnel
 that abandons on repeated eventless failures — the idle-recovery
 exhaustion and the retry-transport failure path alike — MUST route
-through the capped poison consult and the captured continuity fence;
-none may compare against the raw configured threshold or clear
-continuity unfenced. The failed-registration poison restore MUST
+through the shared poison consult and the captured continuity fence;
+none may apply a threshold of its own or clear continuity unfenced. The failed-registration poison restore MUST
 transition its own settle's tombstone through the fenced detail-only
 supersede before re-seeding — the strike merge's sticky tombstone would
 otherwise silently refuse the poison class and leave a threshold
@@ -295,13 +294,12 @@ also clear the stored durable continuity anchor for that key. The quarantine
 armed with the strike only suppresses injection in this process and expires,
 so without the durable clear the same dead anchor is restored on the next
 reattach and re-poisons the key after every cooldown. On every settlement path — terminal,
-grouped, retirement, and close alike — the configured anchor-poison threshold
-MUST be capped at the circuit's own failure threshold. Above that threshold
-the key is refused for 60-600s per strike, so a higher value cannot be reached
-at any useful rate. A configured value below the circuit threshold MUST still
-be honoured, and the poison quarantine MUST be armed no later than the strike
-that satisfies that effective threshold, so a clear that fires before the
-circuit opens is never published without quarantine cover.
+grouped, retirement, and close alike — the anchor-poison threshold IS the
+circuit's own failure threshold, a fixed application constant rather than a
+runtime setting. Above that threshold the key is refused for 60-600s per
+strike, so a higher value could never be reached at any useful rate, and the
+poison quarantine MUST be armed with the strike that opens the circuit, so a
+clear is never published without quarantine cover.
 
 A grouped settlement whose strikes carry the circuit through that threshold
 MUST clear the anchor as well, after its grouped terminal frames are published.
@@ -500,7 +498,7 @@ time while its snapshot predates the write — and a settlement MUST sweep
 any state that a pre-delete snapshot re-created while its delete was in
 flight. Adopting a replacement episode MUST invalidate the local half-open
 lease even when the adopted cooldown has already elapsed, and a poison row at
-the effective configured abandonment threshold adopted from a durable load
+the circuit threshold adopted from a durable load
 MUST arm this worker's process-local poison quarantine, since the replica
 that recorded the strikes cannot arm it here — unless the local episode's
 one-clear marker records that its anchor was already abandoned, in which
@@ -665,9 +663,9 @@ reconcile on the row's own values — strike merges keep the tombstone
 sticky, so a miss means the count moved, not that the tombstone was
 replaced: a zeroed row erases plain, a positive count promotes to the
 superseded sentinel, and a second miss defers to the next completion.
-The merged-opening quarantine arm MUST use the effective anchor-poison
-threshold, so a configured threshold of one arms from an adopted
-one-failure poison row even when the local strike was clean. The poison
+The merged-opening quarantine arm MUST use the circuit threshold, so an
+adopted poison row that reaches it arms the quarantine even when the local
+strike was clean. The poison
 classification carries its OWN deadline: only a poison arm may extend
 it, a weaker arm extends only the shared session fence, and the
 anchor-is-dead answer expires on the poison deadline even while weaker
@@ -755,10 +753,9 @@ exits without advancing a send attempt past the captured baseline — the
 internal precreated-retry path included, whose requests already carry
 prior attempts and therefore key the release on advancement, not on a
 zero count. The owed-debt arm and the sticky-detail
-fence MUST both
-use the effective configured anchor-poison threshold, so a configured
-threshold of one arms and preserves the debt from the one-failure row
-whose first poison strike already authorized the abandonment.
+fence MUST both use the circuit threshold, so the strike that opens the
+circuit arms and preserves the debt whose poison evidence already authorized
+the abandonment.
 The claimed-probe token MUST be handed out by the admission's claim under
 its own lock, never inferred from before/after reads. Every fence captured
 for a later clear MUST be captured under the same provenance rule the clear
@@ -781,9 +778,9 @@ the half-open lease once the cooldown has expired (`hard_key_half_open`). The
 suppression message MUST NOT describe the bridge as cooling down when the
 cooldown has expired.
 
-The clean-close retry jitter maximum MUST be read from the
-`http_responses_session_bridge_clean_close_retry_jitter_max_seconds` runtime
-setting and MUST be bounded to the inclusive range 0–30 seconds.
+The clean-close retry jitter MUST be drawn uniformly from 0 up to the fixed
+2 second maximum (`_HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS`); the
+maximum is not a runtime setting.
 
 The proxy MUST evict process-local circuit entries and their loaded/persisted
 markers after one hour without use, independently of durable-row cleanup, so
@@ -1019,7 +1016,9 @@ and durable circuit state.
 ### Requirement: Long Codex websocket turns tolerate extended upstream silence
 The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.
 
-`compact_request_budget_seconds`, `stream_idle_timeout_seconds` and `proxy_request_budget_seconds` are dashboard-managed (`configuration-tiers`): each has a nullable `dashboard_settings` column of the same name whose non-NULL value MUST override the process environment value, which in turn overrides the code default. Consumers MUST read the effective value from the `SettingsCache` snapshot bound at the request or WebSocket entry point and MUST NOT query the database per request or per event. The environment variables remain as deprecated fallbacks and MUST NOT be copied into the column by the server; a client that echoes the effective values of a `GET /api/settings` response back through `PUT` stores them as explicit dashboard values (clients MUST send only the fields they intend to change). `GET /api/settings` MUST report any environment value the `Settings` model accepts, including one outside the bounds `PUT` enforces.
+`compact_request_budget_seconds`, `stream_idle_timeout_seconds`, `proxy_request_budget_seconds` and `http_responses_stream_request_budget_seconds` are dashboard-managed (`configuration-tiers`): each has a nullable `dashboard_settings` column of the same name whose non-NULL value MUST override the process environment value, which in turn overrides the code default. Consumers MUST read the effective value from the `SettingsCache` snapshot bound at the request or WebSocket entry point and MUST NOT query the database per request or per event. The environment variables remain as deprecated fallbacks and MUST NOT be copied into the column by the server; a client that echoes the effective values of a `GET /api/settings` response back through `PUT` stores them as explicit dashboard values (clients MUST send only the fields they intend to change). `GET /api/settings` MUST report any environment value the `Settings` model accepts, including one outside the bounds `PUT` enforces.
+
+Background consumers derived from the stream budget (the quota warm-up claim lease, which floors at the stream budget) MUST resolve the effective value from a dashboard snapshot the scheduler tick already holds, not from the environment alone. The background warm-up probe itself MUST stream under that same snapshot, so a healthy probe still provably outlives its claim lease when the dashboard budget is below the environment value. `upstream_connect_timeout_seconds` MUST NOT exceed the effective `http_responses_stream_request_budget_seconds` (`upstream-connect-within-stream-budget`); `PUT /api/settings` MUST reject a change that introduces that violation with `400 timeout_invariant_violation`, alongside the existing `admission-wait-within-stream-budget` rule.
 
 #### Scenario: compact and stream watchdog defaults leave room for long turns
 - **WHEN** the service starts with default configuration
@@ -1057,6 +1056,21 @@ The default compact request budget MUST be at least 180 seconds, and the default
 - **WHEN** the operator sends `PUT /api/settings` with `proxyRequestBudgetSeconds: 5`
 - **THEN** the request is rejected with `400` and code `timeout_invariant_violation` naming `admission-wait-within-proxy-budget`
 - **AND** a request that raises every violated budget in the same `PUT` is accepted
+
+#### Scenario: Dashboard stream budget overrides startup environment
+- **GIVEN** `CODEX_LB_HTTP_RESPONSES_STREAM_REQUEST_BUDGET_SECONDS=7200` in the process environment and an operator has stored `3600` for `http_responses_stream_request_budget_seconds` through `PUT /api/settings`
+- **WHEN** a new HTTP or WebSocket Responses stream computes its request deadline on any replica
+- **THEN** the stream budget is 3600 seconds
+- **AND** `GET /api/settings` reports `httpResponsesStreamRequestBudgetSeconds: 3600` with `provenance.http_responses_stream_request_budget_seconds.source = "dashboard"`
+- **AND** the next quota warm-up claim lease is 3600 seconds long rather than 7200
+- **AND** the background warm-up probe streams under the same 3600 second budget
+
+#### Scenario: Connect timeout is bounded by the effective stream budget
+- **GIVEN** default configuration
+- **WHEN** the operator sends `PUT /api/settings` with `upstreamConnectTimeoutSeconds: 100` and `httpResponsesStreamRequestBudgetSeconds: 60`
+- **THEN** the request is rejected with `400` and code `timeout_invariant_violation` naming `upstream-connect-within-stream-budget`
+- **AND** a `PUT` with `httpResponsesStreamRequestBudgetSeconds: 5` is rejected naming `admission-wait-within-stream-budget`
+- **AND** nothing is stored in either case
 
 ### Requirement: Responses upstream websocket liveness is bounded
 
@@ -1718,11 +1732,15 @@ When serving Responses routes, the service MUST prefer eligible accounts that ar
 - **THEN** the below-threshold candidate is chosen first
 
 ### Requirement: Upstream Responses event size budget
-The service SHALL allow upstream Responses SSE events and upstream websocket message frames up to 16 MiB by default before treating them as oversized.
+The service SHALL allow upstream Responses SSE events and upstream websocket message frames up to 16 MiB before treating them as oversized. The budget is a fixed application constant (`MAX_SSE_EVENT_BYTES` in `app/core/clients/proxy.py`); it MUST NOT be operator-configurable, and the serialized upstream `response.create` budget (15 MiB) MUST be derived from it so the envelope can never exceed the frame ceiling.
 
 #### Scenario: built-in tool output exceeds the old 2 MiB limit
 - **WHEN** upstream Responses traffic includes a single SSE event or websocket message frame larger than 2 MiB but not larger than 16 MiB
 - **THEN** the proxy continues processing the event instead of closing the upstream websocket locally with `1009 message too big`
+
+#### Scenario: The event budget is not an environment setting
+- **WHEN** the process starts with `CODEX_LB_MAX_SSE_EVENT_BYTES` or `CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES` set
+- **THEN** the values are ignored, startup logs the removed-setting warning once, and the 16 MiB / 15 MiB budgets apply
 
 ### Requirement: Upstream Responses transport strategy
 For streaming Codex/Responses proxy requests, the system MUST let operators choose the upstream transport strategy through dashboard settings, and the dashboard setting MUST be the only source of that choice: there MUST NOT be an environment variable for it, and the service MUST warn at startup when the removed `CODEX_LB_UPSTREAM_STREAM_TRANSPORT` variable is still set. The persisted strategy MUST be one of `auto`, `http`, or `websocket`; the settings API MUST reject any other value. Runtime readers MUST resolve the strategy from the dashboard settings snapshot through one shared resolver, and a snapshot still carrying the legacy `default` sentinel MUST resolve to `auto`. Upgrading MUST migrate persisted `default` rows to `auto`.
@@ -2137,14 +2155,6 @@ Request-log conversation grouping MUST continue to use raw `thread-id`.
 - **WHEN** a request supplies a nonblank client turn state with no exact in-memory alias
 - **THEN** it does not reuse or replace the broader thread state
 - **AND** only a previously resolved exact alias may refresh the thread alias
-
-### Requirement: Proxy-generated prompt cache key derivation is operator-toggleable
-The service MUST provide a runtime flag that disables only proxy-generated prompt-cache-key derivation. When disabled, the service MUST continue forwarding any client-supplied `prompt_cache_key` unchanged and MUST NOT synthesize a new one.
-
-#### Scenario: Derivation disabled preserves client-supplied key
-- **WHEN** the derivation flag is disabled and a client sends `prompt_cache_key`
-- **THEN** the service forwards that key unchanged
-- **AND** it does not generate a replacement key
 
 ### Requirement: HTTP Responses routes preserve upstream websocket session continuity
 
@@ -3066,20 +3076,25 @@ account-owner requests whose upstream resource is bound to the selected account.
 The service MUST bypass the HTTP responses bridge when a `/v1/responses`,
 `/backend-api/codex/responses`, `/responses/compact`, or `/v1/responses/compact`
 request contains any `input_image` part in top-level input items, nested
-message content, or tool output content, and send the request over the raw HTTP
-Responses stream path. This bypass MUST happen after rejecting unsupported
-uploaded-image references and MUST be limited to the current request; subsequent
-text-only requests MAY continue using the HTTP responses bridge.
+message content, or tool output content, and send the request over the raw
+(non-bridge) Responses stream path. This bypass MUST happen after rejecting
+unsupported uploaded-image references and MUST be limited to the current
+request; subsequent text-only requests MAY continue using the HTTP responses
+bridge.
 
-The raw HTTP path is the source of truth for image validation and upstream image
-error semantics. The bridge MUST NOT hold image requests waiting for
-`response.created` when upstream rejects an invalid inline image payload.
+The raw (non-bridge) path is the source of truth for image validation and
+upstream image error semantics. The bridge MUST NOT hold image requests waiting
+for `response.created` when upstream rejects an invalid inline image payload.
+
+This bridge bypass MUST NOT by itself pin the upstream stream transport. The
+upstream transport for a bypassed image request MUST be resolved by the ordinary
+upstream-transport precedence.
 
 #### Scenario: Nested input_image bypasses bridge
 
 - **GIVEN** the HTTP responses bridge is enabled
 - **WHEN** a Responses request contains a nested content part with `type = "input_image"`
-- **THEN** the request is sent through the raw HTTP stream path
+- **THEN** the request is sent through the raw (non-bridge) stream path
 - **AND** the HTTP responses bridge is not used for that request
 
 #### Scenario: Image bypass does not disable future text bridge use
@@ -3088,6 +3103,15 @@ error semantics. The bridge MUST NOT hold image requests waiting for
 - **WHEN** an image-bearing request bypasses the bridge
 - **THEN** the bypass applies only to that request
 - **AND** a later text-only request can still use the HTTP responses bridge
+
+#### Scenario: Image bypass does not pin the upstream transport
+
+- **GIVEN** the HTTP responses bridge is enabled
+- **AND** `upstream_stream_transport` is `"auto"`
+- **WHEN** a Responses request carrying an inline `data:` image below the
+  WebSocket frame budget bypasses the bridge
+- **THEN** the request MUST NOT be forced onto upstream HTTP
+- **AND** the configured transport policy MUST decide its upstream transport
 
 ### Requirement: Security-work authorization errors can route to authorized accounts
 
@@ -3640,13 +3664,13 @@ Request logs for direct Responses WebSocket turns MUST persist the connection-sc
 - **AND** the request log records `connection_request_kind` as `prewarm`
 
 ### Requirement: Codex compact requests are bounded by the proxy request budget
-When `/backend-api/codex/responses/compact` is called for Codex auto-compaction, the service MUST bound the upstream compact call by the remaining proxy compact request budget even when no explicit upstream compact timeout is configured. The service MUST preserve Codex turn metadata `request_kind` in compact request logs so auto-compaction failures are distinguishable from normal user turns.
+When `/backend-api/codex/responses/compact` is called for Codex auto-compaction, the service MUST bound the upstream compact call by the remaining proxy compact request budget. That budget (the dashboard `compact_request_budget_seconds`) is the only total cap on the upstream compact call; there is no separate upstream compact timeout setting. The service MUST preserve Codex turn metadata `request_kind` in compact request logs so auto-compaction failures are distinguishable from normal user turns.
 
 #### Scenario: auto-compaction cannot hang past the proxy budget
 - **GIVEN** a Codex compact request carries `x-codex-turn-metadata` with `request_kind: "compaction"`
-- **AND** no explicit upstream compact timeout is configured
 - **WHEN** the service calls upstream
 - **THEN** the upstream call receives both connect and total timeout overrides from the remaining compact request budget
+- **AND** no other total timeout is applied to the upstream compact call
 - **AND** the request log records `request_kind` as `compaction`
 
 ### Requirement: Responses Lite signaling is derived from the normalized body
@@ -4547,8 +4571,19 @@ Precedence (highest first), evaluated before the policy:
 
 1. Outside the existing recent upstream WS failure cooldown, an explicit
    `upstream_stream_transport` override of `"http"` or `"websocket"` wins.
-2. Oversized-payload bypass and image / image-generation bypass force
-   upstream HTTP.
+2. Oversized-payload bypass and the `image_generation` bypass force upstream
+   HTTP. A request carrying `input_image` parts forces upstream HTTP only when
+   its serialized payload exceeds the WebSocket frame budget, or when the
+   payload still carries an external `http(s)` image URL that the proxy may be
+   unable to inline; an inline `data:` image alone MUST NOT force upstream HTTP.
+   These two residual `input_image` pins are deliberately evaluated ahead of an
+   explicit `"websocket"` override wherever the request passes through the HTTP
+   bridge routing decision — every `/v1/responses` and
+   `/backend-api/codex/responses` request does — because that override
+   short-circuits the size gate and an oversized image payload would otherwise
+   fail locally with `400 payload_too_large`. A request that never reaches that
+   decision, such as a `/v1/chat/completions` request whose bridge admission has
+   already declined the bridge, follows item 1 instead.
 3. The effective policy (per-API-key `transport_policy_override` when
    set, otherwise the global `http_downstream_transport_policy`) decides.
 
@@ -4656,10 +4691,21 @@ through to the global `http_downstream_transport_policy`.
 
 - **GIVEN** `upstream_stream_transport` is explicitly `"websocket"`
 - **AND** no recent upstream WS failure marker is active
-- **WHEN** a single-shot downstream HTTP request with no sticky signals
-  resolves the upstream transport under any policy
+- **WHEN** a single-shot downstream HTTP request with no sticky signals, and
+  which trips none of the precedence item 2 bypasses, resolves the upstream
+  transport under any policy
 - **THEN** the explicit override MUST win and the request MUST use
   upstream WebSocket
+
+#### Scenario: external image URL still forces HTTP under an explicit websocket override
+
+- **GIVEN** `upstream_stream_transport` is explicitly `"websocket"`
+- **AND** a request passing through the HTTP bridge routing decision carries an
+  `input_image` part whose `image_url` is an external `http(s)` URL
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST be sent over upstream HTTP `POST`, because the
+  override would otherwise short-circuit the residual pin and hand the upstream
+  WebSocket a URL it does not accept
 
 #### Scenario: oversized payload bypass still forces HTTP under always_websocket
 
@@ -4669,6 +4715,23 @@ through to the global `http_downstream_transport_policy`.
 - **WHEN** the proxy resolves the upstream transport
 - **THEN** the request MUST be sent over upstream HTTP `POST`, because the
   oversized-payload bypass has higher precedence than the policy
+
+#### Scenario: inline image alone does not force HTTP under always_websocket
+
+- **GIVEN** `http_downstream_transport_policy` is `"always_websocket"`
+- **AND** a request carries an inline `data:` image below the WebSocket
+  frame budget
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST keep upstream WebSocket
+
+#### Scenario: external image URL still forces HTTP
+
+- **GIVEN** `upstream_stream_transport` is `"auto"`
+- **AND** a request carries an `input_image` part whose `image_url` is an
+  external `http(s)` URL, anywhere in the input — including inside a
+  tool-output array, which the image inliner never rewrites
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST be sent over upstream HTTP `POST`
 
 #### Scenario: native WebSocket clients are unaffected by the policy
 
@@ -5292,69 +5355,6 @@ current and the failure is ordinary transient upstream silence.
 - **THEN** the proxy preserves the existing retryable `stream_idle_timeout`
   behavior
 
-### Requirement: Repeated zero-event idle failures poison dead anchors
-
-For hard HTTP bridge keys, repeated zero-event idle failures MUST use the
-existing durable retry-circuit counter to identify an anchor that should no
-longer remain addressable; the counter resets on a completed response, so a run of consecutive failures proves the anchor never advanced. Both ambiguous eventless transport classes — `stream_idle_timeout` (including its aliased diagnostics) and `stream_incomplete` — MUST be able to trigger anchor poisoning at the threshold; a `clean_close` outcome MUST NOT itself trigger anchor poisoning. When consecutive failures for the same hard bridge
-key reach the configured poison threshold, the proxy MUST abandon durable
-continuity for that session and retire the bridge even when admission waiters
-exist, and the shared retirement boundary MUST clear the poisoned durable anchor even when no admission waiter exists, while the session still owns its durable lease. If the clear cannot be confirmed on the waiterless retirement path, the proxy MUST re-attempt it when a later eligible eventless failure at or above the threshold retires the session. The default threshold MUST be no greater than seven failures.
-
-Recovery MUST NOT depend on the counter reaching that threshold: because an
-open circuit admits only one probe per half-open lease, the counter may never
-reach a threshold above the circuit's own opening threshold from an interactive
-client. The circuit opening on an eventless poison-class failure MUST
-therefore quarantine the key independently, as specified under the
-silent-session quarantine requirement, so a full-resend probe after the
-circuit opens is planned without the dead anchor.
-
-#### Scenario: Admission waiters cannot defer anchor poisoning forever
-- **GIVEN** a hard durable bridge key has admission waiters
-- **AND** repeated zero-event idle failures for that same key reach the poison
-  threshold
-- **WHEN** the reader failure path would normally defer retirement for the
-  admission waiter
-- **THEN** the proxy clears the durable continuity anchors
-- **AND** retires the session despite the admission waiter
-- **AND** the next attach starts from fresh durable state rather than the
-  poisoned previous-response anchor
-
-#### Scenario: Lease liveness comparison is timezone-safe
-- **GIVEN** a durable bridge session whose `lease_expires_at` was read from a `timestamptz` column (offset-aware) on PostgreSQL
-- **WHEN** the dead-owner classifier evaluates lease liveness against the application's naive-UTC clock
-- **THEN** both timestamps MUST be normalized to naive UTC before comparison
-- **AND** the anchored-lookup path MUST NOT raise on mixed-awareness datetimes
-
-#### Scenario: Repeated eventless stream_incomplete failures poison the anchor
-- **GIVEN** a hard durable bridge key has a stored durable anchor
-- **AND** every anchored attempt fails eventlessly with `stream_incomplete` (for example a masked upstream previous-response rejection)
-- **WHEN** consecutive failures for that key reach the poison threshold
-- **THEN** the proxy clears the durable continuity anchors under the session's owner epoch
-- **AND** the next attach starts from fresh durable state instead of looping through retry-circuit cooldown
-
-#### Scenario: Waiterless retirement poisons the anchor at the threshold
-- **GIVEN** a hard durable bridge key fails eventlessly with no admission waiters
-- **WHEN** the shared retirement boundary records the eventless failure that reaches the poison threshold
-- **THEN** the proxy clears the durable continuity anchors before releasing the durable lease
-
-#### Scenario: Failed waiterless clear is re-attempted on the next threshold failure
-- **GIVEN** the waiterless retirement path reached the poison threshold but the durable continuity clear could not be confirmed
-- **WHEN** the next eligible eventless failure for the same key retires the session
-- **THEN** the proxy re-attempts the durable continuity clear under the new session's owner epoch
-
-#### Scenario: Clean closes never trigger anchor poisoning
-- **WHEN** a `clean_close` retry-circuit outcome is recorded for a hard bridge key, at any consecutive-failure count
-- **THEN** that outcome does not clear the durable continuity anchors
-
-#### Scenario: A dead anchor is bypassed before the poison threshold is reached
-
-- **GIVEN** a hard durable bridge key has two consecutive eventless `stream_incomplete` failures and an open circuit
-- **AND** the configured poison threshold is greater than two
-- **WHEN** the cooldown expires and the next full-resend request is admitted as the probe
-- **THEN** the key is quarantined and the probe is planned without the dead anchor
-- **AND** the probe resends full history rather than the dead anchor
-
 ### Requirement: HTTP bridge model-transition isolation is single-pass
 
 When an HTTP bridge request cannot reuse the session selected by its incoming affinity because that session uses an incompatible model, the service MUST preserve the resulting internal model-parallel key until bridge creation or reuse completes. It MUST NOT reapply the original session-header or turn-state fallback to the same request after selecting that fork.
@@ -5665,7 +5665,7 @@ When a direct Responses WebSocket request fails closed because upstream rejects 
 
 ### Requirement: Responses HTTP ingress uses the expanded bounded budget
 
-HTTP requests to `/v1/responses` and `/backend-api/codex/responses`, including trailing-slash variants, MUST use the larger of `max_decompressed_body_bytes` and `max_decompressed_responses_body_bytes` as both the raw-body and decompressed-body ingress budget. The Responses-specific default MUST remain 128 MiB.
+HTTP requests to `/v1/responses` and `/backend-api/codex/responses`, including trailing-slash variants, MUST use the larger of the general HTTP body budget (`MAX_DECOMPRESSED_BODY_BYTES`, 32 MiB) and the Responses body budget (`MAX_DECOMPRESSED_RESPONSES_BODY_BYTES`, 128 MiB) as both the raw-body and decompressed-body ingress budget. Both budgets are fixed application constants in `app/core/ingress_limits.py` and MUST NOT be operator-configurable; the Responses budget MUST remain 128 MiB and MUST be the same constant that seeds the downstream websocket `--ws-max-size` default.
 
 The trailing-slash variants MUST be hidden aliases of the canonical HTTP handlers rather than redirects, so streamed bodies receive the same admission, authorization, and route behavior.
 
@@ -6504,6 +6504,32 @@ Disabling the existing sticky-session mapping cleanup switch MUST NOT disable
 operation transcript retention; that switch MAY skip sticky mapping
 maintenance while durable operation retention continues.
 
+The retention window itself is dashboard-managed. It MUST resolve as code
+default, then the deprecated environment alias, then a value stored in the
+dashboard, and both the startup one-shot purge and each scheduler pass MUST
+read it from the dashboard snapshot that pass already holds — once per pass,
+never inside a runtime lock and never per operation — so a dashboard change
+takes effect on the next tick on every replica without a restart.
+
+Because the spool is the replay source for durable bridge recovery, the
+effective window MUST cover every *configured* window in which a spooled
+operation can still be read: the bridge session reuse window, the
+stale-operation abandonment window, and the lifetime of a retry circuit that
+has already admitted a claim. That floor
+MUST be derived from those terms rather than fixed, because two of them are
+themselves operator-tunable, and the settings API MUST refuse an update that
+would leave the effective window below it, naming the binding term. A
+deployment can already be below the floor without any update having passed that
+check, because the environment alias alone decides the window while the
+dashboard column is NULL; startup MUST warn about that state (warn-only,
+naming the binding term and both values) so the first refusal is not a
+surprise. The floor is a steady-state bound on the configuration, not a
+retroactive one: a bridge
+session already open keeps the longer idle TTL it captured, so shortening a
+reuse window can still outlive the transcripts of sessions opened under the
+previous window — the same non-retroactive behaviour the abandoned-row
+retention derived from those windows already has.
+
 #### Scenario: Retention drains a small backlog
 
 - **WHEN** fewer operations are eligible than one scheduler-pass budget
@@ -6547,15 +6573,31 @@ maintenance while durable operation retention continues.
 - **THEN** the leader-gated scheduler still deletes bounded batches of expired
   operation transcript rows while skipping sticky mapping cleanup
 
-### Requirement: Fresh indefinite-recovery spool
+#### Scenario: Dashboard window applies without a restart
 
-Before dispatching a server-owned retry for a nonterminal operation, the system
-MUST atomically clear any partial event spool under the durable owner fence.
+- **GIVEN** the environment alias sets a seven-day window and an operator
+  stores a shorter window in the dashboard
+- **WHEN** the next leader-gated retention pass runs
+- **THEN** it cuts at the dashboard window, not the environment alias
+- **AND** no replica was restarted
 
-#### Scenario: Retry starts with a clean transcript
+#### Scenario: A window already below the floor is reported at startup
 
-- **WHEN** an anchored retry is dispatched after partial persistence
-- **THEN** old events and byte counts are cleared before new output is accepted
+- **GIVEN** the environment alias sets a window below the floor and no
+  dashboard value has been stored
+- **WHEN** the application starts
+- **THEN** it logs a warning naming the binding term, the effective window and
+  the floor
+- **AND** startup continues
+
+#### Scenario: Unset dashboard window keeps inheriting
+
+- **GIVEN** no dashboard value has been stored
+- **WHEN** a retention pass runs
+- **THEN** it cuts at the environment alias, or at the code default when the
+  alias is unset
+- **AND** the stored dashboard value remains unset after any settings save that
+  omits the field
 
 ### Requirement: Ordered deferred reasoning persistence
 
@@ -6663,36 +6705,6 @@ predicate MUST be rechecked in the deletion transaction.
 - **WHEN** a stale operation belongs to a session with a live lease
 - **THEN** retention leaves it intact
 
-### Requirement: Anchored indefinite recovery gate
-
-The server-indefinite recovery loop MUST be installed only for an eventless
-anchored continuation with a durable parent operation. Fresh first-turn
-requests and streams that already emitted downstream response events MUST
-terminate normally rather than being resent indefinitely.
-
-#### Scenario: Fresh request is not held indefinitely
-
-- **WHEN** a first-turn request loses its upstream connection
-- **THEN** the proxy returns its normal error path without an indefinite loop
-
-### Requirement: Retry reservation terminalization
-
-If reacquiring API-key usage limits for a recovery attempt fails, the proxy
-MUST settle the prior reservation and emit a terminal `response.failed` SSE
-event instead of aborting the already-started stream.
-
-#### Scenario: Quota failure produces terminal SSE
-
-- **WHEN** a recovery retry cannot reacquire its usage reservation
-- **THEN** the client receives `response.failed` and the prior reservation is settled
-
-#### Scenario: Unexpected admission failure produces terminal SSE
-
-- **WHEN** recovery admission raises an unexpected infrastructure error before
-  a replacement stream starts
-- **THEN** the client receives `response.failed` and the prior reservation is
-  settled instead of receiving a truncated stream
-
 ### Requirement: Failure spool/state ordering
 
 For an explicit deterministic failure, the proxy MUST persist the terminal SSE
@@ -6718,17 +6730,6 @@ disconnect was non-terminal.
 
 - **WHEN** the upstream closes after `response.created` but before completion
 - **THEN** the operation remains non-retryable
-
-### Requirement: Retry output stops indefinite recovery
-
-An indefinite recovery attempt MUST stop retrying once that attempt emits any
-downstream response event, even if the attempt later fails with a retryable
-transport error.
-
-#### Scenario: Retry output prevents a second attempt
-
-- **WHEN** a retry emits a data event and then times out
-- **THEN** the server stops the indefinite loop instead of appending another response
 
 ### Requirement: Preserve repeated event occurrences
 
@@ -6793,18 +6794,6 @@ sending it.
 
 - **WHEN** operation metadata makes the final frame exceed the configured limit
 - **THEN** the request is rejected or slimmed before any upstream send
-
-### Requirement: Fence same-session active operations
-
-Server-indefinite recovery MUST NOT reset or redispatch a nonterminal operation
-when another pending request in the same durable session still references that
-operation. Submitted and acknowledged operations MUST remain fail-closed;
-only an inactive `unknown` operation may enter a fresh recovery attempt.
-
-#### Scenario: Active same-session operation is not duplicated
-
-- **WHEN** a duplicate request finds a submitted operation still referenced by another pending request
-- **THEN** the proxy refuses a second dispatch and preserves the existing spool
 
 ### Requirement: Responses routes preserve the Ultrafast service tier
 
@@ -7926,72 +7915,6 @@ merging.
 - **THEN** the old observer does not recreate or persist the cleared failure
 - **AND** it receives the current circuit count of zero
 
-### Requirement: Operation-fenced hard turns preserve client retry budget during cooldown
-
-A hard turn-state HTTP bridge request arriving during retry-circuit cooldown MUST remain pending until cooldown expires only if an explicit server recovery mode is enabled, the request has not observed a response id or response event, and the bridge has a live durable session and owner epoch. The proxy MUST NOT dispatch upstream while waiting. After the wait, the request MUST pass through the existing durable operation-ledger admission before any `response.create` is sent.
-
-#### Scenario: One-shot hard turn waits before durable arbitration
-
-- **GIVEN** `server_anchored_replay_once` is enabled
-- **AND** a turn-state-only hard continuation has a live durable owner
-- **AND** its retry circuit is cooling down before submission
-- **WHEN** the request reaches bridge startup
-- **THEN** the proxy waits for the bounded cooldown instead of returning 503
-- **AND** it sends no upstream request during the wait
-- **AND** normal durable operation admission runs after cooldown
-
-#### Scenario: Missing durable fence remains fail closed
-
-- **GIVEN** a turn-state-only hard continuation has no durable session or owner
-  epoch
-- **WHEN** its retry circuit is cooling down
-- **THEN** the proxy does not wait or dispatch upstream
-- **AND** it returns the existing cooldown failure with a retry hint
-
-#### Scenario: Operation ledger disabled remains fail closed
-
-- **GIVEN** ambiguous continuation recovery mode is enabled
-- **AND** a turn-state-only hard continuation has a live durable session and
-  owner epoch
-- **AND** the durable operation ledger is disabled
-- **WHEN** its retry circuit is cooling down before submission
-- **THEN** the proxy preserves the existing cooldown failure
-- **AND** it does not wait or dispatch upstream
-
-#### Scenario: Default mode remains fail closed
-
-- **GIVEN** ambiguous continuation recovery mode is `fail_closed`
-- **WHEN** any continuity-bound hard request arrives during cooldown
-- **THEN** the proxy preserves the existing immediate cooldown failure
-- **AND** it does not create or claim a durable recovery operation
-
-#### Scenario: Request budget expires while waiting
-
-- **GIVEN** an operation-fenced hard turn is allowed to wait through cooldown
-- **AND** its request budget expires before the cooldown does
-- **WHEN** the bounded wait reaches the request deadline
-- **THEN** the proxy releases the request reservation and returns a terminal
-  timeout
-- **AND** it does not submit `response.create` after the deadline
-
-#### Scenario: Cooldown waiter stays within the per-session queue limit
-
-- **GIVEN** an operation-fenced hard turn is eligible to wait through cooldown
-- **AND** the bridge session is already at its configured queue limit
-- **WHEN** the request reaches the cooldown wait point before submission
-- **THEN** the proxy rejects the request with the existing bridge queue full
-  error
-- **AND** it does not sleep or dispatch upstream
-
-#### Scenario: Durable ownership is renewed while the cooldown wait is pending
-
-- **GIVEN** an operation-fenced hard turn is waiting through startup cooldown
-- **AND** the cooldown exceeds one durable lease refresh cadence
-- **WHEN** the wait continues before submission
-- **THEN** the proxy renews and revalidates the durable owner lease before the
-  wait completes
-- **AND** it fails closed if durable ownership changes during the wait
-
 ### Requirement: Source-owned models are not served over the WebSocket transport
 
 Model sources are reachable only from the HTTP request path. When a WebSocket
@@ -8428,7 +8351,16 @@ operation MAY transition to the terminal `abandoned` state only after its
 http_responses_session_bridge_request_budget_seconds)`, no local canonical or
 detached bridge request is pending for that operation, and the durable owning
 session has no owner or an owner lease that has remained expired for at least
-one additional durable lease period.
+one additional durable lease period. The budget term is the effective
+dashboard-managed value: a non-NULL
+`dashboard_settings.http_responses_session_bridge_request_budget_seconds`
+overrides the environment value, which overrides the 7200 second code default.
+
+The maintenance sweep runs from the ring heartbeat outside any request
+binding, so it MUST resolve that budget from one `SettingsCache` snapshot read
+per sweep — never per candidate row and never inside the bridge registry lock.
+When the snapshot cannot be read the sweep MUST log a warning and fall back to
+the environment value rather than skipping the pass.
 
 An ownerless session produced by a graceful lease release MUST remain
 ineligible until its recorded `lease_expires_at` has aged through that same
@@ -8566,6 +8498,24 @@ be starved by a protected prefix.
   without a `previous_response_id` parameter
 - **AND** the error instructs Codex to discard the hard continuity anchor and
   resend full history
+
+#### Scenario: dashboard bridge budget sets the inactivity cutoff
+
+- **GIVEN** the process environment sets a 120 second bridge request budget
+- **AND** an operator has stored `10800` for
+  `http_responses_session_bridge_request_budget_seconds` through
+  `PUT /api/settings`
+- **WHEN** the bridge maintenance sweep runs on any replica
+- **THEN** the inactivity cutoff is 10800 seconds before the sweep time
+- **AND** not the `max(1800, 120)` = 1800 seconds the environment alone implies
+
+#### Scenario: snapshot failure keeps the environment budget
+
+- **GIVEN** the `SettingsCache` snapshot cannot be read during a sweep
+- **WHEN** the bridge maintenance sweep runs
+- **THEN** the sweep still runs with the `max(1800 seconds, environment budget)`
+  cutoff
+- **AND** a warning is logged
 
 ### Requirement: Suppressed duplicate side-effect replays receive a dedicated terminal failure
 
@@ -9183,31 +9133,6 @@ policy.
   historical tool-output omission notice
 - **AND** preserves the namespaced pair's output unchanged
 
-### Requirement: Eventless server-owned bridge recovery is bounded
-
-The proxy MUST retry server-owned HTTP bridge recovery only up to the
-configured `http_responses_session_bridge_server_recovery_max_attempts`
-setting (default 6) after consecutive eligible eventless failures for an
-anchored continuation. Once
-that budget is exhausted, the proxy MUST stop recovering and emit a terminal
-`response.failed` event.
-
-That terminal event MUST include a stable `response.id` even when upstream
-never emitted `response.created` or another response envelope before the
-failure. Public `/v1/responses` normalization depends on that envelope to
-synthesize the required leading `response.created` event without producing an
-SDK parser failure.
-
-#### Scenario: Exhausted eventless recovery terminates with one response id
-
-- **GIVEN** an anchored HTTP bridge continuation is eligible for server-owned
-  recovery
-- **AND** each upstream attempt fails before any downstream `response.*` event
-- **WHEN** the bridge reaches its configured eventless recovery attempt cap
-- **THEN** it emits one terminal `response.failed` event instead of continuing
-  recovery indefinitely
-- **AND** that terminal event includes a stable `response.id`
-
 ### Requirement: Stale bridge retirement rechecks liveness after suspension
 
 Before closing and unregistering a stale HTTP bridge session, the service MUST re-sample pending request liveness after retry-circuit bookkeeping awaits. A response event, response id, or equivalent response-created signal newly observed after the caller's pre-suspension snapshot MUST prevent stale retirement. A session that remains eventless MUST still be retired. Retirement entered from the reader-failure funnel, or for a session that was already closed when its last admission waiter cancelled, MUST NOT be revived by post-suspension signals: its pending turns were already terminally failed and its reader is condemned, and the completed-response anchor can be moved by durable-anchor rehydration without any upstream evidence.
@@ -9557,12 +9482,15 @@ The pre-response silence budget MUST be a named quantity derived from
 configuration, not the implicit product of `_STREAM_KEEPALIVE_MAX_COUNT` and
 `sse_keepalive_interval_seconds`.
 
-The budget MUST be the minimum of
-`http_responses_session_bridge_stuck_gate_retire_after_seconds`,
-`stream_idle_timeout_seconds`, and
+The budget MUST be the minimum of the fixed owner-side stuck gate
+(`HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS`, 300 seconds; not a runtime
+setting), `stream_idle_timeout_seconds`, and
 `http_responses_session_bridge_request_budget_seconds`, so that the downstream
 pre-response watchdog can never outlive the owner-side stuck gate, the
-configured idle budget, or the request budget. The number of pre-response
+configured idle budget, or the request budget. The two settings-derived terms
+MUST be read as their effective dashboard-managed values from the snapshot
+bound to the request, a non-NULL `dashboard_settings` column of the same name
+overriding the environment value. The number of pre-response
 keepalive intervals waited MUST cover that budget. It MUST NOT drop below
 `_STREAM_KEEPALIVE_MAX_COUNT` when the budget spans at least that many
 keepalive intervals; when the configured budget is shorter, the count MUST
@@ -9570,9 +9498,8 @@ follow the budget instead, so the watchdog never outlives it.
 
 #### Scenario: Default settings align the budget with the stuck gate
 
-- **GIVEN** shipped defaults `sse_keepalive_interval_seconds=10`,
-  `http_responses_session_bridge_stuck_gate_retire_after_seconds=300`, and
-  `stream_idle_timeout_seconds=7200`
+- **GIVEN** shipped defaults `sse_keepalive_interval_seconds=10` and
+  `stream_idle_timeout_seconds=7200`, and the fixed `300` second stuck gate
 - **WHEN** the pre-response silence budget is computed
 - **THEN** the budget is `300` seconds
 - **AND** the pre-response keepalive count covers `300` seconds rather than the
@@ -9583,6 +9510,16 @@ follow the budget instead, so the watchdog never outlives it.
 - **GIVEN** `stream_idle_timeout_seconds=45` and a `300` second stuck gate
 - **WHEN** the pre-response silence budget is computed
 - **THEN** the budget is `45` seconds
+
+#### Scenario: Dashboard bridge budget is the term compared
+
+- **GIVEN** the process environment sets a `7200` second bridge request budget
+  and an operator has stored `650` through `PUT /api/settings`
+- **AND** `stream_idle_timeout_seconds=7200` and the fixed `300` second stuck
+  gate
+- **WHEN** the pre-response silence budget is computed for a request
+- **THEN** the bridge budget term is `650` seconds (the dashboard value)
+- **AND** the budget is `300` seconds
 
 ### Requirement: Unmatched live upstream frames are recorded as liveness
 
@@ -10035,14 +9972,15 @@ rewritten payload.
 
 ### Requirement: Per-request detached-session retire sweep bounds its lock wait
 
-The fail-safe sweep that reconsiders detached HTTP-bridge generations on every bridge request MUST bound how long it waits for any single detached session's `pending_lock`. When the bound elapses the sweep MUST skip that session for the current pass, emit a warning, leave the session tracked and its lock state untouched, and continue. Session lifecycle owners (drain, close, cooldown-suppression retirement) MUST keep waiting for the lock without a bound so retirement decisions stay authoritative.
+The fail-safe sweep that reconsiders detached HTTP-bridge generations on every bridge request MUST use one five-second monotonic deadline for its aggregate detached-session lock waits. Each retirement attempt MUST receive only the remaining time. Once the deadline expires, the sweep MUST stop starting attempts and emit one warning naming the number of unattempted sessions, if any. Timed-out and unattempted sessions MUST remain tracked with their lock state untouched for later sweeps and lifecycle cleanup. Session lifecycle owners (drain, close, cooldown-suppression retirement) MUST keep waiting for the lock without a bound so retirement decisions stay authoritative. Request cancellation MUST NOT bypass the shielded finalization sweep or transfer resource cleanup ownership.
 
 #### Scenario: Busy detached lock does not park the request path
 
 - **GIVEN** a detached session flagged `retire_after_drain` whose `pending_lock` is held by another task for longer than the bound
 - **WHEN** a request runs the fail-safe sweep
 - **THEN** the sweep returns after the bound without closing the session
-- **AND** a warning names the skipped session
+- **AND** if sessions remain unattempted when the deadline expires, one warning reports their count
+- **AND** the timed-out session remains tracked for later sweeps and lifecycle cleanup
 - **AND** the lock remains owned by its holder with no stranded waiter
 
 #### Scenario: Free detached lock still retires
@@ -10056,6 +9994,19 @@ The fail-safe sweep that reconsiders detached HTTP-bridge generations on every b
 - **GIVEN** a drain or close path calls the retire check without a bound while another task briefly holds the lock
 - **WHEN** the holder releases
 - **THEN** the retire check proceeds and retires the session
+
+#### Scenario: Several busy sessions share one deadline
+
+- **GIVEN** three detached sessions and a five-second sweep budget
+- **WHEN** the first retirement attempt consumes three seconds and the second consumes its remaining two seconds
+- **THEN** no third attempt starts and aggregate lock waiting is five seconds
+- **AND** the deferred sessions remain tracked and a later sweep can retire them
+
+#### Scenario: Cancelled request finalization uses the same deadline
+
+- **WHEN** a bridge request is cancelled while several detached sessions have busy locks
+- **THEN** shielded finalization uses one aggregate lock-wait deadline before cancellation propagates
+- **AND** deferred sessions retain their existing cleanup owners
 
 ### Requirement: Cancelled streamed responses do not re-cancel deferred startup work every loop iteration
 
@@ -10726,8 +10677,6 @@ original upstream code is retained for account-health recovery.
 - **AND** the request-log error code is `previous_response_owner_unavailable`
 - **AND** no raw stale-anchor identifier or source-ownership detail is exposed
 
-
-
 ### Requirement: Structured HTTP continuation promotion
 Under automatic upstream transport and smart HTTP policy, the proxy SHALL
 recognize a non-empty conversation identifier, a tool-result input item, or an
@@ -10793,6 +10742,7 @@ Metrics SHALL NOT label raw request, conversation, session, account or API-key i
 - **WHEN** a request remains HTTP because it is single-turn, policy-pinned, bridge-disabled, oversized, image-capable, or affected by a recent WS outage
 - **THEN** its routing diagnostics distinguish that reason
 - **AND** admission counters MUST NOT be represented as successful WS connections
+
 ### Requirement: Observed HTTP response IDs publish same-process ownership before delivery
 
 When an HTTP Responses attempt extracts a valid response ID from an actual upstream lifecycle event, it MUST publish that ID to the existing bounded process owner cache with the selected account and existing API-key/session scope before delivering the event that exposes the ID downstream. An immediate same-process follow-up referencing that ID MUST be able to resolve its known owner without waiting for the originating request-log write or originating stream completion. This readiness MUST apply from the first observed lifecycle event carrying the ID, including `response.created`, `response.queued`, and `response.in_progress`, whether delivered as SSE or adapted from a canonical background JSON acknowledgement; it MUST NOT promise that an unfinished response is already usable by the upstream provider.
@@ -10830,3 +10780,86 @@ When normalization of an actual upstream error supplies a local response ID, tha
 - **GIVEN** an HTTP stream has delivered a text delta and first exposes its authoritative response ID in `response.in_progress`
 - **WHEN** the event reaches the caller before stream completion
 - **THEN** a same-process continuation MUST resolve the known owner before upstream dispatch
+
+### Requirement: Repeated zero-event idle failures poison dead anchors at the circuit threshold
+
+For hard HTTP bridge keys, repeated zero-event idle failures MUST use the
+existing durable retry-circuit counter to identify an anchor that should no
+longer remain addressable; the counter resets on a completed response, so a run of consecutive failures proves the anchor never advanced. Both ambiguous eventless transport classes — `stream_idle_timeout` (including its aliased diagnostics) and `stream_incomplete` — MUST be able to trigger anchor poisoning at the threshold; a `clean_close` outcome MUST NOT itself trigger anchor poisoning. When consecutive failures for the same hard bridge
+key reach the poison threshold, the proxy MUST abandon durable
+continuity for that session and retire the bridge even when admission waiters
+exist, and the shared retirement boundary MUST clear the poisoned durable anchor even when no admission waiter exists, while the session still owns its durable lease. If the clear cannot be confirmed on the waiterless retirement path, the proxy MUST re-attempt it when a later eligible eventless failure at or above the threshold retires the session. The poison threshold IS the retry circuit's own opening threshold
+(`_HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD`, two consecutive failures): a
+fixed application constant, not a runtime setting.
+
+Because the poison threshold coincides with the circuit's opening threshold,
+the eventless poison-class strike that opens the circuit is also the strike
+that authorizes the abandonment. The circuit opening MUST therefore quarantine
+the key independently of the durable clear, as specified under the
+silent-session quarantine requirement, so a full-resend probe after the
+circuit opens is planned without the dead anchor even while that clear is
+still awaiting I/O.
+
+#### Scenario: Admission waiters cannot defer anchor poisoning forever
+- **GIVEN** a hard durable bridge key has admission waiters
+- **AND** repeated zero-event idle failures for that same key reach the poison
+  threshold
+- **WHEN** the reader failure path would normally defer retirement for the
+  admission waiter
+- **THEN** the proxy clears the durable continuity anchors
+- **AND** retires the session despite the admission waiter
+- **AND** the next attach starts from fresh durable state rather than the
+  poisoned previous-response anchor
+
+#### Scenario: Lease liveness comparison is timezone-safe
+- **GIVEN** a durable bridge session whose `lease_expires_at` was read from a `timestamptz` column (offset-aware) on PostgreSQL
+- **WHEN** the dead-owner classifier evaluates lease liveness against the application's naive-UTC clock
+- **THEN** both timestamps MUST be normalized to naive UTC before comparison
+- **AND** the anchored-lookup path MUST NOT raise on mixed-awareness datetimes
+
+#### Scenario: Repeated eventless stream_incomplete failures poison the anchor
+- **GIVEN** a hard durable bridge key has a stored durable anchor
+- **AND** every anchored attempt fails eventlessly with `stream_incomplete` (for example a masked upstream previous-response rejection)
+- **WHEN** consecutive failures for that key reach the poison threshold
+- **THEN** the proxy clears the durable continuity anchors under the session's owner epoch
+- **AND** the next attach starts from fresh durable state instead of looping through retry-circuit cooldown
+
+#### Scenario: Waiterless retirement poisons the anchor at the threshold
+- **GIVEN** a hard durable bridge key fails eventlessly with no admission waiters
+- **WHEN** the shared retirement boundary records the eventless failure that reaches the poison threshold
+- **THEN** the proxy clears the durable continuity anchors before releasing the durable lease
+
+#### Scenario: Failed waiterless clear is re-attempted on the next threshold failure
+- **GIVEN** the waiterless retirement path reached the poison threshold but the durable continuity clear could not be confirmed
+- **WHEN** the next eligible eventless failure for the same key retires the session
+- **THEN** the proxy re-attempts the durable continuity clear under the new session's owner epoch
+
+#### Scenario: Clean closes never trigger anchor poisoning
+- **WHEN** a `clean_close` retry-circuit outcome is recorded for a hard bridge key, at any consecutive-failure count
+- **THEN** that outcome does not clear the durable continuity anchors
+
+#### Scenario: The probe after the circuit opens is planned without the dead anchor
+
+- **GIVEN** a hard durable bridge key has two consecutive eventless `stream_incomplete` failures, which open the circuit and reach the poison threshold in the same strike
+- **WHEN** the cooldown expires and the next full-resend request is admitted as the probe
+- **THEN** the key is quarantined and the probe is planned without the dead anchor
+- **AND** the probe resends full history rather than the dead anchor
+
+### Requirement: Eventless bridge failures terminate with a stable response id
+
+When an anchored HTTP bridge continuation fails before any downstream response
+event, the proxy MUST emit one terminal `response.failed` event.
+
+That terminal event MUST include a stable `response.id` even when upstream
+never emitted `response.created` or another response envelope before the
+failure. Public `/v1/responses` normalization depends on that envelope to
+synthesize the required leading `response.created` event without producing an
+SDK parser failure.
+
+#### Scenario: Eventless failure terminates with one response id
+
+- **GIVEN** an anchored HTTP bridge continuation
+- **AND** its upstream attempt fails before any downstream `response.*` event
+- **WHEN** the bridge settles the turn
+- **THEN** it emits one terminal `response.failed` event
+- **AND** that terminal event includes a stable `response.id`

@@ -109,17 +109,9 @@ async def test_fetch_models_for_plan_marks_transport_errors(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-async def test_refresh_access_token_marks_transport_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_access_token_marks_transport_errors() -> None:
     session = MagicMock()
     session.post.side_effect = aiohttp.ClientError("dns failed")
-
-    monkeypatch.setattr(
-        refresh_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            token_refresh_timeout_seconds=15.0,
-        ),
-    )
 
     with pytest.raises(refresh_module.RefreshError) as excinfo:
         await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
@@ -132,20 +124,9 @@ async def test_refresh_access_token_marks_transport_errors(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_refresh_access_token_preserves_transient_dns_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_access_token_preserves_transient_dns_classification() -> None:
     session = MagicMock()
     session.post.side_effect = socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
-    monkeypatch.setattr(
-        refresh_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            auth_base_url="https://auth.example.test",
-            oauth_client_id="client-id",
-            oauth_scope="openid profile",
-            token_refresh_timeout_seconds=15.0,
-        ),
-    )
-
     with pytest.raises(refresh_module.RefreshError) as exc_info:
         await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
 
@@ -156,26 +137,13 @@ async def test_refresh_access_token_preserves_transient_dns_classification(monke
 
 
 @pytest.mark.asyncio
-async def test_refresh_access_token_marks_typed_connector_dns_failure_replay_safe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_refresh_access_token_marks_typed_connector_dns_failure_replay_safe() -> None:
     session = MagicMock()
     key = ConnectionKey("auth.example.test", 443, True, True, None, None, None)
     session.post.side_effect = aiohttp.ClientConnectorError(
         key,
         socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
     )
-    monkeypatch.setattr(
-        refresh_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            auth_base_url="https://auth.example.test",
-            oauth_client_id="client-id",
-            oauth_scope="openid profile",
-            token_refresh_timeout_seconds=15.0,
-        ),
-    )
-
     with pytest.raises(refresh_module.RefreshError) as exc_info:
         await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
 
@@ -185,9 +153,7 @@ async def test_refresh_access_token_marks_typed_connector_dns_failure_replay_saf
 
 
 @pytest.mark.asyncio
-async def test_refresh_access_token_network_body_read_failure_is_not_replay_safe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_refresh_access_token_network_body_read_failure_is_not_replay_safe() -> None:
     class _BodyReadFailureResponse:
         status = 200
 
@@ -206,17 +172,6 @@ async def test_refresh_access_token_network_body_read_failure_is_not_replay_safe
 
     session = MagicMock()
     session.post.return_value = _BodyReadFailureResponse()
-    monkeypatch.setattr(
-        refresh_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            auth_base_url="https://auth.example.test",
-            oauth_client_id="client-id",
-            oauth_scope="openid profile",
-            token_refresh_timeout_seconds=15.0,
-        ),
-    )
-
     with pytest.raises(refresh_module.RefreshError) as exc_info:
         await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
 

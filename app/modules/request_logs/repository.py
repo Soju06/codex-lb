@@ -1041,6 +1041,9 @@ class RequestLogsRepository:
         upstream_proxy_fallback_used: bool | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
         archive_request_id: str | None = None,
+        sticky_key_source: str | None = None,
+        sticky_kind: str | None = None,
+        sticky_key_hash: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
             # Telemetry write: this transaction only appends one request-log
@@ -1058,6 +1061,9 @@ class RequestLogsRepository:
             resolved_conversation_id = _normalize_conversation_id(conversation_id)
             resolved_client_ip = client_ip if not isinstance(client_ip, str) or client_ip.strip() else None
             log = RequestLog(
+                sticky_key_source=sticky_key_source,
+                sticky_kind=sticky_kind,
+                sticky_key_hash=sticky_key_hash,
                 account_id=account_id,
                 model_source_id=model_source_id,
                 model_source_kind=model_source_kind,
@@ -1261,10 +1267,13 @@ class RequestLogsRepository:
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
+        sources: list[str] | None = None,
         *,
         cache_mode: str = "since",
         timeframe: str | None = None,
         include_sensitive_metadata: bool = True,
+        include_account_identity: bool = True,
+        include_api_key_identity: bool = True,
     ) -> RequestLogsResult:
         since = _naive_utc(since) if since is not None else None
         until = _naive_utc(until) if until is not None else None
@@ -1283,8 +1292,11 @@ class RequestLogsRepository:
             include_error_other=include_error_other,
             error_codes_in=error_codes_in,
             error_codes_excluding=error_codes_excluding,
+            sources=sources,
             exclude_soft_deleted=True,
             include_sensitive_metadata=include_sensitive_metadata,
+            include_account_identity=include_account_identity,
+            include_api_key_identity=include_api_key_identity,
         )
 
         stmt = select(RequestLog).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
@@ -1303,7 +1315,10 @@ class RequestLogsRepository:
             return RequestLogsResult(logs=logs, total=total, aggregated_cost_usd=aggregated_cost_usd)
 
         demand_params: _DemandCountParams | None = None
-        if search is None and not error_codes_in and not error_codes_excluding:
+        # ``source`` is not a demand-rollup dimension (its primary key carries no
+        # ``source`` column), so an active source filter must not be counted from
+        # the rollup -- it would silently return the unfiltered total.
+        if search is None and not error_codes_in and not error_codes_excluding and not sources:
             demand_params = _DemandCountParams(
                 since=since,
                 until=until,
@@ -1336,7 +1351,10 @@ class RequestLogsRepository:
             include_error_other,
             tuple(sorted(error_codes_in)) if error_codes_in else None,
             tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
+            tuple(sources or ()),
             include_sensitive_metadata,
+            include_account_identity,
+            include_api_key_identity,
         )
         total = _cached_recent_count(cache_key)
         if total is None:
@@ -1560,17 +1578,27 @@ class RequestLogsRepository:
     async def _distinct_skip_scan(
         self,
         column: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
-        conditions: list,
+        conditions: list[ColumnElement[bool]],
+        *,
+        prefix_conditions: tuple[ColumnElement[bool], ...] = (),
     ) -> list[str]:
         """Loose-index-scan emulation: seed min(column), then min(column) >
         previous, one btree probe per distinct value. NULLs never seed or
         chain (min() skips them); empty strings are preserved — the legacy
         DISTINCT path only drops falsy values per facet, in the callers."""
-        seed = select(func.min(column).label("val")).where(*conditions)
+        sqlite = self._session.get_bind().dialect.name == "sqlite"
+        # SQLite can choose the deleted_at index for MIN(facet), rescanning
+        # every live row per successor. Traverse the facet index first, then
+        # check visibility with an equality probe for each candidate value.
+        scan_conditions = prefix_conditions if sqlite else conditions
+        seed = select(func.min(column).label("val")).where(*scan_conditions)
         skip = seed.cte("facet_skip", recursive=True)
-        successor = select(func.min(column)).where(*conditions, column > skip.c.val).scalar_subquery()
+        successor = select(func.min(column)).where(*scan_conditions, column > skip.c.val).scalar_subquery()
         skip = skip.union_all(select(successor).where(skip.c.val.is_not(None)))
         stmt = select(skip.c.val).where(skip.c.val.is_not(None)).order_by(skip.c.val.asc())
+        if sqlite:
+            visible = select(RequestLog.id).where(*conditions, column == skip.c.val).correlate(skip).exists()
+            stmt = stmt.where(visible)
         rows = await self._session.execute(stmt)
         return [value for (value,) in rows.all() if value is not None]
 
@@ -1591,10 +1619,11 @@ class RequestLogsRepository:
             if not value:
                 # Legacy DISTINCT drops falsy leading values in Python.
                 continue
-            value_conditions = [*conditions, leading == value]
+            prefix = leading == value
+            value_conditions = [*conditions, prefix]
             null_probe = select(RequestLog.id).where(*value_conditions, second.is_(None)).limit(1)
             has_null = (await self._session.execute(null_probe)).scalar_one_or_none() is not None
-            second_values = await self._distinct_skip_scan(second, value_conditions)
+            second_values = await self._distinct_skip_scan(second, value_conditions, prefix_conditions=(prefix,))
             if has_null and nulls_first:
                 pairs.append((value, None))
             pairs.extend((value, second_value) for second_value in second_values)
@@ -1635,8 +1664,11 @@ class RequestLogsRepository:
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
+        sources: list[str] | None = None,
         exclude_soft_deleted: bool = False,
         include_sensitive_metadata: bool = True,
+        include_account_identity: bool = True,
+        include_api_key_identity: bool = True,
     ) -> _RequestLogFilters:
         conditions = []
         if exclude_soft_deleted:
@@ -1651,6 +1683,10 @@ class RequestLogsRepository:
             conditions.append(RequestLog.account_id.in_(account_ids))
         if api_key_ids:
             conditions.append(RequestLog.api_key_id.in_(api_key_ids))
+        if sources:
+            # Opaque equality set (``request_logs.source`` is a plain nullable
+            # string, no enum), served by ``idx_logs_source_requested_at``.
+            conditions.append(RequestLog.source.in_(sources))
 
         if model_options:
             pair_conditions = []
@@ -1693,7 +1729,6 @@ class RequestLogsRepository:
             search_pattern = f"%{search}%"
             search_conditions = [
                 RequestLog.account_id.ilike(search_pattern),
-                Account.email.ilike(search_pattern),
                 RequestLog.request_id.ilike(search_pattern),
                 RequestLog.model.ilike(search_pattern),
                 RequestLog.reasoning_effort.ilike(search_pattern),
@@ -1701,8 +1736,6 @@ class RequestLogsRepository:
                 RequestLog.status.ilike(search_pattern),
                 RequestLog.error_code.ilike(search_pattern),
                 RequestLog.error_message.ilike(search_pattern),
-                RequestLog.api_key_id.ilike(search_pattern),
-                ApiKey.name.ilike(search_pattern),
                 cast(RequestLog.requested_at, String).ilike(search_pattern),
                 cast(RequestLog.input_tokens, String).ilike(search_pattern),
                 cast(RequestLog.output_tokens, String).ilike(search_pattern),
@@ -1710,8 +1743,17 @@ class RequestLogsRepository:
                 cast(RequestLog.reasoning_tokens, String).ilike(search_pattern),
                 cast(RequestLog.latency_ms, String).ilike(search_pattern),
             ]
+            if include_api_key_identity:
+                # API-key ids and names are an api_keys:read surface; matching on
+                # them would let a guest enumerate the key inventory.
+                search_conditions.append(RequestLog.api_key_id.ilike(search_pattern))
+                search_conditions.append(ApiKey.name.ilike(search_pattern))
             if include_sensitive_metadata:
                 search_conditions.append(RequestLog.client_ip.ilike(search_pattern))
+            if include_account_identity:
+                # Account emails are redacted for principals without account
+                # write access; matching on them would be a membership oracle.
+                search_conditions.append(Account.email.ilike(search_pattern))
             conditions.append(or_(*search_conditions))
             return _RequestLogFilters(conditions=conditions, needs_related_search_joins=True)
         return _RequestLogFilters(conditions=conditions, needs_related_search_joins=False)

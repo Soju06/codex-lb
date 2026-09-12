@@ -441,7 +441,7 @@ When an account has an active proxy binding but route resolution returns `None` 
 
 ### Requirement: Upstream SSE framing scans each byte a bounded number of times
 
-The upstream SSE event reader MUST NOT rescan previously scanned buffer bytes on each network read; framing cost MUST be linear in event size so a single large event (up to the configured event-size cap) cannot stall the shared event loop. Framing semantics MUST be unchanged: all separator forms (`\r\n\r\n`, `\n\n`, `\r\r`) are honored, including separators straddling read boundaries, and event-size limits and idle timeouts apply as before.
+The upstream SSE event reader MUST NOT rescan previously scanned buffer bytes on each network read; framing cost MUST be linear in event size so a single large event (up to the fixed 16 MiB event-size cap) cannot stall the shared event loop. Framing semantics MUST be unchanged: all separator forms (`\r\n\r\n`, `\n\n`, `\r\r`) are honored, including separators straddling read boundaries, and event-size limits and idle timeouts apply as before.
 
 #### Scenario: Large event frames in linear time
 
@@ -1227,3 +1227,120 @@ Rust MUST NOT mark such a frame complete solely because it contains an error.
 - **THEN** without SDK-contract enforcement, the envelope is delivered unchanged and the stream continues to the recognized terminal
 - **AND** with SDK-contract enforcement, Python normalizes the envelope to `response.failed` and terminates through its existing cleanup path
 - **AND** both modes preserve the corresponding Python fallback result
+
+### Requirement: Direct usage queries prefer native egress with explicit ownership
+
+After the existing route-or-direct authorization check, a usage GET without a
+resolved route or explicit Python RetryClient MUST prefer the discovered native
+helper. An explicit Python client MUST bypass native discovery. Routed usage
+MUST retain CodexClient ownership. Native requests MUST preserve the usage URL,
+authentication/account/request-id headers, default compression negotiation and
+effective total timeout, and MUST
+use the existing native HTTP environment-proxy resolver. Python MUST retain
+payload validation, public error mapping and retry policy.
+
+#### Scenario: Explicit client and route retain precedence
+
+- **WHEN** a usage call supplies a resolved route or a direct Python client
+- **THEN** it uses that route or client without direct native discovery
+- **AND** an unauthorized direct call fails before any helper discovery or network call
+
+#### Scenario: Missing helper permits only initial fallback
+
+- **WHEN** no helper is found or the first native request raises helper-unavailable before dispatch
+- **THEN** the original Python transport handles the GET
+- **AND** protocol incompatibility, body failure, or helper loss after a prior attempt MUST NOT select Python fallback
+
+### Requirement: Native usage preserves direct retry and response failure semantics
+
+Native usage GETs MUST use the existing direct retryable HTTP statuses, maximum
+attempt count and one-based ExponentialRetry delay calculation. Retryable status
+responses MUST be closed before backoff without waiting for their body. Native
+transport failures before response headers MAY use the remaining GET attempts;
+protocol failures and final-response body failures MUST NOT be retried. Native
+transport/protocol failures MUST surface as UsageFetchError with status 0.
+
+For a fully read response, non-JSON error text and non-object JSON MUST retain
+the existing direct Python error mapping, including charset and empty-body
+handling. Compressed responses MUST be decoded as with the default Python client.
+Malformed success payloads MUST retain
+the 502 invalid-usage-payload result. Cancellation MUST propagate after exchange
+cleanup and MUST NOT invalidate other requests sharing the helper.
+
+#### Scenario: Status retry does not depend on body completion
+
+- **WHEN** a retryable usage response sends headers but stalls its body and an attempt remains
+- **THEN** its exchange is closed and the next native GET follows the existing backoff
+- **AND** the same effective per-attempt timeout and attempt cap apply
+
+#### Scenario: Response-body failure remains a transport error
+
+- **WHEN** the selected response body is truncated or times out
+- **THEN** the call raises UsageFetchError with status 0 without retry or Python fallback
+- **AND** fully read plain-text error responses preserve their text instead
+
+#### Scenario: Encoded responses match the default Python client
+
+- **WHEN** the upstream returns compressed JSON or a body with an explicit charset
+- **THEN** native usage decodes it and produces the same payload or error as direct Python usage
+- **AND** empty, whitespace-only and non-object JSON bodies retain the Python error mapping
+
+#### Scenario: Cancellation and helper exit are isolated
+
+- **WHEN** one usage query is cancelled before headers or while reading the body
+- **THEN** its exchange is retired and another query can use the same helper
+- **WHEN** the helper exits during a body read
+- **THEN** that query fails without replay and a subsequent independent query can start a fresh helper
+
+### Requirement: Rust supplies payload routing metadata for interpreted WebSocket events
+
+The native adapter MUST require `websocket_responses_routing_v1` before dispatch.
+Every interpreted Responses WebSocket event MUST include `payload_response_id`
+and `sequence_number`, each explicitly null when absent. Rust MUST select the
+first nonempty stripped string from top-level `response_id` then nested
+`response.id`, using Python whitespace and last-duplicate-key semantics.
+Sequence metadata MUST accept only JSON integer tokens, excluding booleans,
+floats and exponent notation, and MUST preserve precision and sign.
+Objects containing any integer token over 640 digits (excluding its sign),
+including nested and overwritten values, MUST retain opaque delivery so Python
+integer conversion limits cannot interrupt unrelated helper exchanges.
+Unsupported selected ID strings MUST retain opaque delivery without replay.
+
+Python MUST consume native payload metadata for direct WebSocket matching,
+archive attribution, bridge matching and sequence checks. A successfully
+validated lifecycle event's nonempty nested response ID MUST retain its existing
+unstripped precedence over payload metadata. Bridge frames requiring legacy SSE
+field parsing MUST retain that parsing. Opaque frames MUST retain Python
+extraction. Malformed or missing metadata MUST fail the affected exchange
+without replay. Rust MUST NOT advance the downstream sequence watermark, mutate
+Python pending queues, settle requests, or close shared sockets on response
+terminals as part of this metadata transfer.
+
+#### Scenario: Lifecycle validation controls response-ID precedence
+
+- **WHEN** a lifecycle event has both a direct ID and a nested ID
+- **THEN** a valid nonempty lifecycle ID wins without stripping
+- **AND** failed lifecycle validation uses Rust's stripped payload ID
+
+#### Scenario: Lossless sequence metadata reaches delivery policy
+
+- **WHEN** an interpreted frame includes a negative or large integer sequence within the interpretation bound
+- **THEN** Python receives that exact integer for replay checks
+- **AND** only successful downstream delivery advances the watermark
+
+#### Scenario: Noninteger sequence is ignored
+
+- **WHEN** a sequence is boolean, null, float, exponent notation or a string
+- **THEN** Rust emits null sequence metadata and Python does not track that value
+
+#### Scenario: Invalid metadata does not replay an exchange
+
+- **WHEN** an interpreted event omits routing metadata or carries invalid field types
+- **THEN** the adapter fails and releases that exchange without resending the request
+- **AND** other exchanges on the helper remain usable
+
+#### Scenario: Oversized integers cannot fail the shared IPC decoder
+
+- **WHEN** an upstream object contains an integer over 640 digits anywhere in its payload
+- **THEN** the helper delivers the original text through the opaque path without embedding raw numeric metadata
+- **AND** other exchanges remain usable on the same helper even if Python rejects that frame

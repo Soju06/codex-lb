@@ -90,7 +90,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["warmupModel"] == "gpt-5.4-mini"
     assert payload["importWithoutOverwrite"] is True
     assert payload["totpRequiredOnLogin"] is False
-    assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
     assert payload["hideUpstreamQuotaFromApiKeys"] is False
     assert payload["limitWarmupEnabled"] is False
@@ -185,7 +184,6 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["warmupModel"] == "gpt-5.4-nano"
     assert updated["importWithoutOverwrite"] is False
     assert updated["totpRequiredOnLogin"] is False
-    assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
     assert updated["hideUpstreamQuotaFromApiKeys"] is True
     assert updated["limitWarmupEnabled"] is True
@@ -235,7 +233,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["warmupModel"] == "gpt-5.4-nano"
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
-    assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
     assert payload["hideUpstreamQuotaFromApiKeys"] is True
     assert payload["limitWarmupEnabled"] is True
@@ -363,6 +360,14 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "soft_drain_enabled",
         "deterministic_failover_enabled",
         "circuit_breaker_enabled",
+        # M3 codex prewarm
+        "http_responses_session_bridge_codex_prewarm_enabled",
+        # M2 background jobs
+        "auth_guardian_enabled",
+        "automations_scheduler_enabled",
+        "rate_limit_reset_credits_refresh_enabled",
+        "conversation_archive_enabled",  # M5 conversation archive
+        "http_responses_session_bridge_operation_spool_retention_seconds",  # R2 spool retention
         # C2-1 timeouts
         "upstream_connect_timeout_seconds",
         "proxy_request_budget_seconds",
@@ -371,6 +376,11 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         "stream_idle_timeout_seconds",
         "proxy_downstream_websocket_idle_timeout_seconds",
         "sse_keepalive_interval_seconds",
+        # M1 stream/bridge budgets
+        "http_responses_stream_request_budget_seconds",
+        "http_responses_session_bridge_request_budget_seconds",
+        # Thread cache identity mode
+        "thread_cache_identity_mode",
     }
     # Retention is database-only: no environment value, NULL reads as default.
     assert provenance["request_log_retention_days"] == {"source": "default", "envValue": None, "default": 0}
@@ -569,6 +579,168 @@ async def test_settings_api_rejects_timeouts_that_break_invariants_against_effec
     assert response.status_code == 422
     response = await async_client.put("/api/settings", json={"sseKeepaliveIntervalSeconds": -1})
     assert response.status_code == 422
+
+
+# M1 stream/bridge budgets
+@pytest.mark.asyncio
+async def test_settings_api_stream_and_bridge_budget_round_trip_with_provenance_and_null_clear(
+    async_client, monkeypatch
+):
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["httpResponsesStreamRequestBudgetSeconds"] == 7200.0
+    assert payload["httpResponsesSessionBridgeRequestBudgetSeconds"] == 7200.0
+    assert payload["provenance"]["http_responses_stream_request_budget_seconds"] == {
+        "source": "default",
+        "envValue": 7200.0,
+        "default": 7200.0,
+    }
+    assert payload["provenance"]["http_responses_session_bridge_request_budget_seconds"]["source"] == "default"
+
+    configured = await async_client.put(
+        "/api/settings",
+        json={"httpResponsesStreamRequestBudgetSeconds": 3600, "httpResponsesSessionBridgeRequestBudgetSeconds": 5400},
+    )
+    assert configured.status_code == 200
+    configured_payload = configured.json()
+    assert configured_payload["httpResponsesStreamRequestBudgetSeconds"] == 3600.0
+    assert configured_payload["httpResponsesSessionBridgeRequestBudgetSeconds"] == 5400.0
+    assert configured_payload["provenance"]["http_responses_stream_request_budget_seconds"]["source"] == "dashboard"
+    assert (
+        configured_payload["provenance"]["http_responses_session_bridge_request_budget_seconds"]["source"]
+        == "dashboard"
+    )
+
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.http_responses_stream_request_budget_seconds == 3600.0
+        assert row.http_responses_session_bridge_request_budget_seconds == 5400.0
+        assert row.proxy_request_budget_seconds is None
+
+    # Omitting the fields leaves them untouched.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["httpResponsesStreamRequestBudgetSeconds"] == 3600.0
+    assert unchanged.json()["httpResponsesSessionBridgeRequestBudgetSeconds"] == 5400.0
+
+    # null clears the column: the stream budget inherits an environment value
+    # that differs from the default, the bridge budget falls back to the default.
+    inherited = settings_service.get_settings().model_copy(
+        update={"http_responses_stream_request_budget_seconds": 5000.0}
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put(
+        "/api/settings",
+        json={"httpResponsesStreamRequestBudgetSeconds": None, "httpResponsesSessionBridgeRequestBudgetSeconds": None},
+    )
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["httpResponsesStreamRequestBudgetSeconds"] == 5000.0
+    assert cleared_payload["provenance"]["http_responses_stream_request_budget_seconds"] == {
+        "source": "env",
+        "envValue": 5000.0,
+        "default": 7200.0,
+    }
+    assert cleared_payload["httpResponsesSessionBridgeRequestBudgetSeconds"] == 7200.0
+    assert cleared_payload["provenance"]["http_responses_session_bridge_request_budget_seconds"]["source"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_stream_and_bridge_budgets_that_break_invariants(async_client):
+    # A connect timeout that fits the proxy/compact/transcription budgets but
+    # not the stream budget stored in the same PUT (upstream-connect-within-stream-budget).
+    response = await async_client.put(
+        "/api/settings",
+        json={"upstreamConnectTimeoutSeconds": 100, "httpResponsesStreamRequestBudgetSeconds": 60},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "timeout_invariant_violation"
+    assert "upstream-connect-within-stream-budget" in body["error"]["message"]
+    assert "upstream-connect-within-proxy-budget" not in body["error"]["message"]
+
+    # The bridge budget must exceed twice the fixed 300 s stuck-gate threshold.
+    response = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeRequestBudgetSeconds": 600})
+    assert response.status_code == 400
+    assert "bridge-stuck-gate-retire-within-bridge-budget" in response.json()["error"]["message"]
+    current = await async_client.get("/api/settings")
+    assert current.json()["provenance"]["http_responses_session_bridge_request_budget_seconds"]["source"] == "default"
+
+    response = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeRequestBudgetSeconds": 601})
+    assert response.status_code == 200
+    assert response.json()["httpResponsesSessionBridgeRequestBudgetSeconds"] == 601.0
+
+    # The bridge path spends the connect timeout inside the bridge budget, so a
+    # connect timeout above it is rejected too. The sibling budgets are raised in
+    # the same PUT, leaving `upstream-connect-within-bridge-budget` as the only
+    # violation the change introduces.
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "upstreamConnectTimeoutSeconds": 700,
+            "proxyRequestBudgetSeconds": 5000,
+            "compactRequestBudgetSeconds": 5000,
+            "transcriptionRequestBudgetSeconds": 5000,
+            "httpResponsesSessionBridgeRequestBudgetSeconds": 650,
+        },
+    )
+    assert response.status_code == 400
+    message = response.json()["error"]["message"]
+    assert "upstream-connect-within-bridge-budget" in message
+    assert "upstream-connect-within-proxy-budget" not in message
+    assert "upstream-connect-within-stream-budget" not in message
+
+    # Stream budget below the environment-only admission wait (10 s).
+    response = await async_client.put("/api/settings", json={"httpResponsesStreamRequestBudgetSeconds": 5})
+    assert response.status_code == 400
+    assert "admission-wait-within-stream-budget" in response.json()["error"]["message"]
+
+    # Out-of-range scalars are schema errors.
+    response = await async_client.put("/api/settings", json={"httpResponsesStreamRequestBudgetSeconds": 0})
+    assert response.status_code == 422
+    response = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeRequestBudgetSeconds": 86401})
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_stream_request_deadline_honours_dashboard_budget_over_environment(async_client):
+    """A dashboard stream budget (3600 s) beats the 7200 s environment value without a restart.
+
+    The value is stored through the settings API, read back from the
+    ``SettingsCache`` snapshot and bound the way ``DashboardOverridesMiddleware``
+    binds it for a request; the proxy service settings facade that
+    ``_stream_request_budget_seconds`` reads then yields the dashboard value.
+    Outside the binding the environment value keeps applying.
+    """
+    from app.core.config.dashboard_overrides import dashboard_overrides_bound
+    from app.modules.proxy import service as proxy_service_module
+    from app.modules.proxy._service.streaming.helpers import _stream_request_budget_seconds
+
+    assert proxy_service_module.get_settings().http_responses_stream_request_budget_seconds == 7200.0
+    response = await async_client.put("/api/settings", json={"httpResponsesStreamRequestBudgetSeconds": 3600})
+    assert response.status_code == 200
+    snapshot = await get_settings_cache().get()
+    assert snapshot.http_responses_stream_request_budget_seconds == 3600.0
+
+    try:
+        with dashboard_overrides_bound(snapshot):
+            bound = proxy_service_module.get_settings()
+            assert bound.http_responses_stream_request_budget_seconds == 3600.0
+            assert _stream_request_budget_seconds(bound, request_transport="http") == 3600.0
+            assert _stream_request_budget_seconds(bound, request_transport="websocket") == 3600.0
+        unbound = proxy_service_module.get_settings()
+        assert _stream_request_budget_seconds(unbound, request_transport="http") == 7200.0
+    finally:
+        # The process-wide SettingsCache outlives the per-test database.
+        await async_client.put("/api/settings", json={"httpResponsesStreamRequestBudgetSeconds": None})
+        await get_settings_cache().invalidate(propagate=False)
+
+
+# end M1 stream/bridge budgets
 
 
 @pytest.mark.asyncio
@@ -1667,11 +1839,11 @@ async def test_retention_override_tri_state_echo_capture_and_clear(async_client)
 
 
 @pytest.mark.asyncio
-async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(async_client, monkeypatch):
-    from types import SimpleNamespace
-
-    disabled = SimpleNamespace(rate_limit_reset_credits_refresh_enabled=False)
-    monkeypatch.setattr("app.modules.settings.api.get_app_settings", lambda: disabled)
+async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(async_client):
+    # M2 background jobs: the gate reads the effective (dashboard) toggle, not the env alias.
+    disabled = await async_client.put("/api/settings", json={"rateLimitResetCreditsRefreshEnabled": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["rateLimitResetCreditsRefreshEnabled"] is False
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -1683,20 +1855,63 @@ async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(a
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "reset_credit_polling_disabled"
+    assert "Background jobs" in response.json()["error"]["message"]
+
+    # Re-enabling polling in the same request satisfies the gate: the proposed
+    # effective value is what counts, and so does clearing the dashboard value
+    # back to the inherited (env default = on) layer.
+    both = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": True, "rateLimitResetCreditsRefreshEnabled": True},
+    )
+    assert both.status_code == 200
+    assert both.json()["autoRedeemResetCreditsBeforeExpiry"] is True
+    reset = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": False, "rateLimitResetCreditsRefreshEnabled": False},
+    )
+    assert reset.status_code == 200
+    cleared = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": True, "rateLimitResetCreditsRefreshEnabled": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["provenance"]["rate_limit_reset_credits_refresh_enabled"]["source"] == "default"
 
 
 @pytest.mark.asyncio
-async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disabled(async_client, monkeypatch):
-    from types import SimpleNamespace
+async def test_disabling_polling_is_rejected_while_auto_redeem_is_on(async_client):
+    """M2 background jobs: the gate is symmetric — the other direction cannot create the same dead state."""
+    opt_in = await async_client.put("/api/settings", json={"autoRedeemResetCreditsBeforeExpiry": True})
+    assert opt_in.status_code == 200
+    assert opt_in.json()["autoRedeemResetCreditsBeforeExpiry"] is True
 
+    response = await async_client.put("/api/settings", json={"rateLimitResetCreditsRefreshEnabled": False})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "reset_credit_polling_disabled"
+    current = await async_client.get("/api/settings")
+    assert current.json()["rateLimitResetCreditsRefreshEnabled"] is True
+
+    # Turning both off in one request is consistent, so it is accepted.
+    both_off = await async_client.put(
+        "/api/settings",
+        json={"autoRedeemResetCreditsBeforeExpiry": False, "rateLimitResetCreditsRefreshEnabled": False},
+    )
+    assert both_off.status_code == 200
+    assert both_off.json()["rateLimitResetCreditsRefreshEnabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disabled(async_client):
     async with SessionLocal() as session:
         await session.execute(
-            text("UPDATE dashboard_settings SET auto_redeem_reset_credits_before_expiry = 1 WHERE id = 1")
+            text(
+                "UPDATE dashboard_settings SET auto_redeem_reset_credits_before_expiry = 1, "
+                "rate_limit_reset_credits_refresh_enabled = 0 WHERE id = 1"
+            )
         )
         await session.commit()
-
-    disabled = SimpleNamespace(rate_limit_reset_credits_refresh_enabled=False)
-    monkeypatch.setattr("app.modules.settings.api.get_app_settings", lambda: disabled)
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -1707,6 +1922,82 @@ async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disable
 
     assert response.status_code == 200
     assert response.json()["autoRedeemResetCreditsBeforeExpiry"] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_api_background_job_toggles_round_trip_with_provenance(async_client, monkeypatch):
+    """M2 background jobs: default -> dashboard -> cleared/env -> unchanged on omit, plus the topology flag."""
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    for camel in ("authGuardianEnabled", "automationsSchedulerEnabled", "rateLimitResetCreditsRefreshEnabled"):
+        assert payload[camel] is True
+    assert payload["authGuardianBlockedByTopology"] is False
+    for name in ("auth_guardian_enabled", "automations_scheduler_enabled", "rate_limit_reset_credits_refresh_enabled"):
+        assert payload["provenance"][name] == {"source": "default", "envValue": True, "default": True}
+
+    # Storing a value (including the inherited one) makes the toggle dashboard-owned.
+    stored = await async_client.put(
+        "/api/settings",
+        json={
+            "authGuardianEnabled": True,
+            "automationsSchedulerEnabled": False,
+            "rateLimitResetCreditsRefreshEnabled": False,
+        },
+    )
+    assert stored.status_code == 200
+    stored_payload = stored.json()
+    assert stored_payload["authGuardianEnabled"] is True
+    assert stored_payload["automationsSchedulerEnabled"] is False
+    assert stored_payload["rateLimitResetCreditsRefreshEnabled"] is False
+    for name in ("auth_guardian_enabled", "automations_scheduler_enabled", "rate_limit_reset_credits_refresh_enabled"):
+        assert stored_payload["provenance"][name]["source"] == "dashboard"
+
+    # Explicit null clears the column; a deprecated env alias that differs from
+    # the default is inherited, and the topology gate is reported alongside.
+    inherited = settings_service.get_settings().model_copy(
+        update={
+            "auth_guardian_enabled": False,
+            "leader_election_enabled": False,
+            "http_responses_session_bridge_instance_ring": ["pod-a", "pod-b"],
+        }
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put(
+        "/api/settings", json={"authGuardianEnabled": None, "rateLimitResetCreditsRefreshEnabled": None}
+    )
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["authGuardianEnabled"] is False
+    assert cleared_payload["authGuardianBlockedByTopology"] is True
+    assert cleared_payload["provenance"]["auth_guardian_enabled"] == {
+        "source": "env",
+        "envValue": False,
+        "default": True,
+    }
+    assert cleared_payload["provenance"]["rate_limit_reset_credits_refresh_enabled"] == {
+        "source": "default",
+        "envValue": True,
+        "default": True,
+    }
+    assert cleared_payload["automationsSchedulerEnabled"] is False
+    assert cleared_payload["provenance"]["automations_scheduler_enabled"]["source"] == "dashboard"
+
+    # Omitting the fields (any unrelated save) leaves every toggle as it was.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    unchanged_payload = unchanged.json()
+    assert unchanged_payload["provenance"]["auth_guardian_enabled"]["source"] == "env"
+    assert unchanged_payload["provenance"]["automations_scheduler_enabled"]["source"] == "dashboard"
+    assert unchanged_payload["provenance"]["rate_limit_reset_credits_refresh_enabled"]["source"] == "default"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.auth_guardian_enabled is None
+        assert row.automations_scheduler_enabled is False
+        assert row.rate_limit_reset_credits_refresh_enabled is None
 
 
 # --- C2-2 routing/overload: dashboard-managed routing weights and isolation ---
@@ -1959,3 +2250,467 @@ async def test_settings_api_reads_inherited_penalty_above_the_dashboard_write_ca
 
     rejected = await async_client.put("/api/settings", json={"proxyAccountInflightPenaltyPct": 150})
     assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_settings_api_codex_prewarm_round_trip_with_provenance(async_client, monkeypatch):
+    """M3 codex prewarm: default -> dashboard -> cleared/env -> unchanged on omit."""
+    from app.modules.settings import service as settings_service
+
+    name = "http_responses_session_bridge_codex_prewarm_enabled"
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["httpResponsesSessionBridgeCodexPrewarmEnabled"] is False
+    assert payload["provenance"][name] == {"source": "default", "envValue": False, "default": False}
+
+    stored = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": True})
+    assert stored.status_code == 200
+    assert stored.json()["httpResponsesSessionBridgeCodexPrewarmEnabled"] is True
+    assert stored.json()["provenance"][name]["source"] == "dashboard"
+
+    # Storing the inherited value (False is a value, not a clear) keeps the
+    # switch dashboard-owned.
+    stored_off = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": False})
+    assert stored_off.status_code == 200
+    assert stored_off.json()["httpResponsesSessionBridgeCodexPrewarmEnabled"] is False
+    assert stored_off.json()["provenance"][name] == {"source": "dashboard", "envValue": False, "default": False}
+
+    # Explicit null clears the column; with the deprecated env alias differing
+    # from the default the switch is inherited from the environment.
+    inherited = settings_service.get_settings().model_copy(update={name: True})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["httpResponsesSessionBridgeCodexPrewarmEnabled"] is True
+    assert cleared.json()["provenance"][name] == {"source": "env", "envValue": True, "default": False}
+
+    # Omitting the field (any unrelated save) leaves the switch inherited: the
+    # dashboard never copies the inherited value into the column.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["provenance"][name]["source"] == "env"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.http_responses_session_bridge_codex_prewarm_enabled is None
+
+
+@pytest.mark.asyncio
+async def test_settings_api_codex_prewarm_dashboard_value_reaches_the_bridge_resolver_without_restart(async_client):
+    """M3 codex prewarm: the bridge reads the switch off the ``Settings`` the
+    request entry point overlaid with the settings-cache snapshot, so a dashboard
+    PUT flips it for the next new Codex session with the process (and its startup
+    ``Settings``) untouched."""
+    from app.core.config.dashboard_overrides import effective_settings
+    from app.core.config.settings import get_settings
+    from app.modules.proxy._service.http_bridge.helpers import _http_bridge_prewarm_enabled
+
+    startup_settings = get_settings()
+
+    async def prewarm_enabled_for_the_next_request() -> bool:
+        # What ``DashboardOverridesMiddleware`` binds and the proxy facade
+        # applies, without standing up a request.
+        snapshot = await get_settings_cache().get()
+        return _http_bridge_prewarm_enabled(effective_settings(snapshot, startup_settings))
+
+    assert startup_settings.http_responses_session_bridge_codex_prewarm_enabled is False
+    assert await prewarm_enabled_for_the_next_request() is False
+
+    enabled = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": True})
+    assert enabled.status_code == 200
+    assert await prewarm_enabled_for_the_next_request() is True
+
+    cleared = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeCodexPrewarmEnabled": None})
+    assert cleared.status_code == 200
+    assert await prewarm_enabled_for_the_next_request() is False
+
+
+# M4 model catalogue: per-model context window overrides sub-API.
+_OVERRIDES_PATH = "/api/settings/model-context-window-overrides"
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_overrides_round_trip_with_provenance(async_client, monkeypatch):
+    initial = await async_client.get(_OVERRIDES_PATH)
+    assert initial.status_code == 200
+    assert initial.json() == {"overrides": []}
+
+    # The environment dict is the per-slug fallback and is reported as such.
+    environment = settings_api_module.get_app_settings().model_copy(
+        update={"model_context_window_overrides": {"gpt-5.4": 300_000}}
+    )
+    monkeypatch.setattr(settings_api_module, "get_app_settings", lambda: environment)
+    inherited = await async_client.get(_OVERRIDES_PATH)
+    assert inherited.json() == {
+        "overrides": [{"slug": "gpt-5.4", "contextWindow": 300_000, "source": "env", "envValue": 300_000}]
+    }
+
+    # A dashboard row wins for its slug and still reports the environment value.
+    stored = await async_client.put(f"{_OVERRIDES_PATH}/gpt-5.4", json={"contextWindow": 515_000})
+    assert stored.status_code == 200
+    assert stored.json()["overrides"] == [
+        {"slug": "gpt-5.4", "contextWindow": 515_000, "source": "dashboard", "envValue": 300_000}
+    ]
+
+    # Rows for slugs the environment does not know have no environment value.
+    added = await async_client.put(f"{_OVERRIDES_PATH}/custom-model", json={"contextWindow": 32_768})
+    assert added.status_code == 200
+    assert added.json()["overrides"] == [
+        {"slug": "custom-model", "contextWindow": 32_768, "source": "dashboard", "envValue": None},
+        {"slug": "gpt-5.4", "contextWindow": 515_000, "source": "dashboard", "envValue": 300_000},
+    ]
+
+    # PUT on an existing slug updates in place (no duplicate row).
+    updated = await async_client.put(f"{_OVERRIDES_PATH}/custom-model", json={"contextWindow": 65_536})
+    assert [o["contextWindow"] for o in updated.json()["overrides"] if o["slug"] == "custom-model"] == [65_536]
+
+    async with SessionLocal() as session:
+        rows = (await session.execute(text("SELECT slug, context_window FROM model_context_window_overrides"))).all()
+    assert sorted(tuple(row) for row in rows) == [("custom-model", 65_536), ("gpt-5.4", 515_000)]
+
+    # Deleting the row returns the slug to the environment entry; deleting a
+    # dashboard-only slug removes it from the list.
+    cleared = await async_client.delete(f"{_OVERRIDES_PATH}/gpt-5.4")
+    assert cleared.status_code == 200
+    assert cleared.json()["overrides"] == [
+        {"slug": "custom-model", "contextWindow": 65_536, "source": "dashboard", "envValue": None},
+        {"slug": "gpt-5.4", "contextWindow": 300_000, "source": "env", "envValue": 300_000},
+    ]
+    removed = await async_client.delete(f"{_OVERRIDES_PATH}/custom-model")
+    assert removed.json()["overrides"] == [
+        {"slug": "gpt-5.4", "contextWindow": 300_000, "source": "env", "envValue": 300_000}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_delete_without_row_is_not_found(async_client, monkeypatch):
+    environment = settings_api_module.get_app_settings().model_copy(
+        update={"model_context_window_overrides": {"gpt-5.4": 300_000}}
+    )
+    monkeypatch.setattr(settings_api_module, "get_app_settings", lambda: environment)
+    # An environment-inherited entry has no dashboard row to delete.
+    response = await async_client.delete(f"{_OVERRIDES_PATH}/gpt-5.4")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "model_context_window_override_not_found"
+    assert (await async_client.delete(f"{_OVERRIDES_PATH}/never-stored")).status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"contextWindow": 0},
+        {"contextWindow": -1},
+        {"contextWindow": 1.5},
+        # A token count is an integer: a float, a numeric string and a bool are
+        # operator mistakes, not values to coerce into a stored window.
+        {"contextWindow": 515000.0},
+        {"contextWindow": "515000"},
+        {"contextWindow": True},
+        {"contextWindow": None},
+        # Wider than the database Integer column: a 422, not a commit-time 500.
+        {"contextWindow": 2_147_483_648},
+        {},
+    ],
+)
+async def test_model_context_window_override_rejects_invalid_window(async_client, payload):
+    response = await async_client.put(f"{_OVERRIDES_PATH}/gpt-5.4", json=payload)
+    assert response.status_code == 422
+    assert (await async_client.get(_OVERRIDES_PATH)).json() == {"overrides": []}
+
+
+@pytest.mark.asyncio
+# The padded variants must be rejected, not silently trimmed into "gpt-5.4".
+@pytest.mark.parametrize("slug", ["%20", "gpt%205.4", "a%09b", "%20gpt-5.4", "gpt-5.4%20", "x" * 257])
+async def test_model_context_window_override_rejects_invalid_slug(async_client, slug):
+    response = await async_client.put(f"{_OVERRIDES_PATH}/{slug}", json={"contextWindow": 1000})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_model_slug"
+    assert (await async_client.get(_OVERRIDES_PATH)).json() == {"overrides": []}
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_concurrent_creates_of_one_slug_both_succeed(async_client):
+    # Create-or-replace is one upsert statement, so two writers racing on the
+    # same previously absent slug cannot leave one of them with a primary-key 500.
+    import asyncio
+
+    responses = await asyncio.gather(
+        *(
+            async_client.put(f"{_OVERRIDES_PATH}/gpt-5.4", json={"contextWindow": window})
+            for window in (515_000, 400_000)
+        )
+    )
+    assert [response.status_code for response in responses] == [200, 200]
+    listed = (await async_client.get(_OVERRIDES_PATH)).json()["overrides"]
+    assert [entry["slug"] for entry in listed] == ["gpt-5.4"]
+    assert listed[0]["contextWindow"] in {515_000, 400_000}
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_slug_may_contain_a_slash(async_client):
+    # Source-catalog slugs such as "vendor/model" are reachable through the
+    # path-typed segment.
+    response = await async_client.put(f"{_OVERRIDES_PATH}/vendor/model-a", json={"contextWindow": 4096})
+    assert response.status_code == 200
+    assert response.json()["overrides"][0]["slug"] == "vendor/model-a"
+    assert (await async_client.delete(f"{_OVERRIDES_PATH}/vendor/model-a")).status_code == 200
+
+
+# M5 conversation archive
+@pytest.mark.asyncio
+async def test_settings_api_conversation_archive_round_trip_with_provenance(async_client, monkeypatch):
+    """default -> dashboard on -> cleared/env -> unchanged on omit; the archive dir is read-only."""
+    from app.modules.settings import service as settings_service
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["conversationArchiveEnabled"] is False
+    assert payload["provenance"]["conversation_archive_enabled"] == {
+        "source": "default",
+        "envValue": False,
+        "default": False,
+    }
+    # T1 directory of this replica, shown read-only next to the toggle.
+    assert payload["conversationArchiveDir"] == str(settings_service.get_settings().conversation_archive_dir)
+
+    enabled = await async_client.put("/api/settings", json={"conversationArchiveEnabled": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["conversationArchiveEnabled"] is True
+    assert enabled.json()["provenance"]["conversation_archive_enabled"]["source"] == "dashboard"
+
+    # The directory is not writable through the API (unknown fields are ignored).
+    renamed = await async_client.put("/api/settings", json={"conversationArchiveDir": "/elsewhere"})
+    assert renamed.status_code == 200
+    assert renamed.json()["conversationArchiveDir"] == payload["conversationArchiveDir"]
+
+    # Explicit null clears the column; the deprecated env alias applies again.
+    inherited = settings_service.get_settings().model_copy(update={"conversation_archive_enabled": True})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put("/api/settings", json={"conversationArchiveEnabled": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["conversationArchiveEnabled"] is True
+    assert cleared.json()["provenance"]["conversation_archive_enabled"] == {
+        "source": "env",
+        "envValue": True,
+        "default": False,
+    }
+
+    # Omitting the field (any unrelated save) never copies the inherited value
+    # into the column.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["provenance"]["conversation_archive_enabled"]["source"] == "env"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.conversation_archive_enabled is None
+
+
+# end M5 conversation archive
+
+
+# R2 spool retention
+@pytest.mark.asyncio
+async def test_settings_api_spool_retention_round_trip_with_provenance(async_client, monkeypatch):
+    """default -> dashboard value -> cleared/env -> unchanged on omit; the floor is reported."""
+    from app.modules.settings import service as settings_service
+
+    setting = "http_responses_session_bridge_operation_spool_retention_seconds"
+
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 604800.0
+    assert payload["provenance"][setting] == {"source": "default", "envValue": 604800.0, "default": 604800.0}
+    # The floor the API enforces, so the card can mirror it before saving. At
+    # shipped defaults the bridge request budget (7200s) binds.
+    floor = payload["httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds"]
+    assert floor == 7200.0
+
+    configured = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 86400}
+    )
+    assert configured.status_code == 200
+    assert configured.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 86400.0
+    assert configured.json()["provenance"][setting]["source"] == "dashboard"
+
+    # Explicit null clears the column; the deprecated env alias applies again.
+    inherited = settings_service.get_settings().model_copy(update={setting: 259200.0})
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+    cleared = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": None}
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 259200.0
+    assert cleared.json()["provenance"][setting] == {
+        "source": "env",
+        "envValue": 259200.0,
+        "default": 604800.0,
+    }
+
+    # Omitting the field never copies the inherited value into the column.
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    assert unchanged.json()["provenance"][setting]["source"] == "env"
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert getattr(row, setting) is None
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_spool_retention_below_the_replay_floor(async_client):
+    """A window shorter than the longest replay window is refused, naming the binding term."""
+    at_floor = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7200}
+    )
+    assert at_floor.status_code == 200
+    assert at_floor.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 7200.0
+
+    below = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7199}
+    )
+    assert below.status_code == 400
+    body = below.json()
+    assert body["error"]["code"] == "spool_retention_below_floor"
+    assert "stale_operation_abandonment_window" in body["error"]["message"]
+
+    # The rejected value was not stored.
+    unchanged = await async_client.get("/api/settings")
+    assert unchanged.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 7200.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_floor_keeps_claimed_retry_circuit_grace_under_a_lowered_budget(async_client):
+    """Lowering the bridge budget must not drop the floor below a claimed circuit's two TTLs."""
+    lowered = await async_client.put("/api/settings", json={"httpResponsesSessionBridgeRequestBudgetSeconds": 3600})
+    assert lowered.status_code == 200
+    # The abandonment window fell to 3600s, but an ever-claimed retry circuit is
+    # still honoured for two TTLs, so the reported floor stays at 7200s.
+    assert lowered.json()["httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds"] == 7200.0
+
+    below = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 3600}
+    )
+    assert below.status_code == 400
+    body = below.json()
+    assert body["error"]["code"] == "spool_retention_below_floor"
+    assert "claimed_retry_circuit_lifetime" in body["error"]["message"]
+
+    at_floor = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7200}
+    )
+    assert at_floor.status_code == 200
+    assert at_floor.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 7200.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_below_floor_state_allows_no_worse_updates_only(async_client, monkeypatch):
+    """An env alias below the floor must not make the dashboard read-only *or* a free-for-all.
+
+    The column is NULL, so this state was never validated by the API; it must
+    still refuse anything that deepens the violation.
+    """
+    from app.modules.settings import service as settings_service
+
+    below = settings_service.get_settings().model_copy(
+        update={"http_responses_session_bridge_operation_spool_retention_seconds": 60.0}
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: below)
+
+    initial = await async_client.get("/api/settings")
+    assert initial.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 60.0
+    assert initial.json()["httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds"] == 7200.0
+
+    # Unrelated edits still go through while below the floor.
+    unrelated = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unrelated.status_code == 200
+    # ... including one that touches a floor input without raising the floor.
+    lowered_input = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 1800}
+    )
+    assert lowered_input.status_code == 200
+
+    # Lowering the retention further is refused, naming the deepening.
+    deeper = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 1}
+    )
+    assert deeper.status_code == 400
+    body = deeper.json()
+    assert body["error"]["code"] == "spool_retention_below_floor"
+    assert "already below its replay floor" in body["error"]["message"]
+
+    # Raising a floor input while below the floor is refused too.
+    raised_floor = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 86400}
+    )
+    assert raised_floor.status_code == 400
+    assert raised_floor.json()["error"]["code"] == "spool_retention_below_floor"
+
+    # Raising the retention toward (but not to) the floor is an improvement.
+    toward = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 3600}
+    )
+    assert toward.status_code == 200
+    assert toward.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 3600.0
+
+    # And clearing back to the below-floor env alias is refused: that would
+    # lower the effective retention again.
+    cleared = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": None}
+    )
+    assert cleared.status_code == 400
+    assert cleared.json()["error"]["code"] == "spool_retention_below_floor"
+
+    # Reaching the floor is accepted and restores the ordinary rule.
+    at_floor = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7200}
+    )
+    assert at_floor.status_code == 200
+    back_below = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 3600}
+    )
+    assert back_below.status_code == 400
+    assert "must be at least 7200s" in back_below.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_raising_a_reuse_window_above_the_spool_retention(async_client):
+    """Raising a reuse window past the stored spool retention introduces the same violation."""
+    configured = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 7200}
+    )
+    assert configured.status_code == 200
+
+    raised = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 10800}
+    )
+    assert raised.status_code == 400
+    body = raised.json()
+    assert body["error"]["code"] == "spool_retention_below_floor"
+    assert "bridge_session_reuse_window" in body["error"]["message"]
+
+    # An explicit null on a non-nullable reuse window means "unchanged", not
+    # "inherit"; the floor check must not treat it as a missing environment layer.
+    null_window = await async_client.put(
+        "/api/settings", json={"httpResponsesSessionBridgePromptCacheIdleTtlSeconds": None}
+    )
+    assert null_window.status_code == 200
+
+    # Raising it together with a spool retention that covers it is accepted.
+    both = await async_client.put(
+        "/api/settings",
+        json={
+            "httpResponsesSessionBridgePromptCacheIdleTtlSeconds": 10800,
+            "httpResponsesSessionBridgeOperationSpoolRetentionSeconds": 10800,
+        },
+    )
+    assert both.status_code == 200
+    assert both.json()["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 10800
+    assert both.json()["httpResponsesSessionBridgeOperationSpoolRetentionSeconds"] == 10800.0
+
+
+# end R2 spool retention

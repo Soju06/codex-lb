@@ -37,6 +37,7 @@ from app.core.clients.native_egress import (
     NativeEgressUnavailable,
     NativeEgressWebSocket,
     NativeWebSocketRequest,
+    NativeWebSocketRoutingMetadata,
     discover_native_egress_client,
 )
 from app.core.clients.proxy import (
@@ -44,6 +45,7 @@ from app.core.clients.proxy import (
     _HOP_BY_HOP_HEADER_NAMES,
     CODEX_INSTALLATION_ID_HEADER,
     CODEX_ROUTING_HINT_HEADER,
+    MAX_SSE_EVENT_BYTES,
     ProxyResponseError,
     _is_native_codex_request,
     _is_upstream_edge_challenge,
@@ -197,6 +199,7 @@ class UpstreamWebSocketMessage:
     responses_interpreted: bool = False
     event_type: str | None = None
     payload: dict[str, JsonValue] | None = None
+    routing: NativeWebSocketRoutingMetadata | None = None
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
@@ -452,6 +455,7 @@ class NativeUpstreamWebSocket:
             responses_interpreted=message.responses_interpreted,
             event_type=message.event_type,
             payload=message.payload,
+            routing=message.routing,
         )
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -927,7 +931,7 @@ async def _connect_upstream_websocket(
                     retry_network_errors=policy.retry_routed_network_errors,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=settings.max_sse_event_bytes,
+                    max_msg_size=MAX_SSE_EVENT_BYTES,
                     heartbeat=heartbeat,
                     compress=15,
                     native_interpret_responses=policy.include_responses_beta,
@@ -945,7 +949,7 @@ async def _connect_upstream_websocket(
                     route=route,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=settings.max_sse_event_bytes,
+                    max_msg_size=MAX_SSE_EVENT_BYTES,
                     heartbeat=heartbeat,
                     compress=15,
                     **protocol_kwargs,
@@ -1054,7 +1058,7 @@ async def _connect_upstream_websocket(
                     url=url,
                     headers=native_headers,
                     connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
-                    max_message_bytes=settings.max_sse_event_bytes,
+                    max_message_bytes=MAX_SSE_EVENT_BYTES,
                     ping_interval_seconds=20.0,
                     ping_timeout_seconds=ping_timeout,
                     proxy_url=proxy_url,
@@ -1101,7 +1105,7 @@ async def _connect_upstream_websocket(
             user_agent_header=user_agent,
             open_timeout=settings.upstream_connect_timeout_seconds,
             ping_timeout=ping_timeout,
-            max_size=settings.max_sse_event_bytes,
+            max_size=MAX_SSE_EVENT_BYTES,
             proxy=proxy_url,
             # Codex offers permessage-deflate on its upstream handshake. Keep
             # the direct path's default offer aligned with the routed aiohttp

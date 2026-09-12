@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.core import usage as usage_core
-from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import UsageHistory
@@ -21,6 +21,7 @@ from app.modules.dashboard.schemas import (
     DashboardOverviewResponse,
     DashboardOverviewTimeframeKey,
     DashboardProjectionsResponse,
+    DashboardSubscriptionOverflow,
     DashboardUsageWindows,
     DepletionResponse,
     WeeklyCreditApiKeyAttribution,
@@ -89,6 +90,8 @@ class DashboardService:
     async def get_overview(
         self,
         timeframe_key: DashboardOverviewTimeframeKey = "7d",
+        *,
+        redact_identity: bool = False,
     ) -> DashboardOverviewResponse:
         now = utcnow()
         overview_timeframe = resolve_overview_timeframe(timeframe_key)
@@ -108,6 +111,7 @@ class DashboardService:
                 limit_warmups_by_account=limit_warmups_by_account,
                 encryptor=self._encryptor,
                 include_auth=False,
+                redact_identity=redact_identity,
             ),
             key=lambda a: a.capacity_credits_primary or 0,
             reverse=True,
@@ -159,6 +163,18 @@ class DashboardService:
             ),
         )
 
+        # Loaded here rather than further down so the overflow read can be
+        # gated on it: on a ship-dark install the gate is two attribute reads on
+        # a row this poll fetches anyway, so the tile costs zero statements.
+        dashboard_settings = await self._repo.get_settings()
+        # Same bounds as the activity aggregate above, so the overflow slice and
+        # the estimated-cost total it breaks down always describe one window.
+        overflow_activity = await self._repo.subscription_overflow_activity(
+            settings=dashboard_settings,
+            since=bucket_since,
+            until=now,
+            now=now,
+        )
         summary = build_dashboard_overview_summary(
             accounts=accounts,
             primary_rows=primary_rows,
@@ -166,6 +182,16 @@ class DashboardService:
             activity_metrics=activity_metrics,
             activity_cost=activity_cost,
             comparison=comparison,
+            subscription_overflow=(
+                None
+                if overflow_activity is None
+                else DashboardSubscriptionOverflow(
+                    requests=overflow_activity.requests,
+                    cost_usd=overflow_activity.cost_usd,
+                    usage_less_requests=overflow_activity.usage_less_requests,
+                    live_pins=overflow_activity.live_pins,
+                )
+            ),
         )
 
         secondary_minutes = usage_core.resolve_window_minutes("secondary", secondary_rows)
@@ -186,7 +212,6 @@ class DashboardService:
             ),
         )
 
-        dashboard_settings = await self._repo.get_settings()
         _, secondary_history = await _load_projection_histories(
             self._repo,
             primary_usage,
@@ -195,7 +220,6 @@ class DashboardService:
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
             include_primary=False,
         )
-        settings = get_settings()
         trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
             _weekly_history_windows(primary_usage, secondary_usage),
             since=now - DEMAND_WINDOW,
@@ -206,7 +230,7 @@ class DashboardService:
             account_summaries=account_summaries,
             secondary_history=secondary_history,
             now=now,
-            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
@@ -247,7 +271,6 @@ class DashboardService:
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
         )
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
-        settings = get_settings()
         trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
             _weekly_history_windows(primary_usage, secondary_usage),
             since=now - DEMAND_WINDOW,
@@ -258,7 +281,7 @@ class DashboardService:
             account_summaries=account_summaries,
             secondary_history=secondary_history,
             now=now,
-            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,

@@ -21,20 +21,14 @@ def test_settings_multi_replica_defaults():
     assert settings.backpressure_max_concurrent_requests == 0
     assert settings.bulkhead_proxy_limit == 512
     assert settings.bulkhead_dashboard_limit == 50
-    assert settings.proxy_token_refresh_limit == 64
-    assert settings.proxy_upstream_websocket_connect_limit == 128
     assert settings.proxy_response_create_limit == 256
-    assert settings.proxy_compact_response_create_limit == 64
     assert settings.compact_request_budget_seconds == 180.0
     assert settings.proxy_request_budget_seconds == 600.0
     assert settings.http_responses_session_bridge_request_budget_seconds == 7200.0
     assert settings.stream_idle_timeout_seconds == 7200.0
     assert settings.proxy_downstream_websocket_idle_timeout_seconds == 120.0
     assert settings.http_responses_stream_request_budget_seconds == 7200.0
-    assert settings.max_sse_event_bytes == 16 * 1024 * 1024
-    assert settings.proxy_refresh_failure_cooldown_seconds == 5.0
     assert settings.conversation_archive_queue_max_bytes == 256 * 1024 * 1024
-    assert settings.usage_refresh_auth_failure_cooldown_seconds == 300.0
     assert settings.otel_enabled is False
     assert settings.otel_exporter_endpoint == ""
     assert settings.shutdown_drain_timeout_seconds == 30
@@ -144,15 +138,9 @@ def test_settings_split_bulkhead_env_overrides_are_removed(monkeypatch):
 
 
 def test_settings_work_admission_limits_from_env(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_PROXY_TOKEN_REFRESH_LIMIT", "7")
-    monkeypatch.setenv("CODEX_LB_PROXY_UPSTREAM_WEBSOCKET_CONNECT_LIMIT", "9")
     monkeypatch.setenv("CODEX_LB_PROXY_RESPONSE_CREATE_LIMIT", "11")
-    monkeypatch.setenv("CODEX_LB_PROXY_COMPACT_RESPONSE_CREATE_LIMIT", "3")
     settings = Settings()
-    assert settings.proxy_token_refresh_limit == 7
-    assert settings.proxy_upstream_websocket_connect_limit == 9
     assert settings.proxy_response_create_limit == 11
-    assert settings.proxy_compact_response_create_limit == 3
 
 
 def test_settings_proxy_downstream_websocket_idle_timeout_from_env(monkeypatch):

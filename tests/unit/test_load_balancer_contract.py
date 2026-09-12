@@ -591,6 +591,9 @@ async def test_required_continuity_owner_preserves_transient_hard_affinity_satur
             error_code="hard_affinity_saturated",
             resets_at=None,
             disposition="shared_result",
+            # This caller excluded nothing, so the saturation is a transient
+            # owner outage and keeps its recovery wait (#2163).
+            hard_affinity_owner_excluded=False,
         )
 
     monkeypatch.setattr(load_balancer_module, "run_sticky_selection_path", saturated_selection)
@@ -606,6 +609,7 @@ async def test_required_continuity_owner_preserves_transient_hard_affinity_satur
     assert selection.account is None
     assert selection.error_message == "Hard affinity owner account is unavailable"
     assert selection.error_code == "hard_affinity_saturated"
+    assert selection.hard_affinity_owner_excluded is False
 
 
 @pytest.mark.asyncio

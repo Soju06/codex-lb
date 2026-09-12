@@ -9,9 +9,14 @@ Checks:
 1. Every ``Settings`` field has a tier in ``app.core.config.tiers.SETTING_TIERS``
    (error). Entries for fields that no longer exist only warn, so field
    removals and this map can land in either order.
-2. Every T3 field has a ``dashboard_settings`` column of the same name or a
-   ``MIGRATING`` entry (error). A ``MIGRATING`` entry that is redundant (the
-   column exists, or the field is not T3) only warns.
+2. Every T3 field has a ``dashboard_settings`` column of the same name, a
+   ``DASHBOARD_HOMES`` mapping to an existing ``table.column``, or a
+   ``MIGRATING`` entry (error). A ``DASHBOARD_HOMES`` target that is not
+   ``table.column`` or names a column that does not exist is an error. A
+   ``MIGRATING`` or ``DASHBOARD_HOMES`` entry that is redundant (the same-name
+   column exists, the field is not T3, or the field is gone) only warns. An
+   empty ``MIGRATING`` is the intended terminal state of the backlog, not a
+   config error: every T3 field then has a database home.
 3. No ``os.environ`` / ``os.getenv`` / ``dotenv_values`` use under ``app/``
    outside ``app/core/config/settings.py``, except the allowlisted files, each
    capped at its recorded number of reading lines (error when a file exceeds
@@ -43,6 +48,7 @@ ENV_EXAMPLE_PATH = ROOT / ".env.example"
 BUDGETS_PATH = ROOT / ".github" / "simplicity-budgets.toml"
 ENV_PREFIX = "CODEX_LB_"
 ENV_ONLY_TIERS = frozenset({"T0", "T1"})
+DASHBOARD_SETTINGS_TABLE = "dashboard_settings"
 
 # Process-level environment reads that are NOT Settings fields (third-party or POSIX
 # conventions; documented in docs/reference/settings.md "Process-level environment
@@ -66,6 +72,7 @@ ENV_READ_ALLOWLIST: Mapping[str, tuple[int, str]] = {
 }
 
 _ENV_VAR_RE = re.compile(rf"\b{ENV_PREFIX}([A-Z0-9_]+)\b")
+_HOME_TARGET_RE = re.compile(r"^([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)$")
 
 
 @dataclass
@@ -99,18 +106,48 @@ def check_t3_dashboard_home(
     tiers: Mapping[str, str],
     migrating: Mapping[str, str],
     dashboard_columns: Iterable[str],
+    dashboard_homes: Mapping[str, str] | None = None,
+    table_columns: Mapping[str, Iterable[str]] | None = None,
 ) -> Report:
+    """T3 fields need a database home: same-name column, ``DASHBOARD_HOMES`` target, or ``MIGRATING``.
+
+    ``table_columns`` maps every database table to its column names so a
+    ``DASHBOARD_HOMES`` target (``table.column``) can be verified; when omitted,
+    only ``dashboard_settings`` (``dashboard_columns``) is known.
+    """
     report = Report()
     columns = set(dashboard_columns)
+    homes = dict(dashboard_homes or {})
+    tables = {table: set(names) for table, names in (table_columns or {}).items()}
+    tables.setdefault(DASHBOARD_SETTINGS_TABLE, columns)
     field_set = set(fields)
+    for name, target in sorted(homes.items()):
+        # Redundant entries (field gone, not T3, or a same-name column now exists)
+        # are classified first and only warn: the entry is due for deletion, so its
+        # target is moot even when the old column was dropped in the same change.
+        # Only an entry that actually serves as a live T3 field's home must resolve.
+        if name not in field_set:
+            report.warn(f"DASHBOARD_HOMES lists {name!r}, which is no longer a Settings field; drop the entry")
+            continue
+        if tiers.get(name) != "T3":
+            report.warn(f"DASHBOARD_HOMES lists {name!r}, which is {tiers.get(name)!r}, not T3; drop the entry")
+            continue
+        if name in columns:
+            report.warn(f"DASHBOARD_HOMES lists {name!r}, but {DASHBOARD_SETTINGS_TABLE}.{name} exists; drop the entry")
+            continue
+        match = _HOME_TARGET_RE.match(target)
+        if match is None:
+            report.error(f"DASHBOARD_HOMES[{name!r}] = {target!r} is not a 'table.column' target")
+        elif match.group(2) not in tables.get(match.group(1), set()):
+            report.error(f"DASHBOARD_HOMES maps {name!r} to {target!r}, but no such database column exists")
     for name in sorted(field_set):
         if tiers.get(name) != "T3":
             continue
-        if name in columns or name in migrating:
+        if name in columns or name in homes or name in migrating:
             continue
         report.error(
-            f"Settings.{name} is T3 but has neither a dashboard_settings column of the same name nor a "
-            "MIGRATING entry in app/core/config/tiers.py"
+            f"Settings.{name} is T3 but has neither a dashboard_settings column of the same name, a "
+            "DASHBOARD_HOMES mapping, nor a MIGRATING entry in app/core/config/tiers.py"
         )
     for name in sorted(migrating):
         if name not in field_set:
@@ -119,6 +156,10 @@ def check_t3_dashboard_home(
             report.warn(f"MIGRATING lists {name!r}, which is {tiers.get(name)!r}, not T3; drop the entry")
         elif name in columns:
             report.warn(f"MIGRATING lists {name!r}, but dashboard_settings.{name} exists; drop the entry")
+        elif name in homes:
+            report.warn(
+                f"MIGRATING lists {name!r}, but DASHBOARD_HOMES already maps it to {homes[name]!r}; drop the entry"
+            )
     return report
 
 
@@ -236,15 +277,16 @@ def check_field_budget(field_count: int, budget: int) -> Report:
 
 def run_all() -> tuple[list[Report], str]:
     from app.core.config.settings import Settings
-    from app.core.config.tiers import MIGRATING, SETTING_TIERS, TIERS
-    from app.db.models import DashboardSettings
+    from app.core.config.tiers import DASHBOARD_HOMES, MIGRATING, SETTING_TIERS, TIERS
+    from app.db.models import Base, DashboardSettings
 
     fields = list(Settings.model_fields)
     columns = [column.name for column in DashboardSettings.__table__.columns]
+    table_columns = {name: [column.name for column in table.columns] for name, table in Base.metadata.tables.items()}
     budget = settings_field_budget(BUDGETS_PATH.read_text(encoding="utf-8"))
     reports = [
         check_tier_coverage(fields, SETTING_TIERS, TIERS),
-        check_t3_dashboard_home(fields, SETTING_TIERS, MIGRATING, columns),
+        check_t3_dashboard_home(fields, SETTING_TIERS, MIGRATING, columns, DASHBOARD_HOMES, table_columns),
         check_env_reads(APP_DIR, ROOT, ENV_READ_ALLOWLIST),
         check_env_example(ENV_EXAMPLE_PATH.read_text(encoding="utf-8"), fields, SETTING_TIERS),
         check_field_budget(len(fields), budget),

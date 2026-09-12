@@ -25,6 +25,7 @@ from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_ROUTING,
     NAMESPACE_ACCOUNT_SELECTION,
     NAMESPACE_API_KEY,
+    NAMESPACE_DASHBOARD_USERS,
     NAMESPACE_FIREWALL,
     NAMESPACE_MODEL_REGISTRY,
     NAMESPACE_RESET_CREDITS,
@@ -385,6 +386,7 @@ def test_namespace_log_labels_cover_all_namespaces() -> None:
             NAMESPACE_RESET_CREDITS,
             NAMESPACE_MODEL_REGISTRY,
             NAMESPACE_UPSTREAM_ROUTE,
+            NAMESPACE_DASHBOARD_USERS,
         )
     }
 
@@ -894,3 +896,21 @@ async def test_aborted_bump_is_retried_by_the_running_poller(db_setup, monkeypat
     assert attempts >= 2, "the poller must retry the aborted namespace"
     assert await _namespace_version(namespace) == 1
     assert namespace not in poller._pending_bumps
+
+
+@pytest.mark.asyncio
+async def test_lifespan_registers_a_settings_refresh_on_the_bus(app_instance) -> None:
+    """The settings namespace must both expire and reload the snapshot.
+
+    Readers that cannot await the cache — the conversation archive gate runs
+    per archived frame — otherwise keep the pre-change value on a replica that
+    is only carrying already-open streams.
+    """
+    from app.core.config.settings_cache import get_settings_cache
+
+    async with app_instance.router.lifespan_context(app_instance):
+        poller = get_cache_invalidation_poller()
+        assert poller is not None
+        callbacks = poller._callbacks[NAMESPACE_SETTINGS]
+
+    assert get_settings_cache().refresh in callbacks

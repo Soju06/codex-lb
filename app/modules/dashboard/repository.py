@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,12 +21,50 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
+from app.modules.settings.subscription_overflow import (
+    SubscriptionOverflowActivity,
+    load_subscription_overflow_activity,
+)
 from app.modules.usage.repository import (
     AdditionalUsageRepository,
     NormalizedUsageWindow,
     UsageHistorySnapshot,
     UsageRepository,
 )
+
+# The weekly credit pace's trailing-demand aggregate (a LAG window over seven
+# days of usage_history per account) is re-run by every /dashboard/overview
+# and /dashboard/projections poll although the displayed pace tolerates short
+# staleness. Cache it per account->window signature for a small fixed TTL,
+# mirroring the request-log COUNT cache (app/modules/request_logs/repository.py);
+# the test suite patches the TTL to 0 so pace figures stay exact within a test.
+_TRAILING_DEMAND_TTL_SECONDS = 60.0
+_TRAILING_DEMAND_MAX_ENTRIES = 16
+# (window span in whole seconds, sorted account -> window pairs)
+_TrailingDemandKey = tuple[int, tuple[tuple[str, NormalizedUsageWindow], ...]]
+_trailing_demand_cache: dict[_TrailingDemandKey, tuple[dict[str, float], float]] = {}
+
+
+def _clear_trailing_demand_cache() -> None:
+    _trailing_demand_cache.clear()
+
+
+def _cached_trailing_demand(key: _TrailingDemandKey) -> dict[str, float] | None:
+    entry = _trailing_demand_cache.get(key)
+    if entry is None:
+        return None
+    deltas, expires_at = entry
+    if time.monotonic() >= expires_at:
+        _trailing_demand_cache.pop(key, None)
+        return None
+    return deltas
+
+
+def _store_trailing_demand(key: _TrailingDemandKey, deltas: dict[str, float], ttl_seconds: float) -> None:
+    if len(_trailing_demand_cache) >= _TRAILING_DEMAND_MAX_ENTRIES:
+        oldest = min(_trailing_demand_cache, key=lambda existing: _trailing_demand_cache[existing][1])
+        _trailing_demand_cache.pop(oldest, None)
+    _trailing_demand_cache[key] = (deltas, time.monotonic() + ttl_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,11 +122,31 @@ class DashboardRepository:
         since: datetime,
         until: datetime,
     ) -> dict[str, float]:
-        return await self._usage_repo.positive_used_percent_deltas_by_account(
+        """Trailing positive used-percent deltas, memoized per window span and account->window signature.
+
+        The key carries the span ``until - since`` but not the bounds themselves:
+        both dashboard callers pass a trailing window anchored at ``now``, so
+        within the TTL the window drifts by at most the TTL and the figure is
+        display-only. A different span, account set or window mapping is its
+        own key.
+        """
+        ttl_seconds = _TRAILING_DEMAND_TTL_SECONDS
+        cache_key: _TrailingDemandKey = (
+            round((until - since).total_seconds()),
+            tuple(sorted(account_windows.items())),
+        )
+        if ttl_seconds > 0:
+            cached = _cached_trailing_demand(cache_key)
+            if cached is not None:
+                return dict(cached)
+        deltas = await self._usage_repo.positive_used_percent_deltas_by_account(
             account_windows,
             since=since,
             until=until,
         )
+        if ttl_seconds > 0:
+            _store_trailing_demand(cache_key, deltas, ttl_seconds)
+        return dict(deltas)
 
     async def aggregate_logs_by_bucket(
         self,
@@ -247,3 +306,26 @@ class DashboardRepository:
 
     async def get_settings(self) -> DashboardSettings:
         return await self._settings_repo.get_or_create()
+
+    async def subscription_overflow_activity(
+        self,
+        *,
+        settings: DashboardSettings,
+        since: datetime,
+        until: datetime,
+        now: datetime,
+    ) -> SubscriptionOverflowActivity | None:
+        """Overflow spend and live pins for the overview tile (#2123 WP-G).
+
+        ``None`` when the installation has never overflowed and holds no live
+        pin, which is every install that never designated a source. ``settings``
+        gates the read and is the row the caller already loaded, so a ship-dark
+        install pays no statement for the tile -- not even the gate.
+        """
+        return await load_subscription_overflow_activity(
+            self._session,
+            settings=settings,
+            since=since,
+            until=until,
+            now=now,
+        )

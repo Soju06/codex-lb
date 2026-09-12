@@ -31,6 +31,7 @@ from app.core.clients.usage import (
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.openai.host_models import resolve_default_host_model
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.upstream_proxy.cache import get_upstream_route_cache
@@ -82,7 +83,6 @@ logger = logging.getLogger(__name__)
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
 
-DEFAULT_PROBE_MODEL = "gpt-5.5"
 PROBE_REQUEST_TIMEOUT_SECONDS = 30.0
 PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
 # Codex rejects probe completions below this output-token floor (1 → 400, 16 → 200).
@@ -131,7 +131,12 @@ class AccountsService:
         self._encryptor = TokenEncryptor()
         self._auth_manager = auth_manager
 
-    async def list_accounts(self, *, account_ids: list[str] | None = None) -> list[AccountSummary]:
+    async def list_accounts(
+        self,
+        *,
+        account_ids: list[str] | None = None,
+        redact_identity: bool = False,
+    ) -> list[AccountSummary]:
         accounts = (
             await self._repo.list_accounts_by_ids(account_ids)
             if account_ids is not None
@@ -231,6 +236,7 @@ class AccountsService:
             additional_quotas_by_account=additional_quotas_by_account,
             limit_warmups_by_account=limit_warmups_by_account,
             encryptor=self._encryptor,
+            redact_identity=redact_identity,
         )
 
     async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:
@@ -346,7 +352,7 @@ class AccountsService:
 
         usage_written = False
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
-            usage_written = await self._usage_updater.force_refresh(account, ignore_refresh_disabled=True)
+            usage_written = await self._usage_updater.force_refresh(account)
             get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
@@ -705,7 +711,7 @@ class AccountsService:
             probe_account = await self._auth_manager.ensure_fresh(account, force=False)
 
         access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
-        probe_model = model or DEFAULT_PROBE_MODEL
+        probe_model = model or resolve_default_host_model()
         probe_status = await self._send_probe_request(
             access_token=access_token,
             chatgpt_account_id=probe_account.chatgpt_account_id,
@@ -714,10 +720,7 @@ class AccountsService:
 
         usage_refresh_fetch_succeeded: bool | None = None
         if self._usage_repo and self._usage_updater:
-            usage_refresh_result = await self._usage_updater.force_refresh_result(
-                probe_account,
-                ignore_refresh_disabled=True,
-            )
+            usage_refresh_result = await self._usage_updater.force_refresh_result(probe_account)
             usage_refresh_fetch_succeeded = usage_refresh_result.fetch_succeeded
             # Forced refresh can still persist fresh OAuth credentials before a
             # later upstream usage fetch fails. Selection-cache rows carry

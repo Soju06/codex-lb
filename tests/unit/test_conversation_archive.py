@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import errno
 import gzip
 import json
 import os
 import queue
+import re
 import stat
 import threading
 import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
+
+import pytest
 
 from app.core import conversation_archive
 from app.core.utils.request_id import reset_request_id, set_request_id
@@ -903,3 +908,151 @@ def test_archive_service_rejects_path_traversal(monkeypatch, tmp_path):
         pass
     else:
         raise AssertionError("expected invalid archive file error")
+
+
+# M5 conversation archive: the toggle is dashboard-managed and resolved from the
+# settings-cache snapshot (never the database) at the single ``archive_enabled``
+# gate every ``archive_*`` call site goes through.
+_UPSTREAM_CLIENT_CALL_SITES = {
+    "app/core/clients/proxy.py": 15,
+    "app/core/clients/proxy_websocket.py": 5,
+}
+_ARCHIVE_CALL_RE = re.compile(r"\barchive_(?:json|text|bytes)\(")
+
+
+class _CachedRow:
+    def __init__(self, row: object | None) -> None:
+        self._row = row
+
+    def cached_row(self) -> object | None:
+        return self._row
+
+
+def test_archive_enabled_falls_back_to_environment_before_the_cache_loaded(monkeypatch, tmp_path):
+    """``cached_row()`` is None until the first settings load: the env alias decides."""
+    monkeypatch.setattr(conversation_archive, "get_settings_cache", lambda: _CachedRow(None))
+
+    monkeypatch.setattr(
+        conversation_archive, "get_settings", lambda: _ArchiveSettings(enabled=True, directory=tmp_path)
+    )
+    assert conversation_archive.archive_enabled() is True
+
+    monkeypatch.setattr(
+        conversation_archive, "get_settings", lambda: _ArchiveSettings(enabled=False, directory=tmp_path)
+    )
+    assert conversation_archive.archive_enabled() is False
+
+
+@pytest.mark.parametrize(
+    ("column", "env", "expected"),
+    [
+        (None, False, False),
+        (None, True, True),
+        (True, False, True),
+        (False, True, False),
+    ],
+)
+def test_archive_enabled_prefers_the_dashboard_row_over_the_environment(
+    monkeypatch, tmp_path, column: bool | None, env: bool, expected: bool
+):
+    monkeypatch.setattr(conversation_archive, "get_settings", lambda: _ArchiveSettings(enabled=env, directory=tmp_path))
+    row = SimpleNamespace(conversation_archive_enabled=column)
+    monkeypatch.setattr(conversation_archive, "get_settings_cache", lambda: _CachedRow(row))
+
+    assert conversation_archive.archive_enabled() is expected
+    assert (
+        conversation_archive.resolve_archive_enabled(row, _ArchiveSettings(enabled=env, directory=tmp_path)) is expected
+    )
+
+
+def test_archive_enabled_tolerates_a_row_without_the_column(monkeypatch, tmp_path):
+    """Partial fakes / rows loaded before the migration resolve to the env layer."""
+    monkeypatch.setattr(
+        conversation_archive, "get_settings", lambda: _ArchiveSettings(enabled=True, directory=tmp_path)
+    )
+    monkeypatch.setattr(conversation_archive, "get_settings_cache", lambda: _CachedRow(object()))
+
+    assert conversation_archive.archive_enabled() is True
+
+
+def test_dashboard_row_disables_archiving_even_when_the_environment_enables_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        conversation_archive, "get_settings", lambda: _ArchiveSettings(enabled=True, directory=tmp_path)
+    )
+    monkeypatch.setattr(
+        conversation_archive,
+        "get_settings_cache",
+        lambda: _CachedRow(SimpleNamespace(conversation_archive_enabled=False)),
+    )
+
+    conversation_archive.archive_json(direction="codex_to_server", kind="responses", transport="http", payload={"a": 1})
+    conversation_archive.flush_archive_writer()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_suppression_excludes_generated_traffic_without_changing_the_setting(monkeypatch, tmp_path):
+    """Operator diagnostics generate their own payloads; the archive records what
+    Codex and the upstream said, so that traffic is excluded at the same gate."""
+
+    monkeypatch.setattr(
+        conversation_archive, "get_settings", lambda: _ArchiveSettings(enabled=True, directory=tmp_path)
+    )
+    monkeypatch.setattr(conversation_archive, "get_settings_cache", lambda: _CachedRow(None))
+
+    assert conversation_archive.archive_enabled() is True
+    with conversation_archive.suppress_conversation_archive():
+        assert conversation_archive.archive_enabled() is False
+        conversation_archive.archive_json(
+            direction="codex_to_server", kind="responses", transport="http", payload={"filler": "x"}
+        )
+    conversation_archive.flush_archive_writer()
+
+    assert conversation_archive.archive_enabled() is True
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_suppression_does_not_reach_a_request_already_in_flight(monkeypatch, tmp_path):
+    """Context-scoped, not global: a real request that was already running when
+    the diagnostic started keeps being archived."""
+
+    monkeypatch.setattr(
+        conversation_archive, "get_settings", lambda: _ArchiveSettings(enabled=True, directory=tmp_path)
+    )
+    monkeypatch.setattr(conversation_archive, "get_settings_cache", lambda: _CachedRow(None))
+
+    observed: list[bool] = []
+    started = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def _concurrent_request() -> None:
+        started.set()
+        await resume.wait()
+        observed.append(conversation_archive.archive_enabled())
+
+    task = asyncio.create_task(_concurrent_request())
+    await started.wait()
+    with conversation_archive.suppress_conversation_archive():
+        assert conversation_archive.archive_enabled() is False
+        resume.set()
+        await task
+
+    assert observed == [True]
+
+
+def test_upstream_client_call_sites_are_unchanged_and_do_not_read_the_toggle():
+    """Grep gate: the 15 + 5 ``archive_*`` call sites keep going through ``archive_enabled()``.
+
+    The dashboard migration changed only that gate; a call site that resolves
+    the toggle itself (``conversation_archive_enabled`` / ``archive_enabled(``)
+    would bypass the snapshot precedence.
+    """
+    root = Path(conversation_archive.__file__).resolve().parents[2]
+    for relative, expected_calls in _UPSTREAM_CLIENT_CALL_SITES.items():
+        source = (root / relative).read_text(encoding="utf-8")
+        assert len(_ARCHIVE_CALL_RE.findall(source)) == expected_calls, relative
+        assert "conversation_archive_enabled" not in source, relative
+        assert "archive_enabled(" not in source, relative
+
+
+# end M5 conversation archive

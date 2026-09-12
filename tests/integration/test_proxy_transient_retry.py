@@ -25,7 +25,6 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clock import RealScheduler
-from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
@@ -412,7 +411,11 @@ async def test_stream_body_read_client_error_surfaces_without_replay(async_clien
             yield ""
         raise aiohttp.ServerDisconnectedError("Server disconnected")
 
+    async def fake_sleep(delay: float, result: None = None) -> None:
+        pass
+
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
@@ -529,8 +532,12 @@ async def test_stream_pinned_previsible_close_exhaustion_surfaces_stream_incompl
             yield ""
         return
 
+    async def fake_sleep(delay: float, result: None = None) -> None:
+        pass
+
     monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
 
     payload = {
         "model": "gpt-5.1",
@@ -1507,6 +1514,7 @@ async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failo
 
 
 @pytest.mark.asyncio
+@pytest.mark.usage_refresh_request_path
 async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exhaustion(
     async_client, app_instance, monkeypatch
 ):
@@ -1558,13 +1566,10 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
             ),
         )
 
-    # The suite disables background usage refresh globally; enable it for the updater only.
-    refresh_settings = get_settings().model_copy(update={"usage_refresh_enabled": True})
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
     monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
     monkeypatch.setattr(proxy_api_module, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 30.0)
     monkeypatch.setattr(usage_updater_module, "fetch_usage", fake_fetch_usage)
-    monkeypatch.setattr(usage_updater_module, "get_settings", lambda: refresh_settings)
 
     async def latest_primary_row():
         async with SessionLocal() as session:
@@ -1589,7 +1594,7 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
 
         release_fetch.set()
         # The refresh is a tracked background task: poll briefly for its row instead of a
-        # scheduler tick (usage_refresh_interval_seconds).
+        # scheduler tick (USAGE_REFRESH_INTERVAL_SECONDS).
         latest = None
         deadline = time.monotonic() + 5.0
         while latest is None and time.monotonic() < deadline:

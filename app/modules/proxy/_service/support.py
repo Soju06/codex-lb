@@ -41,6 +41,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy.affinity import _AffinityPolicy
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountLease,
@@ -496,6 +497,23 @@ def _account_selection_recovery_sleep_seconds_from_message(
 
 
 def _account_selection_recovery_sleep_seconds(selection: AccountSelection) -> float | None:
+    """The wait this selection failure earns before the caller re-selects.
+
+    ``hard_affinity_owner_excluded`` is the selector's proof that the hard
+    ``CODEX_SESSION`` owner it resolved is one of the caller's own
+    ``exclude_account_ids``. The owner cannot become selectable while that
+    exclusion holds and a hard row never spills to another account, so the
+    short owner-recovery window earns nothing here: every re-selection would
+    report the same ``hard_affinity_saturated`` until the request budget is
+    spent (7200s on the HTTP bridge), long after the client gave up. Fail
+    closed at once instead -- the same fail-closed the bridge already applies
+    when the request excludes the account its hard session is bound to
+    (``_require_http_bridge_bound_account_not_excluded``) -- and let the
+    client's own retry reach the owner with no exclusion. A genuinely
+    unavailable owner the caller did NOT exclude keeps its recovery wait.
+    """
+    if selection.hard_affinity_owner_excluded:
+        return None
     return _account_selection_recovery_sleep_seconds_from_message(
         selection.error_message,
         error_code=selection.error_code,
@@ -706,6 +724,7 @@ class _RefreshFailoverProxy(Protocol):
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
         retry_after_seconds: float | None = None,
         burst_cooldown_recorded: bool = False,
+        upstream_http_status: int | None = None,
     ) -> Any: ...
 
 
@@ -873,6 +892,12 @@ class _StreamSettlement:
     downstream_text_visible: bool = False
     response_id: str | None = None
     usage_settlement_transferred: bool = False
+    # Monotonic instant the upstream terminal frame (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed by
+    # ``_stream_once``, before it is yielded downstream. The throughput cohort
+    # sample ends its generation span here; the row's ``latency_ms`` keeps
+    # measuring to the generator's close (downstream flush, upstream EOF).
+    upstream_terminal_at: float | None = None
 
     def reset(self) -> None:
         fresh = type(self)()
@@ -987,6 +1012,12 @@ class _WebSocketRequestState:
     latency_first_upstream_event_ms: int | None = None
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
+    # Monotonic instant the upstream terminal event (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed for
+    # this turn, before terminal bookkeeping, API-key settlement and cleanup.
+    # The throughput cohort sample ends its generation span here; the row's
+    # ``latency_ms`` keeps measuring to the end of the finalizer.
+    upstream_terminal_at: float | None = None
     response_create_gate_wait_started_at: float | None = None
     # Monotonic time immediately before the current upstream response.create
     # send. Retries replace this value so admission wait and prior attempts do
@@ -1153,7 +1184,6 @@ class _WebSocketRequestState:
     # True after an existing UNKNOWN operation is claimed for this attempt.
     # If admission fails before send, cleanup must restore UNKNOWN rather than
     # treating the pre-existing row like a newly-created operation.
-    operation_recovery_claimed: bool = False
     # True only when this request created the durable operation row. A
     # pre-dispatch admission failure may remove that row; an existing row
     # represents an ambiguous upstream attempt and must remain fenced.
@@ -1165,9 +1195,6 @@ class _WebSocketRequestState:
     operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
-    # Immutable durable attempt generation. Recovery claims increment the
-    # operation's dispatch count before sending a replacement attempt.
-    operation_attempt_generation: int = 0
     # Last response identity successfully written to the durable operation.
     # Retry setup may clear the active response before a replacement is
     # acknowledged, but fallback settlement must still fence against this ID.
@@ -1222,6 +1249,7 @@ class _WebSocketRequestState:
     account_response_create_release: Callable[[AccountLease | None], Coroutine[Any, Any, None]] | None = None
     websocket_stream_lease: AccountLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
+    affinity_observation: AffinityObservation | None = None
     thread_affinity_last_touch_at: float = field(default_factory=time.monotonic)
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)

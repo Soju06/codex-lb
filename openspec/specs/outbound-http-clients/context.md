@@ -114,3 +114,59 @@ Compact, raw HTTP and WebSocket messages keep immediate writes through this same
 cancellation-safe owner. Python queue fairness, bounds and replay policy are
 unchanged. Benchmark methodology and limitations are recorded in the archived
 `batch-ready-native-sse-output` change.
+
+## Direct usage GET transport
+
+Direct usage queries without an injected Python client prefer the existing
+native helper after the direct-egress admission check. Python owns routes,
+retry policy and UsagePayload validation; Rust owns each HTTP attempt and body.
+Only a missing/unstartable helper on the initial request permits Python fallback.
+
+For example, a 503 response whose body never ends closes before the next attempt
+and uses the existing ExponentialRetry delay (1, 2, then 2 seconds). A truncated
+200 body remains a transport error instead of becoming an invalid-payload 502.
+Cancellation retires one exchange without closing the shared helper.
+
+The adapter explicitly forwards aiohttp's default Accept-Encoding value because
+the helper enables decompression only for requests that negotiate it. Charset,
+empty-body and JSON-syntax handling follow the default Python session. Usage
+credit consumption remains a separate call, and resolved routes retain
+CodexClient ownership. Loopback probes validate these semantics; they do not
+measure production performance.
+
+## Native WebSocket routing metadata
+
+The `websocket_responses_routing_v1` capability transfers payload-only response-ID
+extraction and integer sequence recognition to the Responses crate. Python still
+validates lifecycle models. A valid completed event with nested ID ` nested `
+and top-level ID `direct` matches ` nested ` without stripping; if its
+`response.status` is invalid, validation fails and the payload ID `direct` wins.
+This preserves existing matching without duplicating Pydantic models in Rust.
+
+Rust applies Python whitespace rules (including U+001C through U+001F) and
+last-key precedence. Selected IDs that cannot decode into Rust strings use
+opaque delivery. Integer tokens, including large and negative values, cross
+IPC without numeric conversion; booleans and floats produce null metadata.
+The Python adapter validates required metadata and charges it against its queue
+byte budget. An invalid exchange is cancelled without replay or closing peers.
+
+Direct WebSocket matching and archive attribution consume the same parsed ID;
+bridge matching uses native metadata only when its existing SSE framing rules
+permit direct JSON interpretation. Pending queues, retry, settlement and shared
+socket lifetime remain Python-owned. Sequence watermarks advance only after
+successful downstream sends, preserving suppression and replay behavior.
+Loopback compatibility tests do not establish a throughput improvement.
+
+The adapter and bundled helper must be updated together for
+`websocket_responses_routing_v1`; an incompatible helper fails closed before
+dispatch. No new deployment mechanism is introduced.
+
+Interpreted payloads admit integer tokens up to 640 digits, excluding the sign.
+This is Python's smallest configurable integer-string limit, so it protects even
+processes configured below the default 4,300 digits. Larger integers anywhere
+in an object (including nested or overwritten values) keep the entire frame
+opaque. The legacy Python parser may reject that exchange, but its integer
+conversion cannot fail the shared IPC reader or interrupt peer exchanges.
+For example, a 5,000-digit sequence is relayed as original text, while a
+640-digit negative sequence remains interpreted without precision loss.
+Strings and floating-point tokens do not use Python's integer conversion limit.

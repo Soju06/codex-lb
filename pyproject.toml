@@ -1,6 +1,6 @@
 [project]
 name = "codex-lb"
-version = "1.25.0-beta.6"
+version = "1.25.0-beta.8"
 description = "Codex load balancer and proxy for ChatGPT accounts with usage dashboard"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -102,7 +102,9 @@ asyncio_default_test_loop_scope = "session"
 markers = [
     "e2e: end-to-end flow tests",
     "integration: tests that exercise multiple layers together",
+    "overflow_drill: subscription-overflow canary drill rehearsals (see docs/routing.md)",
     "unit: fast isolated tests",
+    "usage_refresh_request_path: keep UsageUpdater request-path refreshes live (see tests/conftest.py)",
 ]
 testpaths = ["tests"]
 filterwarnings = [

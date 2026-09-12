@@ -28,24 +28,57 @@ When the proxy resolves or fails closed a continuity-sensitive follow-up request
 
 ### Requirement: Full upstream conversation archive
 
-The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversation traffic. When enabled, the archive MUST write gzip-compressed newline-delimited JSON records for upstream request payloads, streamed Responses events, compact response payloads, and websocket text or binary frames without performing gzip file I/O in the request event loop during normal operation. The archive writer queue MUST be bounded and MUST apply synchronous write backpressure instead of growing without limit when the background writer is saturated. Archive records MUST include request id, timestamp, direction, traffic kind, transport, account id when known, upstream target metadata, redacted headers, and the full payload or frame body. Credential-bearing headers such as authorization, cookies, proxy authorization, token headers, and API key headers MUST be redacted before persistence. JSON records MUST preserve non-ASCII payload text as UTF-8 rather than Unicode escape sequences. When disabled, no archive file MUST be created by the archive writer. Admin request-log API rows MUST expose an `archiveRequestId` lookup key when the persisted log id can differ from the archive record request id; guest rows MUST redact that key.
+The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversation traffic. The archive MUST be enabled by the dashboard setting `conversation_archive_enabled` (the `dashboard_settings` column of that name): a NULL column MUST inherit the deprecated `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED` environment variable and then the code default (off), a non-NULL column MUST win over both, and the effective value and its provenance MUST be reported by the settings API through the single `configuration-tiers` resolver. The archive writer MUST resolve the toggle at its single `archive_enabled()` gate from the last loaded dashboard-settings snapshot (`SettingsCache.cached_row()`, the environment layer before the first load); it MUST NOT read the database or await for it, and the `archive_*` call sites in the upstream HTTP and WebSocket clients MUST NOT resolve the toggle themselves. Once a snapshot has been loaded, invalidating the settings cache MUST NOT return the gate to the environment layer: the last loaded row keeps deciding until a newer one replaces it. The settings cache MUST be refreshed from the cache-invalidation bus rather than only expired, so a dashboard change reaches every replica — including one that is carrying nothing but already-open streams and therefore never pulls a snapshot in on a request — within the invalidation poll interval and without a restart. When enabled, the archive MUST write gzip-compressed newline-delimited JSON records for upstream request payloads, streamed Responses events, compact response payloads, and websocket text or binary frames without performing gzip file I/O in the request event loop during normal operation. The archive writer queue MUST be bounded and MUST apply synchronous write backpressure instead of growing without limit when the background writer is saturated. Archive records MUST include request id, timestamp, direction, traffic kind, transport, account id when known, upstream target metadata, redacted headers, and the full payload or frame body. Credential-bearing headers such as authorization, cookies, proxy authorization, token headers, and API key headers MUST be redacted before persistence. JSON records MUST preserve non-ASCII payload text as UTF-8 rather than Unicode escape sequences. When disabled, no archive file MUST be created by the archive writer. The archive directory (`CODEX_LB_CONVERSATION_ARCHIVE_DIR`) remains environment-only: each replica writes its own local shard, and the dashboard MUST show the directory read-only with that limitation stated. The settings API MUST report the directory to admin principals only and MUST NOT accept it as a write. Admin request-log API rows MUST expose an `archiveRequestId` lookup key when the persisted log id can differ from the archive record request id; guest rows MUST redact that key.
 
 #### Scenario: operator enables archive for audit
-- **WHEN** `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED=true`
-- **AND** a Codex Responses request is proxied upstream
+
+- **WHEN** an operator confirms enabling the conversation archive in the dashboard (or `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED=true` is set while the dashboard value is unset)
+- **AND** a Codex Responses request is proxied upstream after the settings cache has loaded the new snapshot
 - **THEN** the archive records both the outbound upstream payload and inbound upstream events or response body as gzip JSONL
 - **AND** credential-bearing headers are stored as redacted values
+- **AND** no replica was restarted
+
+#### Scenario: operator disables archive without a restart
+
+- **GIVEN** the archive is enabled from the dashboard and records have been written
+- **WHEN** the operator turns the archive off (or clears the dashboard value while the environment variable is unset)
+- **AND** a later request is proxied upstream after the settings cache reloaded
+- **THEN** the archive writer records nothing for that request
+- **AND** existing archive files are left untouched
 
 #### Scenario: archive remains disabled by default
+
 - **WHEN** the archive setting is not enabled
 - **THEN** the archive writer does not create conversation archive files
 
+#### Scenario: an unrelated settings change does not resume recording
+
+- **GIVEN** `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED=true` and an operator has turned the archive off in the dashboard
+- **WHEN** any settings update invalidates the settings cache and no request has reloaded a snapshot yet
+- **THEN** the archive writer still records nothing
+
+#### Scenario: a replica carrying only open streams follows a peer's change
+
+- **GIVEN** the archive is on and a replica is relaying an already-open stream and serving no new requests
+- **WHEN** an operator turns the archive off on another replica
+- **THEN** that replica refreshes its settings snapshot from the cache-invalidation bus
+- **AND** later frames of the open stream are not archived
+
+#### Scenario: dashboard value wins over the environment variable
+
+- **GIVEN** `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED=true` and an operator has set the archive off in the dashboard
+- **WHEN** a request is proxied upstream
+- **THEN** the archive writer records nothing
+- **AND** the settings API reports `source: "dashboard"` for `conversation_archive_enabled` and warns at startup that the environment variable is shadowed
+
 #### Scenario: operator views archived traffic
+
 - **GIVEN** conversation archive files exist as `.jsonl.gz` or legacy `.jsonl`
 - **WHEN** an authenticated dashboard admin opens an existing request log detail
 - **THEN** the dashboard can find matching archive records by request id across archive files and display payload plus metadata for that request
 
 #### Scenario: response-id request logs keep archive lookup
+
 - **WHEN** a successful proxied request stores a downstream response id in the request-log `requestId`
 - **AND** the conversation archive stored records under the original request context id
 - **THEN** the admin request-log API response includes `archiveRequestId` with the original archive lookup id
@@ -123,7 +156,7 @@ When an HTTP bridge startup wait times out locally, the service MUST log the req
 
 #### Scenario: Bridge startup admission timeout is diagnosable
 
-- **WHEN** a HTTP bridge startup wait exceeds the configured proxy admission wait timeout
+- **WHEN** a HTTP bridge startup wait exceeds the fixed 10-second proxy admission wait timeout
 - **THEN** the console log includes the timeout stage and request id
 - **AND** the log includes only low-cardinality affinity metadata, not raw affinity key values
 
@@ -1301,3 +1334,59 @@ The dashboard request-log API MUST return request rows and non-identifying opera
 - **THEN** only matching request rows are returned
 - **AND** the response retains the matching request count and aggregated conversation cost
 
+### Requirement: Durable affinity observation on request logs
+
+The system MUST persist `sticky_key_source`, `sticky_kind`, and `sticky_key_hash` on existing Responses and compact request-log rows independently of trace settings. Source MUST describe the existing resolved source classification. Kind and hash MUST describe the resolved affinity policy associated with the logged attempt or final request state. The hash MUST be the first 16 lowercase hexadecimal characters of SHA-256 over the resolved key's UTF-8 bytes. Observation MUST NOT rederive keys, change routing, health, retries, settlement ordering, callback ownership, or persistence drain semantics.
+
+#### Scenario: Resolved affinity is recorded without trace
+- **WHEN** an HTTP or native WebSocket Responses request resolves affinity and emits a request-log row with tracing disabled
+- **THEN** the row stores the source, kind, and hash from that decision
+- **AND** the authorized request-log listing returns `stickyKeySource`, `stickyKind`, and `stickyKeyHash`
+- **AND** these fields contain no raw keys or prompt content
+
+#### Scenario: Stable grouping across requests
+- **WHEN** two requests use the same resolved key
+- **THEN** their stored hashes match
+- **AND** different synthetic keys with distinct SHA-256 prefixes produce different hashes
+
+#### Scenario: Failure and retry rows retain their meaning
+- **WHEN** an existing emitter records an attempt failure or final settlement row
+- **THEN** the row records the affinity associated with that attempt or final request state
+- **AND** no extra rows are added to simulate an attempt history
+- **AND** a final row that covers multiple sends does not claim to enumerate intermediate decisions
+
+#### Scenario: Affinity is absent or unavailable
+- **WHEN** resolution explicitly finds no affinity
+- **THEN** the source is `none` and kind and hash are null
+- **WHEN** the policy has no key after an existing routing adjustment
+- **THEN** the hash is null and source retains its original resolved classification
+- **AND** kind equals the adjusted policy kind: null when recovery clears it, or `codex_session` when only a broad session key is ignored
+- **WHEN** a row predates the migration or no affinity observation was available to its emitter
+- **THEN** all three fields are null without an invented backfill
+
+#### Scenario: Existing privacy and retention apply
+- **WHEN** request logs are read, retained, or deleted
+- **THEN** affinity metadata follows the same access controls and retention lifecycle as its owning row
+- **AND** request-log responses without `conversations:read` permission return null for the three affinity fields
+- **AND** enabling raw-key tracing does not make these columns store raw keys
+
+#### Scenario: Upgrade and downgrade preserve existing records
+- **WHEN** a populated database upgrades to the affinity metadata revision
+- **THEN** existing request and ownership records remain intact and historical affinity metadata is null
+- **WHEN** that revision is downgraded
+- **THEN** only the three new columns are removed and existing record values remain intact
+
+### Requirement: Affinity history converges with dashboard authentication history
+The system MUST provide a single migration head when the published affinity history is combined with dashboard role, user authentication and invitation migrations. Convergence MUST preserve all published revision definitions and apply each missing branch once.
+
+#### Scenario: Upgrade either populated history
+- **GIVEN** a database at the published affinity merge or the dashboard authentication leaf
+- **WHEN** it upgrades to head
+- **THEN** existing account ownership, request logs, guest generations, roles, grants, users, identities, invitations and audit history MUST remain intact except for the existing authentication migrations' specified backfills
+- **AND** historical logs newly receiving affinity columns MUST retain null affinity metadata
+
+#### Scenario: Merge-only downgrade and reupgrade
+- **GIVEN** a database has reached the converged head and a user's credentials or session generation have subsequently changed
+- **WHEN** only the merge revision is downgraded and then upgraded again
+- **THEN** both parent histories MUST remain applied and all schema and data MUST be preserved
+- **AND** the earlier credential projection MUST NOT run again

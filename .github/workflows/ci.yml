@@ -86,10 +86,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Validate canonical OpenSpec capabilities
         run: npx --yes @fission-ai/openspec@1.11.0 validate --specs
+
+      - name: Strictly validate changed OpenSpec folders
+        run: python3 .github/scripts/validate_changed_openspec.py
 
   frontend-lint:
     name: Frontend lint (eslint)
@@ -356,7 +360,7 @@ jobs:
         run: |
           uv sync --dev --frozen
           cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress
-          uv run pytest -q -ra tests/integration/test_native_routed_egress.py tests/integration/test_native_sse_egress.py tests/integration/test_native_websocket_events.py
+          uv run pytest -q -ra tests/integration/test_native_routed_egress.py tests/integration/test_native_sse_egress.py tests/integration/test_native_websocket_events.py tests/integration/test_native_usage_egress.py
 
       - name: Audit Rust dependencies and licenses
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25

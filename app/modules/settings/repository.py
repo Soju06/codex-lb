@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -11,7 +14,8 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.db.models import DashboardSettings
+from app.db.models import DashboardSettings, DashboardUser, LocalLoginPolicy, ModelContextWindowOverride
+from app.modules.dashboard_users.repository import DashboardUsersRepository
 
 _SETTINGS_ID = 1
 
@@ -19,6 +23,32 @@ _SETTINGS_ID = 1
 class SettingsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_active_password_users(self) -> Sequence[DashboardUser]:
+        """Accounts the TOTP requirements bind (roles loaded for the admin-level check)."""
+
+        return await DashboardUsersRepository(self._session).list_active_local_password_users()
+
+    async def acquire_account_write_intent(self) -> None:
+        """Serialise this settings write against the account mutations it depends on.
+
+        The tightening gate counts qualifying emergency accounts and then
+        writes the policy; without the accounts lock a concurrent TOTP reset,
+        password removal or deactivation can take the last one away in between
+        and leave a restricted policy with no way back in.
+        """
+
+        await DashboardUsersRepository(self._session).acquire_write_intent()
+
+    async def count_qualifying_break_glass(self) -> int:
+        """Accounts that can still open the door once local sign-in is restricted."""
+
+        return await DashboardUsersRepository(self._session).count_qualifying_break_glass()
+
+    async def list_break_glass_designations(self) -> Sequence[DashboardUser]:
+        """Designated accounts, so a refusal can name the one an operator should enrol."""
+
+        return await DashboardUsersRepository(self._session).list_break_glass_designations()
 
     async def get_or_create(self) -> DashboardSettings:
         existing = await self._session.get(DashboardSettings, _SETTINGS_ID)
@@ -39,6 +69,9 @@ class SettingsRepository:
             proxy_account_stream_limit=None,
             proxy_account_stream_recovery_reserve=None,
             proxy_api_key_fair_share_congestion_threshold_pct=None,
+            # Thread cache identity: same tri-state rule, seeded NULL.
+            # NULL inherits the environment value and then ``shared``.
+            thread_cache_identity_mode=None,
             # C2-2 routing/overload: same tri-state rule, seeded NULL.
             proxy_overload_isolation_seconds=None,
             proxy_account_error_rate_weighting_enabled=None,
@@ -61,6 +94,8 @@ class SettingsRepository:
             dashboard_session_ttl_seconds=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
             import_without_overwrite=True,
             totp_required_on_login=False,
+            totp_required_for_admin_role=False,
+            local_login_policy=LocalLoginPolicy.ENABLED.value,
             password_hash=None,
             guest_access_enabled=False,
             guest_password_hash=None,
@@ -90,6 +125,16 @@ class SettingsRepository:
             soft_drain_enabled=None,
             deterministic_failover_enabled=None,
             circuit_breaker_enabled=None,
+            # M3 codex prewarm: NULL = inherit the env alias / default (off).
+            http_responses_session_bridge_codex_prewarm_enabled=None,
+            # M2 background jobs: NULL = inherit the env alias / default.
+            auth_guardian_enabled=None,
+            automations_scheduler_enabled=None,
+            rate_limit_reset_credits_refresh_enabled=None,
+            # M5 conversation archive: NULL = inherit the env alias / default.
+            conversation_archive_enabled=None,
+            # R2 spool retention: NULL = inherit the env alias / default (7d).
+            http_responses_session_bridge_operation_spool_retention_seconds=None,
         )
         self._session.add(row)
         try:
@@ -110,6 +155,8 @@ class SettingsRepository:
         upstream_stream_transport: str | None = None,
         prohibit_fast_mode: bool | None = None,
         http_downstream_transport_policy: str | None = None,
+        thread_cache_identity_mode: str | None = None,
+        clear_thread_cache_identity_mode: bool = False,
         proxy_account_response_create_limit: int | None = None,
         clear_proxy_account_response_create_limit: bool = False,
         proxy_account_stream_limit: int | None = None,
@@ -156,6 +203,8 @@ class SettingsRepository:
         warmup_model: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
+        totp_required_for_admin_role: bool | None = None,
+        local_login_policy: str | None = None,
         api_key_auth_enabled: bool | None = None,
         hide_upstream_quota_from_api_keys: bool | None = None,
         limit_warmup_enabled: bool | None = None,
@@ -181,6 +230,21 @@ class SettingsRepository:
         clear_deterministic_failover_enabled: bool = False,
         circuit_breaker_enabled: bool | None = None,
         clear_circuit_breaker_enabled: bool = False,
+        # M2 background jobs (tri-state like the resilience toggles)
+        auth_guardian_enabled: bool | None = None,
+        clear_auth_guardian_enabled: bool = False,
+        automations_scheduler_enabled: bool | None = None,
+        clear_automations_scheduler_enabled: bool = False,
+        rate_limit_reset_credits_refresh_enabled: bool | None = None,
+        clear_rate_limit_reset_credits_refresh_enabled: bool = False,
+        # M5 conversation archive (tri-state like the resilience toggles)
+        conversation_archive_enabled: bool | None = None,
+        clear_conversation_archive_enabled: bool = False,
+        # end M5 conversation archive
+        # R2 spool retention (tri-state like the C2-1 timeouts)
+        http_responses_session_bridge_operation_spool_retention_seconds: float | None = None,
+        clear_http_responses_session_bridge_operation_spool_retention_seconds: bool = False,
+        # end R2 spool retention
         # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
         # inherit, neither = untouched).
         upstream_connect_timeout_seconds: float | None = None,
@@ -198,6 +262,16 @@ class SettingsRepository:
         sse_keepalive_interval_seconds: float | None = None,
         clear_sse_keepalive_interval_seconds: bool = False,
         # end C2-1 timeouts
+        # M3 codex prewarm (tri-state like the resilience toggles)
+        http_responses_session_bridge_codex_prewarm_enabled: bool | None = None,
+        clear_http_responses_session_bridge_codex_prewarm_enabled: bool = False,
+        # end M3 codex prewarm
+        # M1 stream/bridge budgets (same tri-state contract).
+        http_responses_stream_request_budget_seconds: float | None = None,
+        clear_http_responses_stream_request_budget_seconds: bool = False,
+        http_responses_session_bridge_request_budget_seconds: float | None = None,
+        clear_http_responses_session_bridge_request_budget_seconds: bool = False,
+        # end M1 stream/bridge budgets
         expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -239,6 +313,10 @@ class SettingsRepository:
             settings.proxy_api_key_fair_share_congestion_threshold_pct = (
                 proxy_api_key_fair_share_congestion_threshold_pct
             )
+        if clear_thread_cache_identity_mode:
+            settings.thread_cache_identity_mode = None
+        elif thread_cache_identity_mode is not None:
+            settings.thread_cache_identity_mode = thread_cache_identity_mode
         # C2-2 routing/overload
         if clear_proxy_overload_isolation_seconds:
             settings.proxy_overload_isolation_seconds = None
@@ -301,6 +379,15 @@ class SettingsRepository:
             )
         if http_responses_session_bridge_gateway_safe_mode is not None:
             settings.http_responses_session_bridge_gateway_safe_mode = http_responses_session_bridge_gateway_safe_mode
+        # M3 codex prewarm: clear flag resets to NULL (inherit the env alias /
+        # code default); a non-None value is dashboard-owned.
+        if clear_http_responses_session_bridge_codex_prewarm_enabled:
+            settings.http_responses_session_bridge_codex_prewarm_enabled = None
+        elif http_responses_session_bridge_codex_prewarm_enabled is not None:
+            settings.http_responses_session_bridge_codex_prewarm_enabled = (
+                http_responses_session_bridge_codex_prewarm_enabled
+            )
+        # end M3 codex prewarm
         if sticky_reallocation_budget_threshold_pct is not None:
             settings.sticky_reallocation_budget_threshold_pct = sticky_reallocation_budget_threshold_pct
         if sticky_reallocation_primary_budget_threshold_pct is not None:
@@ -317,6 +404,10 @@ class SettingsRepository:
             settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:
             settings.totp_required_on_login = totp_required_on_login
+        if totp_required_for_admin_role is not None:
+            settings.totp_required_for_admin_role = totp_required_for_admin_role
+        if local_login_policy is not None:
+            settings.local_login_policy = local_login_policy
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
         if hide_upstream_quota_from_api_keys is not None:
@@ -342,6 +433,10 @@ class SettingsRepository:
         if weekly_pace_smoothing_minutes is not None:
             settings.weekly_pace_smoothing_minutes = weekly_pace_smoothing_minutes
         if guest_access_enabled is not None:
+            if settings.guest_access_enabled and not guest_access_enabled:
+                # Disabling guest access must not leave already-issued guest
+                # cookies valid for when it is re-enabled later.
+                settings.guest_session_generation += 1
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
@@ -370,6 +465,38 @@ class SettingsRepository:
             settings.circuit_breaker_enabled = None
         elif circuit_breaker_enabled is not None:
             settings.circuit_breaker_enabled = circuit_breaker_enabled
+        # M2 background jobs: clear flag resets to NULL (inherit the env alias
+        # / code default); a non-None value is dashboard-owned.
+        for column_name, value, clear in (
+            ("auth_guardian_enabled", auth_guardian_enabled, clear_auth_guardian_enabled),
+            ("automations_scheduler_enabled", automations_scheduler_enabled, clear_automations_scheduler_enabled),
+            (
+                "rate_limit_reset_credits_refresh_enabled",
+                rate_limit_reset_credits_refresh_enabled,
+                clear_rate_limit_reset_credits_refresh_enabled,
+            ),
+        ):
+            if clear:
+                setattr(settings, column_name, None)
+            elif value is not None:
+                setattr(settings, column_name, value)
+        # end M2 background jobs
+        # M5 conversation archive: clear flag resets to NULL (inherit the env
+        # alias / code default); a non-None value is dashboard-owned.
+        if clear_conversation_archive_enabled:
+            settings.conversation_archive_enabled = None
+        elif conversation_archive_enabled is not None:
+            settings.conversation_archive_enabled = conversation_archive_enabled
+        # end M5 conversation archive
+        # R2 spool retention: clear flag resets to NULL (inherit the env alias
+        # / code default); a non-None value is dashboard-owned.
+        if clear_http_responses_session_bridge_operation_spool_retention_seconds:
+            settings.http_responses_session_bridge_operation_spool_retention_seconds = None
+        elif http_responses_session_bridge_operation_spool_retention_seconds is not None:
+            settings.http_responses_session_bridge_operation_spool_retention_seconds = (
+                http_responses_session_bridge_operation_spool_retention_seconds
+            )
+        # end R2 spool retention
         # C2-1 timeouts
         for column_name, value, clear in (
             (
@@ -391,6 +518,18 @@ class SettingsRepository:
                 clear_proxy_downstream_websocket_idle_timeout_seconds,
             ),
             ("sse_keepalive_interval_seconds", sse_keepalive_interval_seconds, clear_sse_keepalive_interval_seconds),
+            # M1 stream/bridge budgets
+            (
+                "http_responses_stream_request_budget_seconds",
+                http_responses_stream_request_budget_seconds,
+                clear_http_responses_stream_request_budget_seconds,
+            ),
+            (
+                "http_responses_session_bridge_request_budget_seconds",
+                http_responses_session_bridge_request_budget_seconds,
+                clear_http_responses_session_bridge_request_budget_seconds,
+            ),
+            # end M1 stream/bridge budgets
         ):
             if clear:
                 setattr(settings, column_name, None)
@@ -449,3 +588,54 @@ class SettingsRepository:
             # stale state the hook is meant to reset.
             on_committed()
         await self._session.refresh(settings)
+
+
+# M4 model catalogue: dashboard rows of the per-model context window overrides.
+_UPSERT_INSERT_FNS = {"postgresql": pg_insert, "sqlite": sqlite_insert}
+
+
+class ModelContextWindowOverridesRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_all(self) -> list[ModelContextWindowOverride]:
+        result = await self._session.execute(
+            select(ModelContextWindowOverride).order_by(ModelContextWindowOverride.slug.asc())
+        )
+        return list(result.scalars().all())
+
+    async def by_slug(self) -> dict[str, int]:
+        """``slug -> context_window`` for every dashboard row."""
+        return {row.slug: row.context_window for row in await self.list_all()}
+
+    async def upsert(self, slug: str, context_window: int) -> None:
+        """Create or replace the row for ``slug`` in one statement.
+
+        A read-then-insert would let two concurrent creates of the same new slug
+        both miss and one fail the primary key, turning a documented
+        create-or-replace into a 500. ``updated_at`` is set explicitly because
+        the ORM ``onupdate`` does not fire for a Core insert.
+        """
+        dialect = self._session.get_bind().dialect.name
+        insert_fn = _UPSERT_INSERT_FNS.get(dialect)
+        if insert_fn is None:
+            raise RuntimeError(f"model_context_window_overrides upsert unsupported for dialect={dialect!r}")
+        statement = insert_fn(ModelContextWindowOverride).values(slug=slug, context_window=context_window)
+        await self._session.execute(
+            statement.on_conflict_do_update(
+                index_elements=[ModelContextWindowOverride.slug],
+                set_={"context_window": context_window, "updated_at": func.now()},
+            )
+        )
+        await self._session.commit()
+
+    async def delete(self, slug: str) -> bool:
+        row = await self._session.get(ModelContextWindowOverride, slug)
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.commit()
+        return True
+
+
+# end M4 model catalogue

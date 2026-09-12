@@ -30,7 +30,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - `truncation` is rejected.
 - `previous_response_id` is forwarded when `conversation` is absent, but the `conversation + previous_response_id` conflict remains rejected.
 - HTTP `/v1/responses` and HTTP `/backend-api/codex/responses` now use a server-side upstream websocket session bridge by default so repeated compatible requests can keep upstream response/session continuity without forcing clients onto the public websocket route.
-- Codex-affinity HTTP bridge sessions can optionally use a conservative first-request prewarm (`generate=false`), but that behavior now stays behind an explicit flag so production defaults do not pay an extra upstream request unless operators opt in.
+- Codex-affinity HTTP bridge sessions can optionally use a conservative first-request prewarm (`generate=false`), but that behavior stays behind an explicit switch so production defaults do not pay an extra upstream request unless operators opt in. The switch is the dashboard setting `http_responses_session_bridge_codex_prewarm_enabled` (Settings → Advanced → Session bridge), resolved from the settings-cache snapshot before a session's prewarm lock; its `CODEX_LB_*` environment variable is a deprecated alias that applies only while the dashboard value is unset.
 - When operators configure a multi-instance bridge ring, deterministic owner enforcement now applies only to hard continuity keys such as `x-codex-turn-state` and explicit session headers. Prompt-cache-derived bridge keys remain stable for local reuse, but in gateway-safe mode a non-owner replica may tolerate that locality miss and create or reuse a local session instead of failing with `bridge_instance_mismatch`.
 - Codex-facing websocket routes now advertise `x-codex-turn-state` during websocket accept and honor client-provided turn-state on reconnect so routing can stay sticky at turn granularity even when the public websocket reconnects.
 - HTTP responses routes now also return `x-codex-turn-state` headers so clients that persist response headers can promote later HTTP requests from prompt-cache affinity to stronger Codex-session continuity.
@@ -272,7 +272,16 @@ OpenSpec change first.
 Healthy native HTTP requests use normal policy. The proxy cannot infer every
 client-local WebSocket failure from HTTP alone; it uses its existing 60-second
 upstream-connect failure marker as concrete failure evidence. Operator HTTP
-pins, image and size bypasses remain effective. No new retry/session registry.
+pins and size bypasses remain effective. The image bypass keeps requests off the
+HTTP session bridge but no longer pins the upstream transport, which is resolved
+by ordinary precedence; an `input_image` request keeps upstream HTTP only when
+its payload exceeds the WebSocket frame budget or still carries an external
+image URL. External-URL detection for that decision recurses the whole input, so
+a URL nested inside a tool-output array keeps the pin even though the image
+inliner never rewrites it — that is the case where the URL is still external at
+the upstream. The inliner and the bridge's post-inline guard still read only
+top-level `input_image` items and one level of `content`; closing that is a
+separate change. No new retry/session registry.
 
 History-only locality is soft, scoped by the bridge's full API-key identifier,
 and hashes the complete first user item plus instructions and model. No client
@@ -297,6 +306,7 @@ stream. Predispatch failures and cancellation release origin-owned reservations;
 accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
+
 ## HTTP response ownership before delivery
 
 An HTTP response can expose its upstream ID before the detached request-log write finishes. The stream now publishes each authoritative lifecycle ID to the existing bounded process cache before delivering that event, beginning with `response.created` when present. An immediate follow-up can resolve the selected account while the original stream or its log write is still pending. This is same-process owner readiness; it does not promise that an unfinished response is already usable by the upstream provider.
@@ -306,3 +316,7 @@ The cache retains its existing API-key partition, session-first lookup and same-
 Local failure events and locally assigned response IDs are separate facts. `ParsedSseBlock.is_local` identifies generated events; `response_id_is_local` excludes a generated ID even when SDK normalization wraps a real upstream error. These flags remain outside serialized event bytes and survive parsed-payload reattachment. Thus an oversized-frame failure cannot invent an upstream owner, while a real upstream error with a locally assigned ID remains a valid event for timing. The shared HTTP/direct/routed WebSocket normalizer and this provenance contract are owned here; HTTP timing consumes them through the owner dependency. Existing durable-log behavior is unchanged. See the [ownership requirement](spec.md#requirement-observed-http-response-ids-publish-same-process-ownership-before-delivery).
 
 Canonical background JSON acknowledgements with status `queued` or `in_progress` carry the same authoritative response identity as SSE lifecycle events. The lifecycle parser includes both, and the HTTP relay keeps queued events on the parsed path. For example, a two-account request receiving a queued acknowledgement can immediately route a same-process continuation to its known account while its originating log is pending. An in-progress event following token output has the same ownership behavior. The provider still decides whether unfinished work can be continued.
+
+## Detached retirement sweep deadline
+
+Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.

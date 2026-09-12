@@ -98,12 +98,8 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         stream_idle_timeout_seconds=300.0,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
     dashboard_settings = DashboardSettings(
         id=1,
@@ -321,6 +317,21 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
         captured["instructions"] = payload.instructions
         captured["input"] = payload.input
         captured["account_id"] = account_id
+        if payload.model == "gpt-5.5":
+            yield _sse(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "status": "failed",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "model_not_found",
+                            "message": "The model gpt-5.5 does not exist or you do not have access to it.",
+                        },
+                    },
+                }
+            )
+            return
         yield _sse(
             {
                 "type": "response.output_item.done",
@@ -376,7 +387,7 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
     assert body["usage"] == {"input_tokens": 7, "output_tokens": 13, "total_tokens": 20}
 
     # The host model is hidden from clients but appears in the upstream call.
-    assert captured["model"] == "gpt-5.5"
+    assert captured["model"] == "gpt-5.6-luna"
     tools = cast(list[Any], captured["tools"])
     image_tool = cast(dict[str, Any], tools[0])
     assert image_tool["type"] == "image_generation"
@@ -1035,6 +1046,7 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del headers, access_token, base_url, raise_for_status, kwargs
+        captured["model"] = payload.model
         captured["input"] = payload.input
         captured["tools"] = list(payload.tools)
         captured["account_id"] = account_id
@@ -1077,6 +1089,7 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
         },
     )
 
+    assert captured["model"] == "gpt-5.6-luna"
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["data"] == [{"b64_json": "EDITED_B64", "revised_prompt": "edited"}]
@@ -1317,7 +1330,7 @@ async def test_images_variations_returns_404(async_client):
 
 @pytest.mark.asyncio
 async def test_images_generations_falls_back_to_default_model_when_omitted(async_client, monkeypatch):
-    """Omitting ``model`` should fall back to ``settings.images_default_model``."""
+    """Omitting ``model`` should fall back to ``DEFAULT_PUBLIC_IMAGE_MODEL``."""
     await _import_account(async_client, "acc_images_default", "img-default@example.com")
 
     captured: dict[str, Any] = {}
@@ -1352,7 +1365,7 @@ async def test_images_generations_falls_back_to_default_model_when_omitted(async
     )
     assert response.status_code == 200, response.text
     image_tool = cast(dict[str, Any], cast(list[Any], captured["tools"])[0])
-    # Default falls back to images_default_model = "gpt-image-2".
+    # Default falls back to DEFAULT_PUBLIC_IMAGE_MODEL = "gpt-image-2".
     assert image_tool["model"] == "gpt-image-2"
 
 
@@ -1612,7 +1625,7 @@ async def test_prime_upstream_stream_cleanup_failure_preserves_original_cancella
 @pytest.mark.asyncio
 async def test_images_edits_falls_back_to_default_model_when_omitted(async_client, monkeypatch):
     """Omitting ``model`` on multipart edits should fall back to
-    ``settings.images_default_model`` instead of being rejected by the
+    ``DEFAULT_PUBLIC_IMAGE_MODEL`` instead of being rejected by the
     FastAPI form parser with a 422.
     """
     await _import_account(async_client, "acc_images_edit_default", "img-edit-default@example.com")

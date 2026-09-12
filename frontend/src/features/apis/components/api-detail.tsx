@@ -44,6 +44,8 @@ export type ApiDetailProps = {
 	usage7DayLoading?: boolean;
 	usage7DayError?: string | null;
 	busy: boolean;
+	/** Read-only sessions see the key without edit, regenerate, enable/disable or delete. */
+	readOnly?: boolean;
 	onEdit: (apiKey: ApiKey) => void;
 	onDelete: (apiKey: ApiKey) => void;
 	onRegenerate: (apiKey: ApiKey) => void;
@@ -67,6 +69,7 @@ export function ApiDetail({
 	usage7DayLoading = false,
 	usage7DayError = null,
 	busy,
+	readOnly = false,
 	onEdit,
 	onDelete,
 	onRegenerate,
@@ -127,6 +130,7 @@ export function ApiDetail({
 		>
 			<div className="flex items-start justify-between">
 				<h2 className="text-base font-semibold">{apiKey.name}</h2>
+				{readOnly ? null : (
 				<DropdownMenu>
 					<DropdownMenuTrigger asChild>
 						<Button
@@ -150,6 +154,7 @@ export function ApiDetail({
 						</DropdownMenuItem>
 					</DropdownMenuContent>
 				</DropdownMenu>
+				)}
 			</div>
 
 			{hasDonutData || hasTrends ? (
@@ -224,6 +229,7 @@ export function ApiDetail({
 				allowUsageSummaryFallback={false}
 			/>
 
+			{readOnly ? null : (
 			<div className="flex flex-wrap gap-2 border-t pt-4">
 				{apiKey.isActive ? (
 					<Button
@@ -261,6 +267,7 @@ export function ApiDetail({
 					{t("common.actions.delete")}
 				</Button>
 			</div>
+			)}
 		</div>
 	);
 }

@@ -93,7 +93,6 @@ def _install_proxy_settings_cache(
     prefer_earlier_reset_accounts: bool = False,
     openai_cache_affinity_max_age_seconds: int = 300,
     sticky_reallocation_budget_threshold_pct: float = 95.0,
-    openai_prompt_cache_key_derivation_enabled: bool = True,
     proxy_request_budget_seconds: float = 75.0,
 ) -> None:
     settings = SimpleNamespace(
@@ -101,28 +100,21 @@ def _install_proxy_settings_cache(
         sticky_threads_enabled=sticky_threads_enabled,
         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
         sticky_reallocation_budget_threshold_pct=sticky_reallocation_budget_threshold_pct,
-        openai_prompt_cache_key_derivation_enabled=openai_prompt_cache_key_derivation_enabled,
         routing_strategy="usage_weighted",
         proxy_request_budget_seconds=proxy_request_budget_seconds,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
         trace_channels=frozenset(),
         http_responses_session_bridge_enabled=False,
         http_responses_session_bridge_instance_id="sticky-session-test",
-        http_responses_session_bridge_idle_ttl_seconds=120.0,
-        http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
         http_responses_session_bridge_max_sessions=128,
         http_responses_session_bridge_queue_limit=8,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
         http_responses_session_bridge_gateway_safe_mode=False,
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_account_stream_recovery_reserve=1,
         proxy_api_key_fair_share_congestion_threshold_pct=0,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
     )
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
@@ -2012,7 +2004,57 @@ async def test_v1_auto_derived_key_stable_across_turns(async_client, monkeypatch
 
     await async_client.post("/v1/responses", json=turn2)
 
-    assert seen == ["acc_turn_a", "acc_turn_a"]
+    # Turn 2 shares exactly one item with turn 1, which is below the anchor
+    # overlap floor (`thread_anchors._MIN_OVERLAP_ITEMS`): a one-item opening is
+    # the weakest possible evidence and is what parallel workers of one agent
+    # share, so it must not carry a key. This turn therefore re-derives and
+    # follows usage to the cheaper account. That is the deliberate cost of the
+    # false-merge guard, paid on the smallest body of the thread's life.
+    assert seen == ["acc_turn_a", "acc_turn_b"]
+
+    turn3 = {
+        "model": "gpt-5.1",
+        "input": [
+            *turn2["input"],
+            {"role": "assistant", "content": "Added logging."},
+            {"role": "user", "content": "now add tests"},
+        ],
+        "stream": True,
+    }
+    await async_client.post("/v1/responses", json=turn3)
+    assert seen == ["acc_turn_a", "acc_turn_b", "acc_turn_b"]
+
+    # Turn 3 recorded five items, so turn 4 clears the floor and must hold its
+    # key -- and therefore its account -- even once that account is the
+    # expensive one.
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=acc_a_id,
+            used_percent=5.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=acc_b_id,
+            used_percent=95.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    turn4 = {
+        "model": "gpt-5.1",
+        "input": [
+            *turn3["input"],
+            {"role": "assistant", "content": "Tests added."},
+            {"role": "user", "content": "ship it"},
+        ],
+        "stream": True,
+    }
+    await async_client.post("/v1/responses", json=turn4)
+    assert seen == ["acc_turn_a", "acc_turn_b", "acc_turn_b", "acc_turn_b"]
 
 
 @pytest.mark.asyncio
@@ -3120,3 +3162,62 @@ async def test_sticky_refresh_skip_never_clobbers_concurrent_rebind(db_setup):
     async with SessionLocal() as session:
         final = await StickySessionsRepository(session).get_account_id(key, kind=StickySessionKind.PROMPT_CACHE)
         assert final == "acc_skip_new"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_retires_derived_prompt_cache_rows_and_keeps_client_sticky_threads(db_setup):
+    """The cleanup pass must not delete a `sticky_thread` row by key prefix.
+
+    Every proxy-derived prompt-cache key -- the retired `{model_class}-...`
+    shape and the current `v2t-` shape alike -- is written as a `prompt_cache`
+    row, because the derivation only runs when cache affinity is enabled and
+    that is the branch choosing `prompt_cache`. `purge_prompt_cache_before`
+    already retires both. A `sticky_thread` row whose key merely *looks* like
+    one of those shapes is client-supplied, and `sticky_thread` has no TTL by
+    design.
+    """
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+    from app.modules.sticky_sessions.cleanup_scheduler import StickySessionCleanupScheduler
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            Account(
+                id="acc_sweep_guard",
+                email="sweep-guard@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+
+    client_thread_keys = ("codex-client-supplied", "std-client-supplied", "v2t-client-supplied")
+    derived_prompt_cache_keys = ("v2t-std-abcdefghijkl-0123456789abcdef", "codex-abcdefghijkl-deadbeef")
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        for key in client_thread_keys:
+            await repo.upsert(key, "acc_sweep_guard", kind=StickySessionKind.STICKY_THREAD)
+        for key in derived_prompt_cache_keys:
+            await repo.upsert(key, "acc_sweep_guard", kind=StickySessionKind.PROMPT_CACHE)
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key.in_((*client_thread_keys, *derived_prompt_cache_keys)))
+            .values(updated_at=utcnow() - timedelta(hours=6))
+        )
+        await session.commit()
+
+    scheduler = StickySessionCleanupScheduler(interval_seconds=300, enabled=True)
+    await scheduler._cleanup_as_leader()
+
+    async with SessionLocal() as session:
+        remaining = set((await session.execute(select(StickySession.key))).scalars())
+
+    assert set(client_thread_keys) <= remaining, "a client-supplied sticky_thread row was swept by key prefix"
+    assert not set(derived_prompt_cache_keys) & remaining, "derived prompt_cache rows should expire at the TTL"

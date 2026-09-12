@@ -457,31 +457,43 @@ async def reconcile_recoverable_account_statuses(
     return recovered
 
 
-def _sibling_window_blocks_recovery(
-    entry: UsageHistory | None,
-    *,
-    account: Account,
-    window: str,
-    now: float,
-) -> bool:
+def _applicable_quota_windows(account: Account) -> tuple[str, ...]:
+    """Return the window slots that carry live quota for this account's plan.
+
+    A plan has one short window and one long window. ``capacity_for_plan``
+    reports a zero-capacity primary for Free (a normalization artifact of the
+    monthly-only payload rather than a live 5h window) and no monthly capacity
+    for paid plans, so the long window is ``monthly`` for Free and ``secondary``
+    otherwise -- the same resolution ``_select_long_window_entry`` uses.
+
+    Slots outside this set can still hold rows written under a previous plan,
+    because usage history is append-only: an account downgraded from a paid plan
+    keeps its last paid ``secondary`` sample as the newest row in that slot
+    forever. Those rows are not current quota state and MUST NOT be read as one.
+    """
+
+    windows: list[str] = []
+    if capacity_for_plan(account.plan_type, "primary"):
+        windows.append("primary")
+    if capacity_for_plan(account.plan_type, "monthly"):
+        windows.append("monthly")
+    elif capacity_for_plan(account.plan_type, "secondary"):
+        windows.append("secondary")
+    return tuple(windows)
+
+
+def _sibling_window_blocks_recovery(entry: UsageHistory | None, *, now: float) -> bool:
     """Return whether a non-recovered window would immediately re-block the account.
 
     Releasing an account whose *other* quota window is still exhausted only buys
     one upstream 429 and a fresh block, so a current sibling at 100% keeps the
-    account blocked. Two exclusions keep that from over-blocking:
-
-    * Only windows that carry quota for the account's plan count. A free
-      account's primary slot has zero capacity and is a normalization artifact
-      of the monthly payload, not a live 5h window.
-    * An elapsed window is stale exhaustion evidence rather than a live block
-      (see "Usage refresh does not trust elapsed reset windows"). A 100% row
-      with no reset metadata is treated as current because nothing proves it
-      rolled.
+    account blocked. An elapsed window is stale exhaustion evidence rather than a
+    live block (see "Usage refresh does not trust elapsed reset windows"), so it
+    does not veto. A 100% row with no reset metadata is treated as current
+    because nothing proves it rolled.
     """
 
     if entry is None or entry.used_percent < 100.0:
-        return False
-    if not capacity_for_plan(account.plan_type, window):
         return False
     return entry.reset_at is None or entry.reset_at > now
 
@@ -536,8 +548,8 @@ def _confirmed_window_reset_recovery(
     if after.used_percent >= 100.0 or latest.used_percent >= 100.0:
         return False
     if any(
-        _sibling_window_blocks_recovery(entry, account=account, window=sibling, now=now)
-        for sibling, entry in latest_by_window.items()
+        _sibling_window_blocks_recovery(latest_by_window.get(sibling), now=now)
+        for sibling in _applicable_quota_windows(account)
         if sibling != window
     ):
         return False

@@ -11,8 +11,9 @@
 
 - [x] 2.1 Rename to `_confirmed_window_reset_recovery` and drop the plan gate
 - [x] 2.2 Bind baseline, before, after, and latest to the anchored window
-- [x] 2.3 Add `_sibling_window_blocks_recovery` with the plan-capacity and
-      elapsed-window exclusions
+- [x] 2.3 Add `_sibling_window_blocks_recovery` with the elapsed-window exclusion
+- [x] 2.4 Scope siblings to `_applicable_quota_windows` so append-only rows from a
+      previous plan are not read as current quota state
 
 ## 3. Warm-up isolation
 
@@ -27,3 +28,6 @@
 - [x] 4.5 Unit: retitle the Plus case to the sibling-exhaustion invariant
 - [x] 4.6 Integration: scheduler recovers a Pro account after an early 7d reset
 - [x] 4.7 Unit: the anchored lookup scans only the newest capped slice
+- [x] 4.8 Unit: a downgraded Free account recovers despite an obsolete paid
+      `secondary` row
+- [x] 4.9 Unit: `_applicable_quota_windows` follows the plan shape

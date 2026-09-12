@@ -1904,3 +1904,84 @@ async def test_resolve_reset_evidence_scans_only_the_newest_capped_history() -> 
     resolved = evidence[account.id]
     assert (resolved.window, resolved.baseline.reset_at) == ("primary", weekly_reset_at)
     assert resolved.after.used_percent == 0.0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recovers_downgraded_free_despite_an_obsolete_paid_secondary_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An append-only paid `secondary` row must not veto Free monthly recovery.
+
+    Usage history is append-only, so an account downgraded from a paid plan
+    keeps its last paid 7d sample as the newest row in that slot indefinitely.
+    Free quota lives in the monthly slot, so that leftover row is not current
+    quota state and must not be read as a live exhausted sibling window.
+    """
+
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    monthly_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_downgraded_free",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=monthly_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=monthly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43_200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 43_200 * 60),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43_200,
+    )
+    # Left over from the paid era: exhausted, unelapsed, and never refreshed
+    # again because upstream now reports a monthly-only payload.
+    obsolete_paid_secondary = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=100.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30 * 24 * 3600),
+        window_minutes=10_080,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            monthly={account.id: after},
+            secondary={account.id: obsolete_paid_secondary},
+        ),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 1
+    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
+
+
+def test_applicable_quota_windows_follows_the_plan_shape() -> None:
+    """Free quota lives in primary(zero-capacity)+monthly; paid plans in primary+secondary."""
+
+    free = _make_account("acc_free_shape", status=AccountStatus.ACTIVE, plan_type="free")
+    pro = _make_account("acc_pro_shape", status=AccountStatus.ACTIVE, plan_type="pro")
+    plus = _make_account("acc_plus_shape", status=AccountStatus.ACTIVE, plan_type="plus")
+    unknown = _make_account("acc_unknown_shape", status=AccountStatus.ACTIVE, plan_type="unknown")
+
+    assert refresh_scheduler_module._applicable_quota_windows(free) == ("monthly",)
+    assert refresh_scheduler_module._applicable_quota_windows(pro) == ("primary", "secondary")
+    assert refresh_scheduler_module._applicable_quota_windows(plus) == ("primary", "secondary")
+    assert refresh_scheduler_module._applicable_quota_windows(unknown) == ()

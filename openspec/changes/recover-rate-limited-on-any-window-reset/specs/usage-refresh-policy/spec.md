@@ -6,7 +6,7 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 
 A future persisted `reset_at` SHALL continue to block ordinary recovery except for a `rate_limited` account whose usage history proves that the specific quota window associated with the current block reset. The exception SHALL be bound to a window, not to the account's plan: the scheduler MUST search each quota-window slot (`primary`, `secondary`, `monthly`) for post-block history containing a baseline whose `reset_at` matches the persisted marker within five seconds, and at most one slot can anchor a given block. This exception MUST require `blocked_at` and a future persisted `reset_at`, at least 30 seconds elapsed after `blocked_at`, a baseline recorded strictly after `blocked_at` in the anchored slot, a real temporal reset in an adjacent pair from that same slot at or after that baseline, and both the transition's after sample and the latest sample of that slot recorded after `blocked_at` with usage below `100%`.
 
-Recovery MUST additionally be withheld while a window other than the anchored one reports usage at or above `100%`, carries non-zero quota capacity for the account's plan, and has not itself elapsed. A window whose own `reset_at` has already passed is stale exhaustion evidence and MUST NOT veto recovery, and a slot with zero capacity for the plan (the normalized Free primary artifact) is not a window for this rule. The reset pair MAY come from the current refresh or be selected from adjacent persisted post-block samples so recovery survives a process restart and tolerates sliding reset deadlines without comparing non-neighboring rows. The persisted lookback MUST be bounded to a fixed number of the most recent rows per slot so the scan cost does not grow with how long the account has been blocked; a transition older than that bound SHALL fall back to the ordinary persisted cooldown. Availability without that matching anchored transition, reset timestamp jitter, an exhausted latest window, or a transition in a slot that does not anchor the persisted marker MUST NOT override the persisted cooldown.
+Recovery MUST additionally be withheld while a window other than the anchored one reports usage at or above `100%` and has not itself elapsed, considering only the slots the account's plan actually uses: the short window plus `monthly` for Free or `secondary` for paid plans. A window whose own `reset_at` has already passed is stale exhaustion evidence and MUST NOT veto recovery; the zero-capacity Free primary slot is a normalization artifact and is not a window for this rule; and because usage history is append-only, a slot outside the plan's current shape can retain a sample written under a previous plan and MUST NOT be read as current quota state. The reset pair MAY come from the current refresh or be selected from adjacent persisted post-block samples so recovery survives a process restart and tolerates sliding reset deadlines without comparing non-neighboring rows. The persisted lookback MUST be bounded to a fixed number of the most recent rows per slot so the scan cost does not grow with how long the account has been blocked; a transition older than that bound SHALL fall back to the ordinary persisted cooldown. Availability without that matching anchored transition, reset timestamp jitter, an exhausted latest window, or a transition in a slot that does not anchor the persisted marker MUST NOT override the persisted cooldown.
 
 Every recovery write MUST compare the current status, deactivation reason, `reset_at`, and `blocked_at`. A successful write SHALL set the account to `active` and clear the deactivation reason and both block markers. A compare-and-set miss MUST preserve the newer row and MUST NOT make the stale account snapshot eligible for warm-up.
 
@@ -38,8 +38,8 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** the last primary usage sample predates the block but still claims an unexpired reset deadline
 - **AND** a later refresh recorded only a fresh long-window row
-- **AND** no qualifying reset-confirmed Free monthly transition matches the current block
-- **THEN** the account stays `rate_limited` until fresh primary evidence arrives, the primary sample's reset deadline elapses, or a qualifying monthly reset is confirmed
+- **AND** no qualifying anchored reset transition in any quota window matches the current block
+- **THEN** the account stays `rate_limited` until fresh primary evidence arrives, the primary sample's reset deadline elapses, or a qualifying anchored window reset is confirmed
 
 #### Scenario: Scheduler recovers a legacy rate-limited account without a block marker
 - **WHEN** an account is persisted as `rate_limited`
@@ -61,7 +61,7 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** its persisted rate-limit reset deadline is still in the future
 - **AND** a later background usage refresh writes fresh available usage
-- **AND** no qualifying reset-confirmed Free monthly transition matches the current block
+- **AND** no qualifying anchored reset transition in any quota window matches the current block
 - **THEN** the scheduler leaves the account `rate_limited`
 
 #### Scenario: Confirmed Free monthly reset recovers before a stale deadline
@@ -172,3 +172,10 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **WHEN** background usage refresh resolves anchored reset evidence
 - **THEN** it reads only the most recent bounded slice of that slot's history
 - **AND** a qualifying transition inside that slice still recovers the account
+
+#### Scenario: An obsolete sibling row from a previous plan does not veto recovery
+- **GIVEN** an account was downgraded from a paid plan to Free
+- **AND** its newest `secondary` row is an exhausted, unelapsed sample left over from the paid era
+- **WHEN** background usage refresh evaluates anchored monthly reset evidence
+- **THEN** the leftover paid sample is not treated as a live exhausted window
+- **AND** the scheduler marks the account `active`

@@ -5382,6 +5382,98 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
 
 
 @pytest.mark.asyncio
+async def test_signed_forward_preserves_generated_turn_state_provenance(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    from app.modules.proxy import api as proxy_api_module
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_request
+
+    target_settings = _make_app_settings(enabled=True, instance_id="instance-b")
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=target_settings,
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: target_settings)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_forwarded_generated",
+        "http-bridge-forwarded-generated@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    upstream = _TurnStateBridgeUpstreamWebSocket("upstream_turn_state_forwarded_generated")
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    async def fail_legacy_stream(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("legacy core_stream_responses path must not be used when HTTP bridge is enabled")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+
+    session_id = "sid-forwarded-generated"
+    turn_state = "http_turn_forwarded_generated"
+    payload = proxy_module.ResponsesRequest(
+        model="gpt-5.1",
+        instructions="Return exactly OK.",
+        input=[{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+    )
+    forward_context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance=target_settings.http_responses_session_bridge_instance_id,
+        codex_session_affinity=True,
+        downstream_turn_state=turn_state,
+        downstream_turn_state_synthesized=True,
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key=session_id,
+    )
+    owner_request = build_owner_forward_request(
+        body=payload.model_dump_for_forwarding(),
+        headers={"x-request-id": "forwarded-generated-request"},
+        payload=payload,
+        context=forward_context,
+    )
+
+    response = await async_client.post(
+        "/internal/bridge/responses",
+        json=owner_request.body,
+        headers=owner_request.headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert '"type":"response.completed"' in response.text
+    session_key = proxy_module._HTTPBridgeSessionKey("session_header", session_id, None)
+    owner_session = service._http_bridge_sessions[session_key]
+    assert turn_state in owner_session.downstream_turn_state_aliases
+    assert turn_state in owner_session.synthesized_downstream_turn_state_aliases
+
+
+@pytest.mark.asyncio
 async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
     async_client,
     app_instance,
@@ -5561,6 +5653,7 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
     recovery_session = service._http_bridge_sessions[recovery_session_key]
     assert recovery_session.account.id == account.id
     assert recovered_turn_state in recovery_session.downstream_turn_state_aliases
+    assert recovered_turn_state not in recovery_session.synthesized_downstream_turn_state_aliases
 
 
 @pytest.mark.asyncio

@@ -205,7 +205,10 @@ class _HTTPBridgeSessionRegistryMixin:
             # released. Start every close concurrently, then await every result,
             # so cancellation cannot strand the tail of a sequential close loop.
             close_results = await asyncio.gather(
-                *(self._close_http_bridge_session(session) for session in sessions_to_close),
+                *(
+                    self._close_http_bridge_session(session, drain_terminal_finalizers=True)
+                    for session in sessions_to_close
+                ),
                 return_exceptions=True,
             )
             background_cleanup_drained = await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")

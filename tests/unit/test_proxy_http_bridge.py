@@ -43560,6 +43560,7 @@ async def test_closing_http_bridge_session_drains_terminal_finalizers_before_lea
         service,
         session,
         turn_state_lock_held=True,
+        drain_terminal_finalizers=True,
     )
 
     assert order == ["fail_pending", "drain_finalizers", "release_live_session"]

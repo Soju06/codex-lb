@@ -506,6 +506,6 @@ Subscription-exhaustion overflow SHALL ship dark: the feature is inactive until 
 #### Scenario: A documented drill outcome without an assertion fails the suite
 
 - **GIVEN** the drill table in the operator documentation and the rehearsals it names
-- **WHEN** a clause is added to a drill's stated outcome, a drill row is added with no rehearsal, or an assertion that covered a clause is deleted from its rehearsal
+- **WHEN** a clause is added to a drill's stated outcome, a drill row is added with no rehearsal, or an assertion that covered a clause is deleted from its rehearsal or switched off in it (commented out, or left as a bare string)
 - **THEN** the mapping guard fails, naming the clause and the assertion it can no longer find
 - **AND** it passes again only once the assertion exists, or the clause is listed as not rehearsed with the operator observation that settles it

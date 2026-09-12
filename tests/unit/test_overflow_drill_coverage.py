@@ -19,10 +19,12 @@ guard then holds three things together:
   punctuation and whitespace. Add a promise to a row and it is covered by no
   clause, so the partition fails -- which is the case the last review round
   found by hand (an exception list that had gone stale).
-* **The assertion is still there.** Each rehearsed clause names snippets that
-  must appear in the body of the drill the table names for it (whitespace
-  normalised, so reformatting is not a failure). Delete the assertion and the
-  clause is uncovered.
+* **The assertion is still there, and still runs.** Each rehearsed clause
+  names snippets that must appear in the body of the drill the table names for
+  it (whitespace normalised, so reformatting is not a failure). Delete the
+  assertion and the clause is uncovered -- and so does switching it off, since
+  the body is matched with comments and string statements blanked out
+  (``_executable_source``). Text that looks like an assertion is not one.
 * **The manual residue is explicit.** A clause with no rehearsal must appear
   verbatim in the "Not rehearsed" section, under its row's name, with the
   ``*Observe:*`` sentence that tells the operator what settles it -- and the
@@ -42,7 +44,9 @@ the guard's own failure modes are tested, not trusted.
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -346,6 +350,54 @@ def _normalized(text: str) -> str:
     return " ".join(text.split())
 
 
+def _char_column(line: str, byte_column: int) -> int:
+    """``ast`` counts columns in UTF-8 bytes; ``str`` slicing counts characters, and this file has both."""
+
+    return len(line.encode("utf-8")[:byte_column].decode("utf-8"))
+
+
+def _executable_source(source: str) -> str:
+    """``source`` with the text that cannot run blanked out, at unchanged offsets.
+
+    A clause is covered by an assertion the drill *runs*, but the body we match
+    against is verbatim source, so text that only looks like an assertion
+    covers it just as well: ``# assert await _pin_rows() == []`` still contains
+    ``assert await _pin_rows() == []``, and so does a bare string statement
+    holding the same line. Both are how an assertion gets switched off in
+    practice, and both used to leave the build green with the rehearsal gone.
+    Comments and string-expression statements are therefore blanked -- to
+    spaces, not deleted, so every surviving character keeps its position and
+    the drill reads exactly as it did.
+    """
+
+    lines = source.splitlines()
+    original = list(lines)
+
+    def blank(start_row: int, start_column: int, end_row: int, end_column: int) -> None:
+        for row in range(start_row, end_row + 1):
+            line = lines[row - 1]
+            first = start_column if row == start_row else 0
+            last = end_column if row == end_row else len(line)
+            lines[row - 1] = line[:first] + " " * (last - first) + line[last:]
+
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.COMMENT:
+            blank(token.start[0], token.start[1], token.end[0], token.end[1])
+    for node in ast.walk(ast.parse(source)):
+        # A string alone as a statement -- a docstring, or an assertion parked in one -- runs nothing.
+        if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str) or node.end_lineno is None or node.end_col_offset is None:
+            continue
+        blank(
+            node.lineno,
+            _char_column(original[node.lineno - 1], node.col_offset),
+            node.end_lineno,
+            _char_column(original[node.end_lineno - 1], node.end_col_offset),
+        )
+    return "\n".join(lines)
+
+
 @dataclass(frozen=True)
 class _Row:
     expected: str
@@ -400,14 +452,18 @@ def _manual_section(doc: str) -> tuple[str, list[str]]:
 
 
 def _drill_bodies(suite: str) -> dict[str, str]:
-    """Every ``test_drill_*`` in the suite, by name, as source text (decorators excluded)."""
+    """Every ``test_drill_*`` in the suite, by name, as *runnable* source (decorators excluded).
+
+    Comments and string statements are blanked, so switching an assertion off
+    uncovers its clause exactly like deleting it does.
+    """
 
     module = ast.parse(suite)
     bodies: dict[str, str] = {}
     for node in module.body:
         if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and _DRILL_TEST_NAME.match(node.name):
             segment = ast.get_source_segment(suite, node)
-            bodies[node.name] = segment or ""
+            bodies[node.name] = _executable_source(segment) if segment else ""
     return bodies
 
 
@@ -627,6 +683,72 @@ def test_guard_catches_a_deleted_assertion() -> None:
     errors = _coverage_errors(ROUTING_DOC, suite, _CLAUSES)
 
     assert any("nothing reached the client" in error and "no longer contains" in error for error in errors), errors
+
+
+_SWITCHED_OFF_DISCONNECT = (
+    "    assert await _pin_rows() == []\n    assert get_source_bulkhead().in_flight(scene.source_id) == 0\n"
+)
+
+
+def _assert_both_disconnect_clauses_uncovered(suite: str) -> None:
+    assert suite != DRILL_SUITE, "the plant did not apply"
+
+    errors = _coverage_errors(ROUTING_DOC, suite, _CLAUSES)
+
+    assert any("'no pin'" in error and "no longer contains" in error for error in errors), errors
+    assert any("'the source slot released'" in error and "no longer contains" in error for error in errors), errors
+
+
+def test_guard_catches_an_assertion_commented_out() -> None:
+    """Switching an assertion off must fail exactly like deleting it.
+
+    ``ast.get_source_segment`` keeps comments, so a substring match read
+    ``# assert await _pin_rows() == []`` as still asserting the clause. These
+    two lines are the only rehearsal of the Disconnect row's "no pin" and "the
+    source slot released", and commenting them out left the whole build green.
+    """
+
+    _assert_both_disconnect_clauses_uncovered(
+        DRILL_SUITE.replace(
+            _SWITCHED_OFF_DISCONNECT,
+            "    # assert await _pin_rows() == []\n"
+            "    # assert get_source_bulkhead().in_flight(scene.source_id) == 0\n",
+            1,
+        )
+    )
+
+
+def test_guard_catches_an_assertion_parked_in_a_string() -> None:
+    """The same hole one keystroke over: a bare string statement runs nothing either."""
+
+    _assert_both_disconnect_clauses_uncovered(
+        DRILL_SUITE.replace(
+            _SWITCHED_OFF_DISCONNECT,
+            '    """assert await _pin_rows() == []\n'
+            '    assert get_source_bulkhead().in_flight(scene.source_id) == 0"""\n',
+            1,
+        )
+    )
+
+
+def test_blanking_inert_text_leaves_the_running_drill_alone() -> None:
+    """Only comments and string statements go; the code keeps its text and its offsets."""
+
+    source = "\n".join(
+        (
+            "def drill():",
+            '    """Docstring with assert stream.chunks == [] in it."""',
+            "    assert x == 1  # assert y == 2",
+            "    return x",
+        )
+    )
+
+    executable = _executable_source(source)
+
+    assert _normalized(executable) == "def drill(): assert x == 1 return x"
+    assert len(executable) == len(source), (len(executable), len(source))
+    assert "assert y == 2" not in executable
+    assert "assert stream.chunks == []" not in executable
 
 
 def test_guard_catches_a_renamed_rehearsal() -> None:

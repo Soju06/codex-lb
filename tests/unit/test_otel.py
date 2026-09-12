@@ -843,18 +843,18 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dispose_failure", [False, True], ids=["clean-dispose", "failed-dispose"])
 @pytest.mark.parametrize(
-    "periodic_shutdown_failure",
-    [False, True],
-    ids=["periodic-drained", "periodic-owner-active"],
+    "periodic_shutdown_state",
+    ["drained", "heartbeat-active", "maintenance-active"],
 )
 async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     dispose_failure: bool,
-    periodic_shutdown_failure: bool,
+    periodic_shutdown_state: str,
 ):
     import app.core.startup as startup_module
     import app.main as main
     from app.core.cache.invalidation import get_cache_invalidation_poller
+    from app.modules.proxy.ring_lifecycle import BridgePeriodicShutdownResult, BridgeRingPeriodicLifecycle
 
     settings = Settings(
         otel_enabled=False,
@@ -954,12 +954,26 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
         "app.modules.proxy.account_cache.get_routing_availability_cache",
         lambda: routing_availability_cache,
     )
-    if periodic_shutdown_failure:
+    if periodic_shutdown_state != "drained":
+        real_stop = main.stop_bridge_periodic_work
 
-        async def _incomplete_bridge_shutdown(**_: object) -> tuple[bool, None]:
-            return False, None
+        async def _incomplete_periodic_stop(
+            registration_task: asyncio.Task[None] | None,
+            lifecycle: BridgeRingPeriodicLifecycle | None,
+            *,
+            timeout_seconds: float,
+        ) -> BridgePeriodicShutdownResult:
+            # Drain the actual test owners before injecting a partial result;
+            # keep the production stale-mark and CLEAN gates under test.
+            result = await real_stop(registration_task, lifecycle, timeout_seconds=timeout_seconds)
+            assert result.all_stopped
+            return BridgePeriodicShutdownResult(
+                registration_stopped=True,
+                heartbeat_stopped=periodic_shutdown_state == "maintenance-active",
+                all_stopped=False,
+            )
 
-        monkeypatch.setattr(main, "_shutdown_bridge_ring_membership", _incomplete_bridge_shutdown)
+        monkeypatch.setattr(main, "stop_bridge_periodic_work", _incomplete_periodic_stop)
 
     if dispose_failure:
         with pytest.raises(RuntimeError, match="dispose failed"):
@@ -976,7 +990,7 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
     wait_for_reachable.assert_not_awaited()
     validate_advertise.assert_not_awaited()
     ring_service.heartbeat.assert_not_awaited()
-    if periodic_shutdown_failure:
+    if periodic_shutdown_state == "heartbeat-active":
         ring_service.mark_stale.assert_not_awaited()
     else:
         ring_service.mark_stale.assert_awaited_once_with(
@@ -987,7 +1001,7 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
     ring_service.unregister.assert_not_called()
     cache_poller.stop.assert_awaited_once()
     expected_events = ["close_db"]
-    if not dispose_failure and not periodic_shutdown_failure:
+    if not dispose_failure and periodic_shutdown_state == "drained":
         expected_events.append("mark_clean")
     assert shutdown_events == expected_events
     # Shutdown must clear the process-global poller so bump_cache_invalidation

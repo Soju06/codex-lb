@@ -19,26 +19,55 @@ guard then holds three things together:
   punctuation and whitespace. Add a promise to a row and it is covered by no
   clause, so the partition fails -- which is the case the last review round
   found by hand (an exception list that had gone stale).
-* **The assertion is still there, and still runs.** Each rehearsed clause
-  names snippets that must appear in the body of the drill the table names for
-  it (whitespace normalised, so reformatting is not a failure). Delete the
-  assertion and the clause is uncovered -- and so does switching it off, since
-  the body is matched with comments and string statements blanked out
-  (``_executable_source``). Text that looks like an assertion is not one.
+* **The assertion is still there.** Each rehearsed clause names snippets that
+  must appear in the body of the drill the table names for it (whitespace
+  normalised, so reformatting is not a failure). Delete the assertion and the
+  clause is uncovered -- and so does parking it in a comment or a string, since
+  the body is matched with those blanked out (``_executable_source``). Text
+  that looks like an assertion is not one.
+* **And the drill still runs.** The body is only half of it: an assertion in a
+  drill that never executes rehearses nothing either, and the body is where a
+  switched-off drill looks exactly like a working one. So the marks that reach
+  each drill are read too (``_switched_off``): a ``skip``/``skipif``/``xfail``
+  on it, or on one of its parametrised cases, or on the module's
+  ``pytestmark``; a ``pytest.skip()``/``pytest.xfail()`` anywhere in it; a body
+  that opens with a ``return``, a ``raise`` or a ``pass``. Any of those and
+  every clause the drill covers is reported uncovered, by name. The drill must
+  also carry the ``overflow_drill`` marker, because that -- not its path -- is
+  what the runbook's one command selects.
 * **The manual residue is explicit.** A clause with no rehearsal must appear
   verbatim in the "Not rehearsed" section, under its row's name, with the
   ``*Observe:*`` sentence that tells the operator what settles it -- and the
   section's own count of them must match.
 
-What it cannot check: that an assertion *means* what the clause says. It
-checks that a named assertion exists and is reachable from the clause, so a
-reviewer can follow the mapping in one step instead of re-deriving it. The
-**How** column is procedure, not promise, and is not mapped.
+What it cannot check: that an assertion *means* what the clause says, or that
+the run reaches it. The requirement is that the text sits in a drill that runs,
+not on a path that executes -- an assertion under a condition that is never
+true, or inside a ``try`` that swallows it, reads as present here and stays a
+reviewer's job. What this does is hold the mapping still, so a reviewer can
+follow it in one step instead of re-deriving it. The **How** column is
+procedure, not promise, and is not mapped.
+
+The "still runs" half is read off the source, not off a live collection: this
+is a unit test, and collecting ``-m overflow_drill tests/integration`` in a
+subprocess costs ~13 s and imports every integration module, so an unrelated
+collection error would surface here as a drill-coverage failure. What that
+buys instead is the static chain -- the marker the runbook's command names, the
+marker the suite declares, the marks on each drill -- checked in
+``test_every_drill_runs_under_the_marker_the_runbook_names``. The gap it leaves
+is the skip no source can show: a ``conftest`` that ignores the file, an
+``addopts`` deselection, or a fixture raising ``Skipped`` at setup. The run is
+what shows those, so the runbook tells the operator to read its summary for a
+``skipped`` and for every ``test_drill_*`` the table names -- and that count is
+kept the table's by
+``test_the_runbook_tells_the_operator_how_many_rehearsals_to_expect``.
 
 ``_coverage_errors`` is a pure function over (doc text, suite text, clauses)
 and is exercised against mutated inputs at the bottom of this file, the way
 ``tests/unit/test_request_log_source_parity.py`` exercises ``_parity_error``:
-the guard's own failure modes are tested, not trusted.
+the guard's own failure modes are tested, not trusted. It also fails when it
+has nothing to check at all -- no table, no drill, no rehearsal in the map --
+so a parser that silently stops working cannot read as a clean bill of health.
 """
 
 from __future__ import annotations
@@ -66,6 +95,12 @@ _MANUAL_HEADING = "#### Not rehearsed -- verify manually during the canary"
 _GLUE = re.compile(r"[\s;.,]*")
 _BACKTICKED = re.compile(r"`([^`\n]+)`")
 _DRILL_TEST_NAME = re.compile(r"^test_drill_[a-z0-9_]+$")
+# The marker the runbook's one command selects: `-m overflow_drill tests/integration`.
+_SUITE_MARKER = "overflow_drill"
+_MARKER_SELECTOR = f"-m {_SUITE_MARKER} tests/integration"
+# Marks that stop a drill from running, and the calls that stop one from inside.
+_OFF_SWITCH_MARKS = frozenset({"skip", "skipif", "xfail"})
+_ESCAPE_CALLS = frozenset({"skip", "xfail", "exit", "importorskip"})
 _COUNT_WORDS = {1: "One clause", 2: "Two clauses", 3: "Three clauses", 4: "Four clauses", 5: "Five clauses"}
 _OUTCOME_LABELS = re.compile(r"codex_lb_subscription_overflow_total\{([^}]*)\}")
 _OUTCOME_MATCHER = re.compile(r'outcome\s*(=~|=)\s*"([^"]*)"')
@@ -481,20 +516,148 @@ def _manual_section(doc: str) -> tuple[str, list[str]]:
     return "\n".join(intro), bullets
 
 
-def _drill_bodies(suite: str) -> dict[str, str]:
-    """Every ``test_drill_*`` in the suite, by name, as *runnable* source (decorators excluded).
+def _dotted(node: ast.expr) -> tuple[str, ...]:
+    """``pytest.mark.skip`` -> ``("pytest", "mark", "skip")``; anything not a dotted name -> ``()``."""
 
-    Comments and string statements are blanked, so switching an assertion off
-    uncovers its clause exactly like deleting it does.
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return ()
+    parts.append(current.id)
+    return tuple(reversed(parts))
+
+
+def _marks(expr: ast.expr) -> set[str]:
+    """Every ``*.mark.<name>`` mentioned anywhere inside ``expr``.
+
+    Anywhere, not just at the top: ``pytest.mark.skip`` and
+    ``pytest.mark.skip(reason=...)`` are the same switch, and so is a mark
+    smuggled into a case list as ``pytest.param(..., marks=pytest.mark.xfail)``.
+    """
+
+    names: set[str] = set()
+    for node in ast.walk(expr):
+        if not isinstance(node, ast.Attribute):
+            continue
+        parts = _dotted(node)
+        if "mark" in parts and parts.index("mark") + 1 < len(parts):
+            names.add(parts[parts.index("mark") + 1])
+    return names
+
+
+def _module_marks(module: ast.Module) -> set[str]:
+    """Marks from a module-level ``pytestmark``, which reach every test in the file."""
+
+    names: set[str] = set()
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets):
+            continue
+        names |= _marks(node.value)
+    return names
+
+
+def _first_statement(node: ast.AsyncFunctionDef | ast.FunctionDef) -> ast.stmt | None:
+    """The drill's first statement that does something, its docstring skipped."""
+
+    for statement in node.body:
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            if isinstance(statement.value.value, str):
+                continue
+        return statement
+    return None
+
+
+def _escape_call(node: ast.AST) -> str | None:
+    """``pytest.skip(...)`` and friends anywhere in the drill: a test may end itself at any depth."""
+
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        parts = _dotted(child.func)
+        if not parts or parts[-1] not in _ESCAPE_CALLS:
+            continue
+        if "pytest" in parts or parts in (("skip",), ("xfail",)):
+            return ".".join(parts)
+    return None
+
+
+def _switched_off(node: ast.AsyncFunctionDef | ast.FunctionDef, module_marks: set[str]) -> str | None:
+    """Why this drill never reaches its assertions, or ``None`` if it does.
+
+    ``ast.get_source_segment`` returns the ``def`` without its decorators -- by
+    design, since the body is what has to contain the assertions -- so nothing
+    below this line can see a drill that was switched off above it. Hence this:
+    the marks that reach it (its own and the module's ``pytestmark``), and the
+    two in-body ways out, a ``pytest.skip()`` and a body that opens with a
+    ``return``, a ``raise`` or a ``pass``. All of them leave ``-m
+    overflow_drill`` green with the rehearsal gone, which is the one thing this
+    guard exists to make impossible.
+
+    Only the *first* statement is read for the quiet exits: a ``return`` deeper
+    in a drill is ordinary control flow, and reading one as a switch would make
+    the guard a style checker. ``pytest.skip``/``pytest.xfail`` are read at any
+    depth, because a drill that can end itself mid-way rehearses the runbook's
+    promise only sometimes.
+    """
+
+    marks = module_marks | {mark for decorator in node.decorator_list for mark in _marks(decorator)}
+    off = sorted(marks & _OFF_SWITCH_MARKS)
+    if off:
+        return " and ".join(f"a pytest.mark.{mark} mark applies to it" for mark in off)
+    escape = _escape_call(node)
+    if escape:
+        return f"it calls {escape}()"
+    first = _first_statement(node)
+    if first is None:
+        return "its body is empty"
+    if isinstance(first, ast.Return):
+        return "it returns before asserting anything"
+    if isinstance(first, ast.Raise):
+        return "it raises before asserting anything"
+    if isinstance(first, ast.Pass):
+        return "its body is a bare pass"
+    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and first.value.value is Ellipsis:
+        return "its body is a bare ellipsis"
+    return None
+
+
+@dataclass(frozen=True)
+class _Drill:
+    """One ``test_drill_*``: the source that runs, and whether it runs at all."""
+
+    body: str
+    switched_off: str | None
+    selected: bool
+
+
+def _drills(suite: str) -> dict[str, _Drill]:
+    """Every ``test_drill_*`` in the suite, by name, with its *runnable* source and its marks.
+
+    ``body`` is the ``def`` without decorators, comments and string statements
+    blanked, so switching an assertion off uncovers its clause exactly like
+    deleting it does. ``switched_off`` and ``selected`` are read from the parts
+    ``body`` cannot show: the decorators above it and the module's
+    ``pytestmark``.
     """
 
     module = ast.parse(suite)
-    bodies: dict[str, str] = {}
+    module_marks = _module_marks(module)
+    drills: dict[str, _Drill] = {}
     for node in module.body:
         if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and _DRILL_TEST_NAME.match(node.name):
             segment = ast.get_source_segment(suite, node)
-            bodies[node.name] = _executable_source(segment) if segment else ""
-    return bodies
+            own_marks = {mark for decorator in node.decorator_list for mark in _marks(decorator)}
+            drills[node.name] = _Drill(
+                body=_executable_source(segment) if segment else "",
+                switched_off=_switched_off(node, module_marks),
+                selected=_SUITE_MARKER in module_marks | own_marks,
+            )
+    return drills
 
 
 # -- the guard -------------------------------------------------------------------------------------
@@ -534,8 +697,24 @@ def _coverage_errors(doc: str, suite: str, clauses: tuple[_Clause, ...]) -> list
 
     errors: list[str] = []
     table = _drill_table(doc)
-    bodies = _drill_bodies(suite)
+    drills = _drills(suite)
     intro, bullets = _manual_section(doc)
+
+    # Nothing below can fail when there is nothing to check, so say so here: an
+    # empty table, an empty suite or a map with no rehearsal in it would
+    # otherwise walk every loop zero times and report a clean bill of health.
+    if not table:
+        errors.append("the runbook has no drill table, so no clause of it can be checked against the suite")
+    if not drills:
+        errors.append("the suite defines no test_drill_* function, so the whole table rests on nothing")
+    if not any(clause.rehearsal for clause in clauses):
+        errors.append("no clause in the coverage map names a rehearsal, so no assertion is being held in place")
+
+    for name in sorted(name for name, drill in drills.items() if not drill.selected):
+        errors.append(
+            f"{name} carries no {_SUITE_MARKER} marker, so `{_MARKER_SELECTOR}` -- "
+            "the one command the runbook gives the operator -- never runs it"
+        )
 
     mapped_rows = {clause.row for clause in clauses}
     for row in sorted(mapped_rows - set(table)):
@@ -563,11 +742,17 @@ def _coverage_errors(doc: str, suite: str, clauses: tuple[_Clause, ...]) -> list
                 manual_count += 1
                 errors.extend(_manual_entry_errors(row, clause, bullets))
                 continue
-            body = bodies.get(clause.rehearsal)
-            if body is None:
+            drill = drills.get(clause.rehearsal)
+            if drill is None:
                 errors.append(f"{row}: {clause.rehearsal} is named for {clause.text!r} but the suite has no such drill")
                 continue
-            normalised = _normalized(body)
+            if drill.switched_off is not None:
+                errors.append(
+                    f"{row}: {clause.rehearsal} does not run -- {drill.switched_off} -- so nothing rehearses "
+                    f"{clause.text!r}; a switched-off drill is not a rehearsal"
+                )
+                continue
+            normalised = _normalized(drill.body)
             for assertion in clause.assertions:
                 if _normalized(assertion) not in normalised:
                     errors.append(
@@ -584,7 +769,7 @@ def _coverage_errors(doc: str, suite: str, clauses: tuple[_Clause, ...]) -> list
             f"but the map has {manual_count} unrehearsed clause(s), so it should open with {expected_intro!r}"
         )
 
-    for name in sorted(set(bodies) - {rehearsal for entry in table.values() for rehearsal in entry.rehearsals}):
+    for name in sorted(set(drills) - {rehearsal for entry in table.values() for rehearsal in entry.rehearsals}):
         errors.append(f"{name} is a drill the table names nowhere, so an operator following the runbook never runs it")
     return errors
 
@@ -618,15 +803,55 @@ DRILL_SUITE = _read(_DRILL_SUITE)
 
 def test_the_table_and_the_suite_parse() -> None:
     table = _drill_table(ROUTING_DOC)
-    bodies = _drill_bodies(DRILL_SUITE)
+    drills = _drills(DRILL_SUITE)
     intro, bullets = _manual_section(ROUTING_DOC)
 
     assert len(table) == 7, sorted(table)
     assert all(row.expected and row.rehearsals for row in table.values()), table
-    assert len(bodies) >= len(table), sorted(bodies)
-    assert all(len(body) > 500 for body in bodies.values()), {name: len(body) for name, body in bodies.items()}
+    assert len(drills) >= len(table), sorted(drills)
+    assert all(len(drill.body) > 500 for drill in drills.values()), {
+        name: len(drill.body) for name, drill in drills.items()
+    }
     assert bullets and intro.strip(), (intro, bullets)
     assert len(_CLAUSES) >= 25, len(_CLAUSES)
+
+
+def test_every_drill_runs_under_the_marker_the_runbook_names() -> None:
+    """The suite's end of the chain from the operator's command to the drill.
+
+    The runbook's command selects ``-m overflow_drill`` under
+    ``tests/integration``; this suite is a ``test_*.py`` file there whose
+    module-level ``pytestmark`` carries that marker, and no drill in it is
+    switched off. That is what "the drill the row names actually runs" means
+    under pytest's default collection, checked without a subprocess -- see the
+    module docstring for the gap that leaves. The other end (``make
+    test-overflow-drills`` exists, the marker is registered in ``pyproject``)
+    is pinned by ``test_subscription_overflow_spec_delta.py``.
+    """
+
+    assert _DRILL_SUITE.parent == REPO_ROOT / "tests/integration", _DRILL_SUITE
+    assert _DRILL_SUITE.name.startswith("test_") and _DRILL_SUITE.suffix == ".py", _DRILL_SUITE
+    assert _MARKER_SELECTOR in ROUTING_DOC, "the runbook's command selects something else"
+
+    drills = _drills(DRILL_SUITE)
+
+    assert drills, "no drills to select"
+    assert {name: drill.switched_off for name, drill in drills.items() if drill.switched_off} == {}
+    assert [name for name, drill in drills.items() if not drill.selected] == []
+
+
+def test_the_runbook_tells_the_operator_how_many_rehearsals_to_expect() -> None:
+    """The one hiding place source cannot see is a drill pytest never collects; the count is what shows it.
+
+    A ``conftest`` ignore or an ``addopts`` deselection removes a drill without
+    printing ``skipped`` anywhere, so the sentence beside the command tells the
+    operator how many ``test_drill_*`` rehearsals the table names. Keep that
+    number the table's, not a remembered one.
+    """
+
+    named = {rehearsal for entry in _drill_table(ROUTING_DOC).values() for rehearsal in entry.rehearsals}
+
+    assert f"all {len(named)} `test_drill_*` rehearsals this table names ran" in ROUTING_DOC, sorted(named)
 
 
 def test_the_coverage_map_is_well_formed() -> None:
@@ -808,6 +1033,189 @@ def test_guard_catches_an_assertion_parked_in_a_string() -> None:
             1,
         )
     )
+
+
+_SILENT_HEADERS_DRILL = "test_drill_silent_headers_send_nothing_and_leave_no_pin"
+_SILENT_HEADERS_DEF = f"async def {_SILENT_HEADERS_DRILL}("
+_STALL_DRILL = "test_drill_stall_fails_closed_and_opens_the_breaker"
+
+
+def _assert_drill_does_not_rehearse(suite: str, drill: str, row: str, clause: str, reason: str) -> None:
+    assert suite != DRILL_SUITE, "the plant did not apply"
+
+    errors = _coverage_errors(ROUTING_DOC, suite, _CLAUSES)
+
+    wanted = f"{row}: {drill} does not run -- {reason} -- so nothing rehearses {clause!r}"
+    assert any(error.startswith(wanted) for error in errors), errors
+
+
+def test_guard_catches_a_drill_marked_skip() -> None:
+    """The round-3 failure mode: the assertions are all there, and none of them runs.
+
+    ``ast.get_source_segment`` excludes decorators, so a substring match over
+    the body cannot see ``@pytest.mark.skip`` above it: the drill reported
+    ``skipped``, the marker-selected run stayed green, and both clauses of the
+    Silent headers row went unrehearsed while the runbook still promised them.
+    """
+
+    _assert_drill_does_not_rehearse(
+        DRILL_SUITE.replace(
+            _SILENT_HEADERS_DEF, f'@pytest.mark.skip(reason="flaky, quarantined")\n{_SILENT_HEADERS_DEF}', 1
+        ),
+        _SILENT_HEADERS_DRILL,
+        "Silent headers",
+        "`504 model_source_timeout` at 30 s",
+        "a pytest.mark.skip mark applies to it",
+    )
+
+
+def test_guard_catches_a_drill_marked_xfail() -> None:
+    """An expected failure is not a rehearsal either, strict or not."""
+
+    _assert_drill_does_not_rehearse(
+        DRILL_SUITE.replace(
+            f"async def {_STALL_DRILL}(", f"@pytest.mark.xfail(strict=False)\nasync def {_STALL_DRILL}(", 1
+        ),
+        _STALL_DRILL,
+        "Stall",
+        "the breaker opens within three attempts",
+        "a pytest.mark.xfail mark applies to it",
+    )
+
+
+def test_guard_catches_a_drill_that_skips_itself() -> None:
+    """The same switch one line lower -- and ``pytest.skip`` is executable, so blanking cannot reach it."""
+
+    _assert_drill_does_not_rehearse(
+        DRILL_SUITE.replace(
+            "    assert response.status_code == 504",
+            '    pytest.skip("quarantined")\n    assert response.status_code == 504',
+            1,
+        ),
+        _SILENT_HEADERS_DRILL,
+        "Silent headers",
+        "`504 model_source_timeout` at 30 s",
+        "it calls pytest.skip()",
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        pytest.param("    return", "it returns before asserting anything", id="return"),
+        pytest.param('    raise RuntimeError("quarantined")', "it raises before asserting anything", id="raise"),
+        pytest.param("    pass", "its body is a bare pass", id="pass"),
+        pytest.param("    ...", "its body is a bare ellipsis", id="ellipsis"),
+        pytest.param('    pytest.skip("later")\n    assert x == 1', "it calls pytest.skip()", id="skip-call"),
+        pytest.param(
+            '    if SLOW:\n        pytest.xfail("later")\n    assert x == 1',
+            "it calls pytest.xfail()",
+            id="nested-xfail",
+        ),
+    ],
+)
+def test_a_drill_that_leaves_before_it_asserts_is_switched_off(body: str, reason: str) -> None:
+    """A body that runs, and gets out. Only the first statement is read for the quiet exits.
+
+    ``return``/``raise``/``pass`` deeper in a drill are ordinary control flow,
+    so they are not read as a switch; ``pytest.skip`` and ``pytest.xfail`` are
+    at any depth, because a drill that can end itself mid-way is not one an
+    operator can read the runbook's promise off.
+    """
+
+    suite = f"import pytest\n\npytestmark = pytest.mark.{_SUITE_MARKER}\n\n\ndef test_drill_x() -> None:\n{body}\n"
+
+    drill = _drills(suite)["test_drill_x"]
+
+    assert drill.switched_off == reason, drill
+    assert drill.selected
+
+
+@pytest.mark.parametrize(
+    ("decorator", "reason"),
+    [
+        pytest.param("@pytest.mark.skip", "a pytest.mark.skip mark applies to it", id="bare"),
+        pytest.param('@pytest.mark.skip(reason="x")', "a pytest.mark.skip mark applies to it", id="called"),
+        pytest.param('@pytest.mark.skipif(True, reason="x")', "a pytest.mark.skipif mark applies to it", id="skipif"),
+        pytest.param("@mark.xfail", "a pytest.mark.xfail mark applies to it", id="imported-mark"),
+        pytest.param(
+            '@pytest.mark.parametrize("n", [pytest.param(1, marks=pytest.mark.skip)])',
+            "a pytest.mark.skip mark applies to it",
+            id="param-level",
+        ),
+    ],
+)
+def test_a_mark_that_reaches_a_drill_switches_it_off(decorator: str, reason: str) -> None:
+    """Bare or called, on the drill or on one of its cases, and whatever ``mark`` was imported as."""
+
+    suite = (
+        f"import pytest\nfrom pytest import mark\n\npytestmark = pytest.mark.{_SUITE_MARKER}\n\n\n"
+        f"{decorator}\ndef test_drill_x() -> None:\n    assert x == 1\n"
+    )
+
+    assert _drills(suite)["test_drill_x"].switched_off == reason
+
+
+def test_a_module_wide_skip_switches_every_drill_off() -> None:
+    """``pytestmark`` is the one switch that is nowhere near the drill it disables."""
+
+    suite = (
+        f"import pytest\n\npytestmark = [pytest.mark.{_SUITE_MARKER}, pytest.mark.skip]\n\n\n"
+        "def test_drill_x() -> None:\n    assert x == 1\n"
+    )
+
+    assert _drills(suite)["test_drill_x"].switched_off == "a pytest.mark.skip mark applies to it"
+
+
+def test_a_drill_outside_the_marker_is_not_the_drill_the_runbook_runs() -> None:
+    """Renaming the marker, or dropping it, makes the runbook's one command miss the drill."""
+
+    suite = (
+        "import pytest\n\npytestmark = pytest.mark.integration\n\n\ndef test_drill_x() -> None:\n    assert x == 1\n"
+    )
+
+    drill = _drills(suite)["test_drill_x"]
+
+    assert not drill.selected
+    assert drill.switched_off is None, "it runs -- just never under the command the operator was given"
+    assert any(
+        error.startswith(f"test_drill_x carries no {_SUITE_MARKER} marker") for error in _coverage_errors("", suite, ())
+    )
+
+
+def test_the_shipped_drills_are_not_read_as_switched_off() -> None:
+    """The other half of the mutation tests: none of these predicates fires on the real suite."""
+
+    drills = _drills(DRILL_SUITE)
+
+    assert len(drills) >= 7, sorted(drills)
+    assert all(drill.switched_off is None and drill.selected for drill in drills.values()), {
+        name: drill.switched_off for name, drill in drills.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("doc", "suite", "clauses", "expected"),
+    [
+        pytest.param("", DRILL_SUITE, _CLAUSES, "the runbook has no drill table", id="no-table"),
+        pytest.param(ROUTING_DOC, "", _CLAUSES, "the suite defines no test_drill_*", id="no-drills"),
+        pytest.param(
+            ROUTING_DOC,
+            DRILL_SUITE,
+            tuple(_Clause(clause.row, clause.text) for clause in _CLAUSES),
+            "no clause in the coverage map names a rehearsal",
+            id="no-rehearsals",
+        ),
+    ],
+)
+def test_the_guard_fails_when_it_has_nothing_to_check(
+    doc: str, suite: str, clauses: tuple[_Clause, ...], expected: str
+) -> None:
+    """Every input this guard reads can go empty, and an empty input must never read as a pass."""
+
+    errors = _coverage_errors(doc, suite, clauses)
+
+    assert any(error.startswith(expected) for error in errors), errors
 
 
 def test_blanking_inert_text_leaves_the_running_drill_alone() -> None:

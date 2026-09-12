@@ -21,7 +21,8 @@ vacuous assertions would say less, not more.
 Which assertion covers which clause is not a claim in a docstring:
 ``tests/unit/test_overflow_drill_coverage.py`` holds the map, parses the table
 out of ``docs/routing.md`` and fails when a clause has neither an assertion
-still present here nor an entry in the runbook's "Not rehearsed" list. The
+still present here -- in a drill nothing has switched off, which it checks too
+-- nor an entry in the runbook's "Not rehearsed" list. The
 clauses in that list are the ones nothing in one process can settle -- whether
 live ChatGPT traffic keeps flowing through a stall (this suite's pool is
 exhausted by construction, so it can only assert that the stalled source never

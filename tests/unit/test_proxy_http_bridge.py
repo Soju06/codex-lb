@@ -9372,6 +9372,57 @@ async def test_transcript_snapshot_waits_for_matching_terminal_finalizer(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_transcript_snapshot_finalizer_wait_uses_snapshot_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stalled terminal finalizer cannot hold a snapshot task past its deadline."""
+    scheduler = VirtualScheduler(VirtualClock())
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
+    session = _make_bridge_session(key_value="snapshot-finalizer-deadline")
+    session.durable_session_id = "durable-snapshot-finalizer-deadline"
+    session.durable_owner_epoch = 5
+    request_state = SimpleNamespace(operation_id="op-snapshot-finalizer-deadline")
+    finalizer_started = asyncio.Event()
+    release_finalizer = asyncio.Event()
+
+    async def finalizer() -> None:
+        finalizer_started.set()
+        await release_finalizer.wait()
+
+    finalizer_task = asyncio.create_task(finalizer(), name="http-bridge-terminal-spool-finalize-deadline")
+    setattr(finalizer_task, "_http_bridge_operation_id", request_state.operation_id)
+    setattr(finalizer_task, "_http_bridge_session_id", session.durable_session_id)
+    setattr(finalizer_task, "_http_bridge_owner_epoch", session.durable_owner_epoch)
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(_terminal_finalize_tasks={finalizer_task}),
+    )
+    update = AsyncMock(return_value=True)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", update)
+
+    try:
+        http_bridge_upstream_events_module._schedule_http_bridge_transcript_snapshot(
+            service,
+            session,
+            request_state,
+            state="completed",
+            operation_attempt_generation=0,
+            response_id="resp-snapshot-finalizer-deadline",
+        )
+        await scheduler.drain()
+        assert finalizer_started.is_set()
+        assert not update.await_args_list
+
+        await scheduler.advance(http_bridge_upstream_events_module._HTTP_BRIDGE_SNAPSHOT_TIMEOUT_SECONDS)
+        assert not finalizer_task.done()
+        assert not finalizer_task.cancelled()
+        assert not update.await_args_list
+        assert not service._background_cleanup_tasks
+    finally:
+        release_finalizer.set()
+        await asyncio.gather(finalizer_task, return_exceptions=True)
+        await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [False, True])
 async def test_bridge_reader_delivers_terminal_before_blocked_parent_snapshot(monkeypatch, batched):
     """Slow parent snapshot persistence does not delay terminal delivery to the client."""

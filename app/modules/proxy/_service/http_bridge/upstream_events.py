@@ -712,7 +712,17 @@ def _schedule_http_bridge_transcript_snapshot(service: Any, session: Any, reques
             # finalizer before reading that flag; otherwise a fast snapshot
             # can race a slow database writer and discard a valid transcript.
             try:
-                await asyncio.shield(finalizer)
+                await scheduler_for(service).wait_for(
+                    asyncio.shield(finalizer),
+                    timeout=_HTTP_BRIDGE_SNAPSHOT_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.debug(
+                    "HTTP bridge terminal spool finalizer deadline exceeded before transcript snapshot "
+                    "operation_id=%s",
+                    getattr(frozen_state, "operation_id", None),
+                )
+                return
             except Exception:
                 logger.debug(
                     "HTTP bridge terminal spool finalizer failed before transcript snapshot operation_id=%s",

@@ -137,6 +137,15 @@ inside the admission latch so a failure cannot leak a claimed slot; a
 saturated source therefore answers 503 `model_source_busy` before a 400/403
 policy refusal.
 
+A late operation-ledger anchor does not enlarge the API-key reservation the
+HTTP route acquired for the originally unanchored body. That is the upstream
+baseline's behavior as well: `_text_with_previous_response_id` on `main` only
+injects the anchor, and the route reserves before bridge dispatch. This change
+re-estimates the account-selection budget on the request state for Astra so
+selection sees the anchored size, but a reservation can only be re-sized once
+the reservation-extension service API from the steering change lands; wiring
+the late-anchor path to it is a follow-up outside this policy change.
+
 The client-prefix retention for an inserted reset applies to the client-facing
 bridge dispatch path. Server-owned recovery retries that re-prepare an already
 shaped payload in place (owner-forward and local terminal-error retries with a

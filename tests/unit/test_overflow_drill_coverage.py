@@ -52,6 +52,7 @@ from pathlib import Path
 
 import pytest
 
+from app.modules.model_sources.forwarding import SOURCE_CONNECT_DEADLINE_SECONDS
 from app.modules.proxy.overflow import OVERFLOW_OUTCOMES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -691,6 +692,20 @@ def test_the_kill_switch_observation_watches_only_the_overflow_the_switch_stops(
         "but the drain keeps feeding those outcomes for up to seven days"
     )
     assert selected == {"dispatched_fresh"}, sorted(selected)
+
+
+def test_the_stall_observation_names_the_bound_a_dropped_syn_actually_waits_out() -> None:
+    """The other half of the same question: an operator timing a DROP must be told the right deadline.
+
+    A firewall ``DROP`` is what the row's first clause is about -- "the connect
+    phase never reaches the header wait" -- so the bound under test is the
+    connect deadline, not the header wait and not the source's total budget.
+    """
+
+    _, bullets = _manual_section(ROUTING_DOC)
+    bullet = next(bullet for bullet in bullets if "firewall `DROP`" in bullet)
+
+    assert f"the real {SOURCE_CONNECT_DEADLINE_SECONDS:.0f} s bound" in bullet, bullet
 
 
 def test_the_drain_really_does_keep_feeding_the_outcomes_that_observation_excludes() -> None:

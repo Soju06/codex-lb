@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from typing import get_args
+from typing import Any, get_args
 
 import pytest
 
@@ -46,11 +46,14 @@ def _user(text: str) -> dict[str, JsonValue]:
 
 
 def _assistant(text: str) -> dict[str, JsonValue]:
+    # ``annotations`` rides on every ``output_text`` part the Responses API
+    # produces, so it is here on both sides of every join, exactly as the spool
+    # and a resending client both carry it.
     return {
         "type": "message",
         "role": "assistant",
         "status": "completed",
-        "content": [{"type": "output_text", "text": text}],
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
     }
 
 
@@ -376,6 +379,108 @@ def test_absent_evidence_declines_before_any_body_is_built(
     assert verdict.movable is False
     assert verdict.decline_reason == "no_relocation_evidence"
     assert verdict.body is None
+
+
+class _PoisonedTranscript(list[object]):
+    """A transcript that cannot be read without saying so."""
+
+    def __iter__(self) -> Any:
+        raise AssertionError("the transcript was walked before the evidence gate ran")
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+@pytest.mark.parametrize(
+    ("insufficient_evidence", "expected_reason"),
+    [
+        ({"evidence": "none"}, "no_relocation_evidence"),
+        ({"spooled_event_count": 1}, "upstream_execution_observed"),
+        ({"evidence": "ambiguous", "seconds_since_dispatch": None}, "outside_ambiguity_window"),
+        (
+            {"evidence": "ambiguous", "seconds_since_dispatch": 1.0, "arms_side_effect_replay_dedupe": False},
+            "no_side_effect_replay_dedupe",
+        ),
+    ],
+)
+def test_the_evidence_gate_runs_before_the_source_ladder_is_consulted(
+    transport: RelocationTransport,
+    insufficient_evidence: dict[str, object],
+    expected_reason: RelocationDeclineReason,
+) -> None:
+    # Both halves would decline, so only the order decides which reason the
+    # operator is told and whether the chain was walked to learn it. A ladder
+    # that ran first would report the body's problem and hide the evidence's.
+    verdict = decide_relocation(
+        _durable_transcript(transport, durable_transcript=_PoisonedTranscript([object()]), **insufficient_evidence),
+    )
+
+    assert verdict.movable is False
+    assert verdict.decline_reason == expected_reason
+    assert verdict.body is None
+    assert verdict.requires_recovery_fence is False
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_a_fresh_developer_message_the_owner_minted_is_not_a_client_full_resend(
+    transport: RelocationTransport,
+) -> None:
+    # The resend's own suffix carries a developer message the owner account
+    # minted an id for. Classifying a body whose ids were already stripped
+    # cannot see that, and would accept the resend as if the client had written
+    # the instruction itself.
+    payload: dict[str, JsonValue] = {
+        **_PRODUCTION_FULL_RESEND_PAYLOAD,
+        "input": [
+            *_PRODUCTION_FULL_RESEND_INPUT,
+            {
+                "type": "message",
+                "id": "msg_response_owned",
+                "role": "developer",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+                "content": [{"type": "input_text", "text": "response-owned control"}],
+            },
+        ],
+    }
+
+    verdict = decide_relocation(
+        RelocationInputs(
+            transport=transport,
+            payload=payload,
+            evidence="definitive",
+            previous_response_id=_ANCHOR,
+            client_resend=_PRODUCTION_RESEND_PROOF,
+        ),
+    )
+
+    assert verdict.movable is False
+    assert verdict.source is None
+    # The resend is refused, so the ladder moves on; this caller brought no
+    # durable material, so the turn stays owner-bound exactly as today.
+    assert verdict.decline_reason == "absent_transcript"
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_a_rebuilt_body_still_carries_the_message_the_client_just_sent(
+    transport: RelocationTransport,
+) -> None:
+    # "hello" is the client's own new message and only coincides with the
+    # message that opened the thread. A verdict that calls the turn movable
+    # while its body has dropped that message is the worst outcome available:
+    # the replacement account answers a conversation the user never wrote.
+    verdict = decide_relocation(
+        _durable_transcript(
+            transport,
+            payload={**_DELTA_PAYLOAD, "input": [_user("hello"), _user("and now?")]},
+        ),
+    )
+
+    assert verdict.movable is True
+    assert verdict.body is not None
+    assert verdict.body["input"] == [
+        _user("hello"),
+        _assistant("hi there"),
+        _user("hello"),
+        _user("and now?"),
+    ]
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)

@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from app.core.openai.requests import extract_input_file_ids
 from app.core.types import JsonValue
+from app.core.utils.sse import parse_sse_data_json
 from app.modules.model_sources.projection import DeclineReason, PortabilityView
 
 _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
@@ -61,7 +62,11 @@ _ACCOUNT_NEUTRAL_CONTENT_FIELDS = {
     "input_file": frozenset({"file_data", "file_id", "file_url", "filename", "type"}),
     "input_image": frozenset({"detail", "file_id", "image_url", "type"}),
     "input_text": frozenset({"text", "type"}),
-    "output_text": frozenset({"text", "type"}),
+    # ``annotations`` rides along on every assistant ``output_text`` part the
+    # Responses API produces, so refusing the field outright refuses every real
+    # conversation. Its *contents* are the account-scoped part -- see
+    # ``_annotations_are_portable``.
+    "output_text": frozenset({"annotations", "text", "type"}),
     "refusal": frozenset({"refusal", "type"}),
     "text": frozenset({"text", "type"}),
 }
@@ -131,8 +136,6 @@ RELOCATION_TRANSCRIPT_MAX_TURNS = 128
 RELOCATION_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
 
 _RESPONSE_CREATE_EVENT_TYPE = "response.create"
-_SSE_DATA_FIELD_PREFIX = "data:"
-_SSE_DONE_SENTINEL = "[DONE]"
 _TERMINAL_RESPONSE_EVENT_TYPES = frozenset({"response.completed", "response.incomplete"})
 _RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE = "response.output_item.done"
 _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION = frozenset(
@@ -1026,7 +1029,7 @@ def _input_content_part_is_self_contained(
     if any(key not in _ACCOUNT_NEUTRAL_CONTENT_FIELDS[cast(str, part_type)] for key in part):
         return False
     if part_type in {"input_text", "text"} or (allow_output and part_type == "output_text"):
-        return _is_nonblank_string(part.get("text"))
+        return _is_nonblank_string(part.get("text")) and _annotations_are_portable(part)
     if allow_output and part_type == "refusal":
         return _is_nonblank_string(part.get("refusal"))
     if part_type == "input_image":
@@ -1040,6 +1043,19 @@ def _input_content_part_is_self_contained(
             or _url_is_account_neutral(part.get("file_url"), allow_data=False)
         )
     return False
+
+
+def _annotations_are_portable(part: Mapping[str, JsonValue]) -> bool:
+    """Whether an output part's annotation list cites nothing the new account lacks.
+
+    An empty list is bookkeeping the API attaches to every ``output_text`` part
+    and carries nothing. A populated one names file citations, container files
+    and URL citations minted against the account that produced the turn, so a
+    part carrying any entry stays owner-bound.
+    """
+
+    annotations = part.get("annotations")
+    return annotations is None or annotations == []
 
 
 def _url_is_account_neutral(value: JsonValue | None, *, allow_data: bool) -> bool:
@@ -1235,33 +1251,30 @@ def _canonical_replay_item(item: JsonValue) -> str:
 
 
 def _replay_prefix_overlap(rebuilt: list[JsonValue], appended: list[JsonValue]) -> int:
-    """How many leading ``appended`` items the rebuilt chain already contains.
+    """How many leading ``appended`` items continue the rebuilt chain's own end.
 
     Both joins the rebuild performs -- one chain turn onto the turns before it,
-    and the client's own suffix onto the finished chain -- ask this same question,
-    so they ask it here rather than each deciding for itself. Restated items run
-    up to where the chain ends, so the tail form is the one that proves a
-    restatement, and a single repeated item proves it as well as ten do. The
-    leading form then catches a sender that repeated the conversation from its
-    start, but only while it still contributes something past the repetition: a
-    leading match that swallowed the whole contribution would delete the very
-    turn the sender came to add, and a message repeated verbatim later in a
-    conversation is ordinary. Everything past the matched overlap is preserved.
+    and the client's own suffix onto the finished chain -- ask this same
+    question, so they ask it here rather than each deciding for itself.
+
+    A restatement carries the conversation up to where that conversation
+    currently ends, so the overlap is anchored at the chain's tail and nowhere
+    else. Matching a leading run against the chain's *start* instead accepts any
+    coincidental equality: a sender whose genuinely new first item happens to
+    repeat the conversation's opening message would have that item deleted and
+    would never reach the replacement account at all -- and the verdict would
+    still call the turn movable. Losing a message the user wrote is worse than
+    carrying one twice, so an unanchored repetition is kept. Everything past the
+    matched overlap is preserved.
     """
 
     max_overlap = min(len(rebuilt), len(appended))
     if max_overlap == 0:
         return 0
-    canonical_appended = [_canonical_replay_item(item) for item in appended[:max_overlap]]
-    canonical_tail = [_canonical_replay_item(item) for item in rebuilt[-max_overlap:]]
-    tail_overlap = _longest_tail_prefix_match(canonical_tail, canonical_appended)
-    if tail_overlap:
-        return tail_overlap
-    canonical_head = [_canonical_replay_item(item) for item in rebuilt[:max_overlap]]
-    leading_overlap = 0
-    while leading_overlap < max_overlap and canonical_head[leading_overlap] == canonical_appended[leading_overlap]:
-        leading_overlap += 1
-    return leading_overlap if leading_overlap < len(appended) else 0
+    return _longest_tail_prefix_match(
+        [_canonical_replay_item(item) for item in rebuilt[-max_overlap:]],
+        [_canonical_replay_item(item) for item in appended[:max_overlap]],
+    )
 
 
 def _longest_tail_prefix_match(tail: list[str], prefix: list[str]) -> int:
@@ -1307,6 +1320,14 @@ def _terminal_response_output_items(events: object) -> list[JsonValue] | None:
     accumulated items are complete enough to preserve that turn's context. Without
     a terminal marker at all there is no proof the turn settled, so the whole
     rebuild fails closed rather than continuing on a truncated conversation.
+
+    The spool stores each frame as the upstream wrote it, so the shared SSE field
+    parser reads it: only CR, LF and CRLF end a line, and a multi-line ``data:``
+    field joins with LF. ``str.splitlines`` would additionally break on U+2028,
+    U+2029, NEL, VT, FF and the file/group/record separators, all of which are
+    legal unescaped inside a JSON string -- one of them in a model's answer would
+    leave the turn with no readable terminal and refuse a rebuild the material
+    fully supports.
     """
 
     if not isinstance(events, Sequence) or isinstance(events, (str, bytes, bytearray)):
@@ -1316,33 +1337,24 @@ def _terminal_response_output_items(events: object) -> list[JsonValue] | None:
     for event_text in events:
         if not isinstance(event_text, str):
             continue
-        for line in event_text.splitlines():
-            if not line.startswith(_SSE_DATA_FIELD_PREFIX):
-                continue
-            event_data = line[len(_SSE_DATA_FIELD_PREFIX) :].strip()
-            if not event_data or event_data == _SSE_DONE_SENTINEL:
-                continue
-            try:
-                event_payload = json.loads(event_data)
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if not isinstance(event_payload, dict):
-                continue
-            event_type = event_payload.get("type")
-            if event_type == _RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE:
-                item = event_payload.get("item")
-                if isinstance(item, dict):
-                    completed_items.append(cast(JsonValue, item))
-                continue
-            if event_type not in _TERMINAL_RESPONSE_EVENT_TYPES:
-                continue
-            saw_terminal = True
-            response = event_payload.get("response")
-            if not isinstance(response, dict):
-                continue
-            output = response.get("output")
-            if isinstance(output, list):
-                return cast(list[JsonValue], output)
+        event_payload = parse_sse_data_json(event_text)
+        if event_payload is None:
+            continue
+        event_type = event_payload.get("type")
+        if event_type == _RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE:
+            item = event_payload.get("item")
+            if isinstance(item, dict):
+                completed_items.append(cast(JsonValue, item))
+            continue
+        if event_type not in _TERMINAL_RESPONSE_EVENT_TYPES:
+            continue
+        saw_terminal = True
+        response = event_payload.get("response")
+        if not isinstance(response, dict):
+            continue
+        output = response.get("output")
+        if isinstance(output, list):
+            return cast(list[JsonValue], output)
     return completed_items if saw_terminal else None
 
 

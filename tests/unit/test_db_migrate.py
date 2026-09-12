@@ -1989,7 +1989,7 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
     recovery_repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
     recovery_merge_revision = "20260912_010000_merge_recovery_repair_and_thread_cache_heads"
     assert script_directory.get_revision(thread_cache_revision).down_revision == local_login_revision
-    assert script_directory.get_revision(continuity_revision).down_revision == thread_cache_revision
+    assert script_directory.get_revision(continuity_revision).down_revision == local_login_revision
     assert script_directory.get_revision(recovery_repair_revision).down_revision == continuity_revision
     assert script_directory.get_revision(recovery_merge_revision).down_revision == (
         recovery_repair_revision,

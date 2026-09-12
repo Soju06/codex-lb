@@ -41,3 +41,11 @@ Run `LOCAL_ENTRY_DATABASE_PLAN=<private-plan> python -m scripts.local_postgres_a
 6. Confirm PostgreSQL sessions, shared ring membership, active destination, model calls and unchanged Codex routing. Enabling Codex's endpoint is a separate user-requested action. Back up PostgreSQL with `pg_dump` and retain the original SQLite snapshot; neither is a substitute for tested restore.
 
 The local Docker container is bound to loopback with a dedicated persistent volume and `unless-stopped` restart policy. PostgreSQL availability still depends on the local Docker/Colima VM; the restart policy does not itself start Colima after a macOS reboot. Database migration solves shared-writer locking, not upstream provider outages or host failure.
+
+## Local deployment receipt (2026-09-12)
+
+The approved initial migration completed with 59 tables and 107,222 rows verified from a stopped SQLite source. `local.codex-lb-pg-blue` (2461) and `local.codex-lb-pg-green` (2462) now share PostgreSQL; the original SQLite LaunchAgent is disabled. `local.codex-lb-entry` remains on 2457, with blue active. `local.codex-lb-compat` preserves port 2455 by forwarding to 2457. Start that compatibility listener only after the stable entry points to a backend, otherwise the old 2457→2455 route would form a loop.
+
+Both the isolated pair and the final public-port HTTP/WebSocket acceptance passed. An isolated restore of the PostgreSQL backup recovered all 59 tables. Private receipts and original files live under `~/.codex-lb/postgres/cutover`. The client config checksum is unchanged; this deployment does not re-enable the Codex endpoint. Future backend rollbacks stay on the shared PostgreSQL database and require schema/inference acceptance. SQLite is an original recovery snapshot, not a current rollback destination after new PostgreSQL writes.
+
+The initial window took 178 seconds to switch the entry. Cold Python imports under LaunchAgent were slower than foreground subprocess imports. Rehearse the exact LaunchAgent environment and await actual readiness before inference; do not assume that foreground startup duration predicts background startup, and never proceed to cutover after a readiness deadline expires.

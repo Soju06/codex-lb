@@ -943,6 +943,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    logging.basicConfig(level=logging.INFO)
     database_url = get_settings().database_url if args.db_url is None else args.db_url
 
     if args.command == "upgrade":

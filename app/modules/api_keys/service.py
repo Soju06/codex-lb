@@ -1076,6 +1076,20 @@ class ApiKeysService:
                     raise
         raise RuntimeError("unreachable")
 
+    async def _reset_elapsed_windows_of_unreserved_limits(self, reservation_id: str, *, now: datetime) -> None:
+        # Lazy resets commit, so they must happen before the reservation row is locked.
+        reservation = await self._repository.get_usage_reservation(reservation_id)
+        if reservation is None or reservation.status != "reserved":
+            return
+        key = _ensure_valid_api_key_row(await self._repository.get_for_limit_enforcement(reservation.api_key_id))
+        reserved_limit_ids = {item.limit_id for item in reservation.items}
+        unreserved_applicable_limits = [
+            limit
+            for limit in key.limits
+            if limit.id not in reserved_limit_ids and _limit_applies_for_request(limit, request_model=reservation.model)
+        ]
+        await _lazy_reset_expired_limits(self._repository, unreserved_applicable_limits, now=now)
+
     async def _adjust_usage_reservation_input_budget_once(
         self,
         reservation_id: str,
@@ -1089,7 +1103,10 @@ class ApiKeysService:
             raise ValueError("direction must be -1 or 1")
         normalized_budget = _normalize_request_usage_budget(request_usage_budget)
         input_tokens = normalized_budget.input_tokens or 0
+        now = utcnow()
         async with sqlite_writer_section():
+            if direction > 0:
+                await self._reset_elapsed_windows_of_unreserved_limits(reservation_id, now=now)
             reservation = await self._repository.get_usage_reservation_for_update(reservation_id)
             if reservation is None or reservation.status != "reserved":
                 await self._repository.rollback()
@@ -1099,7 +1116,7 @@ class ApiKeysService:
                     key = _ensure_valid_api_key_row(
                         await self._repository.get_for_limit_enforcement(reservation.api_key_id)
                     )
-                    if key.expires_at is not None and key.expires_at < utcnow():
+                    if key.expires_at is not None and key.expires_at < now:
                         raise ApiKeyInvalidError("API key has expired")
                     existing_limit_ids = {item.limit_id for item in reservation.items}
                     for limit in key.limits:

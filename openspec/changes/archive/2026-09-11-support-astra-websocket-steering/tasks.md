@@ -41,3 +41,4 @@
 - [x] 3.26 Detach expired steering continuations through the existing bounded tombstone path; prove late-event suppression, current replacement ownership, explicit same-parent retry, rotation and exactly-once accounting
 - [x] 3.27 Restrict steering snapshots to downstream WebSocket requests; verify HTTP bridge forwarding/completion and preserve direct steering configuration
 - [x] 3.28 Reject new steers for a retired parent before admission or dispatch; prove delayed first acknowledgment and failure cannot claim a retry, while explicit creates and other parents retain their lifecycles and accounting
+- [x] 3.29 Reset elapsed windows of newly applicable limits before steering reconciliation; prove admission against the fresh window on the WebSocket route

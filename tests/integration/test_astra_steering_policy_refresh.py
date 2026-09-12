@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,6 +12,7 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 
 from app.core.clients.proxy_websocket import WebsocketsUpstreamWebSocket
+from app.core.utils.time import utcnow
 from app.db.models import ApiKeyLimit, ApiKeyUsageReservation
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -24,11 +26,12 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initial_limit", ["none", "existing", "other-model"])
-@pytest.mark.parametrize("exhausted", [True, False], ids=["reject", "admit"])
+@pytest.mark.parametrize("counter", ["exhausted", "fresh", "elapsed"], ids=["reject", "admit", "admit-after-reset"])
 async def test_queued_steering_reconciles_refreshed_limits_on_the_wire(
-    app_instance: FastAPI, monkeypatch: pytest.MonkeyPatch, initial_limit: str, exhausted: bool
+    app_instance: FastAPI, monkeypatch: pytest.MonkeyPatch, initial_limit: str, counter: str
 ) -> None:
     # Given an owned parent and a steer admitted before a quota policy update.
+    exhausted = counter == "exhausted"
     finish_successor = asyncio.Event()
     wire_frames: list[dict] = []
     before_terminal: list[tuple[int, int]] = []
@@ -66,7 +69,9 @@ async def test_queued_steering_reconciles_refreshed_limits_on_the_wire(
                             )
                         )
                     ).scalar_one()
-                    limit.current_value = limit.max_value if exhausted else 0
+                    limit.current_value = 0 if counter == "fresh" else limit.max_value
+                    if counter == "elapsed":
+                        limit.reset_at = utcnow() - timedelta(days=2)
                     await session.commit()
             elif event["type"] == "response.steer.failed":
                 finish_successor.set()
@@ -157,7 +162,9 @@ async def test_queued_steering_reconciles_refreshed_limits_on_the_wire(
         limits = await ApiKeysRepository(session).get_limits_by_key(api_key.id)
         # The new policy starts at the controlled counter, then settles one successor.
         expected_input_usage = 1_000_000 if exhausted else 10
-        assert next(x.current_value for x in limits if x.limit_type == "input_tokens") == expected_input_usage
+        input_limit = next(x for x in limits if x.limit_type == "input_tokens")
+        assert input_limit.current_value == expected_input_usage
+        assert input_limit.reset_at > utcnow()
         rows = (
             (
                 await session.execute(

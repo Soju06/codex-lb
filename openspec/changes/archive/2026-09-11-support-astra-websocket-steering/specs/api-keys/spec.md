@@ -16,7 +16,9 @@ no reservation exists, admission SHALL create one if limits now apply. Missing
 reservation items SHALL reserve the queued successor's input and single output
 budget under the existing request-admission policy; existing items SHALL extend
 only the new input increment. An exhausted newly applicable limit SHALL reject
-the new submission before dispatch without disturbing admitted work. Reconciliation
+the new submission before dispatch without disturbing admitted work. A newly
+applicable limit whose window has elapsed SHALL be reset under the existing lazy
+on-read strategy before reconciliation reserves against it. Reconciliation
 SHALL keep one successor reservation and its existing terminal settlement owner.
 Cancellation during creation of a newly applicable reservation SHALL be deferred
 until that reservation is attached to the successor's cleanup owner, then
@@ -39,6 +41,12 @@ propagated through normal socket teardown.
 - **WHEN** another submission is admitted after a new applicable limit is added
 - **THEN** the same reservation SHALL gain an item for that limit before dispatch
 - **AND** terminal settlement SHALL charge actual successor usage once to each item
+
+#### Scenario: A newly applicable limit with an elapsed window resets before reconciliation
+- **GIVEN** a limit that did not apply to the first steer holds an exhausted counter and a `reset_at` in the past
+- **WHEN** another submission is admitted after that limit becomes applicable
+- **THEN** the counter SHALL reset and `reset_at` SHALL advance before the new item is reserved
+- **AND** the additional steer SHALL be admitted against the fresh window
 
 #### Scenario: Additional steering input extends the successor reservation
 

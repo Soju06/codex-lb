@@ -718,8 +718,7 @@ def _schedule_http_bridge_transcript_snapshot(service: Any, session: Any, reques
                 )
             except TimeoutError:
                 logger.debug(
-                    "HTTP bridge terminal spool finalizer deadline exceeded before transcript snapshot "
-                    "operation_id=%s",
+                    "HTTP bridge terminal spool finalizer deadline exceeded before transcript snapshot operation_id=%s",
                     getattr(frozen_state, "operation_id", None),
                 )
                 return

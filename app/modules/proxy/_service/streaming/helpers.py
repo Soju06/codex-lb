@@ -411,6 +411,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     classify_upstream_failure,
+    is_account_neutral_safety_policy_rejection,
     is_model_scoped_upstream_rejection,
     is_upstream_model_capacity_error,
 )
@@ -504,10 +505,21 @@ def _stream_iterator_after_capacity_admission(
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
-def _should_penalize_stream_error(code: str | None) -> bool:
+def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:
     if code is None:
         return False
-    return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or code in _facade()._TRANSIENT_RETRY_CODES
+    should_penalize = code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or code in _facade()._TRANSIENT_RETRY_CODES
+    if not should_penalize and _is_account_neutral_request_rejection(
+        code=code,
+        http_status=None,
+        message=message,
+    ):
+        _facade().logger.info(
+            "Skipped account error penalty for account-neutral request rejection code=%s request_id=%s",
+            code,
+            get_request_id(),
+        )
+    return should_penalize
 
 
 _MODEL_CAPACITY_LIMIT_CODES = {
@@ -1021,23 +1033,23 @@ def _is_account_neutral_request_rejection(
 ) -> bool:
     """Return whether upstream rejected the request payload, not the account.
 
-    A payload-shape rejection reproduces identically on every account, so it
-    must never mutate one account's health: otherwise a single client looping
-    on a self-inconsistent conversation drives its serving accounts into
+    An account-neutral request rejection reproduces identically on every
+    account, so it must never mutate one account's health: otherwise a single
+    client looping on a rejected conversation drives its serving accounts into
     ``error_count`` backoff and starves unrelated tenants.
 
     Keep this set narrow: membership is decided by the specific classified
-    message, never by the ``invalid_request_error`` code alone. The
-    model-entitlement rejection is deliberately not a member -- it is handled
-    by ``_is_model_scoped_rejection`` below, which likewise keeps the account's
+    code and message, never by a broad HTTP status alone. The model-entitlement
+    rejection is deliberately not a member -- it is handled by
+    ``_is_model_scoped_rejection`` below, which likewise keeps the account's
     health untouched but still lets failover try accounts whose entitlements
     may differ.
     """
-    if code != "invalid_request_error":
-        return False
     if http_status is not None and http_status != 400:
         return False
-    return bool(_facade()._is_missing_tool_output_message(message))
+    if is_account_neutral_safety_policy_rejection(code=code, http_status=http_status, message=message):
+        return True
+    return code == "invalid_request_error" and bool(_facade()._is_missing_tool_output_message(message))
 
 
 def _is_model_scoped_rejection(

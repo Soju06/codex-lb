@@ -52,6 +52,8 @@ from pathlib import Path
 
 import pytest
 
+from app.modules.proxy.overflow import OVERFLOW_OUTCOMES
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROUTING_DOC = REPO_ROOT / "docs/routing.md"
 _DRILL_SUITE = REPO_ROOT / "tests/integration/test_subscription_overflow_canary_drills.py"
@@ -64,6 +66,12 @@ _GLUE = re.compile(r"[\s;.,]*")
 _BACKTICKED = re.compile(r"`([^`\n]+)`")
 _DRILL_TEST_NAME = re.compile(r"^test_drill_[a-z0-9_]+$")
 _COUNT_WORDS = {1: "One clause", 2: "Two clauses", 3: "Three clauses", 4: "Four clauses", 5: "Five clauses"}
+_OUTCOME_LABELS = re.compile(r"codex_lb_subscription_overflow_total\{([^}]*)\}")
+_OUTCOME_MATCHER = re.compile(r'outcome\s*(=~|=)\s*"([^"]*)"')
+# Off stops *fresh* overflow; pinned and anchored conversations go on being
+# dispatched until the drain window closes, which is what the row's other
+# clauses promise and what the drills assert.
+_DRAIN_SURVIVING_OUTCOMES = ("dispatched_pinned", "dispatched_anchor")
 
 
 @dataclass(frozen=True)
@@ -427,6 +435,27 @@ def _drill_table(doc: str) -> dict[str, _Row]:
     return rows
 
 
+def _selected_outcomes(promql: str) -> frozenset[str]:
+    """The outcomes a runbook ``codex_lb_subscription_overflow_total`` selector really matches.
+
+    Expanded against the production enum, because the point of reading a
+    selector is what an operator would see on ``/metrics``, not what the
+    sentence around it meant.
+    """
+
+    labels = _OUTCOME_LABELS.findall(promql)
+    assert len(labels) == 1, f"expected exactly one overflow-counter selector, got {labels}"
+    matcher = _OUTCOME_MATCHER.search(labels[0])
+    assert matcher, f"no 'outcome' label in the selector {labels[0]!r}"
+    operator, value = matcher.groups()
+    if operator == "=":
+        assert value in OVERFLOW_OUTCOMES, f"{value!r} is not an outcome the proxy emits"
+        return frozenset({value})
+    # PromQL ``=~`` is fully anchored.
+    pattern = re.compile(rf"(?:{value})\Z")
+    return frozenset(outcome for outcome in OVERFLOW_OUTCOMES if pattern.match(outcome))
+
+
 def _manual_section(doc: str) -> tuple[str, list[str]]:
     """The "Not rehearsed" section: its intro text and its bullets."""
 
@@ -636,6 +665,41 @@ def test_the_clauses_are_the_semicolon_split_the_runbook_promises() -> None:
         mapped = [clause.text for clause in _CLAUSES if clause.row == row]
 
         assert split == mapped, (row, split, mapped)
+
+
+def test_the_kill_switch_observation_watches_only_the_overflow_the_switch_stops() -> None:
+    """An unrehearsed clause hands the operator a query; the query has to be able to succeed.
+
+    The clause is about *fresh* overflow -- its cell reads "Fresh overflow
+    stops -- today's ``429``, byte for byte; on every replica within the
+    settings-cache window". But the same row promises, two clauses later, that
+    pinned conversations *drain*, and a ``dispatched_.*`` selector covers
+    ``dispatched_pinned`` and ``dispatched_anchor`` too. Those keep
+    incrementing for up to seven idle days after the flip, so the series the
+    operator was told to watch go flat cannot, and following the sentence
+    literally means concluding the kill switch never propagated.
+    """
+
+    _, bullets = _manual_section(ROUTING_DOC)
+    bullet = next(bullet for bullet in bullets if "settings-cache window" in bullet)
+
+    selected = _selected_outcomes(bullet)
+
+    still_climbing = selected & frozenset(_DRAIN_SURVIVING_OUTCOMES)
+    assert not still_climbing, (
+        f"the Off observation tells the operator to watch {sorted(still_climbing)} go flat, "
+        "but the drain keeps feeding those outcomes for up to seven days"
+    )
+    assert selected == {"dispatched_fresh"}, sorted(selected)
+
+
+def test_the_drain_really_does_keep_feeding_the_outcomes_that_observation_excludes() -> None:
+    """Keep the test above honest: the drills pin those outcomes on the very leg it describes."""
+
+    assert frozenset(_DRAIN_SURVIVING_OUTCOMES) < OVERFLOW_OUTCOMES, _DRAIN_SURVIVING_OUTCOMES
+    # The Off leg of the kill-switch drill, and day six of the clear-then-touch drain.
+    assert '("off", 200, True, "declined_drain_mode", "dispatched_pinned")' in DRILL_SUITE
+    assert 'assert outcomes == [(ROUTE_CODEX_RESPONSES, "dispatched_pinned")]' in DRILL_SUITE
 
 
 # -- the guard bites -------------------------------------------------------------------------------

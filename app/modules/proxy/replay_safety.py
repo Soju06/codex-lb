@@ -6,7 +6,7 @@ import json
 from collections import deque
 from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 from urllib.parse import urlsplit
 
 from app.core.openai.requests import extract_input_file_ids
@@ -131,6 +131,8 @@ _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
 # ratchet is full.
 RELOCATION_TRANSCRIPT_MAX_TURNS = 128
 RELOCATION_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
+
+_RelocationJoin = Literal["append", "refuse", "supersede"]
 
 _RESPONSE_CREATE_EVENT_TYPE = "response.create"
 _ATTEMPT_START_EVENT_TYPE = "response.created"
@@ -1130,10 +1132,9 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     fetched the chain. Anything the rebuild cannot prove returns ``None``,
     leaving the caller on the owner-bound behaviour it has without a transcript.
 
-    The shapes of the turns inside the chain are not a gate. A parent turn that
-    was itself a full resend is ordinary material, and demanding each look like
-    a delta would disable relocation for every thread whose first recorded turn
-    was a resend.
+    Every input is joined by ``_relocation_join``, the chain's stored requests
+    and the client's current turn alike, which is what makes a turn that
+    restated the conversation harmless: it supersedes at its own position.
     """
 
     current_input = current_payload.get("input")
@@ -1145,6 +1146,7 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     rebuilt_input: list[JsonValue] = []
     remaining_bytes = max_bytes
     expected_parent_response_id: str | None = None
+    linked_response_ids: set[str] = set()
     for turn in transcript:
         operation = getattr(turn, "operation", None)
         events = getattr(turn, "events", None)
@@ -1154,38 +1156,48 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
         if remaining_bytes < 0:
             return None
         response_id = getattr(operation, "response_id", None)
-        # Three facts about the stored row, any one of which makes the turn
+        # Four facts about the stored row, any one of which makes the turn
         # unusable. An unfinished spool holds a fragment of an answer rather than
-        # the answer. A turn with no response id links to nothing. And the oldest
+        # the answer, and a turn with no response id links to nothing. The oldest
         # turn opens the conversation while every later one names the turn before
-        # it -- a chain in any other order, most cheaply the walk handed over
-        # newest first, assembles a conversation that reads backwards while
-        # satisfying every structural predicate downstream.
+        # it -- a chain in any other order assembles a conversation that reads
+        # backwards while satisfying every structural predicate downstream. And a
+        # response id the walk already linked closes a cycle, which the
+        # parent-link check alone reads as a well-formed step.
         if (
             not getattr(operation, "event_spool_complete", False)
             or not _is_nonblank_string(response_id)
+            or response_id in linked_response_ids
             or getattr(operation, "parent_response_id", None) != expected_parent_response_id
         ):
             return None
         expected_parent_response_id = cast(str, response_id)
+        linked_response_ids.add(cast(str, response_id))
         turn_input = _transcript_turn_input_items(operation)
         terminal_output = _terminal_response_output_items(events)
         if turn_input is None or terminal_output is None:
             return None
         # The spool holds these turns as the owner account produced them, item
         # ids and reasoning included, and none of that resolves anywhere else.
-        replayable_turn = _account_neutral_replay_items([*turn_input, *terminal_output])
-        if replayable_turn is None:
+        # Emptiness only becomes real here: a turn whose whole answer is
+        # response-owned bookkeeping passes the terminal check and then projects
+        # away, leaving its question standing with no reply.
+        replayable_input = _account_neutral_replay_items(turn_input)
+        replayable_answer = _account_neutral_replay_items(terminal_output)
+        if not replayable_input or not replayable_answer:
             return None
-        rebuilt_input.extend(replayable_turn)
+        if not _join_relocated_input(rebuilt_input, replayable_input):
+            return None
+        rebuilt_input.extend(replayable_answer)
     if expected_parent_response_id != anchor_response_id:
         return None
 
-    # Verbatim, and last. Projection here would be the proxy editing a turn the
-    # user just wrote: it drops reasoning and settled search bookkeeping
-    # outright, and an item it drops is a message that never reaches the
-    # replacement account while the verdict still reports the turn as moved.
-    rebuilt_input.extend(cast(list[JsonValue], current_input))
+    # Verbatim. Projection here would be the proxy editing a turn the user just
+    # wrote: it drops reasoning and settled search bookkeeping outright, and an
+    # item it drops is a message that never reaches the replacement account
+    # while the verdict still reports the turn as moved.
+    if not _join_relocated_input(rebuilt_input, cast(list[JsonValue], current_input)):
+        return None
     replay_payload = dict(current_payload)
     replay_payload["input"] = cast(JsonValue, rebuilt_input)
     replay_payload.pop("previous_response_id", None)
@@ -1193,6 +1205,76 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     if not responses_payload_is_account_neutral_fresh_replay(replay_payload):
         return None
     return replay_payload
+
+
+def _join_relocated_input(accumulated: list[JsonValue], input_items: list[JsonValue]) -> bool:
+    """Fold one input into the conversation rebuilt so far, or refuse the rebuild."""
+
+    join = _relocation_join(input_items)
+    if join == "refuse":
+        return False
+    if join == "supersede":
+        accumulated.clear()
+    accumulated.extend(input_items)
+    return True
+
+
+def _relocation_join(input_items: list[JsonValue]) -> _RelocationJoin:
+    """How an input joins what precedes it, decided from the input alone.
+
+    An input that restates nothing the model produced is that turn's delta and
+    appends unchanged, whatever it holds: the only way to find a boundary inside
+    it is to match its content against the history, and content equality cannot
+    tell a client restating a turn from a client that happened to write the same
+    words again. A self-contained transcript ending in the prior answer and a
+    fresh turn *is* the conversation as of its own position, so it replaces what
+    came before. Anything else restates part of the prior answer without
+    carrying what came before it, and is refused.
+
+    ``previous_response_id`` is deliberately not consulted. The proxy injects
+    anchors onto requests that did not arrive with one, and an anchored full
+    resend is a shape this repository already verifies, so the anchor on the
+    wire says nothing about what the input holds.
+    """
+
+    restated_output_index = _last_retained_output_index(input_items)
+    if restated_output_index is None:
+        return "append"
+    if not responses_input_items_are_self_contained_fresh_replay(input_items):
+        return "refuse"
+    # The projection is an identity transform for input the predicate above
+    # already accepted, and it is the shared authority for recognizing the
+    # canonical Responses-Lite developer instruction behind an
+    # ``additional_tools`` bundle -- without that index the suffix walk would
+    # refuse every Lite resend.
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        input_items,
+        stored_count=restated_output_index,
+    )
+    if projection is None or not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    ):
+        return "refuse"
+    return "supersede"
+
+
+def _last_retained_output_index(input_items: list[JsonValue]) -> int | None:
+    """Where a restated conversation would hand over to the prior answer.
+
+    The same split the shipped full-resend proof takes: the last assistant
+    message is the only position at which the suffix walk can prove retained
+    prior output followed by fresh client input. Reading the role rather than
+    the message's validity keeps a malformed answer on the refusing side --
+    treating it as absent would append the restatement a second time.
+    """
+
+    for index in range(len(input_items) - 1, -1, -1):
+        item = input_items[index]
+        if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "assistant":
+            return index
+    return None
 
 
 def _durable_turn_byte_size(operation: object, events: object) -> int:

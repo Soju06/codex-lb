@@ -9,7 +9,6 @@ import pytest
 from app.core.types import JsonValue
 from app.modules.proxy.replay_relocation import (
     RELOCATION_AMBIGUITY_WINDOW_SECONDS,
-    ClientResendProof,
     RelocationDeclineReason,
     RelocationEvidence,
     RelocationInputs,
@@ -63,11 +62,21 @@ def _spooled_assistant(text: str) -> dict[str, JsonValue]:
     return {**_assistant(text), "content": [{"type": "output_text", "text": text, "annotations": []}]}
 
 
-def _completed_turn(prompt: str, answer: str, *, response_id: str) -> _Turn:
+def _completed_turn(
+    prompt: str,
+    answer: str,
+    *,
+    response_id: str,
+    parent_response_id: str | None = None,
+    stored_input: JsonValue | None = None,
+) -> _Turn:
     return _Turn(
         operation=_Operation(
-            request_text=_frame({"model": "gpt-5.4", "input": [_user(prompt)]}),
+            request_text=_frame(
+                {"model": "gpt-5.4", "input": [_user(prompt)] if stored_input is None else stored_input}
+            ),
             response_id=response_id,
+            parent_response_id=parent_response_id,
         ),
         events=(
             _sse(
@@ -99,7 +108,6 @@ _FULL_RESEND_PAYLOAD: dict[str, JsonValue] = {
 }
 _UNANCHORED_PAYLOAD: dict[str, JsonValue] = {"model": "gpt-5.4", "input": [_user("hello")]}
 _TRANSCRIPT = (_completed_turn("hello", "hi there", response_id=_ANCHOR),)
-_RESEND_PROOF = ClientResendProof(stored_input_item_count=1)
 
 _OWNER_METADATA: JsonValue = {"turn_id": "turn-owner"}
 # The shape a Codex client actually resends: every item the owner account minted
@@ -153,24 +161,11 @@ _PRODUCTION_FULL_RESEND_PAYLOAD: dict[str, JsonValue] = {
     "input": _PRODUCTION_FULL_RESEND_INPUT,
     "previous_response_id": _ANCHOR,
 }
-_PRODUCTION_RESEND_PROOF = ClientResendProof(stored_input_item_count=2)
 
 
 def _unanchored(transport: RelocationTransport, **overrides: object) -> RelocationInputs:
     return replace(
         RelocationInputs(transport=transport, payload=_UNANCHORED_PAYLOAD, evidence="definitive"),
-        **overrides,
-    )
-
-
-def _client_full_resend(transport: RelocationTransport, **overrides: object) -> RelocationInputs:
-    return replace(
-        RelocationInputs(
-            transport=transport,
-            payload=_FULL_RESEND_PAYLOAD,
-            evidence="definitive",
-            client_resend=_RESEND_PROOF,
-        ),
         **overrides,
     )
 
@@ -189,7 +184,6 @@ def _durable_transcript(transport: RelocationTransport, **overrides: object) -> 
 
 _SOURCE_BUILDERS = {
     "unanchored": _unanchored,
-    "client_full_resend": _client_full_resend,
     "durable_transcript": _durable_transcript,
 }
 _AMBIGUITY_CLEARED: dict[str, object] = {
@@ -239,60 +233,137 @@ def test_every_transport_reaches_the_same_verdict(source: RelocationSource, evid
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_client_full_resend_outranks_the_durable_transcript(transport: RelocationTransport) -> None:
-    verdict = decide_relocation(
-        _client_full_resend(transport, durable_transcript=_TRANSCRIPT),
-    )
-
-    assert verdict.source == "client_full_resend"
-    assert verdict.body is not None
-    assert verdict.body["input"] == _FULL_RESEND_PAYLOAD["input"]
-
-
-@pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_a_client_full_resend_relocates_on_the_projected_body(transport: RelocationTransport) -> None:
-    verdict = decide_relocation(
-        RelocationInputs(
-            transport=transport,
-            payload=_PRODUCTION_FULL_RESEND_PAYLOAD,
-            evidence="definitive",
-            client_resend=_PRODUCTION_RESEND_PROOF,
-        ),
-    )
-
-    assert verdict.movable is True
-    assert verdict.source == "client_full_resend"
-    assert verdict.body is not None
-    assert verdict.body["input"] == [
-        _PRODUCTION_FULL_RESEND_INPUT[0],
-        {
-            "type": "function_call",
-            "call_id": "call_old",
-            "name": "lookup",
-            "arguments": "{}",
-            "internal_chat_message_metadata_passthrough": _OWNER_METADATA,
-        },
-        _PRODUCTION_FULL_RESEND_INPUT[3],
-        {
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "phase": "final_answer",
-            "content": [{"type": "output_text", "text": "old answer"}],
-            "internal_chat_message_metadata_passthrough": _OWNER_METADATA,
-        },
-        _PRODUCTION_FULL_RESEND_INPUT[5],
-    ]
-    assert verdict.body["instructions"] == "hi"
-    assert "previous_response_id" not in verdict.body
-
-
-@pytest.mark.parametrize("transport", _TRANSPORTS)
 def test_durable_transcript_rebuilds_the_conversation_the_client_did_not_resend(
     transport: RelocationTransport,
 ) -> None:
     verdict = decide_relocation(_durable_transcript(transport))
 
+    assert verdict.body is not None
+    assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), _user("and now?")]
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_an_anchored_full_resend_supersedes_the_chain_it_restates(transport: RelocationTransport) -> None:
+    # The client resent the whole thread and anchored it as well, which is a
+    # shape this proxy already verifies. Joining the chain to it would send the
+    # replacement account every turn twice.
+    verdict = decide_relocation(_durable_transcript(transport, payload=_FULL_RESEND_PAYLOAD))
+
+    assert verdict.movable is True
+    assert verdict.body is not None
+    assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), _user("and now?")]
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_a_chain_turn_that_restated_the_conversation_supersedes_at_its_own_position(
+    transport: RelocationTransport,
+) -> None:
+    # The thread's second recorded turn carried everything before it, which is
+    # what a client sends the first time this proxy sees a conversation it did
+    # not start. Concatenating it onto the history it restates doubles the
+    # opening turn.
+    chain = (
+        _completed_turn("q1", "a1", response_id="resp_1"),
+        _completed_turn(
+            "unused",
+            "a2",
+            response_id=_ANCHOR,
+            parent_response_id="resp_1",
+            stored_input=[
+                _user("q1"),
+                {"id": "rs_resp_1", "type": "reasoning", "summary": []},
+                {"id": "msg_resp_1", **_spooled_assistant("a1")},
+                _user("q2"),
+            ],
+        ),
+    )
+
+    verdict = decide_relocation(_durable_transcript(transport, durable_transcript=chain))
+
+    assert verdict.movable is True
+    assert verdict.body is not None
+    assert verdict.body["input"] == [
+        _user("q1"),
+        _assistant("a1"),
+        _user("q2"),
+        _assistant("a2"),
+        _user("and now?"),
+    ]
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_an_anchored_tail_restatement_refuses_rather_than_repeating_the_answer(
+    transport: RelocationTransport,
+) -> None:
+    # The client restated the last answer and nothing before it. Where that
+    # restatement ends is recoverable only by matching content against the
+    # chain, so the rebuild refuses instead of appending the answer twice.
+    verdict = decide_relocation(
+        _durable_transcript(
+            transport,
+            payload={**_DELTA_PAYLOAD, "input": [_assistant("hi there"), _user("and now?")]},
+        ),
+    )
+
+    assert verdict.movable is False
+    assert verdict.body is None
+    assert verdict.decline_reason == "no_account_neutral_body"
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_a_chain_turn_stored_as_a_scalar_is_that_turns_own_material(transport: RelocationTransport) -> None:
+    # A stored scalar is the whole of that turn's prompt and restates nothing,
+    # so it joins as the turn's delta. The client's opening message reads the
+    # same as the chain's and is kept: only a content match could tell the
+    # repeat from a coincidence, and deleting it would answer a conversation
+    # the user never wrote.
+    chain = (_completed_turn("hello", "hi there", response_id=_ANCHOR, stored_input="hello"),)
+
+    verdict = decide_relocation(
+        _durable_transcript(
+            transport,
+            payload={**_DELTA_PAYLOAD, "input": [_user("hello"), _user("and now?")]},
+            durable_transcript=chain,
+        ),
+    )
+
+    assert verdict.movable is True
+    assert verdict.body is not None
+    assert verdict.body["input"] == [
+        _user("hello"),
+        _assistant("hi there"),
+        _user("hello"),
+        _user("and now?"),
+    ]
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_the_bridge_frame_seam_classifies_the_body_it_dispatches(transport: RelocationTransport) -> None:
+    # The bridge decides on the exact frame it would have sent upstream, so the
+    # resend inside that frame has to supersede there too.
+    verdict = decide_relocation(
+        _durable_transcript(
+            transport,
+            payload={"model": "gpt-5.4", "input": [_user("stale parse")]},
+            current_request_text=_frame(_FULL_RESEND_PAYLOAD),
+        ),
+    )
+
+    assert verdict.movable is True
+    assert verdict.body is not None
+    assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), _user("and now?")]
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_the_fenced_lane_spends_its_one_shot_on_a_superseded_body(transport: RelocationTransport) -> None:
+    # The ambiguous lane spends a budget that cannot be refilled, so the body it
+    # spends it on must not be the conversation twice over.
+    verdict = decide_relocation(
+        _durable_transcript(transport, payload=_FULL_RESEND_PAYLOAD, **_AMBIGUITY_CLEARED),
+    )
+
+    assert verdict.movable is True
+    assert verdict.requires_recovery_fence is True
     assert verdict.body is not None
     assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), _user("and now?")]
 
@@ -488,44 +559,6 @@ def test_the_evidence_gate_runs_before_the_source_ladder_is_consulted(
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_a_fresh_developer_message_the_owner_minted_is_not_a_client_full_resend(
-    transport: RelocationTransport,
-) -> None:
-    # The resend's own suffix carries a developer message the owner account
-    # minted an id for. Classifying a body whose ids were already stripped
-    # cannot see that, and would accept the resend as if the client had written
-    # the instruction itself.
-    payload: dict[str, JsonValue] = {
-        **_PRODUCTION_FULL_RESEND_PAYLOAD,
-        "input": [
-            *_PRODUCTION_FULL_RESEND_INPUT,
-            {
-                "type": "message",
-                "id": "msg_response_owned",
-                "role": "developer",
-                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
-                "content": [{"type": "input_text", "text": "response-owned control"}],
-            },
-        ],
-    }
-
-    verdict = decide_relocation(
-        RelocationInputs(
-            transport=transport,
-            payload=payload,
-            evidence="definitive",
-            client_resend=_PRODUCTION_RESEND_PROOF,
-        ),
-    )
-
-    assert verdict.movable is False
-    assert verdict.source is None
-    # The resend is refused, so the ladder moves on; this caller brought no
-    # durable material, so the turn stays owner-bound exactly as today.
-    assert verdict.decline_reason == "absent_transcript"
-
-
-@pytest.mark.parametrize("transport", _TRANSPORTS)
 def test_a_rebuilt_body_still_carries_the_message_the_client_just_sent(
     transport: RelocationTransport,
 ) -> None:
@@ -575,15 +608,14 @@ def test_a_production_resend_the_anchor_cannot_vouch_for_stays_owner_bound(
     transport: RelocationTransport,
 ) -> None:
     # A real Codex resend restates every item the owner account minted, ids and
-    # reasoning included. The proof rung declines it, and the chain rung joins
-    # it verbatim -- where those owner-minted items meet the strict predicate
-    # and keep the turn where it is.
+    # reasoning included. Nothing about that body is self-contained, so it can
+    # neither supersede the chain nor be appended to it, and the turn stays
+    # where it is rather than moving on a body edited to fit.
     verdict = decide_relocation(
         RelocationInputs(
             transport=transport,
             payload=_PRODUCTION_FULL_RESEND_PAYLOAD,
             evidence="definitive",
-            client_resend=ClientResendProof(stored_input_item_count=len(_PRODUCTION_FULL_RESEND_INPUT)),
             durable_transcript=_TRANSCRIPT,
         ),
     )
@@ -618,47 +650,6 @@ def test_a_current_turn_the_rebuild_cannot_use_refuses_rather_than_guessing(
     assert verdict.source is None
     assert verdict.body is None
     assert verdict.decline_reason == "no_account_neutral_body"
-
-
-@pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_an_anchored_delta_is_joined_whatever_the_delta_holds(transport: RelocationTransport) -> None:
-    # The anchor already said this input is the turn's delta, so a delta that
-    # restates part of the thread is joined whole rather than trimmed to fit.
-    delta = [_assistant("hi there"), _user("and now?")]
-
-    verdict = decide_relocation(_durable_transcript(transport, payload={**_DELTA_PAYLOAD, "input": delta}))
-
-    assert verdict.movable is True
-    assert verdict.source == "durable_transcript"
-    assert verdict.body is not None
-    assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), *delta]
-
-
-@pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_a_pending_tool_call_manifest_proves_a_tool_settling_suffix(transport: RelocationTransport) -> None:
-    payload: dict[str, JsonValue] = {
-        "model": "gpt-5.4",
-        "input": [
-            _user("hello"),
-            {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
-            {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
-        ],
-        "previous_response_id": _ANCHOR,
-    }
-    verdict = decide_relocation(
-        RelocationInputs(
-            transport=transport,
-            payload=payload,
-            evidence="definitive",
-            client_resend=ClientResendProof(
-                stored_input_item_count=1,
-                pending_tool_calls={"call_1": "function_call"},
-            ),
-        ),
-    )
-
-    assert verdict.movable is True
-    assert verdict.source == "client_full_resend"
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)

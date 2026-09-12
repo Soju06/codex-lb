@@ -1599,33 +1599,52 @@ async def _close_http_bridge_session_resources(
 
     event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
     drain_finalizers = getattr(event_batcher, "drain_terminal_finalizers", None)
-    session_finalizers_pending = bool(
-        durable_session_id is not None
-        and event_batcher is not None
-        and any(
-            not task.done() and getattr(task, "_http_bridge_session_id", None) == durable_session_id
-            for task in getattr(event_batcher, "_terminal_finalize_tasks", ())
+
+    def session_finalizers_pending() -> bool:
+        """Return whether this durable owner still has terminal work in flight."""
+        return bool(
+            durable_session_id is not None
+            and event_batcher is not None
+            and any(
+                not task.done()
+                and getattr(task, "_http_bridge_session_id", None) == durable_session_id
+                and (
+                    durable_owner_epoch is None
+                    or getattr(task, "_http_bridge_owner_epoch", durable_owner_epoch) == durable_owner_epoch
+                )
+                for task in getattr(event_batcher, "_terminal_finalize_tasks", ())
+            )
         )
-    )
+
     drain_finalizers_accepts_session_id = False
+    drain_finalizers_accepts_owner_epoch = False
     if callable(drain_finalizers) and durable_session_id is not None:
         try:
+            parameters = inspect.signature(drain_finalizers).parameters.values()
             drain_finalizers_accepts_session_id = any(
                 parameter.name == "session_id" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-                for parameter in inspect.signature(drain_finalizers).parameters.values()
+                for parameter in parameters
+            )
+            parameters = inspect.signature(drain_finalizers).parameters.values()
+            drain_finalizers_accepts_owner_epoch = any(
+                parameter.name == "owner_epoch" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
             )
         except (TypeError, ValueError):
             # Preserve compatibility with test doubles and legacy batchers whose
             # callable signature cannot be inspected.
             drain_finalizers_accepts_session_id = False
+            drain_finalizers_accepts_owner_epoch = False
 
     async def drain_session_finalizers() -> None:
         if not callable(drain_finalizers):
             return
+        drain_kwargs: dict[str, Any] = {}
         if drain_finalizers_accepts_session_id:
-            await drain_finalizers(session_id=durable_session_id)
-        else:
-            await drain_finalizers()
+            drain_kwargs["session_id"] = durable_session_id
+        if drain_finalizers_accepts_owner_epoch and durable_owner_epoch is not None:
+            drain_kwargs["owner_epoch"] = durable_owner_epoch
+        await drain_finalizers(**drain_kwargs)
 
     async def release_durable_session_and_cleanup() -> None:
         """Release the durable owner and retire process-local denial state when it is safe."""
@@ -1648,6 +1667,10 @@ async def _close_http_bridge_session_resources(
                 # missing row) means this generation no longer owns a durable lease.
                 durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
             except Exception:
+                # A transient store failure must not consume the one-shot guard;
+                # the post-reader drain path can safely retry this owner-fenced
+                # idempotent release.
+                durable_release_attempted = False
                 logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
         # Closing a generation retires its process-local denial slot as well as
         # its routing aliases. Keep pinned requests fenced; the owner helper marks
@@ -1674,11 +1697,16 @@ async def _close_http_bridge_session_resources(
     clean_close_without_pending_requests = getattr(session, "last_upstream_close_code", None) == 1000 and not getattr(
         session, "pending_requests", ()
     )
-    if clean_close_without_pending_requests and not drain_terminal_finalizers and not session_finalizers_pending:
-        # A graceful close with no pending request lifecycle has no reader work
-        # left that can publish a late terminal event, so release promptly even
-        # if the reader task itself has not unwound yet. Other detached readers
-        # keep the owner fence until their cleanup continuation settles.
+    if (
+        clean_close_without_pending_requests
+        and upstream_reader is None
+        and not drain_terminal_finalizers
+        and not session_finalizers_pending()
+    ):
+        # A graceful close with no pending request lifecycle and no reader can
+        # release promptly. If a reader exists, it may have already removed its
+        # request state while still settling retry or poisoned-anchor cleanup;
+        # keep the owner fence until that reader has actually unwound.
         await release_durable_session_and_cleanup()
 
     detached_reader_pending = False
@@ -1695,7 +1723,7 @@ async def _close_http_bridge_session_resources(
             )
             if session.upstream_reader is upstream_reader:
                 session.upstream_reader = None
-    if not detached_reader_pending and not drain_terminal_finalizers and not session_finalizers_pending:
+    if not detached_reader_pending and not drain_terminal_finalizers and not session_finalizers_pending():
         # Once any reader has settled, a normal close can release its durable
         # lease before unrelated teardown awaits. A cancellation-resistant
         # reader keeps the owner fence until its cleanup continuation settles.
@@ -1722,7 +1750,7 @@ async def _close_http_bridge_session_resources(
         )
 
     async def drain_and_release(*, force_drain: bool = False) -> None:
-        if callable(drain_finalizers) and (force_drain or drain_terminal_finalizers or session_finalizers_pending):
+        if callable(drain_finalizers) and (force_drain or drain_terminal_finalizers or session_finalizers_pending()):
             try:
                 await drain_session_finalizers()
             except Exception:

@@ -8,7 +8,7 @@ from typing import Any
 from app.core import shutdown as shutdown_state
 from app.core.clock import REAL_SCHEDULER, Scheduler, clock_for
 from app.core.config.settings import get_settings
-from app.core.utils.shared_future import _await_result_deferring_cancellation
+from app.core.utils.shared_future import _await_result_deferring_cancellation, _await_task_deferring_cancellation
 from app.db.models import HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2, HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
 from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationEventInput
 
@@ -142,6 +142,7 @@ class HttpBridgeOperationEventBatcher:
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._terminal_append_tasks: set[asyncio.Task[TerminalOperationEventAppendResult]] = set()
+        self._ordinary_append_tasks: set[asyncio.Task[bool]] = set()
         self._terminal_finalize_tasks: set[asyncio.Task[None]] = set()
         # Keep terminal callers visible while they hand off an append result
         # to the finalizer tracker.  Shutdown waits for this handoff so a
@@ -532,18 +533,29 @@ class HttpBridgeOperationEventBatcher:
                 # progress.  Resolve the append outcome before deciding
                 # whether the dequeued batch needs to be restored.
                 if defer_cancellation:
-                    persisted, deferred_cancellation = await _await_result_deferring_cancellation(
-                        append,
-                        scheduler=self._scheduler,
-                    )
+                    append_task = self._scheduler.create_task(append)
+                    self._ordinary_append_tasks.add(append_task)
+                    try:
+                        persisted, deferred_cancellation = await _await_task_deferring_cancellation(append_task)
+                    finally:
+                        self._ordinary_append_tasks.discard(append_task)
                 else:
                     persisted = await append
                     deferred_cancellation = None
                 if not persisted:
                     failed_batch = batch
+
+                    async def drop_failed_batch() -> None:
+                        async with self._lock:
+                            self._drop_failed_batch_locked(operation_id, failed_batch[0])
+
+                    _, drop_cancellation = await _await_result_deferring_cancellation(
+                        drop_failed_batch(),
+                        scheduler=self._scheduler,
+                    )
                     batch = []
-                    async with self._lock:
-                        self._drop_failed_batch_locked(operation_id, failed_batch[0])
+                    if drop_cancellation is not None:
+                        raise drop_cancellation
                 else:
                     # The durable append completed; do not requeue this batch
                     # if cancellation arrives while final bookkeeping runs.
@@ -559,9 +571,18 @@ class HttpBridgeOperationEventBatcher:
                 raise
             except Exception:
                 failed_batch = batch
+
+                async def drop_failed_batch() -> None:
+                    async with self._lock:
+                        self._drop_failed_batch_locked(operation_id, failed_batch[0])
+
+                _, drop_cancellation = await _await_result_deferring_cancellation(
+                    drop_failed_batch(),
+                    scheduler=self._scheduler,
+                )
                 batch = []
-                async with self._lock:
-                    self._drop_failed_batch_locked(operation_id, failed_batch[0])
+                if drop_cancellation is not None:
+                    raise drop_cancellation
                 logger.debug(
                     "Dropping failed HTTP bridge transcript event batch operation_id=%s",
                     operation_id,
@@ -1280,9 +1301,11 @@ class HttpBridgeOperationEventBatcher:
         if task is not None:
             task.cancel()
             try:
-                await task
+                await self._drain_terminal_tasks((task,), kind="flusher", cancel=False)
             except asyncio.CancelledError:
                 pass
+        if self._ordinary_append_tasks:
+            await self._drain_terminal_tasks(tuple(self._ordinary_append_tasks), kind="ordinary append", cancel=False)
         # Let terminal append callers that crossed the admission fence finish
         # handing their result to the finalizer tracker before cancelling any
         # still-running append task.  Cancelling the inner append first would
@@ -1325,8 +1348,19 @@ class HttpBridgeOperationEventBatcher:
         # in memory.
         async with self._lock:
             pending_operation_ids = tuple(self._pending)
-        for operation_id in pending_operation_ids:
-            await self.flush_pending_operation(operation_id=operation_id)
+        pending_flush_tasks = tuple(
+            asyncio.create_task(
+                self.flush_pending_operation(operation_id=operation_id),
+                name=f"http-bridge-close-flush-{operation_id}",
+            )
+            for operation_id in pending_operation_ids
+        )
+        await self._drain_terminal_tasks(pending_flush_tasks, kind="pending", cancel=False)
+        # A bounded pending drain can itself have started a durable append just
+        # before the overall shutdown deadline.  Apply the same deadline to
+        # those owned writer tasks before returning from close().
+        if self._ordinary_append_tasks:
+            await self._drain_terminal_tasks(tuple(self._ordinary_append_tasks), kind="ordinary append", cancel=False)
         # Yield once so a caller completing its finalizer handoff after the
         # append-task drain is visible before taking the finalizer snapshot.
         await asyncio.sleep(0)

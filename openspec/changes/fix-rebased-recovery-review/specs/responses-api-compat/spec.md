@@ -59,6 +59,13 @@ contextless recovery fences MUST release their bookkeeping after bounded retenti
 - **AND** a successfully committed batch MUST NOT be requeued or persisted a
   second time
 
+#### Scenario: Failed append bookkeeping survives cancellation
+
+- **WHEN** a durable append reports failure and cancellation arrives while the
+  batcher's failure marker is being recorded
+- **THEN** the failed-batch marker MUST be recorded before the batch is cleared
+- **AND** a later terminal drain MUST NOT finalize that operation as replayable
+
 #### Scenario: Close drains a restored ordinary batch
 
 - **WHEN** a flusher cancellation restores a dequeued ordinary batch to the
@@ -67,6 +74,8 @@ contextless recovery fences MUST release their bookkeeping after bounded retenti
   returns
 - **AND** close MUST NOT leave the operation's pending counters or event data
   stranded in memory
+- **AND** any shutdown deadline MUST bound the flusher and pending-drain waits
+  before forced termination
 
 ### Requirement: Normalizable text extensions retain streaming parity
 

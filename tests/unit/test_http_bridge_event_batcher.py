@@ -259,6 +259,12 @@ class _DelayedFailingDrainDurableBridge(_FakeDurableBridge):
         await self.release_append.wait()
         return False
 
+    async def append_operation_event_chunk(self, **kwargs) -> bool:
+        del kwargs
+        self.append_started.set()
+        await self.release_append.wait()
+        return False
+
 
 class _ShieldedStall:
     """Mimic ``close_session()``'s ``_shielded`` teardown: every cancellation is absorbed."""
@@ -705,6 +711,36 @@ async def test_cancelled_pending_flush_requeues_dequeued_batch(spool_format: str
     finally:
         durable.release_batch.set()
         await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_failed_flush_finishes_drop_bookkeeping() -> None:
+    """Cancellation while dropping a failed append cannot erase its failure marker."""
+    durable = _DelayedFailingDrainDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+    )
+    batcher._task = asyncio.create_task(asyncio.sleep(60.0))
+    await _enqueue(batcher, "pending")
+    flush_task = asyncio.create_task(batcher.flush_pending_operation(operation_id="op-1"))
+    await asyncio.wait_for(durable.append_started.wait(), timeout=1.0)
+
+    await batcher._lock.acquire()
+    try:
+        durable.release_append.set()
+        flush_task.cancel()
+        await asyncio.sleep(0)
+    finally:
+        batcher._lock.release()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(flush_task, timeout=1.0)
+
+    assert batcher._dropped_operations == {"op-1"}
+    assert batcher._pending_count == 0
+    assert batcher._pending_bytes == 0
+    await batcher.close()
 
 
 @pytest.mark.asyncio

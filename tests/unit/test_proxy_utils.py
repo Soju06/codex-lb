@@ -12656,11 +12656,12 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
+        compact_request_budget_seconds = 7200.0
         stream_idle_timeout_seconds = 45.0
         trace_channels = frozenset()
 
     # Override-only compact cap (the compact service pushes the remaining budget).
-    monkeypatch.setattr(proxy_module, "_effective_compact_total_timeout", lambda: 12.0)
+    monkeypatch.setattr(proxy_module, "_effective_compact_total_timeout", lambda configured_timeout_seconds=None: 12.0)
 
     inline_ran = False
     recorded: dict[str, float | None] = {}
@@ -12713,6 +12714,7 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
+        compact_request_budget_seconds = 7200.0
         stream_idle_timeout_seconds = 45.0
         trace_channels = frozenset()
 
@@ -12776,6 +12778,7 @@ async def test_compact_responses_normalizes_preexisting_terminal_trigger_without
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
+        compact_request_budget_seconds = 7200.0
         stream_idle_timeout_seconds = 45.0
         trace_channels = frozenset()
 
@@ -12928,9 +12931,15 @@ async def test_compact_responses_without_trigger_canonicalization_hits_upstream_
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
+        compact_request_budget_seconds = 7200.0
+        stream_idle_timeout_seconds = 7200.0
         trace_channels = frozenset()
 
-    monkeypatch.setattr(proxy_module, "_effective_compact_total_timeout", lambda: 12.0)
+    monkeypatch.setattr(
+        proxy_module,
+        "_effective_compact_total_timeout",
+        lambda configured_timeout_seconds=None: 12.0,
+    )
 
     class _DuplicateTriggerResponse:
         status = 400
@@ -13048,6 +13057,8 @@ async def test_compact_responses_rejects_image_inlining_that_exceeds_wire_budget
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 1.0
+        compact_request_budget_seconds = 7200.0
+        stream_idle_timeout_seconds = 7200.0
         trace_channels = frozenset()
 
     async def fake_inline(payload_dict, session, connect_timeout):
@@ -13109,11 +13120,16 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 2.0
+        compact_request_budget_seconds = 7200.0
         stream_idle_timeout_seconds = 45.0
         trace_channels = frozenset()
 
     # Override-only compact cap (the compact service pushes the remaining budget).
-    monkeypatch.setattr(proxy_module, "_effective_compact_total_timeout", lambda: 123.0)
+    monkeypatch.setattr(
+        proxy_module,
+        "_effective_compact_total_timeout",
+        lambda configured_timeout_seconds=None: 123.0,
+    )
 
     class _TimeoutCompactResponse:
         status = 200
@@ -13163,14 +13179,12 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_defaults_to_no_configured_request_timeout(monkeypatch):
-    class Settings:
-        upstream_base_url = "https://chatgpt.com/backend-api"
-        upstream_connect_timeout_seconds = 2.0
-        stream_idle_timeout_seconds = 45.0
-        trace_channels = frozenset()
-
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+async def test_compact_responses_uses_real_settings_default_budget(monkeypatch):
+    settings = Settings(
+        upstream_connect_timeout_seconds=2.0,
+        stream_idle_timeout_seconds=45.0,
+    )
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
 
@@ -13189,9 +13203,9 @@ async def test_compact_responses_defaults_to_no_configured_request_timeout(monke
 
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total is None
+    assert timeout.total == pytest.approx(settings.compact_request_budget_seconds, abs=0.05)
     assert timeout.sock_connect == pytest.approx(2.0, abs=0.05)
-    assert timeout.sock_read is None
+    assert timeout.sock_read == pytest.approx(settings.compact_request_budget_seconds, abs=0.05)
     dumped = result.model_dump(mode="json", exclude_none=True)
     assert dumped["object"] == "response.compaction"
     assert dumped["output"][0]["encrypted_content"] == "enc_summary_2"
@@ -13202,6 +13216,7 @@ async def test_compact_responses_preserves_stream_idle_timeout_from_direct_sse(m
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 2.0
+        compact_request_budget_seconds = 7200.0
         stream_idle_timeout_seconds = 45.0
         trace_channels = frozenset()
 
@@ -13243,6 +13258,7 @@ async def test_compact_responses_preserves_stream_event_too_large_from_routed_ss
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 2.0
+        compact_request_budget_seconds = 7200.0
         stream_idle_timeout_seconds = 45.0
         trace_channels = frozenset()
 
@@ -14031,6 +14047,66 @@ async def test_service_compact_budget_bounds_unconfigured_upstream_read_timeout(
     assert result.model_extra == {"output": []}
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["request_kind"] == "normal"
+
+
+@pytest.mark.asyncio
+async def test_service_compact_default_budget_keeps_long_response_window(monkeypatch):
+    """The compact product path must not cut off a valid long Codex turn at 150s."""
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_long_window")
+    runtime_values = dict(settings.__dict__)
+    runtime_values["compact_request_budget_seconds"] = Settings().compact_request_budget_seconds
+    runtime_settings = SimpleNamespace(**runtime_values)
+    captured: dict[str, float | None] = {}
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(runtime_settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        captured["total_timeout"] = proxy_module._COMPACT_TOTAL_TIMEOUT_OVERRIDE.get()
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(payload, {"session_id": "sid-compact-long-window"})
+
+    assert captured["total_timeout"] == pytest.approx(7170.0)
+    assert result.object == "response.compaction"
+
+
+@pytest.mark.asyncio
+async def test_compact_product_path_uses_real_settings_budget(monkeypatch):
+    settings = Settings(compact_request_budget_seconds=60.0)
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    session = _CompactSession(_compact_sse_response(encrypted_content="enc_summary_1"))
+    payload = ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    await proxy_module.compact_responses(
+        payload,
+        headers={},
+        access_token="token",
+        account_id="acc_compact_short_cap",
+        session=cast(proxy_module.aiohttp.ClientSession, session),
+    )
+    timeout = session.calls[0]["timeout"]
+    assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
+    assert timeout.total is not None
+    assert 59.0 < timeout.total <= 60.0
 
 
 @pytest.mark.asyncio

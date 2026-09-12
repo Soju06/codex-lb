@@ -117,7 +117,7 @@ anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
-| `CODEX_LB_COMPACT_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `180.0` |
+| `CODEX_LB_COMPACT_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `7200.0` |
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT` | T1 | `int` | `100` |
 | `CODEX_LB_HTTP_CONNECTOR_LIMIT_PER_HOST` | T1 | `int` | `50` |
 | `CODEX_LB_HTTP_RESPONSES_STREAM_REQUEST_BUDGET_SECONDS` | T3 (dashboard) | `float` | `7200.0` |
@@ -154,7 +154,7 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_PROXY_ACCOUNT_ERROR_RATE_WEIGHTING_ENABLED` | T3 (dashboard) | `bool` | `True` |
 | `CODEX_LB_PROXY_ACCOUNT_INFLIGHT_PENALTY_PCT` | T3 (dashboard) | `float` | `2.5` |
 | `CODEX_LB_PROXY_ACCOUNT_LEASE_TOKEN_WEIGHT` | T3 (dashboard) | `float` | `1.0` |
-| `CODEX_LB_PROXY_ACCOUNT_LEASE_TTL_SECONDS` | T3 (dashboard) | `float` | `900.0` |
+| `CODEX_LB_PROXY_ACCOUNT_LEASE_TTL_SECONDS` | T3 (dashboard) | `float` | `7200.0` |
 | `CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT` | T3 (dashboard) | `int` | `4` |
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT` | T3 (dashboard) | `int` | `8` |
 | `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` | T3 (dashboard) | `int` | `1` |

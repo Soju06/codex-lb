@@ -97,6 +97,7 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
     _upstream_error_from_openai,
     classify_upstream_failure,
+    is_message_derived_usage_limit_rejection,
     is_upstream_burst_rejection,
     is_upstream_model_capacity_error,
 )
@@ -772,11 +773,19 @@ class _StreamingRetryMixin:
             burst_same_account_retries += 1
             return burst_same_account_retries
 
-        def _stamp_surfaced_burst_retry_after(exc: ProxyResponseError) -> None:
-            # A surfaced burst 429 that carried no upstream Retry-After still
-            # tells the client when to come back (api.py emits the header).
+        def _stamp_surfaced_retry_after(exc: ProxyResponseError) -> None:
+            # A surfaced 429 that carried no upstream Retry-After still tells
+            # the client when to come back (api.py emits the header).
             if exc.retry_after_seconds is None:
                 exc.retry_after_seconds = BURST_SURFACE_RETRY_AFTER_SECONDS
+
+        def _surfaced_429_owes_a_retry_hint(classified: ClassifiedFailure, *, burst: bool) -> bool:
+            # A burst rejection and a 429 whose usage limit is proven only by
+            # its message are the same envelope as far as the client is
+            # concerned: no upstream ``Retry-After``, no ``error.resets_at``.
+            # Reading the limit off the message must not cost the client the
+            # only wait guidance the rejection carries.
+            return burst or is_message_derived_usage_limit_rejection(classified)
 
         async def _drain_pending_post_refresh_penalty_on_terminal(
             current_settlement: _StreamSettlement,
@@ -2702,8 +2711,8 @@ class _StreamingRetryMixin:
                                     **_retry_after_kwargs(tex.retry_after_seconds),
                                 )
                                 setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
-                                if burst:
-                                    _stamp_surfaced_burst_retry_after(tex)
+                                if _surfaced_429_owes_a_retry_hint(classified, burst=burst):
+                                    _stamp_surfaced_retry_after(tex)
                                 raise
                             error_payload: UpstreamError = (
                                 tex.error
@@ -3367,7 +3376,7 @@ class _StreamingRetryMixin:
                                 # A failed re-selection re-raises this exception:
                                 # stamp Retry-After now (after the delay was
                                 # derived from the upstream value).
-                                _stamp_surfaced_burst_retry_after(retry_exc)
+                                _stamp_surfaced_retry_after(retry_exc)
                                 last_transient_exc = retry_exc
                                 _facade().logger.info(
                                     "Burst 429 on owner-bound stream, retrying same account "
@@ -3424,8 +3433,8 @@ class _StreamingRetryMixin:
                                     **_retry_after_kwargs(retry_exc.retry_after_seconds),
                                 )
                                 setattr(retry_exc, _STREAM_HEALTH_RECORDED_ATTR, True)
-                            if burst:
-                                _stamp_surfaced_burst_retry_after(retry_exc)
+                            if _surfaced_429_owes_a_retry_hint(classified, burst=burst):
+                                _stamp_surfaced_retry_after(retry_exc)
                             if propagate_http_errors:
                                 raise
                             error_message = error.message if error else None

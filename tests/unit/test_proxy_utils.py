@@ -567,6 +567,43 @@ async def test_usage_limit_stream_error_requests_tracked_usage_refresh(monkeypat
     assert kwargs == {"action": "request_usage_refresh", "request_id": "req_usage_limit_refresh"}
 
 
+@pytest.mark.parametrize("code", ["upstream_error", "invalid_request_error"])
+@pytest.mark.asyncio
+async def test_message_derived_usage_limit_requests_the_same_usage_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+) -> None:
+    """An envelope whose usage limit is proven by its message records the same evidence a coded
+    one does: the refresh is gated on what the rejection means, not on the literal error code
+    upstream happened to attach."""
+    load_balancer = _stream_error_load_balancer()
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=schedule)
+    requested: list[str] = []
+    refresh = _sentinel_usage_refresh()
+
+    def fake_request_refresh(account_id: str):
+        requested.append(account_id)
+        return refresh
+
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(fake_request_refresh), raising=False)
+    try:
+        classified = await streaming_helpers_module._handle_stream_error(
+            proxy,
+            cast(Account, SimpleNamespace(id="acc-message-usage-limit")),
+            {"message": "The usage limit has been reached"},
+            code,
+            429,
+        )
+    finally:
+        refresh.close()
+
+    assert classified["failure_class"] == "rate_limit"
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    assert requested == ["acc-message-usage-limit"]
+    schedule.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_usage_limit_stream_error_uses_unknown_request_id_outside_request_context(
     monkeypatch: pytest.MonkeyPatch,
@@ -643,6 +680,10 @@ async def test_usage_limit_stream_error_tolerates_proxy_without_cleanup_schedule
         # Quota codes already pin used_percent=100 in runtime state.
         ("insufficient_quota", 429, "You exceeded your current quota"),
         ("quota_exceeded", 429, "quota exceeded"),
+        # A quota code that repeats the usage-limit sentence stays a quota
+        # rejection: the refresh follows the classification, and widening it to
+        # the message alone would widen it to the quota class it excludes.
+        ("insufficient_quota", 429, "The usage limit has been reached"),
         # Account-neutral and model-scoped rejections never touch account health.
         ("invalid_request_error", 400, "No tool output found for function call call_abc."),
         (
@@ -56218,6 +56259,75 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_surfaces_wit
     assert excinfo.value.retry_after_seconds == 5
     assert stream_once_calls == 2
     assert scheduler.sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_post_refresh_message_only_usage_limit_429_surfaces_with_retry_after(
+    monkeypatch, caplog
+):
+    """The post-refresh surface owes the same hint as the pre-visible one.
+
+    A 429 whose usage limit is proven only by its message is not a burst, so it
+    skips the same-account backoff that would otherwise have stamped the hint --
+    and its envelope carries neither an upstream ``Retry-After`` nor a
+    ``resets_at``. Reading the limit off the message must not leave this client
+    with nothing to wait on.
+    """
+    settings = _make_proxy_settings()
+    scheduler = _RecordingSleepScheduler()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()), scheduler=scheduler)
+    account = _make_account("acc_post_refresh_usage_limit_owner")
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda target, **_k: target))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    stream_once_calls = 0
+
+    async def fake_stream_once(_account: Account, *_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        raise proxy_module.ProxyResponseError(
+            429,
+            cast(Any, {"error": {"message": "The usage limit has been reached"}}),
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+
+    with pytest.raises(proxy_module.ProxyResponseError) as excinfo:
+        [
+            chunk
+            async for chunk in service._stream_with_retry(
+                _burst_payload(_BURST_OWNER_BOUND_INPUT),
+                {"session_id": "sid-post-refresh-usage-limit-owner"},
+                codex_session_affinity=False,
+                propagate_http_errors=True,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
+
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.payload == {"error": {"message": "The usage limit has been reached"}}
+    assert excinfo.value.retry_after_seconds == 5
+    assert stream_once_calls == 2
+    assert "phase=post_refresh failure_class=rate_limit action=surface" in caplog.text
+    # Out of quota: no same-account backoff was spent waiting on this account.
+    assert scheduler.sleeps == []
 
 
 @pytest.mark.asyncio

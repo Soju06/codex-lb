@@ -26,6 +26,14 @@ labels. Explicit ISO and time-format preferences, expiry serialization, timezone
 selection, compact `K/M/B` quantities, and USD `$` formatting are preserved.
 API-key limit summaries and details reuse the limit editor's translated period labels so
 daily, weekly, and monthly windows also follow the active language.
+Reports generation timestamps also use the shared formatter, including when the
+browser language differs from the selected dashboard language. The Reports page
+subscribes to date display preference changes so switching to ISO updates the
+visible timestamp immediately.
+The API-key edit dialog reuses the translated limit type, window, and all-model
+labels for current usage; for example, a weekly token limit without a model
+filter displays `トークン (週次, すべてのモデル)`. Model identifiers and
+numeric/currency formatting remain unchanged.
 
 ### Example and failure modes
 

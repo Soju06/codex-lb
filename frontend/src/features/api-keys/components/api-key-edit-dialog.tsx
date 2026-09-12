@@ -35,7 +35,6 @@ import type {
   ApiKey,
   ApiKeyUpdateRequest,
   LimitRuleCreate,
-  LimitType,
   ReasoningEffortType,
   ServiceTierType,
   TrafficClass,
@@ -426,13 +425,14 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 }
 
 function LimitUsageBar({ limit }: { limit: ApiKey["limits"][number] }) {
+  const { t } = useTranslation();
   const isCost = limit.limitType === "cost_usd";
   const percent = limit.maxValue > 0 ? Math.min(100, (limit.currentValue / limit.maxValue) * 100) : 0;
   const current = isCost ? `$${(limit.currentValue / 1_000_000).toFixed(2)}` : formatTokenCount(limit.currentValue);
   const max = isCost ? `$${(limit.maxValue / 1_000_000).toFixed(2)}` : formatTokenCount(limit.maxValue);
-  const typeLabel = LIMIT_TYPE_SHORT[limit.limitType];
-  const windowLabel = limit.limitWindow;
-  const modelLabel = limit.modelFilter || "all";
+  const typeLabel = t(`apiKeys.limitTypes.${limit.limitType}`);
+  const windowLabel = t(`apiKeys.limitWindows.${limit.limitWindow}`);
+  const modelLabel = limit.modelFilter || t("apiKeys.modelSelect.all");
 
   return (
     <div className="rounded border p-1.5">
@@ -453,14 +453,6 @@ function LimitUsageBar({ limit }: { limit: ApiKey["limits"][number] }) {
     </div>
   );
 }
-
-const LIMIT_TYPE_SHORT: Record<LimitType, string> = {
-  total_tokens: "Tokens",
-  input_tokens: "Input",
-  output_tokens: "Output",
-  cost_usd: "Cost",
-  credits: "Credits",
-};
 
 function formatTokenCount(n: number): string {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;

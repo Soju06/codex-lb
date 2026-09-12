@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import type { ReportsResponse } from "../src/features/reports/schemas";
 
 import {
   accounts,
@@ -458,6 +459,68 @@ test.describe("Japanese locale screenshots", () => {
       }
     }
   }
+});
+
+test.describe("Japanese locale review regressions", () => {
+  test.use({ locale: "en-US", timezoneId: "Asia/Tokyo", viewport: { width: 1440, height: 1000 } });
+
+  test.beforeEach(async ({ page }) => {
+    await interceptApi(page);
+    await applyTheme(page, "light");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.addInitScript(() => {
+      localStorage.setItem("codex-lb-language", "ja");
+      localStorage.setItem("codex-lb-date-display-format", "default");
+      localStorage.setItem("codex-lb-time-format", "12h");
+    });
+  });
+
+  test("formats the Reports generation timestamp in the selected language", async ({ page }, testInfo) => {
+    const report: ReportsResponse = {
+      generatedAt: "2026-09-06T05:30:45Z",
+      summary: {
+        totalCostUsd: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalReasoningTokens: 0,
+        reasoningUsageKnownRequests: 0,
+        totalCachedTokens: 0,
+        totalRequests: 0,
+        totalCancelled: 0,
+        totalErrors: 0,
+        totalConversations: 0,
+        activeAccounts: 0,
+        avgCostPerDay: 0,
+        avgRequestsPerDay: 0,
+      },
+      comparison: { canCompare: false, previous: { totalCostUsd: 0, totalTokens: 0, totalRequests: 0 } },
+      daily: [],
+      byModel: [],
+      byUseragent: [],
+      byAccount: [],
+    };
+    await page.route(/\/api\/reports(?:\?|$)/, (route) => fulfill(route, report));
+    await page.route(/\/api\/reports\/options(?:\?|$)/, (route) => fulfill(route, { models: [], useragents: [] }));
+    await page.goto(`${BASE_URL}/reports`);
+    const timestamp = page.getByText(/ 時点$/);
+    await expect(timestamp).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("reports.jpg"), type: "jpeg", quality: 85, animations: "disabled" });
+    await expect(timestamp).toHaveText("午後02:30:45 2026/09/06 時点");
+  });
+
+  test("translates existing limits in the API-key edit dialog", async ({ page }, testInfo) => {
+    // Enter through the router because Vite's /api proxy also matches /apis.
+    await page.goto(`${BASE_URL}/settings`);
+    await page.getByRole("link", { name: "API", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Production", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "操作", exact: true }).click();
+    await page.getByRole("menuitem", { name: "編集", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "API キーを編集", exact: true });
+    await dialog.getByText("現在の使用量", { exact: true }).scrollIntoViewIfNeeded();
+    await dialog.screenshot({ path: testInfo.outputPath("api-key-edit.jpg"), type: "jpeg", quality: 85, animations: "disabled" });
+    await expect(dialog.getByText("トークン (週次, すべてのモデル)", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("コスト (月次, すべてのモデル)", { exact: true })).toBeVisible();
+  });
 });
 
 test.describe("Japanese locale", () => {

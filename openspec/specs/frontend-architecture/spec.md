@@ -2615,6 +2615,14 @@ when the English form is the clearest operator-facing label.
 - **THEN** daily, weekly, and monthly periods use the translated labels used by the limit editor
 - **AND** numeric values and technical window abbreviations such as `5h` and `7d` are preserved
 
+#### Scenario: Japanese API-key edit usage labels
+
+- **WHEN** a user selects Japanese and edits an API key with existing limits
+- **THEN** current-usage labels translate the limit type, daily/weekly/monthly window, and all-model label
+- **AND** nonempty model identifiers, compact amounts, currency amounts, and `5h`/`7d` windows retain their existing representation
+- **WHEN** the selected language changes while the dialog is open
+- **THEN** the current-usage labels update to that language
+
 ### Requirement: Japanese locale formats dashboard dates and calendar controls
 
 With Japanese selected and the default date display format active, the dashboard
@@ -2630,6 +2638,14 @@ retain the existing locale-independent `K/M/B` and `$` notation.
 - **THEN** dates use Japanese year/month/day order and times use Japanese day-period labels
 - **WHEN** the user switches to 24-hour time or ISO date formatting
 - **THEN** the selected format applies without changing the represented instant
+
+#### Scenario: Reports generation timestamp follows the selected locale
+
+- **WHEN** Japanese is selected on a browser with an English locale and Reports includes a generation timestamp
+- **THEN** the visible generation timestamp uses Japanese date/time formatting and the selected 12-hour or 24-hour preference
+- **WHEN** the user changes the date display preference to ISO
+- **THEN** the timestamp updates to the existing ISO display format without changing the represented instant
+- **AND** an absent generation timestamp does not render an as-of label
 
 #### Scenario: Japanese expiry calendar
 
@@ -4282,4 +4298,3 @@ model-source models without assuming one global effort vocabulary.
   so the operator can save a valid initial configuration
 - **AND** the operator MUST still be able to replace that seed with arbitrary
   effort slugs before saving.
-

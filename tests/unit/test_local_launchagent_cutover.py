@@ -67,7 +67,7 @@ def test_bootstrap_failure_restores_plist_and_verifies_rollback(
 
     def run(command, *, check, **_kwargs):
         calls.append(list(command))
-        if command[1:2] == ["bootstrap"] and len([item for item in calls if item[1:2] == ["bootstrap"]]) == 1:
+        if command[1:2] == ["bootstrap"] and len([item for item in calls if item[1:2] == ["bootstrap"]]) <= 10:
             raise subprocess.CalledProcessError(5, command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -80,10 +80,41 @@ def test_bootstrap_failure_restores_plist_and_verifies_rollback(
             startup_timeout_seconds=90,
             run=run,
             health_probe=lambda _url, _timeout: True,
+            sleep=lambda _seconds: None,
         )
 
     assert plist.read_bytes() == rollback.read_bytes()
-    assert [command[1] for command in calls[1:]] == ["bootout", "bootstrap", "bootout", "bootstrap"]
+    assert [command[1] for command in calls[1:]].count("bootstrap") == 11
+
+
+def test_transient_launchd_label_release_race_is_retried_without_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
+    plist, rollback = _plists(tmp_path)
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def run(command, *, check, **_kwargs):
+        calls.append(list(command))
+        if command[1:2] == ["bootstrap"] and len([item for item in calls if item[1:2] == ["bootstrap"]]) == 1:
+            raise subprocess.CalledProcessError(5, command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    run_cutover(
+        plist=plist,
+        rollback_plist=rollback,
+        label="gui/501/local.codex-lb",
+        health_url="http://127.0.0.1:2455/health",
+        startup_timeout_seconds=90,
+        run=run,
+        health_probe=lambda _url, _timeout: True,
+        sleep=sleeps.append,
+    )
+
+    assert sleeps == [0.5]
+    assert [command[1] for command in calls[1:]] == ["bootout", "bootstrap", "bootstrap"]
+    assert plist.read_bytes() != rollback.read_bytes()
 
 
 def test_candidate_health_timeout_restores_healthy_rollback(

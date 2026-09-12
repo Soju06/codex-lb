@@ -38,6 +38,7 @@ def run_cutover(
     startup_timeout_seconds: float,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     health_probe: Callable[[str, float], bool] = wait_for_health,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     if os.environ.get("XPC_SERVICE_NAME"):
         raise CutoverError("Run this one-shot cutover from a terminal, not as a KeepAlive LaunchAgent")
@@ -53,16 +54,35 @@ def run_cutover(
 
     run([str(executable), "--help"], check=True, capture_output=True, text=True, timeout=30)
     domain = label.rsplit("/", 1)[0]
+
+    def bootstrap_with_launchd_release_retry() -> None:
+        # macOS can keep a booted-out label reserved briefly.  An immediate
+        # bootstrap then returns EIO (5), and an immediate rollback hits the
+        # same race.  Retry the same, idempotent bootstrap while launchd
+        # finishes releasing the label before treating it as a real failure.
+        last_error: subprocess.CalledProcessError | None = None
+        for attempt in range(10):
+            try:
+                run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True, text=True)
+                return
+            except subprocess.CalledProcessError as exc:
+                last_error = exc
+                if attempt == 9:
+                    raise
+                sleep(0.5)
+        if last_error is not None:  # pragma: no cover - loop always returns or raises
+            raise last_error
+
     try:
         run(["launchctl", "bootout", label], check=True, capture_output=True, text=True)
-        run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True, text=True)
+        bootstrap_with_launchd_release_retry()
         if health_probe(health_url, startup_timeout_seconds):
             return
         raise CutoverError(f"Candidate did not become healthy within {startup_timeout_seconds:g}s")
     except BaseException as exc:
         run(["launchctl", "bootout", label], check=False, capture_output=True, text=True)
         shutil.copy2(rollback_plist, plist)
-        run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True, text=True)
+        bootstrap_with_launchd_release_retry()
         if not health_probe(health_url, startup_timeout_seconds):
             raise CutoverError("Candidate failed and rollback did not become healthy") from exc
         if isinstance(exc, CutoverError):

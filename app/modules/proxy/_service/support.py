@@ -1483,6 +1483,12 @@ class _HTTPBridgeSession:
     # ``closed`` is fail-closed for normal request reuse.
     handoff_in_progress: bool = False
     handoff_future: asyncio.Future["_HTTPBridgeSession"] | None = None
+    # Set after pre-created retry admission has made its final sibling
+    # visibility check and before the shared reader is replaced. Upstream
+    # event bookkeeping drops frames from the superseded reader while this
+    # fence is held, so a sibling cannot become visible in the gap between
+    # retry admission and reconnect.
+    reconnect_admission_in_progress: bool = False
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)

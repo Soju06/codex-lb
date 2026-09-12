@@ -1983,7 +1983,10 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
         index_merge,
         pin_affinity_merge,
     )
-    assert script_directory.get_heads() == ["20260911_030000_add_local_login_policy"]
+    local_login_revision = "20260911_030000_add_local_login_policy"
+    recovery_repair_revision = "20260911_040000_repair_http_bridge_recovery_columns"
+    assert script_directory.get_revision(recovery_repair_revision).down_revision == local_login_revision
+    assert script_directory.get_heads() == [recovery_repair_revision]
 
 
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:

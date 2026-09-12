@@ -7566,6 +7566,62 @@ async def test_retry_http_bridge_precreated_request_refuses_accepted_replay_whil
 
 
 @pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_fences_sibling_visibility_during_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling event racing the handoff cannot publish visibility on the old reader."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    accepted_request_state = _accepted_bridge_request_state(
+        request_id="req-accepted-reconnect-fence",
+        account_response_create_lease=cast(Any, object()),
+    )
+    # This sibling has an assigned response id but no lifecycle event yet, so
+    # it is not itself retryable. The injected delta is the event that would
+    # make it visible if it won the gap between admission and reconnect.
+    sibling_request_state = _accepted_bridge_request_state(
+        request_id="req-sibling-reconnect-fence",
+        response_id="resp-sibling-reconnect-fence",
+        response_event_count=0,
+        awaiting_response_created=False,
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("request", "bridge-reconnect-fence", None),
+        key_value="bridge-reconnect-fence",
+        pending_requests=deque([accepted_request_state, sibling_request_state]),
+        queued_request_count=2,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    session.last_upstream_close_code = 1011
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+
+    async def reconnect_with_racing_sibling_event(*_args: Any, **_kwargs: Any) -> None:
+        await service._process_http_bridge_upstream_text(
+            session,
+            json.dumps(
+                {
+                    "type": "response.output_text.delta",
+                    "response_id": sibling_request_state.response_id,
+                    "delta": "late sibling output",
+                },
+                separators=(",", ":"),
+            ),
+        )
+
+    reconnect = AsyncMock(side_effect=reconnect_with_racing_sibling_event)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    reconnect.assert_awaited_once()
+    send_text.assert_awaited_once()
+    assert sibling_request_state.response_event_count == 0
+    assert sibling_request_state.downstream_visible is False
+    assert sibling_request_state.upstream_model_output_seen is False
+    assert session.reconnect_admission_in_progress is False
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_rejects_accepted_id_still_waiting_with_visible_sibling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9265,6 +9321,54 @@ async def test_transcript_snapshot_tasks_bound_backlog_and_release_on_deadline_o
         assert not scheduler.owned_tasks
     finally:
         await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_transcript_snapshot_waits_for_matching_terminal_finalizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A snapshot waits for its terminal spool finalizer before reading durable state."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="snapshot-finalizer-order")
+    session.durable_session_id = "durable-snapshot-finalizer-order"
+    session.durable_owner_epoch = 4
+    request_state = SimpleNamespace(operation_id="op-snapshot-finalizer-order")
+    finalizer_started = asyncio.Event()
+    release_finalizer = asyncio.Event()
+
+    async def finalizer() -> None:
+        finalizer_started.set()
+        await release_finalizer.wait()
+
+    finalizer_task = asyncio.create_task(finalizer(), name="http-bridge-terminal-spool-finalize-order")
+    setattr(finalizer_task, "_http_bridge_operation_id", request_state.operation_id)
+    setattr(finalizer_task, "_http_bridge_session_id", session.durable_session_id)
+    setattr(finalizer_task, "_http_bridge_owner_epoch", session.durable_owner_epoch)
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(_terminal_finalize_tasks={finalizer_task}),
+    )
+    update = AsyncMock(return_value=True)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", update)
+
+    try:
+        http_bridge_upstream_events_module._schedule_http_bridge_transcript_snapshot(
+            service,
+            session,
+            request_state,
+            state="completed",
+            operation_attempt_generation=0,
+            response_id="resp-snapshot-finalizer-order",
+        )
+        await asyncio.wait_for(finalizer_started.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        update.assert_not_awaited()
+
+        release_finalizer.set()
+        assert await service.drain_persistence_tasks(timeout_seconds=1.0)
+        update.assert_awaited_once()
+    finally:
+        release_finalizer.set()
+        await asyncio.gather(finalizer_task, return_exceptions=True)
+        await service.drain_persistence_tasks(timeout_seconds=1.0)
 
 
 @pytest.mark.asyncio

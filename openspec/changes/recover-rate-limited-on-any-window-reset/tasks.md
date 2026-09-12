@@ -11,7 +11,8 @@
 - [x] 2.2 Bind baseline, before, after, and latest to the anchored window
 - [x] 2.3 Add `_sibling_window_blocks_recovery` with the elapsed-window exclusion
 - [x] 2.4 Count a sibling only when it is live: the slot's plan capacity is not
-      known to be zero, and its newest row does not lag the anchored window's
+      known to be zero, and its newest row carries the anchored window's own
+      newest `recorded_at` (one fetch writes every reported window at once)
 
 ## 3. Warm-up isolation
 

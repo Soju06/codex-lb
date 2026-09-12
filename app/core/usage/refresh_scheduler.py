@@ -44,11 +44,6 @@ _BLOCK_RESET_MATCH_TOLERANCE_SECONDS = 5
 # primary/secondary slots and the free 30d window through the monthly slot, so
 # the anchor search covers all three instead of assuming one plan's shape.
 _RESET_EVIDENCE_WINDOWS: tuple[str, ...] = ("primary", "secondary", "monthly")
-# How far a sibling window's newest row may lag the anchored window's newest row
-# and still count as current. One usage fetch writes a row for every window the
-# payload carries, so live slots share a timestamp; this only has to absorb
-# write jitter and a transiently omitted window, not a change of quota shape.
-_SIBLING_WINDOW_FRESHNESS_TOLERANCE_SECONDS = 900
 
 
 def _normalized_usage_window(entry: UsageHistory) -> str:
@@ -475,13 +470,14 @@ def _sibling_window_blocks_recovery(
       does not exclude the slot.
     * A slot upstream no longer reports is not current state. Usage history is
       append-only and one fetch writes a row for every window the payload
-      carries, so a live sibling is recorded alongside the anchored window's own
-      newest row. A slot that falls behind it holds a leftover from an earlier
-      quota shape -- a plan change, or a payload that stopped carrying that
-      window -- and must not be read as live. Deriving this from the reported
-      shape rather than from the plan keeps it correct for both directions: a
-      downgraded account's stale paid `secondary` row, and a Free account whose
-      live quota arrives in a slot other than `monthly`.
+      carries, sharing a single captured timestamp (see
+      ``_account_snapshot_entries``), so a live sibling carries exactly the
+      anchored window's newest ``recorded_at``. Any slot behind it holds a
+      leftover from an earlier quota shape -- a plan change, or a payload that
+      stopped carrying that window -- and must not be read as live. Deriving
+      this from the reported shape rather than from the plan keeps it correct
+      in both directions: a downgraded account's stale paid ``secondary`` row,
+      and a Free account whose live quota arrives outside ``monthly``.
     * An elapsed window is stale exhaustion evidence rather than a live block
       (see "Usage refresh does not trust elapsed reset windows"). A 100% row
       with no reset metadata is treated as current because nothing proves it
@@ -493,8 +489,7 @@ def _sibling_window_blocks_recovery(
     capacity = capacity_for_plan(account.plan_type, window)
     if capacity is not None and capacity <= 0:
         return False
-    anchored_recorded_at = naive_utc_to_epoch(anchored_latest.recorded_at)
-    if naive_utc_to_epoch(entry.recorded_at) < anchored_recorded_at - _SIBLING_WINDOW_FRESHNESS_TOLERANCE_SECONDS:
+    if naive_utc_to_epoch(entry.recorded_at) < naive_utc_to_epoch(anchored_latest.recorded_at):
         return False
     return entry.reset_at is None or entry.reset_at > now
 

@@ -132,20 +132,10 @@ _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
 RELOCATION_TRANSCRIPT_MAX_TURNS = 128
 RELOCATION_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
 
-# Who could have written an input item. A message role the model never speaks
-# in, plus the item types a client produces on its own: the outputs of tools it
-# ran and the Responses-Lite tool bundle it declares.
-_CLIENT_AUTHORED_MESSAGE_ROLES = frozenset({"developer", "system", "user"})
-_CLIENT_AUTHORED_INPUT_ITEM_TYPES = frozenset(_TOOL_CALL_TYPE_BY_OUTPUT_TYPE) | {
-    "additional_tools",
-    "input_file",
-    "input_image",
-    "input_text",
-    "tool_search_output",
-}
-
 _RESPONSE_CREATE_EVENT_TYPE = "response.create"
-_TERMINAL_RESPONSE_EVENT_TYPES = frozenset({"response.completed", "response.incomplete"})
+_ATTEMPT_START_EVENT_TYPE = "response.created"
+_ANSWERED_TERMINAL_EVENT_TYPES = frozenset({"response.completed", "response.incomplete"})
+_ABANDONED_TERMINAL_EVENT_TYPES = frozenset({"error", "response.failed"})
 _RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE = "response.output_item.done"
 _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION = frozenset(
     {
@@ -1035,10 +1025,10 @@ def _input_content_part_is_self_contained(
     part_type = part.get("type")
     if not _is_one_of(part_type, _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES):
         return False
-    if any(key not in _allowed_content_part_fields(cast(str, part_type), allow_output=allow_output) for key in part):
+    if any(key not in _ACCOUNT_NEUTRAL_CONTENT_FIELDS[cast(str, part_type)] for key in part):
         return False
     if part_type in {"input_text", "text"} or (allow_output and part_type == "output_text"):
-        return _is_nonblank_string(part.get("text")) and _annotations_are_portable(part)
+        return _is_nonblank_string(part.get("text"))
     if allow_output and part_type == "refusal":
         return _is_nonblank_string(part.get("refusal"))
     if part_type == "input_image":
@@ -1052,35 +1042,6 @@ def _input_content_part_is_self_contained(
             or _url_is_account_neutral(part.get("file_url"), allow_data=False)
         )
     return False
-
-
-def _allowed_content_part_fields(part_type: str, *, allow_output: bool) -> frozenset[str]:
-    """The keys one content part may carry, widened only where the API forces it.
-
-    ``annotations`` rides along on every assistant ``output_text`` part the
-    Responses API produces, so refusing the field outright would refuse every
-    real conversation. It is admitted on that one part in that one position and
-    nowhere else: the field set is shared with the already-shipped fresh-replay
-    admission, and widening it at module level would also admit an annotated
-    ``output_text`` standing alone as a top-level input item, where nothing
-    inspects its contents.
-    """
-
-    allowed = _ACCOUNT_NEUTRAL_CONTENT_FIELDS[part_type]
-    return allowed | {_ANNOTATIONS_FIELD} if allow_output and part_type == "output_text" else allowed
-
-
-def _annotations_are_portable(part: Mapping[str, JsonValue]) -> bool:
-    """Whether an output part's annotation list cites nothing the new account lacks.
-
-    An empty list is bookkeeping the API attaches to every ``output_text`` part
-    and carries nothing. A populated one names file citations, container files
-    and URL citations minted against the account that produced the turn, so a
-    part carrying any entry stays owner-bound.
-    """
-
-    annotations = part.get(_ANNOTATIONS_FIELD)
-    return annotations is None or annotations == []
 
 
 def _url_is_account_neutral(value: JsonValue | None, *, allow_data: bool) -> bool:
@@ -1142,7 +1103,8 @@ def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> boo
 def project_durable_transcript_for_account_neutral_fresh_replay(
     transcript: Sequence[object],
     *,
-    current_request_text: str | None,
+    anchor_response_id: str,
+    current_payload: Mapping[str, JsonValue],
     max_turns: int = RELOCATION_TRANSCRIPT_MAX_TURNS,
     max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
 ) -> dict[str, JsonValue] | None:
@@ -1154,33 +1116,30 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     and the terminal response it produced, so the conversation can be reassembled
     here and offered to another account as a fresh request.
 
-    ``transcript`` is consumed structurally -- ``turn.operation.request_text``,
-    ``turn.operation.response_id``, ``turn.operation.parent_response_id`` and
-    ``turn.events``, oldest turn first, matching the order the durable repository
-    returns -- so this module stays independent of the persistence layer. The
-    caps are applied to the material this rebuild actually consumes rather than
-    left to whichever loader fetched the chain. Anything the rebuild cannot prove
-    returns ``None``, leaving the caller on the owner-bound behaviour it has
-    without a transcript.
+    ``anchor_response_id`` is the anchor ``current_payload`` carries, and the walk
+    must end on it. Parent links prove only that these turns follow one another;
+    an internally consistent chain from a different conversation satisfies every
+    one of them while being somebody else's history.
 
-    Every join here is decided by shape, never by comparing content. Each turn
-    the chain contributes must itself be a continuation delta, and so must the
-    client's current turn; a restatement is refused rather than trimmed to fit.
-    Content equality cannot tell "this sender is restating the conversation"
-    from "this sender happened to write the same words again", so a trim that
-    guesses deletes a message somebody actually wrote and leaves a conversation
-    that satisfies every remaining predicate.
+    ``transcript`` is consumed structurally -- ``turn.operation.request_text``,
+    ``turn.operation.response_id``, ``turn.operation.parent_response_id``,
+    ``turn.operation.event_spool_complete`` and ``turn.events``, oldest turn
+    first, matching the order the durable repository returns -- so this module
+    stays independent of the persistence layer. The caps are applied to the
+    material this rebuild actually consumes rather than left to whichever loader
+    fetched the chain. Anything the rebuild cannot prove returns ``None``,
+    leaving the caller on the owner-bound behaviour it has without a transcript.
+
+    The shapes of the turns inside the chain are not a gate. A parent turn that
+    was itself a full resend is ordinary material, and demanding each look like
+    a delta would disable relocation for every thread whose first recorded turn
+    was a resend.
     """
 
-    if not transcript or len(transcript) > max_turns or not isinstance(current_request_text, str):
-        return None
-    current_payload = _responses_request_frame_payload(current_request_text)
-    if current_payload is None:
-        return None
     current_input = current_payload.get("input")
     # A scalar input is the new prompt by itself. It cannot carry the prior
     # conversation the anchor stood for, so there is nothing safe to join.
-    if not isinstance(current_input, list) or not responses_input_is_continuation_delta(current_input):
+    if not transcript or len(transcript) > max_turns or not isinstance(current_input, list) or not current_input:
         return None
 
     rebuilt_input: list[JsonValue] = []
@@ -1195,22 +1154,32 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
         if remaining_bytes < 0:
             return None
         response_id = getattr(operation, "response_id", None)
-        parent_response_id = getattr(operation, "parent_response_id", None)
-        # The oldest turn opens the conversation, and every later one names the
-        # turn before it. A chain in any other order -- most cheaply, the walk
-        # handed over newest first -- assembles a conversation that reads
-        # backwards while satisfying every structural predicate downstream.
-        if not _is_nonblank_string(response_id) or parent_response_id != expected_parent_response_id:
+        # Three facts about the stored row, any one of which makes the turn
+        # unusable. An unfinished spool holds a fragment of an answer rather than
+        # the answer. A turn with no response id links to nothing. And the oldest
+        # turn opens the conversation while every later one names the turn before
+        # it -- a chain in any other order, most cheaply the walk handed over
+        # newest first, assembles a conversation that reads backwards while
+        # satisfying every structural predicate downstream.
+        if (
+            not getattr(operation, "event_spool_complete", False)
+            or not _is_nonblank_string(response_id)
+            or getattr(operation, "parent_response_id", None) != expected_parent_response_id
+        ):
             return None
         expected_parent_response_id = cast(str, response_id)
         turn_input = _transcript_turn_input_items(operation)
         terminal_output = _terminal_response_output_items(events)
-        if turn_input is None or terminal_output is None or not responses_input_is_continuation_delta(turn_input):
+        if turn_input is None or terminal_output is None:
             return None
         # The spool holds these turns as the owner account produced them, item
         # ids and reasoning included, and none of that resolves anywhere else.
-        rebuilt_input.extend(_account_neutral_replay_items(turn_input))
-        rebuilt_input.extend(_account_neutral_replay_items(terminal_output))
+        replayable_turn = _account_neutral_replay_items([*turn_input, *terminal_output])
+        if replayable_turn is None:
+            return None
+        rebuilt_input.extend(replayable_turn)
+    if expected_parent_response_id != anchor_response_id:
+        return None
 
     # Verbatim, and last. Projection here would be the proxy editing a turn the
     # user just wrote: it drops reasoning and settled search bookkeeping
@@ -1226,36 +1195,6 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     return replay_payload
 
 
-def responses_input_is_continuation_delta(input_items: Sequence[JsonValue]) -> bool:
-    """Whether this input is only new material, authored by whoever sent it.
-
-    This is the shape test the rebuild joins on. A continuation delta carries
-    the sender's own items -- user, developer and system messages, the tool
-    outputs it produced, the Responses-Lite tool bundle -- and nothing the
-    model minted. An input that carries an assistant message, a reasoning item
-    or a tool *call* is restating a conversation that already exists, and where
-    its restatement ends cannot be established without comparing content.
-
-    So restatements are refused rather than joined. That costs a conversation
-    that could have been recovered; joining one on a guessed boundary costs a
-    message the user actually wrote, silently, and the first failure is the one
-    this path already has today.
-    """
-
-    return bool(input_items) and all(_is_client_authored_input_item(item) for item in input_items)
-
-
-def _is_client_authored_input_item(item: JsonValue) -> bool:
-    """Whether one input item is something only the sender could have written."""
-
-    if not isinstance(item, dict):
-        return False
-    item_type = item.get("type")
-    if item_type in (None, "message"):
-        return _is_one_of(item.get("role"), _CLIENT_AUTHORED_MESSAGE_ROLES)
-    return _is_one_of(item_type, _CLIENT_AUTHORED_INPUT_ITEM_TYPES)
-
-
 def _durable_turn_byte_size(operation: object, events: object) -> int:
     """The stored bytes one chain turn contributes, counted as the spool stores them."""
 
@@ -1266,22 +1205,49 @@ def _durable_turn_byte_size(operation: object, events: object) -> int:
     return turn_bytes
 
 
-def _account_neutral_replay_items(input_items: list[JsonValue]) -> list[JsonValue]:
-    """``input_items`` with their former owner's response-owned bookkeeping removed."""
+def _account_neutral_replay_items(input_items: list[JsonValue]) -> list[JsonValue] | None:
+    """``input_items`` with their former owner's response-owned bookkeeping removed.
+
+    Beyond the shared projection this drops ``annotations``, which the Responses
+    API attaches to every assistant ``output_text`` part it produces. The strict
+    predicate does not admit the field, and widening it there would also widen
+    what the already-shipped fresh-replay admission accepts, so the rebuild edits
+    the items it owns instead. A populated list names file, container-file and
+    URL citations minted against the account that produced the turn, and nothing
+    resolves those elsewhere, so it keeps the turn owner-bound.
+    """
 
     projected_items: list[JsonValue] = []
     for item in input_items:
         projected_item = _project_account_neutral_replay_item(item, preserve_developer_message_ids=False)
-        if projected_item is not None:
-            projected_items.append(projected_item)
+        if projected_item is None:
+            continue
+        without_annotations = _content_without_portable_annotations(projected_item)
+        if without_annotations is None:
+            return None
+        projected_items.append(without_annotations)
     return projected_items
 
 
-def _responses_request_frame_payload(request_text: str) -> dict[str, JsonValue] | None:
-    """Return the Responses body inside a stored request frame.
+def _content_without_portable_annotations(item: JsonValue) -> JsonValue | None:
+    if not isinstance(item, dict) or not isinstance(item.get("content"), list):
+        return item
+    parts: list[JsonValue] = []
+    for part in cast(list[JsonValue], item["content"]):
+        if not isinstance(part, dict) or _ANNOTATIONS_FIELD not in part:
+            parts.append(part)
+            continue
+        if part[_ANNOTATIONS_FIELD] != []:
+            return None
+        parts.append({key: value for key, value in part.items() if key != _ANNOTATIONS_FIELD})
+    return {**item, "content": cast(JsonValue, parts)}
 
-    The session bridge spools the exact upstream frame, which wraps the body in a
-    ``response.create`` envelope; the direct paths store the body alone. Any other
+
+def responses_request_frame_payload(request_text: str) -> dict[str, JsonValue] | None:
+    """Return the Responses body inside a stored or live request frame.
+
+    The session bridge holds the exact upstream frame, which wraps the body in a
+    ``response.create`` envelope; the direct paths hold the body alone. Any other
     envelope is not a turn this rebuild knows how to replay.
     """
 
@@ -1308,7 +1274,7 @@ def _transcript_turn_input_items(operation: object) -> list[JsonValue] | None:
     request_text = getattr(operation, "request_text", None)
     if not isinstance(request_text, str):
         return None
-    payload = _responses_request_frame_payload(request_text)
+    payload = responses_request_frame_payload(request_text)
     if payload is None:
         return None
     turn_input = payload.get("input")
@@ -1334,15 +1300,18 @@ def _terminal_response_output_items(events: object) -> list[JsonValue] | None:
     reply, which is the one reading of the spool that invents content rather
     than losing it.
 
-    The first terminal decides. A spool that holds two attempts -- an abandoned
-    one and its replacement -- would otherwise concatenate the second attempt's
-    item frames onto the first attempt's answer.
+    An abandoned attempt leaves its item frames behind. It ends explicitly at
+    one of those failure terminals, or -- the shape production actually
+    produces -- it dies mid-stream and is recognisable only by the replacement's
+    ``response.created``. Either marker starts the accumulation over, so the
+    abandoned generation cannot be reported as part of this turn's answer.
 
     Some upstream versions omit ``response.output`` from a ``response.incomplete``
     terminal while still emitting every ``response.output_item.done`` frame; the
-    accumulated items are complete enough to preserve that turn's context. An
-    answer that is empty either way is not an answer, so it fails closed as a
-    missing terminal does.
+    accumulated items are complete enough to preserve that turn's context. A
+    terminal carrying no response object at all proves nothing about either, and
+    an answer that is empty is not an answer, so both fail closed as a missing
+    terminal does.
 
     The spool stores each frame as the upstream wrote it, so the shared SSE field
     parser reads it: only CR, LF and CRLF end a line, and a multi-line ``data:``
@@ -1363,17 +1332,19 @@ def _terminal_response_output_items(events: object) -> list[JsonValue] | None:
         if event_payload is None:
             continue
         event_type = event_payload.get("type")
-        if event_type == _RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE:
+        if event_type in _ANSWERED_TERMINAL_EVENT_TYPES:
+            response = event_payload.get("response")
+            if not isinstance(response, dict):
+                return None
+            output = response.get("output")
+            settled_items = cast(list[JsonValue], output) if isinstance(output, list) else completed_items
+            return settled_items or None
+        if event_type == _ATTEMPT_START_EVENT_TYPE or event_type in _ABANDONED_TERMINAL_EVENT_TYPES:
+            completed_items.clear()
+        elif event_type == _RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE:
             item = event_payload.get("item")
             if isinstance(item, dict):
                 completed_items.append(cast(JsonValue, item))
-            continue
-        if event_type not in _TERMINAL_RESPONSE_EVENT_TYPES:
-            continue
-        response = event_payload.get("response")
-        output = response.get("output") if isinstance(response, dict) else None
-        settled_items = cast(list[JsonValue], output) if isinstance(output, list) else completed_items
-        return settled_items or None
     return None
 
 

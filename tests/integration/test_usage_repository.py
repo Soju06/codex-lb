@@ -110,62 +110,6 @@ async def test_latest_by_account_respects_window_filter(db_setup):
 
 
 @pytest.mark.asyncio
-async def test_latest_by_account_per_window_returns_every_slot_from_one_statement(db_setup):
-    now = utcnow()
-    async with SessionLocal() as session:
-        accounts_repo = AccountsRepository(session)
-        repo = UsageRepository(session)
-        await accounts_repo.upsert(_make_account("acc1"))
-        await accounts_repo.upsert(_make_account("acc2"))
-
-        # Older rows in every slot, then a newer row in each, so the query has
-        # to rank within the slot rather than return whatever is newest overall.
-        await repo.add_entry("acc1", 10.0, window="primary", recorded_at=now - timedelta(hours=2))
-        await repo.add_entry("acc1", 11.0, window="primary", recorded_at=now - timedelta(minutes=1))
-        await repo.add_entry("acc1", 80.0, window="secondary", recorded_at=now - timedelta(hours=2))
-        await repo.add_entry("acc1", 81.0, window="secondary", recorded_at=now - timedelta(minutes=1))
-        await repo.add_entry("acc1", 20.0, window="monthly", recorded_at=now - timedelta(minutes=1))
-        # A legacy NULL-window row normalizes into the primary slot.
-        await repo.add_entry("acc2", 35.0, window=None, recorded_at=now)
-
-        latest = await repo.latest_by_account_per_window(
-            account_ids=["acc1", "acc2"],
-            windows=["primary", "secondary", "monthly"],
-        )
-
-    assert set(latest) == {"acc1", "acc2"}
-    assert {slot: entry.used_percent for slot, entry in latest["acc1"].items()} == {
-        "primary": 11.0,
-        "secondary": 81.0,
-        "monthly": 20.0,
-    }
-    assert {slot: entry.used_percent for slot, entry in latest["acc2"].items()} == {"primary": 35.0}
-
-
-@pytest.mark.asyncio
-async def test_latest_by_account_per_window_scopes_to_requested_accounts_and_slots(db_setup):
-    now = utcnow()
-    async with SessionLocal() as session:
-        accounts_repo = AccountsRepository(session)
-        repo = UsageRepository(session)
-        await accounts_repo.upsert(_make_account("acc1"))
-        await accounts_repo.upsert(_make_account("acc2"))
-
-        await repo.add_entry("acc1", 10.0, window="primary", recorded_at=now)
-        await repo.add_entry("acc1", 80.0, window="secondary", recorded_at=now)
-        await repo.add_entry("acc2", 90.0, window="primary", recorded_at=now)
-
-        latest = await repo.latest_by_account_per_window(account_ids=["acc1"], windows=["primary"])
-        empty_accounts = await repo.latest_by_account_per_window(account_ids=[], windows=["primary"])
-        empty_windows = await repo.latest_by_account_per_window(account_ids=["acc1"], windows=[])
-
-    assert latest == {"acc1": {"primary": latest["acc1"]["primary"]}}
-    assert latest["acc1"]["primary"].used_percent == 10.0
-    assert empty_accounts == {}
-    assert empty_windows == {}
-
-
-@pytest.mark.asyncio
 async def test_latest_by_account_default_includes_primary_and_none(db_setup):
     now = utcnow()
     async with SessionLocal() as session:

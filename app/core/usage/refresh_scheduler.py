@@ -92,13 +92,6 @@ class _LatestUsageRepository(Protocol):
         account_ids: Collection[str] | None = None,
     ) -> dict[str, UsageHistory]: ...
 
-    async def latest_by_account_per_window(
-        self,
-        *,
-        account_ids: Collection[str],
-        windows: Collection[str],
-    ) -> dict[str, dict[str, UsageHistory]]: ...
-
 
 class _BackgroundLimitWarmupRepository:
     async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
@@ -389,20 +382,17 @@ async def reconcile_recoverable_account_statuses(
     soft_drain_enabled = resolve_resilience_toggles(dashboard_settings).soft_drain_enabled
 
     candidate_ids = [account.id for account in candidates]
-    # One statement, so the windows compared below cannot come from different
-    # fetches: a concurrent usage write between per-window reads would otherwise
-    # make a live window look like one upstream stopped reporting.
-    latest_windows = await usage_repo.latest_by_account_per_window(
-        account_ids=candidate_ids,
-        windows=_RESET_EVIDENCE_WINDOWS,
-    )
+    latest_primary = await usage_repo.latest_by_account(window="primary", account_ids=candidate_ids)
+    latest_secondary = await usage_repo.latest_by_account(window="secondary", account_ids=candidate_ids)
+    latest_monthly = await usage_repo.latest_by_account(window="monthly", account_ids=candidate_ids)
 
     recovered = 0
     for account in candidates:
-        account_windows = latest_windows.get(account.id, {})
-        monthly_entry = account_windows.get("monthly")
+        monthly_entry = latest_monthly.get(account.id)
         latest_by_window: dict[str, UsageHistory | None] = {
-            window: account_windows.get(window) for window in _RESET_EVIDENCE_WINDOWS
+            "primary": latest_primary.get(account.id),
+            "secondary": latest_secondary.get(account.id),
+            "monthly": monthly_entry,
         }
         if _confirmed_window_reset_recovery(
             account=account,
@@ -415,11 +405,11 @@ async def reconcile_recoverable_account_statuses(
         else:
             state = background_recovery_state_from_account(
                 account=account,
-                primary_entry=account_windows.get("primary"),
+                primary_entry=latest_primary.get(account.id),
                 secondary_entry=_select_long_window_entry(
                     account=account,
                     monthly_entry=monthly_entry,
-                    secondary_entry=account_windows.get("secondary"),
+                    secondary_entry=latest_secondary.get(account.id),
                 ),
                 routing_tunables=routing_tunables,
                 soft_drain_enabled=soft_drain_enabled,
@@ -463,7 +453,7 @@ def _sibling_window_blocks_recovery(
     *,
     account: Account,
     window: str,
-    anchored_latest: UsageHistory,
+    blocked_at: float,
     now: float,
 ) -> bool:
     """Return whether a non-recovered window would immediately re-block the account.
@@ -478,16 +468,14 @@ def _sibling_window_blocks_recovery(
       (an unrecognized stored plan, which ``coerce_account_plan_type``
       preserves) is not evidence that a reported window does not exist, so it
       does not exclude the slot.
-    * A slot upstream no longer reports is not current state. Usage history is
-      append-only and one fetch writes a row for every window the payload
-      carries, sharing a single captured timestamp (see
-      ``_account_snapshot_entries``), so a live sibling carries exactly the
-      anchored window's newest ``recorded_at``. Any slot behind it holds a
-      leftover from an earlier quota shape -- a plan change, or a payload that
-      stopped carrying that window -- and must not be read as live. Deriving
-      this from the reported shape rather than from the plan keeps it correct
-      in both directions: a downgraded account's stale paid ``secondary`` row,
-      and a Free account whose live quota arrives outside ``monthly``.
+    * A slot with no sample since the block is not current state. Usage history
+      is append-only, so a slot upstream stopped reporting keeps its last row
+      forever -- a downgraded account's paid ``secondary`` sample, or a Free
+      account's ``monthly`` sample once live quota arrives in another slot.
+      Requiring a post-block sample is the same evidence bar the rest of this
+      predicate uses, and unlike comparing slots against each other it does not
+      depend on two windows being written together: live ingest can append a
+      single window, so a live sibling legitimately falls behind its peers.
     * An elapsed window is stale exhaustion evidence rather than a live block
       (see "Usage refresh does not trust elapsed reset windows"). A 100% row
       with no reset metadata is treated as current because nothing proves it
@@ -499,7 +487,7 @@ def _sibling_window_blocks_recovery(
     capacity = capacity_for_plan(account.plan_type, window)
     if capacity is not None and capacity <= 0:
         return False
-    if naive_utc_to_epoch(entry.recorded_at) < naive_utc_to_epoch(anchored_latest.recorded_at):
+    if naive_utc_to_epoch(entry.recorded_at) <= blocked_at:
         return False
     return entry.reset_at is None or entry.reset_at > now
 
@@ -558,7 +546,7 @@ def _confirmed_window_reset_recovery(
             entry,
             account=account,
             window=sibling,
-            anchored_latest=latest,
+            blocked_at=account.blocked_at,
             now=now,
         )
         for sibling, entry in latest_by_window.items()

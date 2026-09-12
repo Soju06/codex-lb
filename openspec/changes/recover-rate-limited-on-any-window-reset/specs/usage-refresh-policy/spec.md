@@ -6,7 +6,7 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 
 A future persisted `reset_at` SHALL continue to block ordinary recovery except for a `rate_limited` account whose usage history proves that the specific quota window associated with the current block reset. The exception SHALL be bound to a window, not to the account's plan: the scheduler MUST search each quota-window slot (`primary`, `secondary`, `monthly`) for post-block history containing a baseline whose `reset_at` matches the persisted marker within five seconds, and at most one slot can anchor a given block. This exception MUST require `blocked_at` and a future persisted `reset_at`, at least 30 seconds elapsed after `blocked_at`, a baseline recorded strictly after `blocked_at` in the anchored slot, a real temporal reset in an adjacent pair from that same slot at or after that baseline, and both the transition's after sample and the latest sample of that slot recorded after `blocked_at` with usage below `100%`.
 
-Recovery MUST additionally be withheld while a window other than the anchored one reports usage at or above `100%` and has not itself elapsed, counting only windows that are currently live for the account. A slot known to carry zero quota capacity for the plan is not a window for this rule, because the Free primary row is a normalization artifact of the monthly-only payload rather than a live short window; an unknown capacity for an unrecognized stored plan is NOT evidence that a reported window does not exist and MUST NOT exclude the slot. The windows compared for this rule MUST be read from a single consistent snapshot, because reading them one at a time can interleave with a concurrent usage write and return rows from different fetches. A slot whose newest row lags the anchored window's newest row is likewise not a window for this rule: usage history is append-only and one usage fetch writes a row for every window the payload carries under a single captured timestamp, so a live sibling carries exactly the anchored window's newest `recorded_at` while a slot upstream has stopped reporting retains a sample from an earlier quota shape. Deriving liveness from the reported shape rather than from the plan MUST hold in both directions -- a downgraded account's leftover paid `secondary` sample, and a Free account whose live quota arrives in a slot other than `monthly`. A window whose own `reset_at` has already passed is stale exhaustion evidence and MUST NOT veto recovery. The reset pair MAY come from the current refresh or be selected from adjacent persisted post-block samples so recovery survives a process restart and tolerates sliding reset deadlines without comparing non-neighboring rows. Availability without that matching anchored transition, reset timestamp jitter, an exhausted latest window, or a transition in a slot that does not anchor the persisted marker MUST NOT override the persisted cooldown.
+Recovery MUST additionally be withheld while a window other than the anchored one reports usage at or above `100%` and has not itself elapsed, counting only windows that are currently live for the account. A slot known to carry zero quota capacity for the plan is not a window for this rule, because the Free primary row is a normalization artifact of the monthly-only payload rather than a live short window; an unknown capacity for an unrecognized stored plan is NOT evidence that a reported window does not exist and MUST NOT exclude the slot. A slot with no sample recorded after `blocked_at` is likewise not a window for this rule: usage history is append-only, so a slot upstream has stopped reporting keeps its last sample indefinitely. Liveness MUST be established from that slot's own post-block evidence rather than by comparing slots against each other, because a live usage ingest MAY append a single window and leave its peers behind. Deriving liveness from evidence rather than from the plan MUST hold in both directions -- a downgraded account's leftover paid `secondary` sample, and a Free account whose live quota arrives in a slot other than `monthly`. A window whose own `reset_at` has already passed is stale exhaustion evidence and MUST NOT veto recovery. The reset pair MAY come from the current refresh or be selected from adjacent persisted post-block samples so recovery survives a process restart and tolerates sliding reset deadlines without comparing non-neighboring rows. Availability without that matching anchored transition, reset timestamp jitter, an exhausted latest window, or a transition in a slot that does not anchor the persisted marker MUST NOT override the persisted cooldown.
 
 Every recovery write MUST compare the current status, deactivation reason, `reset_at`, and `blocked_at`. A successful write SHALL set the account to `active` and clear the deactivation reason and both block markers. A compare-and-set miss MUST preserve the newer row and MUST NOT make the stale account snapshot eligible for warm-up.
 
@@ -174,16 +174,23 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **THEN** the leftover paid sample is not treated as a live exhausted window
 - **AND** the scheduler marks the account `active`
 
-#### Scenario: A stale slot does not veto recovery when live quota moved slots
+#### Scenario: A slot with no post-block sample does not veto recovery
 - **GIVEN** a Free account whose live quota is reported in a slot other than `monthly`
-- **AND** an exhausted, unelapsed `monthly` row remains from an earlier quota shape
+- **AND** an exhausted, unelapsed `monthly` row remains from before the block
 - **WHEN** background usage refresh evaluates anchored reset evidence in the live slot
-- **THEN** the stale `monthly` row is not treated as a live exhausted window
+- **THEN** the `monthly` row is not treated as a live exhausted window
 - **AND** the scheduler marks the account `active`
 
-#### Scenario: A sibling reported by the same fetch still vetoes recovery
+#### Scenario: A sibling that only lags its peers still vetoes recovery
 - **GIVEN** an account qualifies for anchored reset recovery in one quota window
-- **AND** another window carrying plan quota is recorded by the same usage fetch at `100%` with an unelapsed deadline
+- **AND** a live usage ingest appended only that window, leaving an exhausted sibling behind
+- **AND** that sibling reported after the block with an unelapsed deadline
+- **WHEN** background usage refresh evaluates recovery
+- **THEN** the account remains `rate_limited`
+
+#### Scenario: A sibling reported after the block still vetoes recovery
+- **GIVEN** an account qualifies for anchored reset recovery in one quota window
+- **AND** another window carrying plan quota reported after the block at `100%` with an unelapsed deadline
 - **WHEN** background usage refresh evaluates recovery
 - **THEN** the account remains `rate_limited`
 
@@ -192,15 +199,3 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **AND** upstream reports a second quota window at `100%` with an unelapsed deadline alongside the anchored one
 - **WHEN** background usage refresh evaluates anchored reset evidence
 - **THEN** the account remains `rate_limited`
-
-#### Scenario: A sibling one fetch behind is not current
-- **GIVEN** an account qualifies for anchored reset recovery in one quota window
-- **AND** another slot's newest row predates the anchored window's newest row
-- **WHEN** background usage refresh evaluates recovery
-- **THEN** that slot is not treated as a currently reported window
-
-#### Scenario: Window comparison does not straddle a concurrent usage write
-- **GIVEN** a blocked account whose recovery depends on comparing one quota window against another
-- **WHEN** background usage refresh reads the latest row for those windows
-- **THEN** it reads them in a single statement
-- **AND** a concurrent usage write cannot make a live window appear to be one upstream stopped reporting

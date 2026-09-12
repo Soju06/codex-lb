@@ -229,7 +229,7 @@ class StubUsageRepository:
         self._primary = primary or {}
         self._secondary = secondary or {}
         self._monthly = monthly or {}
-        self.queries: list[tuple[str | tuple[str, ...] | None, tuple[str, ...] | None]] = []
+        self.queries: list[tuple[str | None, tuple[str, ...] | None]] = []
 
     async def latest_by_account(
         self,
@@ -239,34 +239,16 @@ class StubUsageRepository:
     ) -> dict[str, UsageHistory]:
         normalized_account_ids = tuple(account_ids) if account_ids is not None else None
         self.queries.append((window, normalized_account_ids))
-        rows = self._rows_for(window)
+        if window == "secondary":
+            rows = self._secondary
+        elif window == "monthly":
+            rows = self._monthly
+        else:
+            rows = self._primary
         if normalized_account_ids is None:
             return rows
         allowed = set(normalized_account_ids)
         return {account_id: entry for account_id, entry in rows.items() if account_id in allowed}
-
-    def _rows_for(self, window: str | None) -> dict[str, UsageHistory]:
-        if window == "secondary":
-            return self._secondary
-        if window == "monthly":
-            return self._monthly
-        return self._primary
-
-    async def latest_by_account_per_window(
-        self,
-        *,
-        account_ids: Collection[str],
-        windows: Collection[str],
-    ) -> dict[str, dict[str, UsageHistory]]:
-        normalized_account_ids = tuple(account_ids)
-        self.queries.append((tuple(windows), normalized_account_ids))
-        allowed = set(normalized_account_ids)
-        latest: dict[str, dict[str, UsageHistory]] = {}
-        for window in windows:
-            for account_id, entry in self._rows_for(window).items():
-                if account_id in allowed:
-                    latest.setdefault(account_id, {})[window] = entry
-        return latest
 
 
 class MutatingAccountsRepository(StubAccountsRepository):
@@ -314,9 +296,11 @@ async def test_reconcile_recoverable_account_statuses_scopes_latest_usage_to_can
     )
 
     assert recovered == 0
-    # One statement, not one per window: the recovery guard compares windows
-    # against each other and must not straddle a concurrent usage write.
-    assert usage_repo.queries == [(("primary", "secondary", "monthly"), (selected.id,))]
+    assert usage_repo.queries == [
+        ("primary", (selected.id,)),
+        ("secondary", (selected.id,)),
+        ("monthly", (selected.id,)),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2093,15 +2077,16 @@ async def test_reconcile_keeps_unknown_plan_blocked_when_a_reported_sibling_is_e
 
 
 @pytest.mark.asyncio
-async def test_reconcile_treats_a_slightly_lagging_sibling_as_stale(
+async def test_reconcile_keeps_account_blocked_when_a_partial_live_update_lags_the_sibling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Liveness is exactly "written by the same fetch", with no grace period.
+    """A live sibling that simply fell behind its peers still vetoes recovery.
 
-    One usage fetch stamps every window it reports with a single captured
-    timestamp, so a sibling that lags the anchored window's newest row at all
-    was not part of that fetch. Pinning the boundary at a small lag keeps a
-    tolerance from being reintroduced.
+    `LiveUsageIngestor` appends only the windows a live header carries, so one
+    slot can advance without the other. Liveness therefore cannot mean "written
+    alongside the anchored window"; it means the slot has reported since the
+    block. Here the exhausted sibling lags the anchored row yet is plainly live,
+    and the account must stay blocked.
     """
 
     now = 1_700_000_000.0
@@ -2112,19 +2097,19 @@ async def test_reconcile_treats_a_slightly_lagging_sibling_as_stale(
     monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
 
     account = _make_account(
-        "acc_pro_lagging_sibling",
+        "acc_pro_partial_live_update",
         status=AccountStatus.RATE_LIMITED,
         plan_type="pro",
         reset_at=weekly_reset_at,
         blocked_at=blocked_at,
     )
     before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
-    lagging_sibling = _make_usage(
+    lagging_live_sibling = _make_usage(
         account.id,
         window="secondary",
         used_percent=100.0,
         reset_at=int(now + 2 * 24 * 3600),
-        recorded_at=_epoch_to_naive_utc(naive_utc_to_epoch(after.recorded_at) - 1),
+        recorded_at=_epoch_to_naive_utc(naive_utc_to_epoch(after.recorded_at) - 90),
         window_minutes=10_080,
     )
 
@@ -2132,11 +2117,15 @@ async def test_reconcile_treats_a_slightly_lagging_sibling_as_stale(
         accounts_repo=StubAccountsRepository([account]),
         usage_repo=StubUsageRepository(
             primary={account.id: after},
-            secondary={account.id: lagging_sibling},
+            secondary={account.id: lagging_live_sibling},
         ),
         accounts=[account],
         reset_evidence={account.id: _reset_evidence(before, after)},
     )
 
-    assert recovered == 1
-    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        weekly_reset_at,
+        blocked_at,
+    )

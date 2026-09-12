@@ -15,10 +15,10 @@ down_revision = "20260909_000000_add_dashboard_roles"
 branch_labels = None
 depends_on = None
 
-# Frozen copies of the runtime identifiers (see
-# app.modules.dashboard_users.compat and app.core.auth.dashboard_access). A
-# migration must not import transient runtime modules; the unit test
-# tests/unit/test_dashboard_users_compat.py asserts these stay in sync.
+# Frozen copies of the runtime identifiers (see app.db.models and
+# app.core.auth.dashboard_access). A migration must not import runtime modules,
+# which may move or go; tests/unit/test_migration_identifier_literals.py asserts
+# these stay in sync with the constants they were copied from.
 COMPAT_ADMIN_USER_ID = "7a4fc02d-216e-5be7-b974-bc437f23df60"
 COMPAT_ADMIN_USERNAME = "admin"
 ADMIN_ROLE_ID = "3fe7dc57-aabd-5b16-9850-b6d464087f07"
@@ -109,6 +109,13 @@ def upgrade() -> None:
     # outside the table guards so a re-run after a partial failure still
     # migrates the credential. Idempotent on the deterministic user id and on
     # the unique username.
+    legacy_columns = {column["name"] for column in sa.inspect(bind).get_columns("dashboard_settings")}
+    if not {"password_hash", "totp_secret_encrypted", "totp_last_verified_step"} <= legacy_columns:
+        # A later revision dropped the legacy credential columns and this
+        # revision is being re-applied over a schema that already lost them
+        # (a rewound ledger, or a bootstrap without one). There is nothing left
+        # to migrate and `dashboard_users` is already the authority.
+        return
     settings_row = bind.execute(
         sa.text(
             "SELECT password_hash, totp_secret_encrypted, totp_last_verified_step FROM dashboard_settings WHERE id = 1"

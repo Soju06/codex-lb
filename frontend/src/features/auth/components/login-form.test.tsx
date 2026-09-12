@@ -158,9 +158,20 @@ describe("LoginForm", () => {
       expect(screen.getByText("Enter your username and password to continue.")).toBeInTheDocument();
     });
 
-    it("does not treat the default admin username as a reason to show the field", () => {
+    // The account the install bootstrapped can be renamed, so no particular
+    // name may mean "this is the default": a remembered name reveals the field
+    // whatever it says, and the store forgets it after a sign-in that comes
+    // back `hidden` (see use-auth) so the install converges on its own.
+    it("reveals the field for any remembered name, the bootstrap default included", () => {
       window.localStorage.setItem(LAST_USERNAME_STORAGE_KEY, "admin");
 
+      render(<LoginForm />);
+
+      expect(screen.getByLabelText("Username")).toHaveValue("admin");
+      expect(screen.getByText("Enter your username and password to continue.")).toBeInTheDocument();
+    });
+
+    it("is password-only again once nothing is remembered", () => {
       render(<LoginForm />);
 
       expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();

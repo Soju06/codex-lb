@@ -75,14 +75,17 @@ export function LoginForm({ localForm = "shown" }: LoginFormProps = {}) {
   // rendering an empty card. It names neither the account nor the way in.
   const showRestrictedNote = !showLocalForm && !showLocalLink && external.length === 0 && !guestAccessEnabled;
 
-  // A remembered non-default username keeps the field visible even when the
-  // server says `hidden` (anti-flapping after the second account is removed
-  // again, PLAN §4.4); the "different account" link and a `username_required`
-  // answer reveal it too.
+  // A remembered username keeps the field visible even when the server says
+  // `hidden` (anti-flapping after the second account is removed again, PLAN
+  // §4.4). It is never compared against a particular name: the account the
+  // install bootstrapped can be renamed, so "is this the default `admin`?" is
+  // not a question the client can ask. The store forgets the remembered name
+  // after a sign-in that comes back `hidden`, so a one-account install shows
+  // the field at most once more and is password-only from the next visit (P5).
+  // The "different account" link and a `username_required` answer reveal it too.
   const [lastUsername] = useState(readLastUsername);
   const [usernameRevealed, setUsernameRevealed] = useState(false);
-  const showUsername =
-    usernameField === "shown" || (lastUsername !== "" && lastUsername !== "admin") || usernameRevealed;
+  const showUsername = usernameField === "shown" || lastUsername !== "" || usernameRevealed;
 
   const form = useForm({
     resolver: zodResolver(LoginRequestSchema),

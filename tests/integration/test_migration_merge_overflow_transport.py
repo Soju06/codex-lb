@@ -192,6 +192,13 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     for column in added_columns:
         backfilled = {row.pop(column) for row in merged_settings}
         assert len(backfilled) == 1, (column, backfilled)
+    # Revisions after the merge also *retire* dashboard_settings columns (the
+    # legacy credential trio, once `dashboard_users` became the only authority).
+    # A column that no longer exists carries no per-row state either, and it is
+    # not a fact about the two branches this test covers.
+    for column in set(expected_settings[0]) - set(merged_settings[0]):
+        for row in expected_settings:
+            row.pop(column)
     assert merged_settings == expected_settings
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
     assert merged["pins"] == (before["pins"] if before["pins"] is not None else [])

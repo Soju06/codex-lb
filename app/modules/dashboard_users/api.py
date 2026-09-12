@@ -40,7 +40,6 @@ from app.modules.dashboard_users.schemas import (
 )
 from app.modules.dashboard_users.service import (
     AdminAccountRequiredError,
-    CompatUserLockedError,
     EmailTakenError,
     ForceWithoutRoleChangeError,
     IdentityTakenError,
@@ -79,7 +78,6 @@ _ERROR_MAP: dict[type[Exception], tuple[type[AppError], str]] = {
     LastAdminProtectedError: (DashboardConflictError, "last_admin_protected"),
     LastBreakGlassProtectedError: (DashboardConflictError, "last_break_glass_protected"),
     BreakGlassRoleRequiredError: (DashboardValidationError, "validation_error"),
-    CompatUserLockedError: (DashboardConflictError, "compat_user_locked"),
     InviteNotPendingError: (DashboardConflictError, "invite_not_pending"),
     InvitePendingError: (DashboardConflictError, "invite_pending"),
     UserNotActiveError: (DashboardConflictError, "user_not_active"),

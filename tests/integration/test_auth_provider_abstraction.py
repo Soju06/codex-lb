@@ -102,6 +102,12 @@ async def _user_by_username(username: str) -> DashboardUser | None:
         ).scalar_one_or_none()
 
 
+async def _users_named(username: str) -> list[DashboardUser]:
+    async with SessionLocal() as session:
+        rows = await session.execute(select(DashboardUser).where(DashboardUser.username == username))
+        return list(rows.scalars().all())
+
+
 async def _identity(subject: str) -> DashboardIdentity | None:
     async with SessionLocal() as session:
         return (
@@ -697,6 +703,62 @@ async def test_admin_is_reserved_for_the_break_glass_account(
     assert setup.status_code == 409 and _error(setup) == "password_already_configured"
     stray = await _user_by_username("admin")
     assert stray is not None and stray.password_hash is None
+
+
+@pytest.mark.asyncio
+async def test_setup_re_arms_the_bootstrap_account_after_it_was_disabled(
+    async_client: AsyncClient, app_instance, monkeypatch
+) -> None:
+    """Disabling the emergency account must not be a one-way door.
+
+    The row keeps its password hash while it is disabled, so a re-arm keyed on
+    ``password_hash IS NULL`` never matches it again: the local form refuses it
+    (``disabled_user``) and setup answers ``409 password_already_configured``
+    for as long as the row exists. On a proxy install that is the whole
+    break-glass path gone, with the proxy the only way back in. The condition
+    is "not an *active* password holder" -- the same fact the gate above the
+    compare-and-set tests -- and the write restores the state setup promises.
+    """
+
+    _trusted_header_mode(monkeypatch)
+    admin = _as("alice")
+    assert (await async_client.get(SESSION, headers=admin)).status_code == 200
+    await _stepped_up(async_client, admin)
+
+    created = await async_client.post(
+        "/api/dashboard-auth/password/setup", json={"password": "password123"}, headers=admin
+    )
+    assert created.status_code == 200, created.text
+    compat = await _user_by_username("admin")
+    assert compat is not None and compat.password_hash is not None
+    first_hash = compat.password_hash
+
+    disabled = await async_client.patch(f"{USERS}/{compat.id}", json={"status": "disabled"}, headers=admin)
+    assert disabled.status_code == 200, disabled.text
+
+    again = await async_client.post(
+        "/api/dashboard-auth/password/setup", json={"password": "password456"}, headers=admin
+    )
+    assert again.status_code == 200, again.text
+    rearmed = await _user_by_username("admin")
+    assert rearmed is not None and rearmed.id == compat.id
+    assert rearmed.status == "active" and rearmed.role_id == ADMIN_ROLE and rearmed.is_break_glass is True
+    assert rearmed.password_hash is not None and rearmed.password_hash != first_hash
+    # One account, re-armed in place -- not a second row alongside a dead one.
+    assert len(await _users_named("admin")) == 1
+
+    # And the door it exists for is open: the new password signs in through the
+    # local form, the one it replaced does not.
+    async with AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as local:
+        stale = await local.post(
+            "/api/dashboard-auth/password/login", json={"username": "admin", "password": "password123"}
+        )
+        assert stale.status_code == 401 and _error(stale) == "invalid_credentials"
+        opened = await local.post(
+            "/api/dashboard-auth/password/login", json={"username": "admin", "password": "password456"}
+        )
+        assert opened.status_code == 200, opened.text
+        assert opened.json()["user"]["username"] == "admin"
 
 
 @pytest.mark.asyncio

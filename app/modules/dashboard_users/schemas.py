@@ -77,6 +77,10 @@ class DashboardUserUpdateRequest(DashboardModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    #: Renaming an account. Validated exactly like a username chosen at
+    #: creation, including the reservation of the break-glass name, and allowed
+    #: on the caller's own account: a name is not a privilege.
+    username: str | None = Field(default=None, max_length=64)
     role_id: str | None = None
     display_name: str | None = Field(default=None, max_length=128)
     email: str | None = Field(default=None, max_length=320)

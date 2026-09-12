@@ -86,7 +86,7 @@ from app.modules.settings.schemas import (
     UpstreamProxyPoolMemberRequest,
     UpstreamProxyPoolResponse,
 )
-from app.modules.settings.service import CompatAdminUnenrolledError, DashboardSettingsUpdateData
+from app.modules.settings.service import DashboardSettingsUpdateData
 from app.modules.settings.subscription_overflow import (
     load_subscription_overflow_preflight,
     resolve_drain_until,
@@ -1559,8 +1559,6 @@ async def update_settings(
         ) from exc
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
-    except CompatAdminUnenrolledError as exc:
-        raise DashboardConflictError(str(exc), code="compat_user_locked") from exc
 
     upstream_route_inputs_changed = (
         current.upstream_proxy_routing_enabled != updated.upstream_proxy_routing_enabled

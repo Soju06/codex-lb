@@ -22,12 +22,15 @@ from app.core.config.settings import get_settings
 from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
 from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_migration_backups
 from app.db.migrate import (
+    CREDENTIAL_DROP_REVISION,
+    CREDENTIAL_REPROJECTION_REVISION,
     MigrationBootstrapError,
     _build_alembic_config,
     _collect_migration_policy_violations,
     _ensure_alembic_version_table_capacity_for_connection,
     _max_revision_id_length,
     _read_current_revisions_from_connection,
+    check_legacy_credential_drop,
     check_migration_policy,
     check_schema_drift,
     inspect_migration_state,
@@ -38,6 +41,10 @@ from app.db.migrate import (
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
 from app.modules.usage.additional_quota_keys import clear_additional_quota_registry_cache
+
+#: The revision immediately before the one that re-projects the legacy
+#: dashboard credentials; a database stamped here has never run that release.
+CREDENTIAL_REPROJECTION_PARENT = "20260909_010000_add_dashboard_users"
 
 
 def _db_url(path: Path) -> str:
@@ -2582,3 +2589,101 @@ def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Pa
     assert "ix_additional_usage_distinct_labels" in usage_indexes
 
     assert check_schema_drift(url) == ()
+
+
+# --- the legacy dashboard credential drop: drain warning ---
+
+
+def _ledger(url: str) -> tuple[str, ...]:
+    with create_engine(to_sync_database_url(url), future=True).connect() as connection:
+        return _read_current_revisions_from_connection(connection)
+
+
+def test_a_database_from_an_older_release_reaches_head_in_one_upgrade(tmp_path: Path, caplog) -> None:
+    """The jump from before the account release is the supported path, not a refusal.
+
+    ``CREDENTIAL_DROP_REVISION`` descends from ``CREDENTIAL_REPROJECTION_REVISION``,
+    so the same run copies the legacy credential onto the account row before it
+    drops the column it came from. Refusing the jump would keep every install of
+    an older release from starting -- ``run_startup_migrations`` is the boot path
+    -- and would refuse work that is safe.
+    """
+
+    url = _db_url(tmp_path / "older-release.db")
+    run_upgrade(url, CREDENTIAL_REPROJECTION_PARENT, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            if connection.execute(text("SELECT id FROM dashboard_settings")).first() is None:
+                connection.execute(text("INSERT INTO dashboard_settings (id) VALUES (1)"))
+            connection.execute(
+                text("UPDATE dashboard_settings SET password_hash = :hash, totp_last_verified_step = 7 WHERE id = 1"),
+                {"hash": "$2b$legacy"},
+            )
+
+        with caplog.at_level("WARNING", logger="app.db.migrate"):
+            result = run_upgrade(url, "head", bootstrap_legacy=False)
+        assert result.current_revision == inspect_migration_state(url).head_revision
+
+        with engine.connect() as connection:
+            account = connection.execute(
+                text("SELECT password_hash, totp_last_verified_step FROM dashboard_users WHERE username = 'admin'")
+            ).one()
+            settings_columns = {column["name"] for column in inspect(connection).get_columns("dashboard_settings")}
+    finally:
+        engine.dispose()
+
+    assert account[0] == "$2b$legacy" and account[1] == 7
+    assert not {"password_hash", "totp_secret_encrypted", "totp_last_verified_step"} & settings_columns
+    # The one thing the ledger cannot decide is stated rather than guessed, once.
+    drain = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and CREDENTIAL_DROP_REVISION in record.getMessage()
+    ]
+    assert len(drain) == 1
+
+
+def test_an_upgrade_that_stops_short_of_the_drop_says_nothing(tmp_path: Path, caplog) -> None:
+    url = _db_url(tmp_path / "short.db")
+    run_upgrade(url, CREDENTIAL_REPROJECTION_PARENT, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+
+    with caplog.at_level("WARNING", logger="app.db.migrate"):
+        check_legacy_credential_drop(config, _ledger(url), CREDENTIAL_REPROJECTION_REVISION)
+    assert not [record for record in caplog.records if CREDENTIAL_DROP_REVISION in record.getMessage()]
+
+
+def test_a_fresh_install_is_not_warned(tmp_path: Path, caplog) -> None:
+    url = _db_url(tmp_path / "fresh-chain.db")
+    with caplog.at_level("WARNING", logger="app.db.migrate"):
+        result = run_upgrade(url, "head", bootstrap_legacy=False)
+    assert result.current_revision == inspect_migration_state(url).head_revision
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert not [message for message in warnings if CREDENTIAL_DROP_REVISION in message]
+
+    # An empty ledger is the fresh case however the caller reaches it.
+    check_legacy_credential_drop(_build_alembic_config(url), (), "head")
+
+
+def test_the_drain_warning_fires_once_on_a_populated_database(tmp_path: Path, caplog) -> None:
+    url = _db_url(tmp_path / "populated.db")
+    run_upgrade(url, CREDENTIAL_REPROJECTION_REVISION, bootstrap_legacy=False)
+
+    with caplog.at_level("WARNING", logger="app.db.migrate"):
+        run_upgrade(url, "head", bootstrap_legacy=False)
+    drain = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and CREDENTIAL_DROP_REVISION in record.getMessage()
+    ]
+    assert len(drain) == 1
+    assert "stop them before this migration runs" in drain[0]
+    # Nothing here claims to have seen a running replica; the ledger cannot.
+    assert "running" not in drain[0]
+
+    # Already at head: the warning is about work that is about to happen.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="app.db.migrate"):
+        run_upgrade(url, "head", bootstrap_legacy=False)
+    assert not [record for record in caplog.records if CREDENTIAL_DROP_REVISION in record.getMessage()]

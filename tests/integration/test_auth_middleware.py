@@ -92,14 +92,10 @@ async def _set_migration_inconsistent_totp_only_mode() -> DashboardUser:
                 sticky_threads_enabled=False,
                 prefer_earlier_reset_accounts=False,
                 totp_required_on_login=True,
-                password_hash=None,
                 api_key_auth_enabled=False,
-                totp_secret_encrypted=None,
-                totp_last_verified_step=None,
             )
             session.add(settings)
         else:
-            settings.password_hash = None
             settings.totp_required_on_login = True
         user = DashboardUser(
             username="totp-only",

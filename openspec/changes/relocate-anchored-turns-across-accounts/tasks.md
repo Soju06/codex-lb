@@ -21,8 +21,11 @@
   suffix. **Delete the content-matching overlap search.** Three rounds of it
   produced three different ways to delete a message the client had just sent,
   because content equality cannot tell a restatement from a coincidence.
-  Establish the shape first — continuation delta, full resend, or neither — and
-  refuse the third case. Terminal-output extraction from the spooled SSE with the
+  The anchor is the shape signal: `previous_response_id` present means the input
+  IS the delta, absent means full resend. Do not write a content predicate for
+  this — one that reads "no assistant turns" as "delta" joins the chain to a full
+  resend and doubles the conversation. Pass the anchor into the rebuild and make
+  it verify the chain terminates there. Terminal-output extraction from the spooled SSE with the
   `response.output_item.done` fallback when `response.incomplete` omits
   `response.output`. Keep the module free of persistence imports by accepting
   transcript turns structurally. Use one overlap routine, not two.
@@ -53,8 +56,8 @@
   window and the one-shot bound are module constants. Bind the byte cap as a
   WHOLE-TRANSCRIPT bound with a test that fails when it is read per turn, and
   bind which SSE event types count as a settled terminal with a test that fails
-  when a failure terminal is admitted — both survived mutation in round 3. Confirm
-  `[settings_fields].max` stays 96.
+  when a failure terminal is admitted — both survived mutation in round 3. Confirm the
+  `[settings_fields]` ratchet does not move.
 - [ ] New `tests/unit/test_replay_relocation.py`: the decision table —
   transports x sources x evidence x ownership facts, asserting `movable`,
   `source` and the exact `decline_reason` for every cell.

@@ -1812,7 +1812,8 @@ async def test_resolve_reset_evidence_anchors_a_paid_block_to_its_primary_window
     )
 
     assert usage_repo.history_windows == ["primary", "secondary", "monthly"]
-    resolved = evidence[account.id]
+    assert account.id not in evidence.warmup
+    resolved = evidence.recovery[account.id]
     assert resolved.window == "primary"
     assert (resolved.baseline.reset_at, resolved.after.used_percent) == (weekly_reset_at, 0.0)
 
@@ -2249,7 +2250,7 @@ async def test_resolve_reset_evidence_rejects_an_ambiguous_anchor() -> None:
         after_monthly={},
     )
 
-    assert account.id not in evidence
+    assert account.id not in evidence.recovery
 
 
 @pytest.mark.asyncio
@@ -2302,3 +2303,100 @@ async def test_reconcile_keeps_account_blocked_for_an_unfamiliar_short_window_du
         long_reset_at,
         blocked_at,
     )
+
+
+@pytest.mark.asyncio
+async def test_resolve_reset_evidence_rejects_an_anchor_shared_with_an_unreset_slot() -> None:
+    """A matching baseline counts even when its own window never reset.
+
+    Uniqueness has to be decided from the matching baselines, not from the
+    transitions. If the second slot carries this deadline and is still
+    exhausted, it is the likelier source of the 429, and treating the slot that
+    did reset as the anchor would clear a block that window never lifted.
+    """
+
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    shared_reset_at = int(now + 3 * 24 * 3600)
+    account = _make_account(
+        "acc_anchor_shared_with_unreset",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="pro",
+        reset_at=shared_reset_at,
+        blocked_at=blocked_at,
+    )
+    primary_before, primary_after = _weekly_block(account.id, now=now, weekly_reset_at=shared_reset_at)
+    # Same deadline, still exhausted, never reset: no transition, but it does
+    # carry the block's deadline.
+    unreset_secondary = [
+        _make_usage(
+            account.id,
+            window="secondary",
+            used_percent=100.0,
+            reset_at=shared_reset_at,
+            recorded_at=_epoch_to_naive_utc(now - offset),
+            window_minutes=10_080,
+        )
+        for offset in (180, 120, 60)
+    ]
+    usage_repo = StubHistoryUsageRepository(
+        history={"primary": [primary_before, primary_after], "secondary": unreset_secondary}
+    )
+
+    evidence = await refresh_scheduler_module._resolve_reset_evidence(
+        accounts=[account],
+        usage_repo=cast(Any, usage_repo),
+        before_monthly={},
+        after_monthly={},
+    )
+
+    assert account.id not in evidence.recovery
+
+
+@pytest.mark.asyncio
+async def test_resolve_reset_evidence_keeps_warmup_evidence_out_of_recovery() -> None:
+    """An in-cycle monthly pair feeds warm-up but can never override a cooldown.
+
+    Warm-up evidence carries no proof about which window produced the block, so
+    promoting it into the recovery map would let an unvalidated transition clear
+    a persisted deadline.
+    """
+
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    unrelated_reset_at = int(now + 5 * 24 * 3600)
+    account = _make_account(
+        "acc_warmup_only_evidence",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=unrelated_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        # Deliberately not the account's persisted deadline.
+        reset_at=unrelated_reset_at + 10_000,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43_200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 43_200 * 60),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43_200,
+    )
+    usage_repo = StubHistoryUsageRepository()
+
+    evidence = await refresh_scheduler_module._resolve_reset_evidence(
+        accounts=[account],
+        usage_repo=cast(Any, usage_repo),
+        before_monthly={account.id: before},
+        after_monthly={account.id: after},
+    )
+
+    assert account.id in evidence.warmup
+    assert account.id not in evidence.recovery

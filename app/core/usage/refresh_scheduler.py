@@ -58,6 +58,20 @@ def _normalized_usage_window(entry: UsageHistory) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class _ResolvedResetEvidence:
+    """The two independent uses of a reset transition, kept apart on purpose.
+
+    ``warmup`` feeds reset-confirmed warm-up and only ever holds monthly-slot
+    pairs. ``recovery`` holds transitions that passed the anchoring and
+    uniqueness checks and may therefore override a persisted cooldown. Sharing
+    one map let unvalidated warm-up evidence reach the recovery path.
+    """
+
+    warmup: "dict[str, _ResetEvidence]"
+    recovery: "dict[str, _ResetEvidence]"
+
+
+@dataclass(frozen=True, slots=True)
 class _ResetEvidence:
     baseline: UsageHistory
     before: UsageHistory
@@ -254,7 +268,7 @@ class UsageRefreshScheduler:
                         refreshed_selected_accounts = [
                             account for account in refreshed_accounts if account.id == selected_account.id
                         ]
-                        resolved_reset_evidence = await _resolve_reset_evidence(
+                        resolved = await _resolve_reset_evidence(
                             accounts=refreshed_selected_accounts,
                             usage_repo=usage_repo,
                             before_monthly=before_monthly,
@@ -263,12 +277,7 @@ class UsageRefreshScheduler:
                         detach_session_objects(session)
                     warmup_before_monthly = dict(before_monthly)
                     warmup_after_monthly = dict(after_monthly)
-                    for account_id, account_evidence in resolved_reset_evidence.items():
-                        # Warm-up consumes the monthly slot; feeding it a
-                        # primary/secondary transition would mislabel a paid
-                        # short or 7d window as the monthly long window.
-                        if account_evidence.window != "monthly":
-                            continue
+                    for account_id, account_evidence in resolved.warmup.items():
                         warmup_before_monthly[account_id] = account_evidence.before
                         warmup_after_monthly[account_id] = account_evidence.after
                     async with get_background_session() as session:
@@ -276,7 +285,7 @@ class UsageRefreshScheduler:
                             accounts_repo=AccountsRepository(session),
                             usage_repo=UsageRepository(session),
                             accounts=refreshed_selected_accounts,
-                            reset_evidence=resolved_reset_evidence,
+                            reset_evidence=resolved.recovery,
                             dashboard_settings=dashboard_settings,
                         )
                     warmup_service = LimitWarmupService(
@@ -566,8 +575,8 @@ async def _resolve_reset_evidence(
     usage_repo: UsageRepository,
     before_monthly: dict[str, UsageHistory],
     after_monthly: dict[str, UsageHistory],
-) -> dict[str, _ResetEvidence]:
-    """Resolve the reset transition each account's recovery and warm-up can use.
+) -> _ResolvedResetEvidence:
+    """Resolve reset transitions for warm-up and, separately, for recovery.
 
     The in-cycle monthly pair feeds reset-confirmed warm-up for every account
     and is unchanged. For a blocked account the persisted lookup additionally
@@ -575,39 +584,70 @@ async def _resolve_reset_evidence(
     account's own ``reset_at``, so recovery works after a restart and for
     whichever window upstream actually blocked -- the paid 5h/7d primary and
     secondary slots as well as the free monthly slot.
+
+    Only that anchored, unique transition is eligible to override a cooldown.
+    Warm-up evidence is never promoted into the recovery map, because it carries
+    no proof about which window produced the block.
     """
 
-    evidence: dict[str, _ResetEvidence] = {}
+    warmup: dict[str, _ResetEvidence] = {}
+    recovery: dict[str, _ResetEvidence] = {}
     for account in accounts:
         before = before_monthly.get(account.id)
         after = after_monthly.get(account.id)
         if usage_reset_confirmed(before=before, after=after):
             assert before is not None and after is not None
-            evidence[account.id] = _ResetEvidence(
-                baseline=before,
-                before=before,
-                after=after,
-            )
+            warmup[account.id] = _ResetEvidence(baseline=before, before=before, after=after)
         if account.status != AccountStatus.RATE_LIMITED or account.reset_at is None or account.blocked_at is None:
             continue
         since = datetime.fromtimestamp(account.blocked_at, timezone.utc).replace(tzinfo=None)
-        anchored: list[_ResetEvidence] = []
+        matching_slots = 0
+        anchored: _ResetEvidence | None = None
         for window in _RESET_EVIDENCE_WINDOWS:
-            history = await usage_repo.history_since(account.id, window, since)
-            persisted = _latest_confirmed_reset_transition_after_baseline(
-                [entry for entry in history if entry.recorded_at > since],
+            history = [
+                entry
+                for entry in await usage_repo.history_since(account.id, window, since)
+                if entry.recorded_at > since
+            ]
+            baseline = _matching_baseline(
+                history,
                 expected_reset_at=account.reset_at,
                 reset_at_tolerance_seconds=_BLOCK_RESET_MATCH_TOLERANCE_SECONDS,
             )
-            if persisted is not None:
-                anchored.append(persisted)
-        # Two slots whose deadlines fall within the match tolerance would both
-        # anchor this block, and picking either one guesses which window the 429
-        # came from. Guessing wrong skips the short-window guard, so an
-        # ambiguous anchor is no anchor and the persisted cooldown stands.
-        if len(anchored) == 1:
-            evidence[account.id] = anchored[0]
-    return evidence
+            if baseline is None:
+                continue
+            # Uniqueness is decided by the matching baseline, not by whether a
+            # transition followed it. A second slot carrying this deadline means
+            # the deadline does not identify the blocked window even when that
+            # slot has not reset -- and that unreset slot may be the exhausted
+            # one that produced the 429.
+            matching_slots += 1
+            transition = _latest_confirmed_reset_transition_from(history, baseline)
+            if transition is not None:
+                anchored = transition
+        if matching_slots == 1 and anchored is not None:
+            recovery[account.id] = anchored
+            if anchored.window == "monthly":
+                warmup[account.id] = anchored
+    return _ResolvedResetEvidence(warmup=warmup, recovery=recovery)
+
+
+def _matching_baseline(
+    history: list[UsageHistory],
+    *,
+    expected_reset_at: int,
+    reset_at_tolerance_seconds: int,
+) -> tuple[int, UsageHistory] | None:
+    """Return the earliest row whose reset deadline matches the persisted marker."""
+
+    return next(
+        (
+            (index, entry)
+            for index, entry in enumerate(history)
+            if entry.reset_at is not None and abs(entry.reset_at - expected_reset_at) <= reset_at_tolerance_seconds
+        ),
+        None,
+    )
 
 
 def _latest_confirmed_reset_transition_after_baseline(
@@ -616,18 +656,21 @@ def _latest_confirmed_reset_transition_after_baseline(
     expected_reset_at: int,
     reset_at_tolerance_seconds: int,
 ) -> _ResetEvidence | None:
-    baseline = next(
-        (
-            (index, entry)
-            for index, entry in enumerate(history)
-            if entry.reset_at is not None and abs(entry.reset_at - expected_reset_at) <= reset_at_tolerance_seconds
-        ),
-        None,
+    baseline = _matching_baseline(
+        history,
+        expected_reset_at=expected_reset_at,
+        reset_at_tolerance_seconds=reset_at_tolerance_seconds,
     )
     if baseline is None:
         return None
-    baseline_index, baseline_entry = baseline
+    return _latest_confirmed_reset_transition_from(history, baseline)
 
+
+def _latest_confirmed_reset_transition_from(
+    history: list[UsageHistory],
+    baseline: tuple[int, UsageHistory],
+) -> _ResetEvidence | None:
+    baseline_index, baseline_entry = baseline
     latest_transition: _ResetEvidence | None = None
     for index in range(baseline_index, len(history) - 1):
         before = history[index]

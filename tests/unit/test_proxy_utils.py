@@ -26713,6 +26713,7 @@ async def test_prepare_websocket_response_create_request_retires_injected_anchor
         last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
         last_pending_function_call_ids=["call_old"],
         last_pending_tool_call_types={"call_old": "function_call"},
+        pending_async_tool_calls={"call_async": "function_call", "call_custom": "custom_tool_call"},
     )
     # Upstream already denied this anchor on the previous attempt: the
     # fail-closed path remembered it, so the client's retry must not carry
@@ -26757,6 +26758,7 @@ async def test_prepare_websocket_response_create_request_retires_injected_anchor
     assert continuity_state.last_completed_input_prefix_fingerprint is None
     assert continuity_state.last_pending_function_call_ids == []
     assert continuity_state.last_pending_tool_call_types == {}
+    assert continuity_state.pending_async_tool_calls == {}
 
 
 @pytest.mark.asyncio
@@ -27722,6 +27724,7 @@ def test_record_websocket_continuity_completion_keeps_pending_tool_calls_for_str
     )
     string_input_state.pending_function_call_ids = ["call_custom_shell"]
     string_input_state.pending_tool_call_types = {"call_custom_shell": "custom_tool_call"}
+    string_input_state.async_tool_call_types = {"call_async": "function_call"}
 
     proxy_service._record_websocket_continuity_completion(
         continuity_state,
@@ -27738,6 +27741,7 @@ def test_record_websocket_continuity_completion_keeps_pending_tool_calls_for_str
     assert continuity_state.last_completed_input_prefix_fingerprint is None
     assert continuity_state.last_pending_function_call_ids == ["call_custom_shell"]
     assert continuity_state.last_pending_tool_call_types == {"call_custom_shell": "custom_tool_call"}
+    assert continuity_state.pending_async_tool_calls == {"call_async": "function_call"}
 
     proxy_service._record_websocket_continuity_completion(
         continuity_state,
@@ -27748,6 +27752,7 @@ def test_record_websocket_continuity_completion_keeps_pending_tool_calls_for_str
     assert continuity_state.last_completed_response_id is None
     assert continuity_state.last_pending_function_call_ids == []
     assert continuity_state.last_pending_tool_call_types == {}
+    assert continuity_state.pending_async_tool_calls == {}
 
 
 @pytest.mark.asyncio

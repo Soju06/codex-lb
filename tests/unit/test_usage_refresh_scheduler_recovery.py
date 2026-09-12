@@ -229,7 +229,7 @@ class StubUsageRepository:
         self._primary = primary or {}
         self._secondary = secondary or {}
         self._monthly = monthly or {}
-        self.queries: list[tuple[str | None, tuple[str, ...] | None]] = []
+        self.queries: list[tuple[str | tuple[str, ...] | None, tuple[str, ...] | None]] = []
 
     async def latest_by_account(
         self,

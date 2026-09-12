@@ -110,7 +110,7 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
                 window_minutes=43_200,
             )
 
-    query_scopes: list[tuple[str | None, tuple[str, ...] | None]] = []
+    query_scopes: list[tuple[str | tuple[str, ...] | None, tuple[str, ...] | None]] = []
     updater_calls: list[tuple[list[str], set[str]]] = []
     warmup_calls: list[dict[str, object]] = []
     original_latest_by_account = UsageRepository.latest_by_account

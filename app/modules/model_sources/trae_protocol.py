@@ -82,7 +82,32 @@ def prepare_request(source: ModelSource, payload: dict[str, JsonValue]) -> TraeR
                 }
             )
         elif kind in ("function_call_output", "custom_tool_call_output"):
-            call_id = _text(item.get("call_id"))
+            call_id_value = item.get("call_id")
+            # Codex desktop can retain app/tool results in an imported or
+            # long-lived transcript without the matching Responses tool call.
+            # Those records carry ``id`` plus ``name``/``namespace``, but no
+            # ``call_id``.  TRAE cannot accept an orphan ``tool`` message, so
+            # preserve the result as ordinary context instead of rejecting the
+            # entire continuation before it reaches the model.
+            if not isinstance(call_id_value, str) or not call_id_value:
+                output = item.get("output", "")
+                if not isinstance(output, (str, list)):
+                    output = json.dumps(output, ensure_ascii=False)
+                name = item.get("name")
+                namespace = item.get("namespace")
+                label_parts = [part for part in (namespace, name) if isinstance(part, str) and part]
+                label = ".".join(label_parts) or "tool"
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": f"[Retained {label} result]"},
+                            *_content(output),
+                        ],
+                    }
+                )
+                continue
+            call_id = call_id_value
             if call_id not in names:
                 raise TraeProtocolError("TRAE tool output requires its preceding call in input history")
             messages.append(

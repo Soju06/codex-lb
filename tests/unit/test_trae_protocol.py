@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from app.modules.model_sources.trae_protocol import TraeRequest, TraeResponsesDecoder
+from app.db.models import ModelSource, ModelSourceModel
+from app.modules.model_sources.trae_protocol import TraeRequest, TraeResponsesDecoder, prepare_request
 
 
 def request(custom=frozenset()):
@@ -22,6 +23,54 @@ def frame(event, data):
 
 def events(chunks):
     return [json.loads(line[6:]) for line in b"".join(chunks).decode().splitlines() if line.startswith("data: ")]
+
+
+def test_orphan_codex_app_tool_result_is_retained_as_plain_context():
+    source = ModelSource(
+        id="source-probe",
+        name="TRAE",
+        kind="trae",
+        base_url="https://copilot-cn.bytedance.net/api/ide/v2",
+        is_enabled=True,
+        models=[
+            ModelSourceModel(
+                model="trae/GPT-5.6-Luna-max",
+                is_enabled=True,
+                raw_metadata_json=json.dumps(
+                    {"trae_config_name": "gpt-5.6-luna-max", "trae_model_name": "gpt-5.6-luna-max__dev"}
+                ),
+            )
+        ],
+    )
+
+    bridged = prepare_request(
+        source,
+        {
+            "model": "trae/GPT-5.6-Luna-max",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "id": "fco_retained",
+                    "name": "automation_update",
+                    "namespace": "codex_app",
+                    "output": "saved heartbeat",
+                },
+                {"type": "message", "role": "user", "content": "continue"},
+            ],
+            "tools": [],
+        },
+    )
+
+    assert bridged.body["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "[Retained codex_app.automation_update result]"},
+                {"type": "text", "text": "saved heartbeat"},
+            ],
+        },
+        {"role": "user", "content": [{"type": "text", "text": "continue"}]},
+    ]
 
 
 def test_real_text_event_shape_with_null_tools_and_fragmented_utf8():

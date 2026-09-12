@@ -2089,6 +2089,7 @@ class _HTTPBridgeStreamingMixin:
         fresh_replay_excluded_account_ids: set[str] = set()
         model_transition_owner_conflict_fork_attempted = False
         unanchored_fork_spill_attempted = False
+        owner_retirement_attempted = False
         verified_stale_anchor_generation_captured = False
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
         verified_stale_anchor_generation: tuple[int, float, int, float, int, float, float] | None = None
@@ -2242,6 +2243,80 @@ class _HTTPBridgeStreamingMixin:
             if reused_parent_turn_state:
                 request_state.session_id = None
                 downstream_turn_state = None
+            return True
+
+        async def retire_unavailable_continuity_owner(exc: ProxyResponseError) -> bool:
+            """Retire an owner that cannot return in time, so this turn can rebind.
+
+            The scheduled sweep frees a thread six hours after its last turn.
+            That is right for a dormant thread but not for the one a user is
+            waiting on, so ask the narrower question here: can this owner come
+            back before this request's own budget runs out? ``reset_at``
+            answers it for a rate or quota limit; paused, re-auth-blocked and
+            deactivated owners carry no horizon, so the answer is always no.
+
+            Only for an anchor the proxy injected. A client that supplied its
+            own ``previous_response_id`` named upstream state that lived on
+            this account, and dropping it here would silently change what the
+            client asked for.
+            """
+            nonlocal durable_lookup
+            nonlocal effective_payload
+            nonlocal owner_retirement_attempted
+            nonlocal preferred_account_has_continuity_provenance
+            nonlocal request_state
+            nonlocal text_data
+
+            if owner_retirement_attempted:
+                return False
+            if not _http_bridge_is_previous_response_owner_unavailable(exc):
+                return False
+            if payload.previous_response_id is not None or rewritten_file_account_id is not None:
+                return False
+            retiring_account_id = request_state.preferred_account_id
+            if durable_lookup is None or retiring_account_id is None:
+                # Nothing durable to retire: the owner came from the
+                # request-log index or the in-process registry, which is the
+                # ``no_durable_lookup`` shape tracked separately.
+                return False
+            if durable_lookup.account_id != retiring_account_id:
+                return False
+            owner_retirement_attempted = True
+            retired = await self._durable_bridge.retire_continuity_owner_if_unavailable(
+                session_id=durable_lookup.session_id,
+                expected_account_id=retiring_account_id,
+                # ``request_deadline`` is monotonic and ``reset_at`` is wall
+                # clock, so project the remaining budget onto the epoch the
+                # account row uses rather than comparing the two directly.
+                recovery_deadline_epoch=int(
+                    clock.time() + max(0.0, request_deadline - clock.monotonic()),
+                ),
+            )
+            if not retired:
+                return False
+            _log_http_bridge_event(
+                "owner_retired_on_request",
+                bridge_session_key,
+                account_id=retiring_account_id,
+                model=payload.model,
+                detail="outcome=rebind_without_anchor",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
+            # Send the body the client actually sent, minus the anchor only the
+            # retired owner could resolve. ``untrimmed_effective_payload`` is
+            # the pre-trim copy the other anchor-free retries already use.
+            effective_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
+            request_state, text_data = prepare_bridge_request(effective_payload)
+            request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+            request_state.affinity_policy = affinity
+            request_state.transport = _REQUEST_TRANSPORT_HTTP
+            request_state.preferred_account_id = None
+            if downstream_turn_state is not None:
+                request_state.session_id = _normalize_session_id(downstream_turn_state)
+            preferred_account_has_continuity_provenance = False
+            durable_lookup = None
             return True
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
@@ -2470,6 +2545,8 @@ class _HTTPBridgeStreamingMixin:
                 if switch_model_transition_to_account_neutral_fork(exc):
                     continue
                 if not owner_unavailable_allows_account_neutral_replay(exc):
+                    if await retire_unavailable_continuity_owner(exc):
+                        continue
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
                         error_code=exc_code,

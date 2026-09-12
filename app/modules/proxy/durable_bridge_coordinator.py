@@ -1032,6 +1032,21 @@ class DurableBridgeSessionCoordinator:
                 request_fingerprint=request_fingerprint,
             )
 
+    async def retire_continuity_owner_if_unavailable(
+        self,
+        *,
+        session_id: str,
+        expected_account_id: str,
+        recovery_deadline_epoch: int,
+    ) -> bool:
+        """Retire a row's owner now when it cannot return before the deadline."""
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).retire_continuity_owner_if_unavailable(
+                session_id,
+                expected_account_id=expected_account_id,
+                recovery_deadline_epoch=recovery_deadline_epoch,
+            )
+
     async def mark_instance_draining(self, *, instance_id: str) -> int:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_owner_draining(instance_id=instance_id)

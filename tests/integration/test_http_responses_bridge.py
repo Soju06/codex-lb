@@ -8828,6 +8828,140 @@ async def test_v1_responses_http_bridge_resumes_a_thread_whose_owner_was_retired
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_cannot_return(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """#1707 without the wait: the first resume after the owner dies must serve.
+
+    The scheduled sweep frees a dormant thread six hours after its last turn.
+    That is too late for the turn a user is actually waiting on, so the connect
+    failure retires the owner in place and rebinds within the same request.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_instant_retire",
+        "http-bridge-instant-retire@example.com",
+    )
+    healthy_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_instant_replacement",
+        "http-bridge-instant-replacement@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    healthy_account = await _get_account(healthy_account_id)
+    upstream = _ClosingBridgeUpstreamWebSocket()
+    served_account_ids: list[str] = []
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        preferred_account_id = cast(str | None, kwargs.get("preferred_account_id"))
+        if preferred_account_id == owner_account.id:
+            return AccountSelection(
+                account=None,
+                error_message="No available accounts",
+                error_code=CONTINUITY_OWNER_UNAVAILABLE,
+            )
+        account = owner_account if not served_account_ids else healthy_account
+        served_account_ids.append(account.id)
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    thread_headers = {"session_id": "session-instant-retire", "thread-id": "thread-instant-retire"}
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=thread_headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello",
+                "prompt_cache_key": "http-bridge-instant-retire",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200
+
+    service = get_proxy_service_for_app(app_instance)
+    deadline = time.monotonic() + _TEST_SYNC_TIMEOUT_SECONDS
+    owned: list[HttpBridgeSessionRecord] = []
+    while time.monotonic() < deadline:
+        async with SessionLocal() as session:
+            owned = list(
+                (
+                    await session.execute(
+                        select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.account_id == owner_account.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if owned:
+            break
+        await asyncio.sleep(0.05)
+    assert owned, "the first turn did not persist a durable bridge row"
+    async with service._http_bridge_lock:
+        service._http_bridge_sessions.clear()
+
+    # The owner is paused. No grace elapses and no sweep runs.
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == owner_account.id).values(status=AccountStatus.PAUSED))
+        await session.commit()
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=thread_headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "continue",
+                "prompt_cache_key": "http-bridge-instant-retire",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert second.status_code == 200
+    assert served_account_ids[-1] == healthy_account.id
+    retired = [record.getMessage() for record in caplog.records if "owner_retired_on_request" in record.getMessage()]
+    assert len(retired) == 1
+    assert "outcome=rebind_without_anchor" in retired[0]
+
+    async with SessionLocal() as session:
+        rows = list((await session.execute(select(HttpBridgeSessionRecord))).scalars().all())
+    # The rebind claimed the row for the replacement, and that claim clears the
+    # marker the retirement wrote — retirement is a step, not a resting state.
+    assert [row.account_id for row in rows if row.account_id == owner_account.id] == []
+    assert any(row.account_id == healthy_account.id for row in rows)
+    assert all(row.continuity_abandoned_at is None for row in rows)
+    assert all(row.continuity_abandonment_scope is None for row in rows)
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_soft_prompt_cache_follow_up_uses_durable_owner_over_stale_local_lane(
     async_client,
     app_instance,

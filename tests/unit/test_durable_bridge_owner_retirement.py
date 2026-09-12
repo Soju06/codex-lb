@@ -499,6 +499,246 @@ async def test_a_retired_row_still_refuses_a_client_supplied_anchor(
     assert by_anchor.latest_response_id is None
 
 
+async def _retire_now(
+    factory: Callable[[], AsyncSession],
+    *,
+    session_id: str,
+    account_id: str,
+    deadline_epoch: int,
+) -> bool:
+    async with factory() as session:
+        return await DurableBridgeRepository(session).retire_continuity_owner_if_unavailable(
+            session_id,
+            expected_account_id=account_id,
+            recovery_deadline_epoch=deadline_epoch,
+        )
+
+
+def _epoch_in(seconds: float) -> int:
+    return naive_utc_to_epoch(to_utc_naive(utcnow() + timedelta(seconds=seconds)))
+
+
+async def test_request_path_retires_an_owner_with_no_recovery_horizon(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """A paused owner carries no horizon, so waiting can never help."""
+    await _add_account(async_session_factory, "acc-paused", AccountStatus.PAUSED)
+    session_id = await _claim(coordinator, account_id="acc-paused")
+
+    assert await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-paused",
+        deadline_epoch=_epoch_in(7200),
+    )
+
+    lookup = await _lookup(coordinator)
+    assert lookup is not None
+    assert lookup.continuity_abandoned is True
+    assert lookup.account_id is None
+    # No grace elapsed and no sweep ran: the row was freed for the waiting turn.
+    assert lookup.retired_account_id == "acc-paused"
+
+
+async def test_request_path_waits_for_an_owner_returning_inside_the_budget(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """A reset inside the budget is evidence the owner returns, so keep the cache."""
+    await _add_account(
+        async_session_factory,
+        "acc-limited",
+        AccountStatus.RATE_LIMITED,
+        reset_at=_epoch_in(60),
+    )
+    session_id = await _claim(coordinator, account_id="acc-limited")
+
+    assert not await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-limited",
+        deadline_epoch=_epoch_in(7200),
+    )
+
+    lookup = await _lookup(coordinator)
+    assert lookup is not None
+    assert lookup.account_id == "acc-limited"
+
+
+async def test_request_path_retires_an_owner_returning_after_the_budget(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """A five-hour limit with hours left is not worth waiting out."""
+    await _add_account(
+        async_session_factory,
+        "acc-limited",
+        AccountStatus.RATE_LIMITED,
+        reset_at=_epoch_in(4 * 3600),
+    )
+    session_id = await _claim(coordinator, account_id="acc-limited")
+
+    assert await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-limited",
+        deadline_epoch=_epoch_in(7200),
+    )
+
+
+async def test_request_path_never_retires_a_healthy_owner(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    await _add_account(async_session_factory, "acc-active", AccountStatus.ACTIVE)
+    session_id = await _claim(coordinator, account_id="acc-active")
+
+    assert not await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-active",
+        deadline_epoch=_epoch_in(7200),
+    )
+
+
+async def test_request_path_retirement_requires_the_expected_owner(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """A concurrent rebind must lose the race, not have its new owner retired."""
+    await _add_account(async_session_factory, "acc-paused", AccountStatus.PAUSED)
+    await _add_account(async_session_factory, "acc-other", AccountStatus.PAUSED)
+    session_id = await _claim(coordinator, account_id="acc-paused")
+
+    assert not await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-other",
+        deadline_epoch=_epoch_in(7200),
+    )
+
+    lookup = await _lookup(coordinator)
+    assert lookup is not None
+    assert lookup.account_id == "acc-paused"
+
+
+async def test_request_path_retirement_is_idempotent(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    await _add_account(async_session_factory, "acc-paused", AccountStatus.PAUSED)
+    session_id = await _claim(coordinator, account_id="acc-paused")
+
+    assert await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-paused",
+        deadline_epoch=_epoch_in(7200),
+    )
+    assert not await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-paused",
+        deadline_epoch=_epoch_in(7200),
+    )
+
+
+async def test_request_path_retirement_is_cleared_by_a_fresh_claim(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """The scope-only marker is as reversible as the sweep's timestamp form."""
+    await _add_account(async_session_factory, "acc-paused", AccountStatus.PAUSED)
+    await _add_account(async_session_factory, "acc-healthy", AccountStatus.ACTIVE)
+    session_id = await _claim(coordinator, account_id="acc-paused")
+    assert await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-paused",
+        deadline_epoch=_epoch_in(7200),
+    )
+
+    await _claim(coordinator, account_id="acc-healthy", latest_response_id=None)
+
+    lookup = await _lookup(coordinator)
+    assert lookup is not None
+    assert lookup.continuity_abandoned is False
+    assert lookup.account_id == "acc-healthy"
+
+
+async def test_an_unclaimed_request_path_marker_is_collected(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """A request-path retirement must not leak when the rebind never lands.
+
+    It writes the scope marker alone, which satisfies neither sweep phase on
+    its own — phase 1 wants both columns NULL, phase 2 wants a timestamp — so
+    the sweep promotes it to the global form once the row goes stale, and the
+    next sweep collects it.
+    """
+    await _add_account(async_session_factory, "acc-paused", AccountStatus.PAUSED)
+    session_id = await _claim(coordinator, account_id="acc-paused")
+    assert await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-paused",
+        deadline_epoch=_epoch_in(7200),
+    )
+    async with async_session_factory() as session:
+        row = (await session.execute(select(HttpBridgeSessionRecord))).scalar_one()
+        assert row.continuity_abandonment_scope == "request_path"
+        assert row.continuity_abandoned_at is None
+
+    # Still fresh: nothing to collect yet.
+    assert await _retire(async_session_factory) == 0
+
+    await _age_row(async_session_factory, seconds=_GRACE.total_seconds() + 60)
+    assert await _retire(async_session_factory) == 1
+    async with async_session_factory() as session:
+        row = (await session.execute(select(HttpBridgeSessionRecord))).scalar_one()
+        assert row.continuity_abandonment_scope is None
+        assert row.continuity_abandoned_at is not None
+
+    # Aged past a second window, the promoted tombstone is deleted.
+    async with async_session_factory() as session:
+        await session.execute(
+            update(HttpBridgeSessionRecord).values(
+                continuity_abandoned_at=to_utc_naive(utcnow() - _GRACE - timedelta(minutes=1))
+            )
+        )
+        await session.commit()
+    assert await _retire(async_session_factory) == 1
+    async with async_session_factory() as session:
+        assert (await session.execute(select(HttpBridgeSessionRecord))).scalars().all() == []
+
+
+async def test_promotion_does_not_need_the_owner_to_be_unavailable(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """An already-retired row is collected even if its old owner recovered.
+
+    Otherwise a marker written while the account was paused would outlive every
+    sweep once the operator resumed it.
+    """
+    await _add_account(async_session_factory, "acc-paused", AccountStatus.PAUSED)
+    session_id = await _claim(coordinator, account_id="acc-paused")
+    assert await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-paused",
+        deadline_epoch=_epoch_in(7200),
+    )
+    async with async_session_factory() as session:
+        await session.execute(update(Account).values(status=AccountStatus.ACTIVE))
+        await session.commit()
+    await _age_row(async_session_factory, seconds=_GRACE.total_seconds() + 60)
+
+    assert await _retire(async_session_factory) == 1
+
+
 def test_unavailable_status_set_covers_every_non_serving_status() -> None:
     assert HARD_OWNER_UNAVAILABLE_STATUSES == {
         AccountStatus.PAUSED,

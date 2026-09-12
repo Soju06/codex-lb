@@ -65,6 +65,9 @@ DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL = "anchor_abandoned"
 DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE = 50
 _PURGE_CLOSED_BATCH_SIZE = 500
+# Marks a retirement taken on the request path rather than by the sweep.
+# The sweep writes the global timestamp form instead; both read as retired.
+_REQUEST_PATH_ABANDONMENT_SCOPE = "request_path"
 # Claim retry budget: insert races and epoch-CAS losses re-read and retry;
 # each round has a winner, so a small budget converges under any realistic
 # same-row claim contention.
@@ -3565,6 +3568,73 @@ class DurableBridgeRepository:
                 await self._session.commit()
             deleted_count += len(deleted.scalars().all())
 
+    async def retire_continuity_owner_if_unavailable(
+        self,
+        session_id: str,
+        *,
+        expected_account_id: str,
+        recovery_deadline_epoch: int,
+    ) -> bool:
+        """Retire one row's owner now, when it cannot return before the deadline.
+
+        The scheduled sweep frees a thread six hours after its last turn. This
+        is the request-path counterpart, and it asks a narrower question: can
+        this owner come back before the request that is waiting on it gives up?
+        ``reset_at`` is the answer for a rate or quota limit; ``paused``,
+        ``reauth_required`` and ``deactivated`` carry no horizon at all, so the
+        answer for them is always no.
+
+        Mirrors ``StickySessionsRepository.abandon_legacy_session_header_owner_if_unavailable``,
+        including why the account row is locked first: PostgreSQL evaluates the
+        status subquery from the UPDATE's snapshot, so without the lock a
+        concurrent recovery can commit while this statement waits on the
+        session row and the stale snapshot would still authorize a retirement.
+        The status predicate stays inside the UPDATE as a second, database-level
+        invariant so a later refactor cannot turn a prior observation into an
+        unconditional write.
+
+        Writes the scope marker alone and leaves the timestamp NULL, so a
+        replica running the previous build keeps treating ``account_id`` as
+        hard ownership for the rest of a rolling deploy.
+        """
+        if not session_id or not expected_account_id:
+            return False
+        owner_status_lock = (
+            select(Account.status, Account.reset_at).where(Account.id == expected_account_id).with_for_update()
+        )
+        unavailable_owner = select(Account.id).where(
+            Account.id == expected_account_id,
+            Account.status.in_(HARD_OWNER_UNAVAILABLE_STATUSES),
+            or_(Account.reset_at.is_(None), Account.reset_at >= recovery_deadline_epoch),
+        )
+        statement = (
+            update(HttpBridgeSessionRecord)
+            .where(
+                HttpBridgeSessionRecord.id == session_id,
+                HttpBridgeSessionRecord.account_id == expected_account_id,
+                HttpBridgeSessionRecord.continuity_abandoned_at.is_(None),
+                HttpBridgeSessionRecord.continuity_abandonment_scope.is_(None),
+                HttpBridgeSessionRecord.account_id.in_(unavailable_owner),
+            )
+            .values(continuity_abandonment_scope=_REQUEST_PATH_ABANDONMENT_SCOPE)
+            .returning(HttpBridgeSessionRecord.id)
+        )
+        async with sqlite_writer_section():
+            locked = (await self._session.execute(owner_status_lock)).one_or_none()
+            if locked is None or locked[0] not in HARD_OWNER_UNAVAILABLE_STATUSES:
+                await self._session.commit()
+                return False
+            owner_reset_at = locked[1]
+            if owner_reset_at is not None and owner_reset_at < recovery_deadline_epoch:
+                # The owner is expected back inside the window the caller is
+                # willing to wait, so waiting keeps the upstream prompt cache
+                # instead of forcing a full resend onto another account.
+                await self._session.commit()
+                return False
+            result = await self._session.execute(statement)
+            await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def retire_stale_unavailable_bridge_owners(self, cutoff: datetime, *, now: datetime) -> int:
         """Retire continuity owners that have been unroutable since ``cutoff``.
 
@@ -3599,11 +3669,22 @@ class DurableBridgeRepository:
         tombstone_stmt = (
             update(HttpBridgeSessionRecord)
             .where(
-                HttpBridgeSessionRecord.account_id.is_not(None),
                 HttpBridgeSessionRecord.continuity_abandoned_at.is_(None),
-                HttpBridgeSessionRecord.continuity_abandonment_scope.is_(None),
                 HttpBridgeSessionRecord.last_seen_at < cutoff_naive,
-                HttpBridgeSessionRecord.account_id.in_(unavailable_account_ids),
+                or_(
+                    # A request-path retirement wrote the scope marker alone.
+                    # Promote it once the row goes stale, exactly as the sticky
+                    # sweep promotes its own younger scoped marker: without
+                    # this, such a row satisfies neither phase — phase 1 wants
+                    # both columns NULL and phase 2 wants a timestamp — and
+                    # would sit in the table forever.
+                    HttpBridgeSessionRecord.continuity_abandonment_scope.is_not(None),
+                    and_(
+                        HttpBridgeSessionRecord.continuity_abandonment_scope.is_(None),
+                        HttpBridgeSessionRecord.account_id.is_not(None),
+                        HttpBridgeSessionRecord.account_id.in_(unavailable_account_ids),
+                    ),
+                ),
             )
             # Timestamp with NULL scope is the global form: this sweep has no
             # per-source question to answer, and a replica that predates the

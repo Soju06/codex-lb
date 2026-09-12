@@ -1,0 +1,5 @@
+- [x] Implement sequential probes, progress, bounded parsing and partial reports.
+- [x] Implement isolated release tests with explicit fixture provenance and process cleanup.
+- [x] Add a conservative read-only idle-state check and preserve legacy validator inputs.
+- [x] Exercise failure paths with local stubs and verify the deployed release without switching or restarting it.
+- [x] Document, validate and archive the completed change.

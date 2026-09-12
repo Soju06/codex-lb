@@ -49,3 +49,23 @@ The approved initial migration completed with 59 tables and 107,222 rows verifie
 Both the isolated pair and the final public-port HTTP/WebSocket acceptance passed. An isolated restore of the PostgreSQL backup recovered all 59 tables. Private receipts and original files live under `~/.codex-lb/postgres/cutover`. The client config checksum is unchanged; this deployment does not re-enable the Codex endpoint. Future backend rollbacks stay on the shared PostgreSQL database and require schema/inference acceptance. SQLite is an original recovery snapshot, not a current rollback destination after new PostgreSQL writes.
 
 The initial window took 178 seconds to switch the entry. Cold Python imports under LaunchAgent were slower than foreground subprocess imports. Rehearse the exact LaunchAgent environment and await actual readiness before inference; do not assume that foreground startup duration predicts background startup, and never proceed to cutover after a readiness deadline expires.
+
+## Reusable verification harness
+
+Use `python -m scripts.local_verification --report <new-file.json> [--timeout 120] <command>` from the checkout, with the Python environment used for verification. Each stage has a deadline; progress is emitted every ten seconds. A fresh report is required, written atomically with mode 0600. Overall `passed` is emitted only after the command completes. Earlier successful stages survive subsequent errors or cancellation. Raw model output and encrypted summaries are omitted. There are no automatic inference retries.
+
+- `probe --url http://127.0.0.1:2461 --plan <private-plan.json>` runs the existing database gate in an owned subprocess, then waits for readiness before HTTP and WebSocket inference. The default model remains `trae/GPT-5.6-Luna-max`; select an explicit model using `--model`.
+- Add `--compaction --replay-url http://127.0.0.1:2462` to produce a summary on one replica, recompact it on the other and recover a fresh marker solely from retained context. Both endpoints must be ready. This is a small synthetic probe, not proof that an arbitrary long task or every model will complete.
+- `test-release --release <candidate-release> --fixture-ref <git-ref> tests/integration/<file>.py [...]` copies tests into a temporary directory and uses the selected Git revision's `tests/conftest.py`. `--tests-repo` selects the source checkout if needed. The candidate application import path is verified, Python source fingerprints are recorded, inherited Codex database settings are replaced with isolated SQLite settings, and neither the release nor the checkout fixtures are rewritten. The runner explicitly loads pytest-asyncio and pytest-timeout; suites requiring other plugins need a separately reviewed runner change. This command is for SQLite-compatible regression tests, not production/PostgreSQL migration tests. Test stdout/stderr is retained in the private `<report>.pytest.log`; the stage report includes its path even on failure.
+- `idle --url http://127.0.0.1:2461 --control <stable-entry/control.sock>` samples route, connection, in-flight and bridge telemetry twice. It never starts drain or restarts a process. Exact cold-idle telemetry is accepted only with zero entrance connections; ambiguous/missing activity fails. This is evidence at the observation times, not a lock against later traffic or a replacement for the retained-WebSocket cutover test.
+
+The existing `CANDIDATE_URL` and optional `LOCAL_ENTRY_DATABASE_PLAN` contract of `scripts/local_entry_acceptance.py` is preserved, including direct script invocation. It now uses the shared readiness and protocol checks. The running entrance need not be restarted to use the standalone verification CLI; changing its configured validator or deploying script updates remains an operator rollout action.
+
+Example for the current release baseline (use a new report filename on every run):
+
+```sh
+python -m scripts.local_verification --report /tmp/release-verification.json --timeout 180 test-release \
+  --release /Users/bytedance/.codex-lb/releases/20260912-trae-compaction-v1 \
+  --fixture-ref v1.25.0-beta.5 \
+  tests/integration/test_trae_compaction.py tests/unit/test_trae_protocol.py
+```

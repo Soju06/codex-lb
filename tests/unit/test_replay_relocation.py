@@ -25,6 +25,8 @@ _DECLINE_REASONS: frozenset[str] = frozenset(get_args(RelocationDeclineReason))
 @dataclass(frozen=True)
 class _Operation:
     request_text: str | None
+    response_id: str | None = "resp_1"
+    parent_response_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,7 +61,10 @@ def _assistant(text: str) -> dict[str, JsonValue]:
 
 def _completed_turn(prompt: str, answer: str, *, response_id: str) -> _Turn:
     return _Turn(
-        operation=_Operation(request_text=_frame({"model": "gpt-5.4", "input": [_user(prompt)]})),
+        operation=_Operation(
+            request_text=_frame({"model": "gpt-5.4", "input": [_user(prompt)]}),
+            response_id=response_id,
+        ),
         events=(
             _sse(
                 {
@@ -354,6 +359,40 @@ def test_routing_strategies_other_than_single_account_do_not_bind(transport: Rel
     assert verdict.movable is True
 
 
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+@pytest.mark.parametrize(
+    ("ownership_fact", "expected_reason"),
+    [
+        ({"routing_strategy": "single_account"}, "single_account_routing"),
+        ({"input_file_pinned": True}, "input_file_pinned"),
+        ({"turn_state_owned": True}, "turn_state_owned"),
+        ({"session_identity_bound": True}, "session_identity_bound"),
+    ],
+)
+@pytest.mark.parametrize(
+    "insufficient_evidence",
+    [
+        {"evidence": "none"},
+        {"evidence": "ambiguous", "spooled_event_count": 1},
+        {"evidence": "ambiguous", "seconds_since_dispatch": None},
+    ],
+)
+def test_an_ownership_fact_is_reported_before_any_evidence_is_consulted(
+    transport: RelocationTransport,
+    ownership_fact: dict[str, object],
+    expected_reason: RelocationDeclineReason,
+    insufficient_evidence: dict[str, object],
+) -> None:
+    # Both gates would decline, so only their order decides what the operator
+    # is told. An ownership fact is a binding no request body can neutralize;
+    # reporting the evidence instead sends whoever reads the decision looking
+    # for a failure that was never the reason this turn could not move.
+    verdict = decide_relocation(_unanchored(transport, **ownership_fact, **insufficient_evidence))
+
+    assert verdict.movable is False
+    assert verdict.decline_reason == expected_reason
+
+
 def test_concurrent_ownership_facts_report_the_most_binding_one() -> None:
     verdict = decide_relocation(
         _unanchored(
@@ -512,13 +551,44 @@ def test_a_full_resend_whose_suffix_is_unproven_is_not_a_source(transport: Reloc
             # The stored turn accounted for the whole body, so nothing in it
             # continues that turn.
             client_resend=ClientResendProof(stored_input_item_count=3),
-            durable_transcript=(_Turn(operation=_Operation(None), events=()),),
+            durable_transcript=_TRANSCRIPT,
         ),
     )
 
     assert verdict.movable is False
     assert verdict.source is None
-    assert verdict.decline_reason == "no_account_neutral_body"
+    # A resend the anchor's stored turn cannot vouch for does not become a
+    # delta the chain can be joined to. Where its restatement ends is exactly
+    # the thing that is not established.
+    assert verdict.decline_reason == "unestablished_turn_shape"
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+@pytest.mark.parametrize(
+    "unestablished_input",
+    [
+        # A restatement of the thread's tail plus a new message.
+        [_assistant("hi there"), _user("and now?")],
+        # Bookkeeping only the owner account minted.
+        [{"type": "reasoning", "id": "rs_owner", "summary": []}, _user("and now?")],
+        # Not a list of items at all: a scalar prompt cannot carry the
+        # conversation the dropped anchor stood for.
+        "and now?",
+        [],
+    ],
+)
+def test_an_unestablishable_turn_shape_refuses_rather_than_guessing(
+    transport: RelocationTransport,
+    unestablished_input: JsonValue,
+) -> None:
+    verdict = decide_relocation(
+        _durable_transcript(transport, payload={**_DELTA_PAYLOAD, "input": unestablished_input}),
+    )
+
+    assert verdict.movable is False
+    assert verdict.source is None
+    assert verdict.body is None
+    assert verdict.decline_reason == "unestablished_turn_shape"
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
@@ -632,19 +702,31 @@ def test_the_ambiguity_window_boundary_still_relocates(transport: RelocationTran
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-@pytest.mark.parametrize(
-    "execution_evidence",
-    [{"spooled_event_count": 1}, {"response_id": "resp_1"}],
-)
 def test_definitive_evidence_still_requires_that_upstream_emitted_nothing(
     transport: RelocationTransport,
-    execution_evidence: dict[str, object],
 ) -> None:
-    verdict = decide_relocation(_unanchored(transport, **execution_evidence))
+    verdict = decide_relocation(_unanchored(transport, spooled_event_count=1))
 
     assert verdict.movable is False
     assert verdict.decline_reason == "upstream_execution_observed"
     assert verdict.body is None
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+def test_a_recorded_response_id_gates_the_fenced_lane_and_only_it(transport: RelocationTransport) -> None:
+    # The two classes do not owe the same proof. A response id is upstream
+    # acknowledging the operation, which turns an ambiguous outcome into an
+    # unknown-but-accepted one and makes the fenced dispatch a double-spend.
+    # Definitive evidence is a rejection upstream accepted nothing from: it
+    # spends no budget and duplicates nothing, and it owes only that no
+    # response event was emitted.
+    acknowledged = {"response_id": "resp_owner_ack", "spooled_event_count": 0}
+
+    fenced = decide_relocation(_unanchored(transport, **_AMBIGUITY_CLEARED, **acknowledged))
+    unfenced = decide_relocation(_unanchored(transport, **acknowledged))
+
+    assert (fenced.movable, fenced.decline_reason) == (False, "upstream_execution_observed")
+    assert (unfenced.movable, unfenced.decline_reason) == (True, None)
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
@@ -795,6 +877,7 @@ def test_every_decline_reason_is_in_the_closed_vocabulary() -> None:
             _unanchored("http_bridge", session_identity_bound=True),
             _unanchored("http_bridge", evidence="none"),
             _durable_transcript("http_bridge", durable_transcript=None),
+            _durable_transcript("http_bridge", payload=_FULL_RESEND_PAYLOAD),
             _durable_transcript("http_bridge", durable_transcript=(_Turn(operation=_Operation(None), events=()),)),
             _unanchored("http_bridge", **_AMBIGUITY_CLEARED, spooled_event_count=1),
             _unanchored("http_bridge", evidence="ambiguous", arms_side_effect_replay_dedupe=True),

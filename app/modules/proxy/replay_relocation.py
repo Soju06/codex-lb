@@ -12,6 +12,7 @@ from app.modules.proxy.replay_safety import (
     AccountNeutralReplayProjection,
     project_durable_transcript_for_account_neutral_fresh_replay,
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_is_continuation_delta,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
@@ -39,6 +40,7 @@ RelocationDeclineReason = Literal[
     "session_identity_bound",
     "no_relocation_evidence",
     "absent_transcript",
+    "unestablished_turn_shape",
     "no_account_neutral_body",
     "upstream_execution_observed",
     "outside_ambiguity_window",
@@ -159,29 +161,35 @@ def _ownership_decline_reason(inputs: RelocationInputs) -> RelocationDeclineReas
 
 
 def _evidence_decline_reason(inputs: RelocationInputs) -> RelocationDeclineReason | None:
-    """What the failure proved, and what each evidence class still owes.
+    """What the failure proved, and what each evidence class owes on top of it.
 
-    Both classes owe the same first proof. A spooled event or a recorded
-    response id means upstream executed the turn: the definitive class is
-    defined as a rejection upstream accepted nothing from, so that is not what
-    happened, and the ambiguous class is then not ambiguous but known-and-run.
-    The definitive lane consumes no claim, so nothing further down would catch
-    it.
+    The two classes owe different things, and conflating them charges the
+    unfenced lane for a fence it does not use.
 
-    The ambiguous class owes two more. An age the caller could not establish, or
-    one no clock could have produced, counts as outside the window rather than
-    inside it -- a dispatch old enough to be mid-execution is likelier to write
-    its first event than to have been lost. And without the side-effect
-    replay-dedupe identity on the relocated dispatch, the duplicate this lane
-    knowingly risks is unbounded in kind rather than merely in tokens.
+    Definitive evidence is a rejection upstream accepted nothing from, and it
+    owes exactly one thing: no response event emitted. A spooled event is a
+    response event, so one of those contradicts the classification and the turn
+    stays put.
+
+    The fenced lane owes that and two more facts, because it is spending a
+    one-shot budget on a turn that may already have run. A recorded response id
+    is upstream acknowledging the operation, which makes the outcome unknown
+    rather than ambiguous -- it is listed here and not above because the
+    definitive lane consumes no budget and risks no duplicate. An age the
+    caller could not establish, or one no clock could have produced, counts as
+    outside the window rather than inside it: a dispatch old enough to be
+    mid-execution is likelier to write its first event than to have been lost.
+    And without the side-effect replay-dedupe identity on the relocated
+    dispatch, the duplicate this lane knowingly risks is unbounded in kind
+    rather than merely in tokens.
     """
 
     if inputs.evidence == "none":
         return "no_relocation_evidence"
-    if inputs.spooled_event_count > 0 or (inputs.response_id or "").strip():
+    if inputs.evidence == "definitive":
+        return "upstream_execution_observed" if inputs.spooled_event_count > 0 else None
+    if inputs.spooled_event_count > 0 or _names_a_prior_response(inputs.response_id):
         return "upstream_execution_observed"
-    if inputs.evidence != "ambiguous":
-        return None
     seconds_since_dispatch = inputs.seconds_since_dispatch
     if seconds_since_dispatch is None or not 0.0 <= seconds_since_dispatch <= RELOCATION_AMBIGUITY_WINDOW_SECONDS:
         return "outside_ambiguity_window"
@@ -204,6 +212,12 @@ def _relocated_body(
     its own reason. Having nothing to rebuild from is a different fact from a
     rebuild that ran and could not prove itself, and only the second one says
     anything about this conversation.
+
+    The durable rung is reached only once the client's turn is a shape the join
+    can be decided from. A full resend was already answered above, by the proof
+    the anchor's stored turn supplies; what is left -- a partial restatement --
+    has a boundary that cannot be found without comparing content, and guessing
+    it deletes a message the user wrote.
     """
 
     client_resend_body = _client_full_resend_body(inputs)
@@ -215,6 +229,9 @@ def _relocated_body(
     transcript = inputs.durable_transcript
     if not transcript:
         return "absent_transcript"
+    current_input = inputs.payload.get("input")
+    if not isinstance(current_input, list) or not responses_input_is_continuation_delta(current_input):
+        return "unestablished_turn_shape"
     durable_transcript_body = project_durable_transcript_for_account_neutral_fresh_replay(
         transcript,
         current_request_text=_current_request_text(inputs),

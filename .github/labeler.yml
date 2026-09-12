@@ -2,3 +2,38 @@ db migration:
   - changed-files:
       - any-glob-to-any-file:
           - app/db/alembic/versions/**
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - docs/**
+          - openspec/**
+          - mkdocs.yml
+
+python:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.py'
+          - pyproject.toml
+          - uv.lock
+
+frontend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - frontend/**
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/workflows/**
+          - .github/labeler.yml
+          - .github/actions/**
+
+docker:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/Dockerfile*'
+          - '**/*compose*.yml'
+          - '**/*compose*.yaml'
+          - .dockerignore

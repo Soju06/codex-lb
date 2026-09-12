@@ -43709,6 +43709,7 @@ async def test_closing_http_bridge_session_defers_release_for_detached_reader(
 ) -> None:
     """A cancellation-resistant reader keeps the durable owner until deferred cleanup settles."""
     session = _denied_anchor_session()
+    session.last_upstream_close_code = 1000
     reader_started = asyncio.Event()
     release_reader = asyncio.Event()
 
@@ -43759,6 +43760,59 @@ async def test_closing_http_bridge_session_defers_release_for_detached_reader(
     assert deferred_task is not None
     release_reader.set()
     await asyncio.wait_for(deferred_task, timeout=1.0)
+    release_live_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_closing_http_bridge_session_rechecks_finalizers_after_reader_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finalizer scheduled while the reader settles must drain before release."""
+    session = _denied_anchor_session()
+    session.last_upstream_close_code = 1000
+    reader = asyncio.create_task(asyncio.sleep(60), name="http-bridge-reader-finalizer-race")
+    session.upstream_reader = reader
+    finalizer_release = asyncio.Event()
+    drain_calls: list[tuple[str | None, int | None]] = []
+
+    async def finalizer() -> None:
+        await finalizer_release.wait()
+
+    async def await_reader(task: asyncio.Task[Any], **_kwargs: Any) -> bool:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        finalizer_task = asyncio.create_task(finalizer(), name="http-bridge-finalizer-after-reader")
+        setattr(finalizer_task, "_http_bridge_session_id", session.durable_session_id)
+        setattr(finalizer_task, "_http_bridge_owner_epoch", session.durable_owner_epoch)
+        batcher._terminal_finalize_tasks.add(finalizer_task)
+        return True
+
+    async def drain_finalizers(*, session_id: str | None = None, owner_epoch: int | None = None) -> None:
+        drain_calls.append((session_id, owner_epoch))
+        finalizer_release.set()
+        await asyncio.gather(*batcher._terminal_finalize_tasks)
+
+    monkeypatch.setattr(http_bridge_helpers_module, "_await_cancelled_task", await_reader)
+    release_live_session = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id=None, owner_epoch=session.durable_owner_epoch)
+    )
+    batcher = SimpleNamespace(
+        _terminal_finalize_tasks=set(),
+        drain_terminal_finalizers=drain_finalizers,
+    )
+    service = SimpleNamespace(
+        _background_cleanup_tasks=set(),
+        _unregister_http_bridge_turn_states_locked=Mock(),
+        _unregister_http_bridge_previous_response_ids_locked=Mock(),
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock()),
+        _durable_bridge=SimpleNamespace(release_live_session=release_live_session),
+        _fail_pending_websocket_requests=AsyncMock(),
+        _http_bridge_operation_event_batcher=batcher,
+    )
+
+    await http_bridge_helpers_module._close_http_bridge_session_resources(service, session, turn_state_lock_held=True)
+
+    assert drain_calls == [(session.durable_session_id, session.durable_owner_epoch)]
     release_live_session.assert_awaited_once()
 
 
@@ -43834,7 +43888,9 @@ async def test_closing_http_bridge_session_keeps_fence_after_durable_release_fai
     assert "resp_denied" in service._http_bridge_denied_anchor_fences
     assert service._http_bridge_denied_anchor_fence_current[session.durable_session_id] == "resp_denied"
     if release_durable_session:
-        release_live_session.assert_awaited_once()
+        # The first owner-fenced release happens before the pending-request
+        # teardown; a transient failure is retried by the final drain.
+        assert release_live_session.await_count == 2
     else:
         release_live_session.assert_not_awaited()
 

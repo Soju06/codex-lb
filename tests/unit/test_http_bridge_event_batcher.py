@@ -1877,3 +1877,45 @@ async def test_close_cancels_background_flusher() -> None:
 
     assert batcher._task is None
     assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_drain_terminal_finalizers_scopes_session_and_owner_epoch() -> None:
+    """Closing one generation must not await another generation's finalizer."""
+    batcher = HttpBridgeOperationEventBatcher(
+        _FakeDurableBridge(),
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    release_matching = asyncio.Event()
+    release_other_epoch = asyncio.Event()
+    release_other_session = asyncio.Event()
+
+    async def wait_for(event: asyncio.Event) -> None:
+        await event.wait()
+
+    matching = asyncio.create_task(wait_for(release_matching), name="matching-finalizer")
+    other_epoch = asyncio.create_task(wait_for(release_other_epoch), name="other-epoch-finalizer")
+    other_session = asyncio.create_task(wait_for(release_other_session), name="other-session-finalizer")
+    for task, session_id, owner_epoch in (
+        (matching, "session-a", 3),
+        (other_epoch, "session-a", 4),
+        (other_session, "session-b", 3),
+    ):
+        setattr(task, "_http_bridge_session_id", session_id)
+        setattr(task, "_http_bridge_owner_epoch", owner_epoch)
+    batcher._terminal_finalize_tasks.update({matching, other_epoch, other_session})
+
+    try:
+        release_matching.set()
+        await batcher.drain_terminal_finalizers(session_id="session-a", owner_epoch=3)
+        assert matching.done()
+        assert not other_epoch.done()
+        assert not other_session.done()
+    finally:
+        release_other_epoch.set()
+        release_other_session.set()
+        await asyncio.gather(matching, other_epoch, other_session, return_exceptions=True)
+        await batcher.close()

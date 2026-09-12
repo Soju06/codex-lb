@@ -6,11 +6,8 @@ import sqlalchemy as sa
 from alembic import op
 
 from app.db.alembic.http_bridge_migration_ownership import (
-    drop_ownership_table_if_empty,
     ensure_ownership_table,
-    forget_created,
     mark_created,
-    was_created,
 )
 
 revision = "20260911_070000_repair_http_bridge_recovery_columns"
@@ -34,6 +31,26 @@ _COLUMN_SPECS = (
     ("response_replay_input_complete", sa.Boolean(), sa.text("false")),
     ("response_replay_input_turn_count", sa.Integer(), sa.text("0")),
 )
+
+# These objects are owned by the historical additive revisions below. A
+# database stamped past those revisions can be missing their DDL when this
+# repair runs, but downgrading the repair must still leave the parent schema
+# intact. Record the historical owner so those revisions retain ownership if
+# a later downgrade reaches them.
+_COLUMN_OWNER_REVISIONS = {
+    "rebind_claim_id": "20260906_000000_add_http_bridge_rebind_claim",
+    "transcript_version": "20260821_010000_add_http_bridge_complete_transcript",
+    "response_output_items_json": "20260821_010000_add_http_bridge_complete_transcript",
+    "response_output_items_complete": "20260821_010000_add_http_bridge_complete_transcript",
+    "response_replay_input_json": "20260821_020000_add_http_bridge_replay_snapshot",
+    "response_replay_input_complete": "20260821_020000_add_http_bridge_replay_snapshot",
+    "response_replay_input_turn_count": "20260828_010000_add_http_bridge_replay_turn_count",
+}
+_INDEX_OWNER_REVISIONS = {
+    "idx_http_bridge_operations_session_state_created": "20260815_000000_add_http_bridge_recent_unknown_index",
+    "idx_http_bridge_operations_response_state": "20260821_010000_add_http_bridge_complete_transcript",
+}
+_ALIAS_COLUMN_OWNER_REVISION = "20260827_000000_add_http_bridge_retained_alias_target"
 
 
 def _columns(bind, table: str) -> set[str]:
@@ -80,37 +97,18 @@ def upgrade() -> None:
     if alias_columns and _ALIAS_COLUMN not in alias_columns:
         with op.batch_alter_table(_ALIAS_TABLE) as batch_op:
             batch_op.add_column(sa.Column(_ALIAS_COLUMN, sa.Text(), nullable=True))
-        created_columns.append(_ALIAS_COLUMN)
+        mark_created(bind, _ALIAS_COLUMN_OWNER_REVISION, "column", _ALIAS_COLUMN)
     for name in created_columns:
-        mark_created(bind, revision, "column", name)
+        mark_created(bind, _COLUMN_OWNER_REVISIONS.get(name, revision), "column", name)
     for name in created_indexes:
-        mark_created(bind, revision, "index", name)
+        mark_created(bind, _INDEX_OWNER_REVISIONS.get(name, revision), "index", name)
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    operation_columns = _columns(bind, _TABLE)
-    operation_indexes = _indexes(bind, _TABLE)
-    indexes_to_drop = [
-        name for name, _ in _INDEX_SPECS if name in operation_indexes and was_created(bind, revision, "index", name)
-    ]
-    for name in indexes_to_drop:
-        op.drop_index(name, table_name=_TABLE)
-        forget_created(bind, revision, "index", name)
-    columns_to_drop = [
-        name
-        for name, _, _ in _COLUMN_SPECS
-        if name in operation_columns and was_created(bind, revision, "column", name)
-    ]
-    if columns_to_drop:
-        with op.batch_alter_table(_TABLE) as batch_op:
-            for name in reversed(columns_to_drop):
-                batch_op.drop_column(name)
-        for name in columns_to_drop:
-            forget_created(bind, revision, "column", name)
-    alias_columns = _columns(bind, _ALIAS_TABLE)
-    if _ALIAS_COLUMN in alias_columns and was_created(bind, revision, "column", _ALIAS_COLUMN):
-        with op.batch_alter_table(_ALIAS_TABLE) as batch_op:
-            batch_op.drop_column(_ALIAS_COLUMN)
-        forget_created(bind, revision, "column", _ALIAS_COLUMN)
-    drop_ownership_table_if_empty(bind)
+    """Preserve parent-owned objects restored by this compatibility repair.
+
+    The repaired objects belong to migrations at or below the parent stamp.
+    Some databases also carry the old repair's revision-local ownership
+    markers, so consulting those markers here could still delete persisted
+    columns and indexes. Leave the schema untouched on downgrade.
+    """

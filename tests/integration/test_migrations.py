@@ -3594,5 +3594,63 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
         assert columns_to_repair <= after
         assert alias_column in aliases_after
         assert indexes_to_repair <= indexes_after
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_recovery_column_repair_downgrade_preserves_parent_schema(tmp_path):
+    """A compatibility repair never removes objects required by its parent stamp."""
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-column-repair-downgrade.sqlite'}"
+    parent_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
+    repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
+    operation_table = "http_bridge_operations"
+    alias_table = "http_bridge_session_aliases"
+    columns_to_repair = {
+        "rebind_claim_id",
+        "transcript_version",
+        "response_output_items_json",
+        "response_output_items_complete",
+        "response_replay_input_json",
+        "response_replay_input_complete",
+        "response_replay_input_turn_count",
+    }
+    indexes_to_repair = {
+        "idx_http_bridge_operations_session_state_created",
+        "idx_http_bridge_operations_response_state",
+    }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            for index in indexes_to_repair:
+                await conn.execute(text(f"DROP INDEX {index}"))
+            for column in columns_to_repair:
+                await conn.execute(text(f"ALTER TABLE {operation_table} DROP COLUMN {column}"))
+            await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN target_response_id"))
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, repair_revision, bootstrap_legacy=False))
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+
+        async with engine.connect() as conn:
+            operation_columns = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(operation_table)}
+            )
+            operation_indexes = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_indexes(operation_table)}
+            )
+            alias_columns = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
+            )
+        assert columns_to_repair <= operation_columns
+        assert indexes_to_repair <= operation_indexes
+        assert "target_response_id" in alias_columns
     finally:
         await engine.dispose()

@@ -357,7 +357,11 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_suffix_retains_prior_output,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 
 
 def _facade() -> Any:
@@ -588,6 +592,9 @@ def _install_fresh_replay_body(
         if request_state.affinity_policy.codex_session_source == "turn_state"
         else None
     )
+    preserve_client_prefix = (
+        request_state.proxy_injected_previous_response_id and request_state.input_full_fingerprint is not None
+    )
     request_state.request_text = fresh_request_text
     request_state.previous_response_id = None
     if release_owner_pin:
@@ -596,7 +603,9 @@ def _install_fresh_replay_body(
     request_state.proxy_injected_previous_response_id = False
     request_state.fresh_upstream_request_is_retry_safe = False
     request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
-    _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    # The next client resend still contains bookkeeping omitted by projection.
+    if not preserve_client_prefix:
+        _refresh_websocket_request_input_fingerprint_from_text(request_state)
     return fresh_request_text
 
 
@@ -744,6 +753,35 @@ def _websocket_continuity_anchor_for_payload(
         previous_response_id=previous_response_id,
         stored_input_item_count=stored_count,
     )
+
+
+def _project_websocket_full_resend_for_replay(
+    payload: ResponsesRequest,
+    *,
+    stored_count: int,
+) -> ResponsesRequest:
+    """Project a prefix-verified resend only if it retains the prior reply."""
+    if not isinstance(payload.input, list):
+        return payload
+    input_items = cast(list[JsonValue], payload.input)
+    evidence = project_responses_input_for_account_neutral_fresh_replay(
+        input_items, stored_count=stored_count, preserve_developer_message_ids=True
+    )
+    if evidence is None or not responses_input_suffix_retains_prior_output(
+        evidence.input_items,
+        stored_count=evidence.stored_prefix_count,
+        canonical_lite_developer_index=evidence.canonical_lite_developer_index,
+    ):
+        return payload
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=stored_count)
+    if projection is None:
+        return payload
+    projected_payload = payload.model_copy(update={"input": projection.input_items})
+    replay_payload = dict(projected_payload.to_replay_safety_payload())
+    replay_payload.pop("type", None)
+    if not responses_payload_is_account_neutral_fresh_replay(replay_payload):
+        return payload
+    return projected_payload
 
 
 _WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE = {

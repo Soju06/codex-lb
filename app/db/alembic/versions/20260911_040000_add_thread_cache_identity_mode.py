@@ -1,7 +1,7 @@
 """Add the thread cache identity mode setting and its per-API-key override.
 
-Revision ID: 20260911_010000_add_thread_cache_identity_mode
-Revises: 20260911_010000_merge_pin_index_and_affinity_heads
+Revision ID: 20260911_040000_add_thread_cache_identity_mode
+Revises: 20260911_030000_add_local_login_policy
 Create Date: 2026-09-11 01:00:00.000000
 
 Both columns are nullable and are created without a server default, so an

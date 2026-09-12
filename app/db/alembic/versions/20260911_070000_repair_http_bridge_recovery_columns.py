@@ -13,8 +13,8 @@ from app.db.alembic.http_bridge_migration_ownership import (
     was_created,
 )
 
-revision = "20260911_040000_repair_http_bridge_recovery_columns"
-down_revision = "20260911_030000_add_local_login_policy"
+revision = "20260911_070000_repair_http_bridge_recovery_columns"
+down_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
 branch_labels = None
 depends_on = None
 

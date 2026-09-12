@@ -364,6 +364,7 @@ class ApiKeysRepository:
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
+        thread_cache_identity_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
@@ -403,6 +404,9 @@ class ApiKeysRepository:
         if transport_policy_override is not _UNSET:
             assert transport_policy_override is None or isinstance(transport_policy_override, str)
             row.transport_policy_override = transport_policy_override
+        if thread_cache_identity_override is not _UNSET:
+            assert thread_cache_identity_override is None or isinstance(thread_cache_identity_override, str)
+            row.thread_cache_identity_override = thread_cache_identity_override
         if usage_sections is not _UNSET:
             assert isinstance(usage_sections, str)
             row.usage_sections = usage_sections

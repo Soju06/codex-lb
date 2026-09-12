@@ -17,6 +17,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
 from app.core.clients.codex_version_snapshot import CODEX_VERSION
+from app.core.clients.thread_cache_identity import (
+    THREAD_CACHE_IDENTITY_MODE_DEFAULT,
+    normalize_thread_cache_identity_mode,
+)
 from app.core.utils.proxy_env import outbound_proxy_env_configured
 
 logger = logging.getLogger(__name__)
@@ -490,6 +494,12 @@ class Settings(BaseSettings):
     soft_drain_enabled: bool = True
     deterministic_failover_enabled: bool = True
 
+    # Thread cache identity mode: "shared" (default) or "isolated".
+    # T3 -> dashboard: the same-name nullable ``dashboard_settings`` column
+    # wins when it is non-NULL; this field is the environment fallback only.
+    # ``shared`` is byte-for-byte the pre-existing outbound request.
+    thread_cache_identity_mode: str = THREAD_CACHE_IDENTITY_MODE_DEFAULT
+
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
 
@@ -572,6 +582,29 @@ class Settings(BaseSettings):
                 return _default_home_dir()
             return Path(stripped).expanduser()
         raise TypeError("data_dir must be a path")
+
+    @field_validator("thread_cache_identity_mode", mode="before")
+    @classmethod
+    def _normalize_thread_cache_identity_mode(cls, value: object) -> str:
+        """Coerce an unrecognised value to ``shared`` instead of letting it escape.
+
+        The settings API constrains this field to ``shared``/``isolated``, so a
+        typo in the environment variable would otherwise reach the response
+        model and fail ``GET /api/settings`` for every setting at once. A
+        behaviour toggle is also the wrong thing to make a boot failure, so the
+        unrecognised value degrades to the safe default and says so.
+        """
+        if value is None:
+            return THREAD_CACHE_IDENTITY_MODE_DEFAULT
+        normalized = normalize_thread_cache_identity_mode(value)
+        if normalized is not None:
+            return normalized
+        logger.warning(
+            "CODEX_LB_THREAD_CACHE_IDENTITY_MODE=%r is not a known mode; using %r",
+            value,
+            THREAD_CACHE_IDENTITY_MODE_DEFAULT,
+        )
+        return THREAD_CACHE_IDENTITY_MODE_DEFAULT
 
     @field_validator("database_url")
     @classmethod

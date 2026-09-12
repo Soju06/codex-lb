@@ -1,3 +1,9 @@
+## PR #2133 maintenance-only shutdown regression
+
+- The lifespan shutdown matrix now exercises the production stale-mark/CLEAN gates with fully drained owners, an active heartbeat writer, and maintenance-only incomplete drainage. Real test owners are drained before injecting the partial result, avoiding leaked test tasks.
+- Maintenance-only drainage attempts `mark_stale()` but withholds SQLite CLEAN; an active heartbeat writer prevents stale-marking. Both cases also cover database-disposal failure.
+- Validation: 52 lifespan tests passed with the previously documented current-main baseline deselected; focused Ruff, formatting, and type checks passed. No production environment was mutated.
+
 ## PR #2133 current-head review follow-up
 
 - Periodic-owner drainage and `mark_stale()` now consume one absolute deadline derived from the remaining process-shutdown budget. Their existing per-step caps remain, but they cannot add together past that deadline.

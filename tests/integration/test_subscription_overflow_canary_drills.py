@@ -109,6 +109,7 @@ from tests.integration.model_source_helpers import (
 from tests.integration.test_model_source_dispatch import (
     _DELTA,
     _ITEM_ADDED,
+    _ITEM_DONE,
     _USAGE,
     _app,
     _completed,
@@ -1207,7 +1208,13 @@ async def test_drill_anchor_timing_accepts_a_source_that_mints_its_id_first(
         async_client,
         source_upstream,
         tag="drill_anchor_early",
-        frames=[_created("resp_drill_anchor"), _ITEM_ADDED, _DELTA, _completed(_USAGE, "resp_drill_anchor")],
+        frames=[
+            _created("resp_drill_anchor"),
+            _ITEM_ADDED,
+            _DELTA,
+            _ITEM_DONE,
+            _completed(_USAGE, "resp_drill_anchor"),
+        ],
     )
 
     anchored = await async_client.post(V1_ROUTE, json=_codex_body(), headers=sdk_headers)

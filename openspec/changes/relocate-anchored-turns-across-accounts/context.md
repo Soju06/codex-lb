@@ -102,11 +102,16 @@ account-neutral projection accepts it, and no downstream check can notice that
 the user's words are missing.
 
 Content equality cannot distinguish "the client is restating this turn" from
-"the client happened to send the same words again". So the requirement no longer
-asks it to. The shape of the client's input decides — delta, full resend, or
-neither — and the third case refuses. Refusing costs a conversation that could
-have been recovered; guessing costs a message the user actually wrote, silently.
-The first is the failure this change already has today.
+"the client happened to send the same words again". A fourth implementation then
+showed that inspecting the input for *shape* fails the same way: a predicate
+that reads "no model-authored items" as "this is a delta" classified a full
+resend as a delta and doubled the conversation at the public entry point.
+
+The signal was in the request all along. `previous_response_id` present means
+the input is that turn's delta — that is what the anchor means in the wire
+contract — and absent means the body is the whole conversation. Two cases, no
+search, no third case to adjudicate. The requirement now names the anchor
+instead of asking an implementation to work the shape out.
 
 ## Why the zero-event precondition is the real fence
 

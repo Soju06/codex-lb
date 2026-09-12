@@ -22,7 +22,7 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
-_HEAD = "20260911_030000_add_local_login_policy"
+_HEAD = "20260911_040000_repair_http_bridge_recovery_columns"
 _RECOVERY = "20260906_000000_add_http_bridge_rebind_claim"
 
 

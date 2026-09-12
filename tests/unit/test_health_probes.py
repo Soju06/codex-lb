@@ -436,11 +436,20 @@ async def test_health_ready_fails_when_bridge_durable_schema_is_not_ready():
 
 
 @pytest.mark.asyncio
-async def test_health_ready_ignores_ring_membership_when_bridge_is_disabled() -> None:
+async def test_health_ready_ignores_all_bridge_state_when_bridge_is_disabled() -> None:
     from app.modules.health.api import health_ready
     from app.modules.health.schemas import BridgeRingInfo
 
     mock_session = AsyncMock()
+    ring_lookup = AsyncMock(
+        return_value=BridgeRingInfo(
+            ring_fingerprint=None,
+            ring_size=0,
+            instance_id="pod-a",
+            is_member=False,
+            error="bridge ring lookup unavailable",
+        )
+    )
     with (
         patch("app.core.draining._draining", False),
         patch("app.modules.health.api.get_session") as mock_get_session,
@@ -448,17 +457,9 @@ async def test_health_ready_ignores_ring_membership_when_bridge_is_disabled() ->
             "app.modules.health.api.get_settings",
             return_value=SimpleNamespace(http_responses_session_bridge_enabled=False),
         ),
-        patch(
-            "app.modules.health.api._get_bridge_ring_info",
-            new=AsyncMock(
-                return_value=BridgeRingInfo(
-                    ring_fingerprint="abc",
-                    ring_size=0,
-                    instance_id="pod-a",
-                    is_member=False,
-                )
-            ),
-        ),
+        patch("app.core.startup._bridge_durable_schema_ready", False),
+        patch("app.core.startup._bridge_registration_complete", False),
+        patch("app.modules.health.api._get_bridge_ring_info", new=ring_lookup),
     ):
 
         async def session_generator():
@@ -468,6 +469,7 @@ async def test_health_ready_ignores_ring_membership_when_bridge_is_disabled() ->
         response = await health_ready()
 
     assert response.status == "ok"
+    ring_lookup.assert_awaited_once()
 
 
 @pytest.mark.asyncio

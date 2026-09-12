@@ -152,6 +152,17 @@ from app.modules.usage.live_ingest import start_live_usage_ingestor, stop_live_u
 
 logger = logging.getLogger(__name__)
 
+_RING_PERIODIC_SHUTDOWN_TIMEOUT_SECONDS = 2.0
+_RING_STALE_MARK_TIMEOUT_SECONDS = 3.0
+_bridge_ring_stale_mark_tasks: set[asyncio.Task[None]] = set()
+
+
+def _discard_bridge_ring_stale_mark_task(task: asyncio.Task[None]) -> None:
+    _bridge_ring_stale_mark_tasks.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
 # On Windows, ``mimetypes`` merges HKCR registry mappings where third-party
 # software commonly remaps web extensions (``.js`` -> ``text/plain``), and
 # browsers enforce strict MIME checking for ES module scripts, so a poisoned
@@ -279,6 +290,7 @@ async def _shutdown_bridge_ring_membership(
     periodic_lifecycle: BridgeRingPeriodicLifecycle | None,
     ring_service: RingMembershipService | None,
     instance_id: str | None,
+    deadline_monotonic: float,
 ) -> tuple[bool, asyncio.CancelledError | None]:
     """Stop every local ring owner before deliberately aging the shared row."""
 
@@ -288,6 +300,7 @@ async def _shutdown_bridge_ring_membership(
             periodic_lifecycle=periodic_lifecycle,
             ring_service=ring_service,
             instance_id=instance_id,
+            deadline_monotonic=deadline_monotonic,
         ),
         name="bridge-ring-membership-shutdown",
     )
@@ -301,11 +314,15 @@ async def _shutdown_bridge_ring_membership_impl(
     periodic_lifecycle: BridgeRingPeriodicLifecycle | None,
     ring_service: RingMembershipService | None,
     instance_id: str | None,
+    deadline_monotonic: float,
 ) -> bool:
     periodic_shutdown = await stop_bridge_periodic_work(
         registration_task,
         periodic_lifecycle,
-        timeout_seconds=2,
+        timeout_seconds=min(
+            max(deadline_monotonic - time.monotonic(), 0.0),
+            _RING_PERIODIC_SHUTDOWN_TIMEOUT_SECONDS,
+        ),
     )
     if not (periodic_shutdown.registration_stopped and periodic_shutdown.heartbeat_stopped):
         logger.warning(
@@ -320,15 +337,35 @@ async def _shutdown_bridge_ring_membership_impl(
         return False
     if ring_service is None or instance_id is None:
         return periodic_shutdown.all_stopped
-    try:
-        await asyncio.wait_for(
-            ring_service.mark_stale(
-                instance_id,
-                stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
-                grace_seconds=RING_STALE_GRACE_SECONDS,
-            ),
-            timeout=3,
+    stale_mark_task = asyncio.create_task(
+        ring_service.mark_stale(
+            instance_id,
+            stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+            grace_seconds=RING_STALE_GRACE_SECONDS,
+        ),
+        name="bridge-ring-membership-mark-stale",
+    )
+    _bridge_ring_stale_mark_tasks.add(stale_mark_task)
+    stale_mark_task.add_done_callback(_discard_bridge_ring_stale_mark_task)
+    timeout_seconds = min(
+        max(deadline_monotonic - time.monotonic(), 0.0),
+        _RING_STALE_MARK_TIMEOUT_SECONDS,
+    )
+    done, _ = await asyncio.wait({stale_mark_task}, timeout=timeout_seconds)
+    if stale_mark_task not in done:
+        stale_mark_task.cancel()
+        logger.warning(
+            "Timed out marking bridge ring membership stale during shutdown",
+            extra={"instance_id": instance_id},
         )
+        return False
+
+    try:
+        if stale_mark_task.cancelled():
+            raise asyncio.CancelledError
+        error = stale_mark_task.exception()
+        if error is not None:
+            raise error
         logger.info(
             "Marked bridge ring membership stale for shutdown",
             extra={"instance_id": instance_id},
@@ -981,11 +1018,19 @@ async def lifespan(app: FastAPI):
 
         # Attempt to drain every owner. Only registration and heartbeat can
         # race a stale mark; surviving maintenance blocks CLEAN, not stale-marking.
+        bridge_shutdown_deadline = shutdown_state.post_drain_cleanup_deadline_monotonic()
+        if bridge_shutdown_deadline is None:
+            # Embedded lifespan users do not install the server's post-drain
+            # reserve, so they continue consuming the original drain deadline.
+            bridge_shutdown_deadline = shutdown_state.drain_deadline_monotonic()
+        if bridge_shutdown_deadline is None:
+            bridge_shutdown_deadline = time.monotonic()
         bridge_periodic_drained, bridge_shutdown_cancellation = await _shutdown_bridge_ring_membership(
             registration_task=bridge_registration_task,
             periodic_lifecycle=bridge_periodic_lifecycle,
             ring_service=ring_service,
             instance_id=instance_id,
+            deadline_monotonic=bridge_shutdown_deadline,
         )
         database_tasks_drained = database_tasks_drained and bridge_periodic_drained
 

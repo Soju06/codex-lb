@@ -128,14 +128,17 @@ def test_normalize_weekly_only_rows_keeps_newer_secondary():
     assert normalized_secondary == [newer_secondary]
 
 
-def test_normalize_rate_limit_windows_promotes_monthly_primary_without_secondary() -> None:
+@pytest.mark.parametrize("minutes", [40320, 43200, 43800, 46080])
+@pytest.mark.parametrize("secondary_minutes", [None, 0])
+def test_normalize_rate_limit_windows_promotes_monthly_primary_without_secondary(minutes, secondary_minutes) -> None:
     primary = UsageWindow(
         used_percent=5.0,
-        limit_window_seconds=2_592_000,
+        limit_window_seconds=minutes * 60,
         reset_at=1_800_000_000,
     )
 
-    normalized = normalize_rate_limit_windows(primary, None)
+    secondary = None if secondary_minutes is None else UsageWindow(used_percent=0, limit_window_seconds=0)
+    normalized = normalize_rate_limit_windows(primary, secondary)
 
     assert normalized.primary is None
     assert normalized.secondary is None
@@ -522,3 +525,21 @@ def test_same_fetch_real_rows_secondary_with_later_reset_at_wins():
     )
 
     assert _should_prefer_primary_row(primary_earlier_reset, secondary_later_reset) is False
+
+
+@pytest.mark.parametrize("minutes", [300, 10080, 40319, 46081, None])
+def test_normalize_rate_limit_windows_preserves_non_monthly_primary(minutes):
+    primary = UsageWindow(used_percent=96, limit_window_seconds=None if minutes is None else minutes * 60)
+    result = normalize_rate_limit_windows(primary, None)
+    assert result.primary is primary
+    assert result.monthly is None
+
+
+@pytest.mark.parametrize("seconds", [300 * 60, 10080 * 60, None])
+def test_normalize_rate_limit_windows_preserves_real_or_unknown_secondary(seconds):
+    primary = UsageWindow(used_percent=96, limit_window_seconds=43800 * 60)
+    secondary = UsageWindow(used_percent=20, limit_window_seconds=seconds)
+    result = normalize_rate_limit_windows(primary, secondary)
+    assert result.primary is primary
+    assert result.secondary is secondary
+    assert result.monthly is None

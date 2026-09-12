@@ -362,6 +362,27 @@ def test_branch_revision_on_the_base_head_is_accepted(checker: ModuleType, tmp_p
     assert report.errors == []
 
 
+def test_branch_fork_repaired_by_later_merge_is_accepted(checker: ModuleType, tmp_path: Path) -> None:
+    """A legacy branch rooted at an old head is valid when a later merge joins it back."""
+    versions = tmp_path / "versions"
+    head = _linear_fixture(checker, versions)
+    landed = "20260912_000000_landed_on_main"
+    branch = "20260912_010000_branch_revision"
+    merge = "20260912_020000_merge_heads"
+    _write_revision(versions, landed, head)
+    _write_revision(versions, branch, head)
+    _write_revision(versions, merge, (landed, branch))
+    base_revisions = [
+        _base_revision(checker, "20260901_000000_fixture_base", None),
+        _base_revision(checker, head, "20260901_000000_fixture_base"),
+        _base_revision(checker, landed, head),
+    ]
+
+    revisions = checker.load_graph(versions)
+    assert checker.check_graph_shape(revisions).errors == []
+    assert checker.check_branch_fork(revisions, base_revisions, "origin/main").errors == []
+
+
 def test_merge_revision_is_exempt_from_the_branch_fork_check(checker: ModuleType, tmp_path: Path) -> None:
     """Merging the two heads is the sanctioned repair; it must not be flagged."""
     versions = tmp_path / "versions"

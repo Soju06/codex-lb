@@ -59,6 +59,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         enforced_service_tier=row.enforced_service_tier,
         traffic_class=row.traffic_class,
         transport_policy_override=row.transport_policy_override,
+        thread_cache_identity_override=row.thread_cache_identity_override,
         usage_sections=row.usage_sections,
         expires_at=row.expires_at,
         is_active=row.is_active,
@@ -151,6 +152,7 @@ async def create_api_key(
                 enforced_service_tier=payload.enforced_service_tier,
                 traffic_class=payload.traffic_class or "foreground",
                 transport_policy_override=payload.transport_policy_override,
+                thread_cache_identity_override=payload.thread_cache_identity_override,
                 usage_sections=(
                     payload.usage_sections
                     if payload.usage_sections is not None
@@ -222,6 +224,8 @@ async def update_api_key(
         traffic_class_set="traffic_class" in fields,
         transport_policy_override=payload.transport_policy_override,
         transport_policy_override_set="transport_policy_override" in fields,
+        thread_cache_identity_override=payload.thread_cache_identity_override,
+        thread_cache_identity_override_set="thread_cache_identity_override" in fields,
         usage_sections=payload.usage_sections,
         usage_sections_set="usage_sections" in fields,
         expires_at=payload.expires_at,

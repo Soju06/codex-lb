@@ -3,7 +3,7 @@
 Initially verified locally on 2026-09-06 using Bun, Node 24.20.0, Chromium, and OpenSpec
 1.12.0. Browser checks use the existing fixture APIs and a production frontend
 build, including Japanese browser settings and narrow mobile viewports.
-The latest main sync and screenshot refresh are recorded in the 2026-09-11
+The latest main sync and screenshot refresh are recorded in the 2026-09-12
 section below.
 
 ## Assessment
@@ -24,7 +24,7 @@ Stable context and the existing Configuration page document the delivered behavi
 | Requirement | Implementation | Verification |
 | --- | --- | --- |
 | Dashboard supports runtime locale selection | `frontend/src/i18n/index.ts`, shared language toggle and existing mobile menu | Locale normalization tests; browser detection, query override, saved preference, reload, document language, and desktop/mobile switching checks. |
-| Dashboard feature surfaces render in the active locale | Complete `ja.json` bundle; API-key table and detail period labels | The refreshed bundles have 1,889 matching keys; interpolation variables and inline tags match English. Japanese plural, table/detail, login, validation, and inline-code rendering tests pass. |
+| Dashboard feature surfaces render in the active locale | Complete `ja.json` bundle; API-key table and detail period labels | The refreshed bundles have 1,982 matching keys; interpolation variables and inline tags match English. Japanese plural, table/detail, login, validation, and inline-code rendering tests pass. |
 | Japanese locale formats dashboard dates and calendar controls | Shared Intl formatter locale and API-key expiry picker | Japanese date/time and relative labels; explicit ISO/12h/24h preferences; unchanged compact units and USD amounts; accessible calendar navigation and date selection retaining 23:59:59 expiry. |
 
 ## Initial validation results: 2026-09-06
@@ -58,8 +58,8 @@ were not changed.
 
 ## Visual verification
 
-The eight screenshots below were refreshed on 2026-09-11 after merging main at
-`a096b6092f7d43b5c59d823a4aefc1b08b6b7f6b`. Each English/Japanese pair uses the
+The eight screenshots below were refreshed on 2026-09-12 after merging main at
+`bb4db9d08cc955743735678ccdb8d8bef19f7bea`. Each English/Japanese pair uses the
 same fixture data, light theme, and viewport: 1440 × 1000 on desktop and
 390 × 844 on mobile, captured at 2× device scale. Dashboard images capture the
 viewport; Settings images capture the full page. Before images show English;
@@ -143,3 +143,41 @@ bun run playwright test --config screenshots/playwright.config.ts --grep 'Japane
 All eight regenerated images were visually inspected. The PR body originally
 pinned image and verification links to `f27f8a2c`; publishing this refresh also
 requires updating those links to the new commit after pushing it.
+
+## Main sync and screenshot refresh: 2026-09-12
+
+Merged 21 main commits through
+`bb4db9d08cc955743735678ccdb8d8bef19f7bea` (1.25.0-beta.8) without conflicts.
+The Reports timestamp and API-key edit-dialog fixes from `8ad30514` are
+preserved. Added 93 Japanese strings for the thread identity report, cache
+isolation probe, and password/emergency sign-in surfaces. All four locale
+bundles now contain 1,982 keys, and Japanese interpolation variables and
+inline tags match English. Existing English strings did not require Japanese
+wording updates.
+
+An independent semantic review of the 93 additions found two cache-probe
+wording issues. The final translation explains that the prefix is unique per
+run, rather than claiming that the seed sends it only once, and describes a
+missing cache hit rather than asserting that nothing was stored.
+
+Refreshed and visually inspected all eight tracked English/Japanese desktop
+and mobile screenshots. Updated the Reports browser fixture for the new
+thread-identity endpoint and confirmed that its card renders in Japanese
+alongside the existing timestamp and API-key limit regressions.
+
+| Check | Result |
+| --- | --- |
+| `bun run test` | 181 files, 1,643 tests passed. |
+| Final locale and cache-probe component checks after wording refinement | 2 files, 19 tests passed. |
+| `bun run lint` and `bun run build` | Passed after the final edits; the production build includes TypeScript checking. |
+| Playwright `--config screenshots/playwright.config.ts --grep 'Japanese locale'` | 15 passed: eight refreshed screenshots, five locale behavior checks, and two review regressions. |
+| Backend `make lint` | Passed, including Ruff and the migration topology guard: 258 revisions, one head, and no revision differences from `origin/main`. |
+| Related backend tests | 188 passed: 187 before committing and the HEAD-dependent migration graph equality check after the merge commit. |
+| `openspec validate --specs --strict` | All 65 specifications passed. |
+| `mkdocs build --strict` | Passed. |
+| `git diff --check` and `git diff --cached --check` | Passed. |
+
+The pre-commit migration graph test reads revisions from `HEAD` and compares
+them with the working tree. An unfinished merge necessarily differs by the
+five migrations added by main; the topology guard itself passes against
+`origin/main`. The equality check passed after the merge commit was created.

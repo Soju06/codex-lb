@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, Eye, EyeOff, LogIn, LogOut, Menu } from "lucide-react";
+import { ChevronDown, Eye, EyeOff, LogIn, LogOut, Menu, ShieldAlert } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, NavLink, useLocation } from "react-router-dom";
@@ -43,6 +43,10 @@ export function AppHeader({
   const permissions = useAuthStore((state) => state.permissions);
   const tier = useAuthStore((state) => state.tier);
   const user = useAuthStore((state) => state.user);
+  // A break-glass session can exist on an install the store still derives as
+  // the individual tier, where there is no account chip to hang a badge on —
+  // so the indicator is a sibling of the chip, not an item inside its menu.
+  const breakGlassSession = useAuthStore((state) => state.breakGlassSession);
   const coreNavItems = CORE_NAV_ITEMS.filter((item) => hasPermission(permissions, item.requires));
   const advancedNavItems = ADVANCED_NAV_ITEMS.filter((item) => hasPermission(permissions, item.requires));
   // Individual installs keep today's Logout button; from the team tier the
@@ -165,6 +169,16 @@ export function AppHeader({
           >
             <PrivacyIcon className="h-3.5 w-3.5" aria-hidden="true" />
           </Button>
+          {breakGlassSession ? (
+            <span
+              data-testid="emergency-session-pill"
+              title={t("nav.emergencySession.description")}
+              className="hidden shrink-0 items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 sm:inline-flex dark:text-amber-400"
+            >
+              <ShieldAlert className="h-3 w-3" aria-hidden="true" />
+              {t("nav.emergencySession.label")}
+            </span>
+          ) : null}
           {showAccountMenu ? <AccountMenu /> : null}
           {showLogout && !showAccountMenu && (
             <Button
@@ -208,6 +222,15 @@ export function AppHeader({
                 </SheetTitle>
               </SheetHeader>
               <nav className="flex flex-col gap-0.5 px-4 pt-2">
+                {breakGlassSession ? (
+                  <span
+                    data-testid="emergency-session-pill-mobile"
+                    className="mb-2 flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-700 dark:text-amber-400"
+                  >
+                    <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+                    {t("nav.emergencySession.label")}
+                  </span>
+                ) : null}
                 {coreNavItems.map((item) => (
                   <NavLink key={item.to} to={item.to} onClick={() => setMobileOpen(false)}>
                     {({ isActive }) => (

@@ -7,12 +7,23 @@ import i18n from "@/i18n";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 import { renderWithProviders } from "@/test/utils";
-import type { ReportsResponse } from "@/features/reports/schemas";
+import type {
+  ReportsResponse,
+  ThreadIdentityFacet,
+  ThreadIdentityResponse,
+} from "@/features/reports/schemas";
 import { listAccounts } from "@/features/accounts/api";
 import { getRequestLogOptions } from "@/features/dashboard/api";
 import { getBrowserReportsTimeZone } from "@/features/reports/date";
-import { useReports, useReportsOptions } from "@/features/reports/hooks/use-reports";
-import { REPORT_CHART_VISIBILITY_STORAGE_KEY } from "@/features/reports/hooks/use-report-chart-visibility";
+import {
+  useReports,
+  useReportsOptions,
+  useThreadIdentity,
+} from "@/features/reports/hooks/use-reports";
+import {
+  REPORT_CHART_DEFINITIONS,
+  REPORT_CHART_VISIBILITY_STORAGE_KEY,
+} from "@/features/reports/hooks/use-report-chart-visibility";
 import { ReportsPage } from "./reports-page";
 
 vi.mock("@/features/accounts/api", () => ({
@@ -26,6 +37,7 @@ vi.mock("@/features/dashboard/api", () => ({
 vi.mock("@/features/reports/hooks/use-reports", () => ({
   useReports: vi.fn(),
   useReportsOptions: vi.fn(),
+  useThreadIdentity: vi.fn(),
 }));
 
 vi.mock("@/features/reports/date", async () => {
@@ -78,13 +90,43 @@ const EMPTY_REPORT: ReportsResponse = {
   byAccount: [],
 };
 
+const EMPTY_THREAD_IDENTITY_FACET: ThreadIdentityFacet = {
+  requests: 0,
+  requestShare: 0,
+  unattributedRequestShare: 0,
+  conversations: 0,
+  meanAccountsPerConversation: 0,
+  singleAccountConversationShare: 0,
+  turns: 0,
+  accountSwitchRate: 0,
+  cacheHitRatio: 0,
+  cacheSampleInputTokens: 0,
+  threadGroupingApproximate: false,
+};
+
 const useReportsOptionsMock = vi.mocked(useReportsOptions);
 const useReportsMock = vi.mocked(useReports);
+const useThreadIdentityMock = vi.mocked(useThreadIdentity);
 const listAccountsMock = vi.mocked(listAccounts);
 const getRequestLogOptionsMock = vi.mocked(getRequestLogOptions);
 const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
 type UseReportsMockResult = ReturnType<typeof useReports>;
 const REPORTS_TIMEZONE_STORAGE_KEY = "codex-lb-reports-timezone";
+// Derived so adding a card to REPORT_CHART_DEFINITIONS does not leave these
+// assertions checking a stale count.
+const ALL_CHARTS_BUTTON = `Charts (${REPORT_CHART_DEFINITIONS.length})`;
+const THREAD_IDENTITY: ThreadIdentityResponse = {
+  available: true,
+  maxDays: 7,
+  windowDays: 7,
+  conversationMinRequests: 3,
+  switchMaxGapSeconds: 600,
+  cacheMinInputTokens: 5000,
+  totalRequests: 0,
+  unkeyedRequestShare: 0,
+  keyed: EMPTY_THREAD_IDENTITY_FACET,
+  unkeyed: { ...EMPTY_THREAD_IDENTITY_FACET, threadGroupingApproximate: true },
+};
 
 const asUseReportsResult = (
   value: Partial<UseReportsMockResult>,
@@ -94,6 +136,12 @@ describe("ReportsPage", () => {
   beforeEach(() => {
     useReportsMock.mockReset();
     useReportsOptionsMock.mockReset();
+    useThreadIdentityMock.mockReset();
+    useThreadIdentityMock.mockReturnValue({
+      data: THREAD_IDENTITY,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useThreadIdentity>);
     useReportsOptionsMock.mockReturnValue({ data: { models: ["gpt-5.1", "gpt-5.2"], useragents: ["CLI", "SDK"] }, isLoading: false, refetch: vi.fn() } as unknown as ReturnType<typeof useReportsOptions>);
     listAccountsMock.mockReset();
     getRequestLogOptionsMock.mockReset();
@@ -630,7 +678,7 @@ describe("ReportsPage", () => {
     }
   });
 
-  it("renders all five line charts by default", async () => {
+  it("renders every report chart by default", async () => {
     useReportsMock.mockReturnValue(
       asUseReportsResult({
         data: EMPTY_REPORT,
@@ -651,6 +699,32 @@ describe("ReportsPage", () => {
     ]) {
       expect(await screen.findByText(heading)).toBeInTheDocument();
     }
+  });
+
+  it("only queries thread identity while its card is visible", async () => {
+    const user = userEvent.setup();
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(await screen.findByTestId("thread-identity-card")).toBeInTheDocument();
+    expect(useThreadIdentityMock.mock.calls.at(-1)?.[2]).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: ALL_CHARTS_BUTTON }));
+    await user.click(
+      screen.getByRole("menuitemcheckbox", { name: "Thread Identity & Cache Locality" }),
+    );
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByTestId("thread-identity-card")).not.toBeInTheDocument();
+    expect(useThreadIdentityMock.mock.calls.at(-1)?.[2]).toBe(false);
   });
 
   it("renders the selected Cost by Day and Queue Wait charts", async () => {
@@ -689,7 +763,7 @@ describe("ReportsPage", () => {
 
     renderWithProviders(<ReportsPage />);
 
-    await user.click(screen.getByRole("button", { name: "Charts (5)" }));
+    await user.click(screen.getByRole("button", { name: ALL_CHARTS_BUTTON }));
     for (const chartOption of screen.getAllByRole("menuitemcheckbox")) {
       await user.click(chartOption);
     }
@@ -729,7 +803,7 @@ describe("ReportsPage", () => {
     const callsBeforeToggle = useReportsMock.mock.calls.slice(-1).map(
       ([filters, timeZone]) => [filters, timeZone],
     );
-    await user.click(screen.getByRole("button", { name: "Charts (5)" }));
+    await user.click(screen.getByRole("button", { name: ALL_CHARTS_BUTTON }));
     await user.click(
       screen.getByRole("menuitemcheckbox", { name: "Queue Wait" }),
     );

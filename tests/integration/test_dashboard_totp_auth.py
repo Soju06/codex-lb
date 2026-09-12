@@ -139,6 +139,16 @@ async def test_dashboard_password_and_totp_flow(async_client, monkeypatch):
     )
     assert confirm.status_code == 200
 
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
+
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -225,6 +235,16 @@ async def test_disable_totp_requires_totp_verified_session(async_client, monkeyp
     )
     assert confirm.status_code == 200
 
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
+
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -273,6 +293,16 @@ async def test_disable_totp_rejects_replayed_step_code(async_client, monkeypatch
         json={"secret": secret, "code": setup_code},
     )
     assert confirm.status_code == 200
+
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
 
     enable = await async_client.put(
         "/api/settings",
@@ -349,6 +379,16 @@ async def test_password_management_requires_totp_when_totp_required(async_client
         json={"secret": secret, "code": setup_code},
     )
     assert confirm.status_code == 200
+
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
 
     enable = await async_client.put(
         "/api/settings",
@@ -438,6 +478,16 @@ async def test_verify_rejects_one_of_concurrent_replays(async_client, monkeypatc
         json={"secret": secret, "code": setup_code},
     )
     assert confirm.status_code == 200
+
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
 
     enable = await async_client.put(
         "/api/settings",

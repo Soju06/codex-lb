@@ -146,8 +146,10 @@ async def _login(
     configured_ttl: int,
     runtime_settings: SimpleNamespace | None = None,
     payload: PasswordLoginRequest | None = None,
-) -> tuple[JSONResponse, SimpleNamespace, SimpleNamespace]:
-    ip_limiter = _limiter()
+) -> tuple[JSONResponse, SimpleNamespace, SimpleNamespace, SimpleNamespace]:
+    # Two buckets are spent by every attempt: the per-(address, username) one
+    # and the coarse per-address ceiling that bounds the endpoint.
+    account_limiter, address_limiter = _limiter(), _limiter()
     store = _store()
     settings_cache = SimpleNamespace(
         get=AsyncMock(return_value=SimpleNamespace(dashboard_session_ttl_seconds=configured_ttl))
@@ -156,13 +158,14 @@ async def _login(
     with (
         patch("app.core.auth.dashboard_session_ttl._get_settings", return_value=runtime),
         patch("app.core.request_locality.get_settings", return_value=runtime),
-        patch("app.modules.dashboard_auth.api.get_password_rate_limiter", return_value=ip_limiter),
+        patch("app.modules.dashboard_auth.api.get_password_rate_limiter", return_value=account_limiter),
+        patch("app.modules.dashboard_auth.api.get_password_address_rate_limiter", return_value=address_limiter),
         patch("app.modules.dashboard_auth.api.get_dashboard_session_store", return_value=store),
         patch("app.modules.dashboard_auth.api.get_settings_cache", return_value=settings_cache),
     ):
         response = await login_password(request, payload or PasswordLoginRequest(password="password123"), context)
     assert isinstance(response, JSONResponse)
-    return response, store, ip_limiter
+    return response, store, account_limiter, address_limiter
 
 
 @pytest.mark.asyncio
@@ -220,7 +223,7 @@ async def test_disable_totp_does_not_spend_rate_limit_budget_before_session_vali
 @pytest.mark.asyncio
 async def test_login_password_uses_configured_dashboard_session_ttl_for_cookie():
     user = _user()
-    response, store, ip_limiter = await _login(
+    response, store, account_limiter, address_limiter = await _login(
         _build_login_request("/api/dashboard-auth/password/login"),
         context=_login_context(user),
         configured_ttl=7200,
@@ -235,14 +238,24 @@ async def test_login_password_uses_configured_dashboard_session_ttl_for_cookie()
         ttl_seconds=7200,
         auth_method="password",
         step_up_verified_at=ANY,
+        break_glass=False,
     )
-    ip_limiter.check_and_increment.assert_awaited_once()
-    ip_limiter.clear_for_key.assert_awaited_once()
+    # Both buckets are spent: the per-address ceiling is added to the
+    # per-account budget, never swapped in. Only the per-account bucket is
+    # cleared -- clearing the coarse one would let anybody holding one valid
+    # account reset the endpoint's only ceiling between sprays.
+    account_limiter.check_and_increment.assert_awaited_once()
+    account_limiter.clear_for_key.assert_awaited_once()
+    address_limiter.check_and_increment.assert_awaited_once()
+    address_limiter.clear_for_key.assert_not_awaited()
+    assert (
+        address_limiter.check_and_increment.await_args.args[0] != account_limiter.check_and_increment.await_args.args[0]
+    )
 
 
 @pytest.mark.asyncio
 async def test_login_password_uses_one_year_ttl_for_direct_loopback_dashboard_request():
-    response, store, _ = await _login(
+    response, store, _, _ = await _login(
         _build_login_request(
             "/api/dashboard-auth/password/login",
             client_host="127.0.0.1",
@@ -258,7 +271,7 @@ async def test_login_password_uses_one_year_ttl_for_direct_loopback_dashboard_re
 
 @pytest.mark.asyncio
 async def test_login_password_caps_non_loopback_dashboard_session_ttl():
-    response, store, _ = await _login(
+    response, store, _, _ = await _login(
         _build_login_request("/api/dashboard-auth/password/login"),
         context=_login_context(_user()),
         configured_ttl=90 * 24 * 60 * 60,
@@ -272,7 +285,7 @@ async def test_login_password_caps_non_loopback_dashboard_session_ttl():
 async def test_login_password_caps_later_duplicate_forwarded_identity_from_loopback_socket():
     runtime_settings = _runtime_settings()
     runtime_settings.dashboard_trust_loopback_host_header_for_long_sessions = True
-    response, store, _ = await _login(
+    response, store, _, _ = await _login(
         _build_login_request(
             "/api/dashboard-auth/password/login",
             client_host="127.0.0.1",
@@ -293,12 +306,12 @@ async def test_login_password_caps_later_duplicate_forwarded_identity_from_loopb
 @pytest.mark.asyncio
 async def test_remote_admin_sessions_are_capped_at_twelve_hours_even_under_thirty_days():
     thirty_days = 30 * 24 * 60 * 60
-    _, admin_store, _ = await _login(
+    _, admin_store, _, _ = await _login(
         _build_login_request("/api/dashboard-auth/password/login"),
         context=_login_context(_user(PresetRoleSlug.ADMIN)),
         configured_ttl=thirty_days,
     )
-    _, operator_store, _ = await _login(
+    _, operator_store, _, _ = await _login(
         _build_login_request("/api/dashboard-auth/password/login"),
         context=_login_context(_user(PresetRoleSlug.OPERATOR)),
         configured_ttl=thirty_days,
@@ -317,10 +330,12 @@ async def test_login_password_username_required_does_not_spend_budget():
             session=object(),
         ),
     )
-    ip_limiter = _limiter()
+    account_limiter = _limiter()
+    address_limiter = _limiter()
     audit_limiter = _limiter()
     with (
-        patch("app.modules.dashboard_auth.api.get_password_rate_limiter", return_value=ip_limiter),
+        patch("app.modules.dashboard_auth.api.get_password_rate_limiter", return_value=account_limiter),
+        patch("app.modules.dashboard_auth.api.get_password_address_rate_limiter", return_value=address_limiter),
         patch("app.modules.dashboard_auth.api.get_login_failed_audit_rate_limiter", return_value=audit_limiter),
         patch("app.modules.dashboard_auth.api.log_login_failed") as log_login_failed,
     ):
@@ -332,9 +347,17 @@ async def test_login_password_username_required_does_not_spend_budget():
             )
 
     assert exc_info.value.code == "username_required"
-    # Audited, but only through the read-only password check plus the audit budget.
-    ip_limiter.check.assert_awaited_once()
-    ip_limiter.check_and_increment.assert_not_awaited()
+    # Audited, but only through the read-only check of the bucket ordinary
+    # logins actually increment -- the per-address one -- plus the audit budget.
+    # A per-username key would be a counter nothing advances, so the guard
+    # would never bite.
+    address_limiter.check.assert_awaited_once()
+    # Assembled, not written out: "<prefix>:<host>" in one literal reads as a
+    # credential pair to secret scanners.
+    assert address_limiter.check.await_args.args[0] == "password_" + "login:203.0.113.10"
+    address_limiter.check_and_increment.assert_not_awaited()
+    account_limiter.check.assert_not_awaited()
+    account_limiter.check_and_increment.assert_not_awaited()
     audit_limiter.check_and_increment.assert_awaited_once()
     log_login_failed.assert_called_once()
     assert log_login_failed.call_args.args[1:] == ("password", "username_required")

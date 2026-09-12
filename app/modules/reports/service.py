@@ -19,7 +19,16 @@ from app.modules.reports.schemas import (
     ReportsOptionsResponse,
     ReportsResponse,
     ReportSummary,
+    ThreadIdentityFacet,
+    ThreadIdentityResponse,
     UserAgentCostEntry,
+)
+from app.modules.reports.thread_identity import (
+    CACHE_MIN_INPUT_TOKENS,
+    CONVERSATION_MIN_REQUESTS,
+    MAX_THREAD_IDENTITY_DAYS,
+    SWITCH_MAX_GAP_SECONDS,
+    ThreadIdentityFacetRow,
 )
 
 
@@ -168,6 +177,43 @@ class ReportsService:
             ],
         )
 
+    async def get_thread_identity(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        report_timezone: str | None = None,
+    ) -> ThreadIdentityResponse:
+        start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
+        window_days = (end_date - start_date).days + 1
+        # Mirrors the speed medians: a range too wide to scan raw request logs
+        # answers "unavailable" instead of costing the database the scan.
+        available = window_days <= MAX_THREAD_IDENTITY_DAYS
+        total_requests = 0
+        keyed = unkeyed = ThreadIdentityFacet()
+        unkeyed_request_share = 0.0
+        if available:
+            facets = await self._repository.aggregate_thread_identity(
+                _local_midnight_to_utc_naive(start_date, timezone_info),
+                _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info),
+            )
+            keyed_row, unkeyed_row = facets[True], facets[False]
+            total_requests = keyed_row.requests + unkeyed_row.requests
+            unkeyed_request_share = _ratio(unkeyed_row.requests, total_requests)
+            keyed = _thread_identity_facet(keyed_row, total_requests, approximate=False)
+            unkeyed = _thread_identity_facet(unkeyed_row, total_requests, approximate=True)
+        return ThreadIdentityResponse(
+            available=available,
+            max_days=MAX_THREAD_IDENTITY_DAYS,
+            window_days=window_days,
+            conversation_min_requests=CONVERSATION_MIN_REQUESTS,
+            switch_max_gap_seconds=SWITCH_MAX_GAP_SECONDS,
+            cache_min_input_tokens=CACHE_MIN_INPUT_TOKENS,
+            total_requests=total_requests,
+            unkeyed_request_share=unkeyed_request_share,
+            keyed=keyed,
+            unkeyed=unkeyed,
+        )
+
     async def get_options(
         self,
         start_date: date | None = None,
@@ -212,3 +258,30 @@ def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:
 
 def _local_midnight_to_utc_naive(value: date, timezone_info: ZoneInfo | timezone) -> datetime:
     return to_utc_naive(datetime.combine(value, datetime.min.time(), tzinfo=timezone_info))
+
+
+def _ratio(numerator: float, denominator: float) -> float:
+    return round(numerator / denominator, 4) if denominator > 0 else 0.0
+
+
+def _thread_identity_facet(
+    row: ThreadIdentityFacetRow,
+    total_requests: int,
+    *,
+    approximate: bool,
+) -> ThreadIdentityFacet:
+    return ThreadIdentityFacet(
+        requests=row.requests,
+        request_share=_ratio(row.requests, total_requests),
+        unattributed_request_share=_ratio(row.unattributed_requests, row.requests),
+        conversations=row.conversations,
+        mean_accounts_per_conversation=round(row.conversation_account_total / row.conversations, 4)
+        if row.conversations > 0
+        else 0.0,
+        single_account_conversation_share=_ratio(row.single_account_conversations, row.conversations),
+        turns=row.turns,
+        account_switch_rate=_ratio(row.account_switches, row.turns),
+        cache_hit_ratio=_ratio(row.cache_cached_input_tokens, row.cache_input_tokens),
+        cache_sample_input_tokens=row.cache_input_tokens,
+        thread_grouping_approximate=approximate,
+    )

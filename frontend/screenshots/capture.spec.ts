@@ -1,7 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page, type Route } from "@playwright/test";
-import type { ReportsResponse } from "../src/features/reports/schemas";
+import type { ReportsResponse, ThreadIdentityFacet, ThreadIdentityResponse } from "../src/features/reports/schemas";
 
 import {
   accounts,
@@ -499,13 +499,43 @@ test.describe("Japanese locale review regressions", () => {
       byUseragent: [],
       byAccount: [],
     };
+    const emptyFacet: ThreadIdentityFacet = {
+      requests: 0,
+      requestShare: 0,
+      unattributedRequestShare: 0,
+      conversations: 0,
+      meanAccountsPerConversation: 0,
+      singleAccountConversationShare: 0,
+      turns: 0,
+      accountSwitchRate: 0,
+      cacheHitRatio: 0,
+      cacheSampleInputTokens: 0,
+      threadGroupingApproximate: false,
+    };
+    const threadIdentity: ThreadIdentityResponse = {
+      generatedAt: report.generatedAt,
+      available: true,
+      maxDays: 7,
+      windowDays: 7,
+      conversationMinRequests: 3,
+      switchMaxGapSeconds: 600,
+      cacheMinInputTokens: 5000,
+      totalRequests: 0,
+      unkeyedRequestShare: 0,
+      keyed: emptyFacet,
+      unkeyed: { ...emptyFacet, threadGroupingApproximate: true },
+    };
     await page.route(/\/api\/reports(?:\?|$)/, (route) => fulfill(route, report));
     await page.route(/\/api\/reports\/options(?:\?|$)/, (route) => fulfill(route, { models: [], useragents: [] }));
+    await page.route(/\/api\/reports\/thread-identity(?:\?|$)/, (route) => fulfill(route, threadIdentity));
     await page.goto(`${BASE_URL}/reports`);
     const timestamp = page.getByText(/ 時点$/);
     await expect(timestamp).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("reports.jpg"), type: "jpeg", quality: 85, animations: "disabled" });
     await expect(timestamp).toHaveText("午後02:30:45 2026/09/06 時点");
+    const identityCard = page.getByTestId("thread-identity-card");
+    await expect(identityCard.getByText("スレッド識別とキャッシュ局所性", { exact: true })).toBeVisible();
+    await identityCard.screenshot({ path: testInfo.outputPath("thread-identity.jpg"), type: "jpeg", quality: 85, animations: "disabled" });
   });
 
   test("translates existing limits in the API-key edit dialog", async ({ page }, testInfo) => {

@@ -10,6 +10,7 @@ from app.modules.shared.schemas import DashboardModel
 _DEFAULT_WEEKLY_PACE_WORKING_DAYS = "0,1,2,3,4,5,6"
 _WEEKLY_PACE_SMOOTHING_MINUTES = (15, 30, 60, 120, 240)
 _HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN = r"^(smart|always_http|always_websocket|pinned)$"
+_THREAD_CACHE_IDENTITY_MODE_PATTERN = r"^(shared|isolated)$"
 
 
 def _normalize_weekly_pace_working_days(value: str | None) -> str | None:
@@ -49,11 +50,19 @@ class SettingProvenance(DashboardModel):
     default: int | float | str | bool | None = None
 
 
+#: ``dashboard_settings.local_login_policy`` on the wire (PLAN §4.6).
+LocalLoginPolicyLiteral = Literal["enabled", "admins_only", "break_glass_only"]
+
+
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(auto|http|websocket)$")
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
+    # Effective mode; ``provenance.thread_cache_identity_mode`` says whether it
+    # came from the dashboard column, the environment or the code default.
+    thread_cache_identity_mode: str = Field(pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN)
+    thread_cache_identity_mode_override: str | None = Field(default=None, pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN)
     proxy_account_response_create_limit: int = Field(ge=0)
     proxy_account_response_create_limit_environment_value: int = Field(ge=0)
     proxy_account_response_create_limit_override: int | None = Field(default=None, ge=0)
@@ -110,6 +119,9 @@ class DashboardSettingsResponse(DashboardModel):
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_required_for_admin_role: bool
+    #: Who may still sign in with a local password (PLAN §4.6). Database
+    #: only: no environment variable can silently re-open a closed door.
+    local_login_policy: LocalLoginPolicyLiteral
     #: Active password accounts without a TOTP secret; the second counts only
     #: admin-level ones. Both say "N accounts will have to enrol at next sign-in".
     users_without_totp_count: int = Field(ge=0)
@@ -201,6 +213,7 @@ SECURITY_SETTINGS_FIELDS: frozenset[str] = frozenset(
     {
         "totp_required_on_login",
         "totp_required_for_admin_role",
+        "local_login_policy",
         "api_key_auth_enabled",
         "guest_access_enabled",
         "dashboard_session_ttl_seconds",
@@ -232,6 +245,12 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     http_downstream_transport_policy: str | None = Field(
         default=None,
         pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN,
+    )
+    # Tri-state like the caps below: omitted = unchanged, null = inherit the
+    # environment value or the ``shared`` code default, value = store.
+    thread_cache_identity_mode: str | None = Field(
+        default=None,
+        pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN,
     )
     proxy_account_response_create_limit: int | None = Field(default=None, ge=0)
     proxy_account_stream_limit: int | None = Field(default=None, ge=0)
@@ -282,6 +301,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     totp_required_for_admin_role: bool | None = None
+    local_login_policy: LocalLoginPolicyLiteral | None = None
     api_key_auth_enabled: bool | None = None
     hide_upstream_quota_from_api_keys: bool | None = None
     limit_warmup_enabled: bool | None = None

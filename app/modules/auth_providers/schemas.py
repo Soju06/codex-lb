@@ -34,6 +34,10 @@ class AuthProviderUpdateRequest(DashboardModel):
     model_config = ConfigDict(extra="forbid")
 
     label: str | None = Field(default=None, min_length=1, max_length=64)
+    #: Turning a password-less sign-in method on needs a qualifying
+    #: break-glass account (409 ``break_glass_requires_totp``); turning one
+    #: off is never gated, so the recovery direction is always open.
+    enabled: bool | None = None
     unknown_identity_role_id: str | None = None
     no_match_role_id: str | None = None
     link_by_email: bool | None = None

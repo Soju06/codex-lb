@@ -32,6 +32,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clients.thread_cache_identity import ThreadCacheIdentity
 from app.core.clock import clock_for, scheduler_for
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
@@ -493,6 +494,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         preferred_account_id: str | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
         enforce_openai_sdk_contract: bool = True,
+        thread_cache_identity: ThreadCacheIdentity | None = None,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         clock = clock_for(proxy)
@@ -578,6 +580,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 "codex_lb_account_id": account.id,
                 # Selected subscription Account, independent of optional legacy header.
                 "synthesize_routing_hint": True,
+                "thread_cache_identity": thread_cache_identity,
             }
             if upstream_stream_transport is not None:
                 stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport

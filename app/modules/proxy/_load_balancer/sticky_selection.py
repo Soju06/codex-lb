@@ -370,6 +370,45 @@ class StickySelectionOutcome(Generic[SelectionInputsT]):
     error_code: str | None
     resets_at: int | None = None
     disposition: StickySelectionDisposition = "shared_result"
+    # Set only alongside ``hard_affinity_saturated`` when the resolved hard
+    # owner is one of the caller's own ``exclude_account_ids``
+    # (``_hard_affinity_owner_excluded_by_caller``).
+    hard_affinity_owner_excluded: bool = False
+
+
+def _hard_affinity_owner_excluded_by_caller(
+    *,
+    error_code: str | None,
+    owner_account_id: str | None | object,
+    exclude_account_ids: frozenset[str],
+) -> bool:
+    """Whether this ``hard_affinity_saturated`` was caused by the caller's own exclusion.
+
+    ``hard_affinity_saturated`` means "the resolved hard ``CODEX_SESSION``
+    owner is not selectable". Two causes reach the same code and the callers'
+    recovery wait (``_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS``) can only help
+    one of them:
+
+    * the owner is briefly unavailable (cap, health backoff, status) -- it may
+      recover inside the wait, which is exactly why the short wait exists;
+    * the caller passed the owner in ``exclude_account_ids`` -- the exclusion
+      filter drops it from the pool before ownership narrows selection to it
+      (``select_account``), so **no** amount of waiting can produce a
+      candidate while the caller keeps excluding it. Selection is not going to
+      spill to another account either: a resolved hard row is ownership
+      evidence, never a preference.
+
+    Only the selector can tell these apart, because only it knows which
+    account the row resolved to. Reporting the distinction (rather than the
+    owner id itself) keeps the account id out of surfaces that would have to
+    redact it, and answers exactly the question every caller asks: "is my own
+    exclusion set the reason, so is waiting futile?"
+    """
+    return (
+        error_code == "hard_affinity_saturated"
+        and isinstance(owner_account_id, str)
+        and owner_account_id in exclude_account_ids
+    )
 
 
 async def run_sticky_selection_path(
@@ -1306,6 +1345,11 @@ async def run_sticky_selection_path(
         error_message=error_message,
         error_code=selection_error_code,
         resets_at=selection_resets_at,
+        hard_affinity_owner_excluded=_hard_affinity_owner_excluded_by_caller(
+            error_code=selection_error_code,
+            owner_account_id=sticky_existing_account_id,
+            exclude_account_ids=request.exclude_account_ids,
+        ),
     )
 
 

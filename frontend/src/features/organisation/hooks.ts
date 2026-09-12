@@ -17,6 +17,8 @@ import {
 } from "@/features/organisation/api";
 import { REFUSED_ACTION, REFUSED_REASON, refusedSince } from "@/features/organisation/rules";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { getSettings, updateSettings } from "@/features/settings/api";
+import type { SettingsUpdateRequest } from "@/features/settings/schemas";
 import { ApiError } from "@/lib/api-client";
 import { getErrorMessage } from "@/utils/errors";
 
@@ -24,6 +26,8 @@ export const PROVIDERS_QUERY_KEY = ["auth-providers", "list"] as const;
 export const MAPPINGS_QUERY_KEY = ["role-mappings", "list"] as const;
 export const REFUSED_SIGN_INS_QUERY_KEY = ["audit-logs", "refused-sign-ins"] as const;
 export const ASSIGNABLE_ROLES_QUERY_KEY = ["role-mappings", "assignable-roles"] as const;
+/** The shared settings query key; the login-policy card reads and writes the same row. */
+export const SETTINGS_QUERY_KEY = ["settings", "detail"] as const;
 
 // Backend refusals this group explains in its own words; anything else surfaces
 // the server message unchanged.
@@ -37,13 +41,42 @@ const EXPLAINED_ERROR_CODES = new Set([
   "mapping_not_found",
   "role_not_assignable",
   "unknown_claim",
+  // The break-glass guard, in both directions (PLAN §4.2/§4.6).
+  "break_glass_requires_totp",
+  "last_break_glass_protected",
 ]);
+
+/**
+ * The account a `break_glass_requires_totp` refusal names. The server sends it
+ * so the refusal doubles as the instruction; nothing else in the envelope is
+ * shown to the person.
+ */
+export function breakGlassAccountFromError(error: unknown): string | null {
+  if (!(error instanceof ApiError)) {
+    return null;
+  }
+  const envelope = error.details;
+  if (typeof envelope !== "object" || envelope === null || !("details" in envelope)) {
+    return null;
+  }
+  const details = (envelope as { details?: unknown }).details;
+  if (typeof details !== "object" || details === null || !("username" in details)) {
+    return null;
+  }
+  const username = (details as { username?: unknown }).username;
+  return typeof username === "string" && username.length > 0 ? username : null;
+}
 
 export function organisationErrorMessage(error: unknown, t: TFunction): string {
   if (error instanceof ApiError && EXPLAINED_ERROR_CODES.has(error.code)) {
     return t(`organisation.errors.${error.code}`);
   }
   return getErrorMessage(error);
+}
+
+/** The settings row, for the one field this group owns (`local_login_policy`). */
+export function useOrganisationSettings(enabled = true) {
+  return useQuery({ queryKey: SETTINGS_QUERY_KEY, queryFn: getSettings, enabled });
 }
 
 export function useAuthProviders(enabled = true) {
@@ -111,13 +144,28 @@ export function useOrganisationMutations() {
     mutationFn: (mappingId: string) => deleteRoleMapping(mappingId),
     onSuccess: settle,
   });
+  // Changing the login policy changes `access_summary.local_login_policy`,
+  // which is what the disclosure tier and the collapsed summary line read.
+  const updateLoginPolicy = useMutation({
+    mutationFn: (payload: SettingsUpdateRequest) => updateSettings(payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: SETTINGS_QUERY_KEY });
+      await settle();
+    },
+    onError: (error) => {
+      if (error instanceof ApiError && error.code === "settings_conflict") {
+        // Another writer committed since the form loaded; refetch so a retry carries the fresh version.
+        void queryClient.invalidateQueries({ queryKey: SETTINGS_QUERY_KEY });
+      }
+    },
+  });
   const reorderMappings = useMutation({
     mutationFn: (payload: { provider: string; providerKey: string; ids: string[] }) => reorderRoleMappings(payload),
     onSuccess: settle,
   });
 
-  const busy = [updateProvider, createMapping, updateMapping, removeMapping, reorderMappings].some(
+  const busy = [updateProvider, createMapping, updateMapping, removeMapping, reorderMappings, updateLoginPolicy].some(
     (mutation) => mutation.isPending,
   );
-  return { updateProvider, createMapping, updateMapping, removeMapping, reorderMappings, busy };
+  return { updateProvider, createMapping, updateMapping, removeMapping, reorderMappings, updateLoginPolicy, busy };
 }

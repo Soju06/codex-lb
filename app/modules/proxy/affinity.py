@@ -379,7 +379,7 @@ def _derive_prompt_cache_anchor(
     window = build_thread_window(
         getattr(payload, "input", None),
         domain=thread_anchor_domain(
-            api_key_id=api_key_id,
+            owner_row_id=api_key_id,
             model_class=model_class or "",
             instructions=instructions_text,
         ),

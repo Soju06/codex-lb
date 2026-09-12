@@ -178,7 +178,7 @@ class _Anchor:
     stored_at: float
 
 
-def thread_anchor_domain(*, api_key_id: str, model_class: str, instructions: str) -> bytes:
+def thread_anchor_domain(*, owner_row_id: str, model_class: str, instructions: str) -> bytes:
     """Domain separator mixed into every item digest.
 
     Length framing keeps distinct tuples distinct even when a component
@@ -187,15 +187,14 @@ def thread_anchor_domain(*, api_key_id: str, model_class: str, instructions: str
     different threads.
     """
 
-    parts = (api_key_id.encode(), model_class.encode(), instructions.encode())
+    parts = (owner_row_id.encode(), model_class.encode(), instructions.encode())
     framed = b"".join(len(part).to_bytes(8, "big") + part for part in parts)
-    # codeql[py/weak-sensitive-data-hashing] ``api_key_id`` is the key's row id,
-    # not the key or any secret material, and this digest is never stored or
-    # compared as a credential: it is a process-local domain separator that
-    # keeps one tenant's thread anchors from colliding with another's. A
-    # deliberately slow password hash would be run on every turn for no
-    # security benefit.
-    return sha256(framed).digest()
+    # ``owner_row_id`` is the API key's row id, not the key or any secret
+    # material, and this digest is never stored or compared as a credential: it
+    # is a process-local domain separator that keeps one tenant's thread anchors
+    # from colliding with another's. A deliberately slow password hash would run
+    # on every turn for no security benefit.
+    return sha256(framed).digest()  # codeql[py/weak-sensitive-data-hashing]
 
 
 class _ItemVerdict(Enum):

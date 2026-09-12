@@ -285,7 +285,7 @@ class TestUnanchorableRequests:
     def test_non_list_input_is_unanchorable(self):
         """`ResponsesRequest` normalises a bare string into a one-item list, so
         this guards the defensive branch for anything that is not a list."""
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         assert build_thread_window(_json_value("hello world"), domain=domain) is None
         assert build_thread_window(_json_value(None), domain=domain) is None
 
@@ -362,7 +362,7 @@ class _FakeClock:
 
 class TestThreadAnchorIndexBounds:
     def _window(self, index: int):
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         window = build_thread_window(_json_value([_user(f"a{index}"), _user(f"b{index}")]), domain=domain)
         assert window is not None
         return window
@@ -412,7 +412,7 @@ class TestThreadAnchorIndexBounds:
         assert len(index) == 0
 
     def test_window_is_bounded_by_the_total_encoding_ceiling(self):
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         big = [_user("z" * 64 * 1024) for _ in range(40)]
         window = build_thread_window(_json_value(big), domain=domain)
         assert window is not None
@@ -427,7 +427,7 @@ class TestThreadAnchorIndexBounds:
         ``TestOversizedItemDoesNotPoisonTheThread`` -- so the two items here
         yield a one-item window, and an oversized *last* item yields none.
         """
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         oversized = [_user("z" * (_MAX_ITEM_ENCODED_CHARS + 1)), _user("tail")]
         bounded = build_thread_window(_json_value(oversized), domain=domain)
         assert bounded is not None
@@ -524,7 +524,7 @@ class TestLargeTrailingItemsDoNotCollapseTheWindow:
     def test_window_keeps_the_documented_item_floor(self, item_chars: int):
         from app.modules.proxy.thread_anchors import _MIN_WINDOW_ITEMS
 
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         items = [_user(f"{index}-" + "z" * item_chars) for index in range(20)]
         window = build_thread_window(_json_value(items), domain=domain)
         assert window is not None
@@ -540,7 +540,7 @@ class TestOversizedItemDoesNotPoisonTheThread:
     """
 
     def test_an_oversized_item_bounds_the_window_instead_of_poisoning_the_body(self):
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         items = [
             _user("z" * (_MAX_ITEM_ENCODED_CHARS + 1)),
             _user("a"),
@@ -623,7 +623,7 @@ class TestIndexReferencesFollowTheirAnchors:
     """
 
     def _window(self, index: int):
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         window = build_thread_window(_json_value([_user(f"a{index}"), _user(f"b{index}")]), domain=domain)
         assert window is not None
         return window
@@ -664,7 +664,7 @@ class TestPerItemCeilingIsEnforcedBeforeEncoding:
             return real_iterencode(value)
 
         monkeypatch.setattr(thread_anchors._ITEM_ENCODER, "iterencode", spy)
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         items = [_user("z" * (_MAX_ITEM_ENCODED_CHARS + 1)), _user("a"), _user("b"), _user("c")]
         window = build_thread_window(_json_value(items), domain=domain)
         assert window is not None
@@ -682,7 +682,7 @@ class TestNonAsciiItemsAreNotExpandedSixfold:
     """
 
     def test_a_large_non_ascii_item_is_digested_not_refused(self):
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         # Comfortably under the per-item ceiling as written, ~6x over it when
         # every code point is escaped.
         korean = "안녕하세요 " * 40_000
@@ -694,7 +694,7 @@ class TestNonAsciiItemsAreNotExpandedSixfold:
     def test_encoded_size_tracks_the_raw_size_for_non_ascii_text(self):
         from app.modules.proxy.thread_anchors import _bounded_item_digest
 
-        domain = thread_anchor_domain(api_key_id="ak", model_class="std", instructions="i")
+        domain = thread_anchor_domain(owner_row_id="ak", model_class="std", instructions="i")
         item = _json_value(_user("한" * 100_000))
         digested = _bounded_item_digest(domain, item)
         assert isinstance(digested, tuple)

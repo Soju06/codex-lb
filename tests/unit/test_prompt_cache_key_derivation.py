@@ -11,7 +11,7 @@ from __future__ import annotations
 import random
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import cast
+from typing import TypedDict, cast
 
 import pytest
 
@@ -244,6 +244,7 @@ class TestDistinctThreadsStayDistinct:
         codex = _derive_prompt_cache_key(_request(items, model="gpt-5.3-codex"), api_key)
         std = _derive_prompt_cache_key(_request(items, model="gpt-5.4"), api_key)
         assert len({mini, codex, std}) == 3
+        assert mini is not None and codex is not None and std is not None
         assert "-mini-" in mini
         assert "-codex-" in codex
         assert "-std-" in std
@@ -446,7 +447,16 @@ class TestUnanchorableKeyIsNeverPromoted:
     unanchorable thread of that API key onto one row and one account.
     """
 
-    _KWARGS = {
+    # A plain dict literal infers `bool | int` for its values, so `**self._KWARGS`
+    # widens every keyword to that union and the checker rejects the call. A
+    # TypedDict keeps one type per key through the unpacking.
+    class _Kwargs(TypedDict):
+        codex_session_affinity: bool
+        openai_cache_affinity: bool
+        openai_cache_affinity_max_age_seconds: int
+        sticky_threads_enabled: bool
+
+    _KWARGS: _Kwargs = {
         "codex_session_affinity": True,
         "openai_cache_affinity": True,
         "openai_cache_affinity_max_age_seconds": 1800,

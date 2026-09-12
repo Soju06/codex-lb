@@ -189,6 +189,40 @@ class DashboardUsersRepository:
             stmt = stmt.where(DashboardUser.id != exclude_user_id)
         return int((await self._session.execute(stmt)).scalar_one())
 
+    def _qualifying_break_glass_filter(self) -> ColumnElement[bool]:
+        """The five facts of a qualifying break-glass account, as a WHERE clause.
+
+        Kept in step with :func:`app.modules.dashboard_users.break_glass.qualifies`;
+        the password term is what stops a proxy-provisioned admin with no local
+        credential from counting as a way back in.
+        """
+
+        return and_(
+            DashboardUser.is_break_glass.is_(True),
+            DashboardUser.status == DashboardUserStatus.ACTIVE.value,
+            DashboardUser.role_id == PRESET_ROLE_IDS[PresetRoleSlug.ADMIN],
+            DashboardUser.totp_secret_encrypted.is_not(None),
+            DashboardUser.password_hash.is_not(None),
+        )
+
+    async def count_qualifying_break_glass(self, *, exclude_user_id: str | None = None) -> int:
+        """Accounts that could still open the door while local sign-in is restricted."""
+
+        stmt = select(func.count()).select_from(DashboardUser).where(self._qualifying_break_glass_filter())
+        if exclude_user_id is not None:
+            stmt = stmt.where(DashboardUser.id != exclude_user_id)
+        return int((await self._session.execute(stmt)).scalar_one())
+
+    async def list_break_glass_designations(self) -> Sequence[DashboardUser]:
+        """Every designated account, qualifying or not, so a refusal can name the one that would fix it."""
+
+        stmt = (
+            _user_query()
+            .where(DashboardUser.is_break_glass.is_(True))
+            .order_by(DashboardUser.created_at.asc(), DashboardUser.id.asc())
+        )
+        return (await self._session.execute(stmt)).scalars().all()
+
     async def local_auth_state(self) -> LocalAuthState:
         active = DashboardUser.status == DashboardUserStatus.ACTIVE.value
         totals = (
@@ -271,6 +305,14 @@ class DashboardUsersRepository:
         each other queue instead of both passing the last-admin check.
         PostgreSQL: lock the active admin rows ``FOR UPDATE``; every mutation
         that could change who counts as an admin must go through them.
+
+        ``BEGIN IMMEDIATE`` cannot run inside an open transaction, so a caller
+        that has already read something falls back to a row-less ``UPDATE``.
+        That statement is not a no-op for locking: SQLite opens the table for
+        writing and takes the RESERVED lock before evaluating the predicate,
+        which is the whole point of the fallback. Callers should still acquire
+        before their first read, so the two dialects take the lock at the same
+        moment and neither depends on that subtlety.
         """
 
         if self._session.get_bind().dialect.name == "sqlite":
@@ -299,16 +341,46 @@ class DashboardUsersRepository:
             .exists()
         )
 
-    async def update_role_status_guarded(self, user_id: str, *, role_id: str, status: str) -> bool:
-        """Write role/status only while another active admin exists (no commit); ``False`` = refused."""
+    def _other_qualifying_break_glass_exists(self, user_id: str) -> ColumnElement[bool]:
+        other = aliased(DashboardUser)
+        return (
+            select(other.id)
+            .where(other.id != user_id)
+            .where(other.is_break_glass.is_(True))
+            .where(other.status == DashboardUserStatus.ACTIVE.value)
+            .where(other.role_id == PRESET_ROLE_IDS[PresetRoleSlug.ADMIN])
+            .where(other.totp_secret_encrypted.is_not(None))
+            .where(other.password_hash.is_not(None))
+            .exists()
+        )
 
+    async def update_role_status_guarded(
+        self,
+        user_id: str,
+        *,
+        role_id: str,
+        status: str,
+        is_break_glass: bool | None = None,
+        require_other_admin: bool = True,
+        require_other_break_glass: bool = False,
+    ) -> bool:
+        """Write role/status (and the designation) only while the invariants still hold (no commit).
+
+        ``False`` means the conditional UPDATE matched no row: another writer
+        removed the last other admin, or the last other qualifying break-glass
+        account, between the read and this statement.
+        """
+
+        stmt = update(DashboardUser).where(DashboardUser.id == user_id)
+        if require_other_admin:
+            stmt = stmt.where(self._other_active_admin_exists(user_id))
+        if require_other_break_glass:
+            stmt = stmt.where(self._other_qualifying_break_glass_exists(user_id))
+        values: dict[str, object] = {"role_id": role_id, "status": status}
+        if is_break_glass is not None:
+            values["is_break_glass"] = is_break_glass
         result = await self._session.execute(
-            update(DashboardUser)
-            .where(DashboardUser.id == user_id)
-            .where(self._other_active_admin_exists(user_id))
-            .values(role_id=role_id, status=status)
-            .returning(DashboardUser.id)
-            .execution_options(synchronize_session=False)
+            stmt.values(**values).returning(DashboardUser.id).execution_options(synchronize_session=False)
         )
         return result.scalar_one_or_none() is not None
 
@@ -545,7 +617,12 @@ class DashboardUsersRepository:
         return hashes
 
     async def delete_user(
-        self, user: DashboardUser, *, require_other_admin: bool = False, only_while_invited: bool = False
+        self,
+        user: DashboardUser,
+        *,
+        require_other_admin: bool = False,
+        require_other_break_glass: bool = False,
+        only_while_invited: bool = False,
     ) -> list[str] | None:
         """Delete the account; its keys stay (owner cleared) but are inactive with the owner reason.
 
@@ -566,6 +643,8 @@ class DashboardUsersRepository:
             stmt = delete(DashboardUser).where(DashboardUser.id == user.id)
             if require_other_admin:
                 stmt = stmt.where(self._other_active_admin_exists(user.id))
+            if require_other_break_glass:
+                stmt = stmt.where(self._other_qualifying_break_glass_exists(user.id))
             if only_while_invited:
                 stmt = stmt.where(DashboardUser.status == DashboardUserStatus.INVITED.value)
             deleted = await self._session.execute(

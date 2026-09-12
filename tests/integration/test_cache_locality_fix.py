@@ -78,6 +78,7 @@ def test_mini_and_large_requests_use_different_cache_keys():
     large_key = _derive_prompt_cache_key(large_payload, None)
 
     assert mini_key != large_key, "Mini and large models should produce different cache keys"
+    assert mini_key is not None and large_key is not None
     assert "-mini-" in mini_key, f"Mini key should name the mini model class, got {mini_key}"
     assert "-codex-" in large_key, f"Large key should name the codex model class, got {large_key}"
 

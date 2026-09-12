@@ -332,4 +332,46 @@ describe("AppHeader", () => {
       }
     });
   });
+  describe("emergency session indicator", () => {
+    it("is drawn on the individual tier, where there is no account chip at all", () => {
+      useAuthStore.setState({ breakGlassSession: true, user: null, tier: "individual" });
+
+      renderHeader();
+
+      expect(screen.getByTestId("emergency-session-pill")).toHaveTextContent("Emergency session");
+      expect(screen.queryByRole("button", { name: /admin\s*·\s*Admin/ })).not.toBeInTheDocument();
+    });
+
+    it("sits beside the account chip on the team tier, and in the mobile sheet", async () => {
+      const user = userEvent.setup();
+      useAuthStore.setState({ breakGlassSession: true, user: createSessionUser(), tier: "team" });
+
+      renderHeader();
+
+      expect(screen.getByTestId("emergency-session-pill")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /admin\s*·\s*Admin/ })).toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "Open menu" }));
+      expect(await screen.findByTestId("emergency-session-pill-mobile")).toHaveTextContent("Emergency session");
+    });
+
+    it("is absent for an ordinary session", () => {
+      useAuthStore.setState({ breakGlassSession: false, user: createSessionUser(), tier: "team" });
+
+      renderHeader();
+
+      expect(screen.queryByTestId("emergency-session-pill")).not.toBeInTheDocument();
+    });
+
+    it("does not outlive the session: the store's least-privilege reset clears it", () => {
+      useAuthStore.setState({ breakGlassSession: true });
+      // What `signOut` and the 401 handler both apply.
+      useAuthStore.setState({ ...useAuthStore.getInitialState(), initialized: true });
+
+      renderHeader();
+
+      expect(useAuthStore.getState().breakGlassSession).toBe(false);
+      expect(screen.queryByTestId("emergency-session-pill")).not.toBeInTheDocument();
+    });
+  });
 });

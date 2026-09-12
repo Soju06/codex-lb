@@ -1377,6 +1377,43 @@ def test_account_selection_recovery_sleep_retries_hard_affinity_owner_briefly():
     assert _account_selection_recovery_sleep_seconds(selection) == 2.0
 
 
+@pytest.mark.asyncio
+async def test_account_selection_recovery_sleep_refuses_a_self_excluded_hard_affinity_owner():
+    """#2163: the selector reports that the hard ``CODEX_SESSION`` owner it
+    resolved is one of the caller's own ``exclude_account_ids``. That owner
+    cannot become selectable while the exclusion holds and a hard row never
+    spills, so the 2s owner-recovery window buys nothing: repeating it burns
+    the whole request budget (7200s on the HTTP bridge) before the same
+    failure surfaces. The wait is refused without sleeping once, and the same
+    ``hard_affinity_saturated`` without that proof keeps its recovery wait
+    (``test_account_selection_recovery_sleep_retries_hard_affinity_owner_briefly``)."""
+    selection = AccountSelection(
+        account=None,
+        error_message="Hard affinity owner account is unavailable",
+        error_code="hard_affinity_saturated",
+        hard_affinity_owner_excluded=True,
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    assert _account_selection_recovery_sleep_seconds(selection) is None
+    waited = await _sleep_for_account_selection_recovery(
+        selection,
+        request_id="req_self_excluded_hard_owner",
+        kind="http_bridge",
+        request_stage="reattach",
+        model="gpt-5.1",
+        max_sleep_seconds=7200.0,
+        scheduler=cast(Any, SimpleNamespace(sleep=fake_sleep)),
+        clock=REAL_CLOCK,
+    )
+
+    assert waited is False
+    assert sleeps == []
+
+
 def test_account_selection_recovery_sleep_ignores_generic_no_available_accounts():
     selection = AccountSelection(account=None, error_message="No available accounts", error_code="no_accounts")
 
@@ -4909,7 +4946,7 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image(monke
     ]
 
     assert output == ["data: retry\n\n"]
-    assert calls == [("retry", payload, None, 180.0, "http")]
+    assert calls == [("retry", payload, None, 180.0, None)]
 
     text_payload = ResponsesRequest.model_validate(
         {
@@ -4965,7 +5002,7 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image(monke
     ]
 
     assert disabled_bridge_output == ["data: retry\n\n"]
-    assert calls == [("retry", payload, None, 180.0, "http")]
+    assert calls == [("retry", payload, None, 180.0, None)]
 
 
 @pytest.mark.asyncio
@@ -5140,7 +5177,9 @@ async def test_native_image_bypass_emits_capacity_keepalive_before_upstream_star
 
 
 @pytest.mark.asyncio
-async def test_stream_http_bridge_or_retry_forces_http_for_input_image_when_bridge_disabled(monkeypatch):
+async def test_stream_http_bridge_or_retry_keeps_unpinned_transport_for_small_input_image_when_bridge_disabled(
+    monkeypatch,
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings()
@@ -5165,6 +5204,79 @@ async def test_stream_http_bridge_or_retry_forces_http_for_input_image_when_brid
             "model": "gpt-5.5",
             "instructions": "hi",
             "input": [{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}],
+        }
+    )
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+
+    captured: dict[str, str | None] = {}
+
+    async def fake_stream_with_retry(payload, headers, **kwargs):
+        del payload, headers
+        captured["override"] = kwargs.get("upstream_stream_transport_override")
+        yield "data: retry\n\n"
+
+    async def fake_stream_via_http_bridge(payload, headers, **kwargs):
+        raise AssertionError("disabled bridge must not be used")
+        yield "data: bridge\n\n"
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+
+    output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert output == ["data: retry\n\n"]
+    # Regression for #2363: this is the population where the pin fired with no
+    # log and no counter, because the bridge was already disabled.
+    assert captured["override"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "image_url",
+    [
+        pytest.param("data:image/png;base64," + ("A" * (1024 * 1024 + 1)), id="over_frame_budget"),
+        pytest.param("https://example.com/shot.png", id="external_url"),
+    ],
+)
+async def test_stream_http_bridge_or_retry_forces_http_for_websocket_hostile_input_image(monkeypatch, image_url):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings()
+    settings.http_responses_stream_request_budget_seconds = 180.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    # Shrink the frame budget to 1 MiB so a 1 MiB + 1 inline image crosses it.
+    monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", 3 * 1024 * 1024)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [{"type": "input_image", "image_url": image_url}],
         }
     )
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
@@ -6889,6 +7001,7 @@ async def _capture_stream_retry_transport(
     resolved_base_transport: str = "websocket",
     payload: ResponsesRequest | None = None,
     headers: dict[str, str] | None = None,
+    resolve_kwargs: dict[str, Any] | None = None,
 ) -> str:
     dashboard_settings = _make_proxy_settings()
     dashboard_settings.http_downstream_transport_policy = dashboard_policy
@@ -6909,13 +7022,13 @@ async def _capture_stream_retry_transport(
     )
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
-    monkeypatch.setattr(
-        streaming_retry_module,
-        "_resolve_stream_transport",
-        lambda **kwargs: (
-            kwargs["transport"] if kwargs.get("transport") in ("http", "websocket") else resolved_base_transport
-        ),
-    )
+
+    def fake_resolve_stream_transport(**kwargs: Any) -> str:
+        if resolve_kwargs is not None:
+            resolve_kwargs.update(kwargs)
+        return kwargs["transport"] if kwargs.get("transport") in ("http", "websocket") else resolved_base_transport
+
+    monkeypatch.setattr(streaming_retry_module, "_resolve_stream_transport", fake_resolve_stream_transport)
 
     async def fake_stream(
         payload,
@@ -7131,9 +7244,11 @@ async def test_http_downstream_oversized_payload_bypass_still_forces_http_under_
 
 
 @pytest.mark.asyncio
-async def test_http_downstream_input_image_bypass_still_forces_http_under_always_websocket(
+async def test_http_downstream_small_input_image_follows_policy_under_always_websocket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Regression for #2363: a small inline image is no longer a transport pin,
+    # so the always_websocket policy keeps the base "auto" transport mode.
     transport = await _capture_stream_retry_transport(
         monkeypatch,
         dashboard_policy="always_websocket",
@@ -7142,7 +7257,55 @@ async def test_http_downstream_input_image_bypass_still_forces_http_under_always
         ),
     )
 
+    assert transport == "auto"
+
+
+@pytest.mark.asyncio
+async def test_http_downstream_external_image_url_still_forces_http_under_always_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = await _capture_stream_retry_transport(
+        monkeypatch,
+        dashboard_policy="always_websocket",
+        payload=_make_transport_policy_payload(
+            input=[{"type": "input_image", "image_url": "https://example.com/shot.png"}],
+        ),
+    )
+
     assert transport == "http"
+
+
+@pytest.mark.asyncio
+async def test_stream_retry_passes_image_generation_only_to_resolve_stream_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``has_image_generation_tool`` is the argument that pinned upstream HTTP
+    # from inside _resolve_stream_transport, where the sibling tests above cannot
+    # see it because they stub the resolver out (#2363).
+    resolve_kwargs: dict[str, Any] = {}
+    await _capture_stream_retry_transport(
+        monkeypatch,
+        payload=_make_transport_policy_payload(
+            input=[{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}],
+        ),
+        resolve_kwargs=resolve_kwargs,
+    )
+
+    assert resolve_kwargs["has_image_generation_tool"] is False
+
+
+@pytest.mark.asyncio
+async def test_stream_retry_passes_image_generation_tool_to_resolve_stream_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolve_kwargs: dict[str, Any] = {}
+    await _capture_stream_retry_transport(
+        monkeypatch,
+        payload=_make_transport_policy_payload(tools=[{"type": "image_generation"}]),
+        resolve_kwargs=resolve_kwargs,
+    )
+
+    assert resolve_kwargs["has_image_generation_tool"] is True
 
 
 @pytest.mark.asyncio
@@ -9890,6 +10053,71 @@ async def test_native_codex_stream_reraises_transport_failure_without_terminal_e
         ]
 
     assert _proxy_error_code(exc_info.value) == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_surfaces_local_pre_dispatch_refusal_as_unmarked_terminal() -> None:
+    """A refusal the proxy raised before dispatch keeps its terminal event.
+
+    Regression for issue #2364: the denied-anchor fence reports the public code
+    ``stream_incomplete``, which is also how an upstream transport failure ends,
+    so without the provenance flag the native lifecycle aborted the committed
+    body and the client received nothing at all. The terminal must also stay
+    unmarked — ``_normalize_public_responses_stream`` turns a terminal marked as
+    a synthetic transport failure back into an abort for native clients.
+    """
+
+    def _refusal(*, local_pre_dispatch_refusal: bool) -> proxy_module.ProxyResponseError:
+        return proxy_module.ProxyResponseError(
+            502,
+            openai_error("stream_incomplete", "The previous response anchor was rejected upstream; retry the request."),
+            local_pre_dispatch_refusal=local_pre_dispatch_refusal,
+        )
+
+    async def refused_stream() -> AsyncIterator[str]:
+        raise _refusal(local_pre_dispatch_refusal=True)
+        yield ""  # pragma: no cover
+
+    events = [
+        parse_sse_data_json(event_block)
+        async for event_block in proxy_api._stream_response_error_events(
+            refused_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    assert len(events) == 1
+    assert events[0] is not None
+    assert events[0]["type"] == "response.failed"
+    response = cast(dict[str, JsonValue], events[0]["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error["code"] == "stream_incomplete"
+    # The actionable half of the fix is the message, not the code: a regression
+    # that kept the terminal but dropped the retry instruction would leave the
+    # client with the same dead end #2364 reported.
+    assert error["message"] == "The previous response anchor was rejected upstream; retry the request."
+    assert "_codex_lb_synthetic_transport_failure" not in events[0]
+
+    async def unflagged_stream() -> AsyncIterator[str]:
+        raise _refusal(local_pre_dispatch_refusal=False)
+        yield ""  # pragma: no cover
+
+    # The same error without the provenance flag still ends the native stream
+    # without a terminal: the flag is the whole of the new behaviour.
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        _ = [
+            event
+            async for event in proxy_api._stream_response_error_events(
+                unflagged_stream(),
+                owns_reservation=False,
+                reservation=None,
+                preserve_native_failure_lifecycle=True,
+            )
+        ]
+
+    assert _proxy_error_code(exc_info.value) == "stream_incomplete"
 
 
 def test_stream_startup_error_response_preserves_exact_retry_after_header() -> None:
@@ -17174,6 +17402,7 @@ async def test_stream_with_retry_keyed_refresh_connect_settles_before_account_he
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -17278,6 +17507,7 @@ async def test_stream_with_retry_keyed_queued_penalty_flushes_on_cancel(monkeypa
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -17380,6 +17610,7 @@ async def test_stream_with_retry_cancel_cleanup_flushes_queued_health_after_back
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -17512,6 +17743,7 @@ async def test_stream_with_retry_cancelled_multi_penalty_flush_survives_backoff_
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         if account is account_a:
@@ -17641,6 +17873,7 @@ async def test_stream_with_retry_keyed_cancel_during_deferred_health_flush_still
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         flush_started.set()
@@ -17756,6 +17989,7 @@ async def test_stream_with_retry_keyed_cancel_mid_deferred_health_flush_does_not
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         nonlocal health_apply_count
         del error, http_status
@@ -17866,6 +18100,7 @@ async def test_stream_unkeyed_owner_rewrite_records_health_before_terminal_deliv
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del http_status
         assert failed_account is account
@@ -17973,6 +18208,7 @@ async def test_stream_responses_route_keyed_owner_rewrite_settles_before_origina
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         assert failed_account is account
@@ -18087,6 +18323,7 @@ async def test_stream_responses_route_keyed_owner_rewrite_preserves_health_after
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         assert failed_account is account
@@ -18233,6 +18470,7 @@ async def test_stream_with_retry_keyed_empty_terminal_queue_settles_before_termi
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         assert failed_account is account
@@ -18359,6 +18597,7 @@ async def test_stream_responses_route_keyed_refresh_connect_settles_before_accou
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -18530,6 +18769,7 @@ async def test_stream_with_retry_keyed_penalty_flush_keeps_later_entries_after_f
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, code, http_status
         health_accounts.append(account.id)
@@ -18628,6 +18868,7 @@ async def test_stream_with_retry_cancel_safe_health_flush_is_drained_at_shutdown
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, code, http_status
         if account.id == account_a.id:
@@ -18759,6 +19000,7 @@ async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_accou
         error: UpstreamError,
         code: str,
         http_status: int | None = None,
+        **_kwargs: object,
     ) -> object:
         del error, http_status
         settlement_order.append(f"health:{account.id}:{code}")
@@ -33166,7 +33408,7 @@ async def test_proxy_responses_websocket_transparent_replay_strips_socket_turn_s
             return _make_account("acc_ws_sticky_1"), first_upstream
         return _make_account("acc_ws_sticky_2"), second_upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -54755,7 +54997,9 @@ async def test_process_upstream_websocket_text_defers_accepted_replay_health_unt
         calls.append("settle")
         return True
 
-    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+    async def handle_stream_error(
+        account: Account, _error: object, code: str, http_status: int | None = None, **_kwargs
+    ) -> None:
         del http_status
         calls.append(f"health:{account.id}:{code}")
 
@@ -54988,7 +55232,9 @@ async def test_process_upstream_websocket_text_defers_owner_bound_accepted_repla
         calls.append("settle")
         return True
 
-    async def handle_stream_error(account: Account, _error: object, code: str, http_status: int | None = None) -> None:
+    async def handle_stream_error(
+        account: Account, _error: object, code: str, http_status: int | None = None, **_kwargs
+    ) -> None:
         del http_status
         calls.append(f"health:{account.id}:{code}")
 
@@ -55972,3 +56218,103 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_surfaces_wit
     assert excinfo.value.retry_after_seconds == 5
     assert stream_once_calls == 2
     assert scheduler.sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("draining", "event_type"),
+    [(False, "response.output_text.delta"), (True, "response.output_text.delta"), (False, "response.completed")],
+    ids=["visible", "draining", "anonymous-completion"],
+)
+async def test_process_upstream_websocket_text_routes_anonymous_output_to_created_response(
+    monkeypatch, draining, event_type
+):
+    """Archive and relay agree on output ownership without changing terminal ownership."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_pipelined_output")
+    active_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_active_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_ws_active_created",
+        awaiting_response_created=False,
+        archive_request_id="archive_ws_active_created",
+        draining_until_terminal=draining,
+    )
+    waiting_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_waiting_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id=None,
+        awaiting_response_created=True,
+        archive_request_id="archive_ws_waiting_created",
+    )
+    payload = {
+        "type": "response.output_text.delta",
+        "sequence_number": 3,
+        "item_id": "msg_ws_pipelined",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "Hello",
+    }
+    if event_type == "response.completed":
+        payload = {"type": event_type, "response": {"status": "completed", "output": []}}
+    pending_requests = deque([waiting_request, active_request])
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    archived: list[tuple[object, str | None]] = []
+
+    class _ArchivingUpstream:
+        def archive_received(self, message: object) -> None:
+            archived.append((message, get_request_id()))
+
+    send_downstream = AsyncMock()
+    monkeypatch.setattr(service, "_send_downstream_websocket_text", send_downstream)
+    text = json.dumps(payload, separators=(",", ":"))
+    message = SimpleNamespace(kind="text", text=text)
+    should_stop = await websocket_mixin_module._process_and_forward_upstream_websocket_text(
+        cast(Any, service),
+        cast(Any, SimpleNamespace()),
+        cast(Any, _ArchivingUpstream()),
+        message=message,
+        text=text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        continuity_state=proxy_service._WebSocketContinuityState(),
+        codex_session_affinity=False,
+    )
+
+    assert should_stop is False
+    if event_type == "response.completed":
+        assert list(pending_requests) == [active_request]
+        assert active_request.downstream_visible is False
+        assert active_request.response_event_count == 0
+        assert waiting_request.latency_first_upstream_event_ms is not None
+        finalize.assert_awaited_once()
+        assert finalize.await_args is not None
+        assert finalize.await_args.args[0] is waiting_request
+        assert finalize.await_args.kwargs["event_type"] == "response.completed"
+        assert archived == [(message, "archive_ws_waiting_created")]
+    else:
+        assert waiting_request.downstream_visible is False
+        assert waiting_request.response_event_count == 0
+        assert active_request.downstream_visible is True
+        assert active_request.response_event_count == 1
+        finalize.assert_not_awaited()
+        assert archived == [(message, "archive_ws_active_created")]
+    send_downstream.assert_awaited_once()
+    assert send_downstream.await_args is not None
+    assert send_downstream.await_args.kwargs["text"] == text

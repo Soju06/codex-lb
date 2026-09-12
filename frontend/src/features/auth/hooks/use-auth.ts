@@ -54,6 +54,8 @@ type AuthState = {
   assignableRoleIds: string[];
   /** Recent re-verification and the factors the account can re-verify with; `null` without an account. */
   stepUp: StepUpState | null;
+  /** This session belongs to a break-glass account; the header shows the emergency indicator. */
+  breakGlassSession: boolean;
   tier: DisclosureTier;
   adminLoginRequested: boolean;
   loading: boolean;
@@ -89,6 +91,7 @@ const LEAST_PRIVILEGE_ACCESS: Pick<
   | "accessSummary"
   | "assignableRoleIds"
   | "stepUp"
+  | "breakGlassSession"
   | "tier"
   | "mustChangePassword"
   | "totpEnrollmentRequired"
@@ -100,6 +103,7 @@ const LEAST_PRIVILEGE_ACCESS: Pick<
   accessSummary: null,
   assignableRoleIds: [],
   stepUp: null,
+  breakGlassSession: false,
   tier: "individual",
   mustChangePassword: false,
   totpEnrollmentRequired: false,
@@ -148,6 +152,7 @@ function applySession(set: (next: Partial<AuthState>) => void, session: AuthSess
     accessSummary: session.accessSummary ?? null,
     assignableRoleIds: session.assignableRoleIds,
     stepUp: session.stepUp ?? null,
+    breakGlassSession: session.breakGlassSession ?? false,
     tier: resolveDisclosureTier(session.accessSummary ?? null, session.user ?? null),
     adminLoginRequested: false,
     initialized: true,

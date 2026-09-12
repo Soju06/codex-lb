@@ -758,6 +758,7 @@ def _websocket_archive_request_state_for_payload(
         previous_response_id_hint=_facade()._previous_response_id_from_not_found_message(error_message),
         error_message=error_message,
         allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
+        event_type=event_type,
     )
 
 
@@ -3427,7 +3428,6 @@ class _WebSocketMixin:
                 if isinstance(responses_payload.input, list)
                 else None,
             )
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
@@ -3479,30 +3479,21 @@ class _WebSocketMixin:
             api_key=api_key,
             synthesized_turn_state=synthesized_turn_state,
         )
-        sticky_key_source = "none"
-        if affinity_policy.codex_session_source == "thread_header":
-            sticky_key_source = "thread_header"
-        elif affinity_policy.kind == StickySessionKind.CODEX_SESSION:
-            turn_state_key = _sticky_key_from_turn_state_header(headers)
-            if turn_state_key is not None and turn_state_key == synthesized_turn_state:
-                sticky_key_source = "generated_turn_state"
-            elif turn_state_key is not None:
-                sticky_key_source = "turn_state_header"
-            else:
-                sticky_key_source = "session_header"
-        elif affinity_policy.key:
-            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        affinity_observation = AffinityObservation.from_policy(
+            affinity_policy,
+            synthesized_turn_state=synthesized_turn_state,
+        )
         _maybe_log_proxy_request_shape(
             "websocket",
             responses_payload,
             headers,
-            sticky_kind=affinity_policy.kind.value if affinity_policy.kind is not None else None,
-            sticky_key_source=sticky_key_source,
+            sticky_kind=affinity_observation.kind,
+            sticky_key_source=affinity_observation.source,
             derivation_outcome=affinity_policy.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(responses_payload) is not None,
         )
         request_state.affinity_policy = affinity_policy
-        request_state.affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity_policy)
+        request_state.affinity_observation = affinity_observation
 
         # First-turn ``input_file.file_id`` references must land on the
         # account that registered the upload (chatgpt-account-id-scoped).
@@ -5530,6 +5521,7 @@ class _WebSocketMixin:
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
                     allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
+                    event_type=event_type,
                 )
                 release_create_gate = False
             else:
@@ -6696,6 +6688,16 @@ class _WebSocketMixin:
                         account,
                         _stream_settlement_error_payload(settlement),
                         settlement.error_code or "upstream_error",
+                        # Evidence only, for the soft-overload window. On the
+                        # HTTP bridge a terminal ``error`` frame can carry the
+                        # upstream HTTP status, which the bridge already parsed
+                        # into this field; such a failure is not a status-less
+                        # terminal. It stays ``None`` for a direct WebSocket
+                        # terminal, which is the shape the window is for.
+                        # Forwarding it positionally would double-count the
+                        # reasoning-replay metric for a frame already counted at
+                        # ``_observe_terminal_stream_error_frame``.
+                        upstream_http_status=request_state.error_http_status_override,
                     )
                 except Exception:
                     _facade().logger.warning(

@@ -64,12 +64,23 @@ export const LoginProviderSchema = z.object({
   loginUrl: z.string().nullable().default(null),
 });
 
+// Who may still sign in with a local password (`dashboard_settings.local_login_policy`).
+// The strict enum is what a *request* must satisfy: `updateSettings` takes
+// `unknown`, so this schema is the only thing standing between a bad value and
+// the wire, and a fallback there would silently send the most open policy of
+// the three.
+export const StrictLocalLoginPolicySchema = z.enum(["enabled", "admins_only", "break_glass_only"]);
+// Responses get the fallback instead: a value this build does not know must not
+// fail the whole session parse. Nothing may echo the fallen-back value into an
+// update — see `buildSettingsUpdateRequest`.
+export const LocalLoginPolicySchema = StrictLocalLoginPolicySchema.catch("enabled");
+
 export const LoginHintSchema = z.object({
   usernameField: z.enum(["hidden", "shown"]).default("hidden"),
   providers: z
     .array(LoginProviderSchema)
     .default([{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }]),
-  localLogin: z.string().default("enabled"),
+  localLogin: LocalLoginPolicySchema.default("enabled"),
   // The request carried a provider identity that has no account here yet.
   pendingIdentity: z.boolean().default(false),
 });
@@ -88,7 +99,7 @@ export const AccessSummarySchema = z.object({
   roleMappings: z.number().int().default(0),
   scimTokens: z.number().int().default(0),
   auditSinks: z.number().int().default(0),
-  localLoginPolicy: z.string().default("enabled"),
+  localLoginPolicy: LocalLoginPolicySchema.default("enabled"),
 });
 
 // Step-up (re-verification for sensitive changes): when the account last
@@ -132,6 +143,9 @@ export const AuthSessionSchema = z.object({
   accessSummary: AccessSummarySchema.nullable().default(null),
   assignableRoleIds: z.array(z.string()).default([]),
   stepUp: StepUpStateSchema.nullable().default(null),
+  // The session was minted for an account carrying the break-glass
+  // designation; the header says so, nothing else changes.
+  breakGlassSession: z.boolean().default(false),
 });
 
 // Mirrors the backend username rule (case-folded on the server).
@@ -218,6 +232,7 @@ export type AuthSession = z.infer<typeof AuthSessionSchema>;
 export type AuthSessionUser = z.infer<typeof AuthSessionUserSchema>;
 export type LoginHint = z.infer<typeof LoginHintSchema>;
 export type LoginProvider = z.infer<typeof LoginProviderSchema>;
+export type LocalLoginPolicy = z.infer<typeof LocalLoginPolicySchema>;
 export type AccessSummary = z.infer<typeof AccessSummarySchema>;
 export type Permission = z.infer<typeof PermissionSchema>;
 export type PermissionScope = z.infer<typeof PermissionScopeSchema>;

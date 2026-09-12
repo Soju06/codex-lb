@@ -3158,3 +3158,96 @@ async def test_guest_session_generation_migration_upgrade_and_downgrade(tmp_path
         assert "guest_session_generation" in await _dashboard_columns(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_terminal_append_phase_migration_upgrade_and_downgrade(tmp_path):
+    """The terminal-append phase is additive and defaults to ``pending``.
+
+    A pre-migration operation can legitimately sit at ``completed`` with
+    ``event_spool_complete = 0``: the relay publishes the operation state
+    before appending the terminal transcript block, so that is the shape of
+    every ordinary operation whose terminal append has not committed yet. Those
+    rows must come out of the upgrade appendable — ``pending`` — because the
+    column fences one dispatch's terminal write, and no legacy row carries such
+    a fence. A final walk to head proves the revision sits on a single-head
+    graph.
+    """
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-terminal-append-phase.sqlite'}"
+    parent_revision = "20260911_010000_merge_pin_index_and_affinity_heads"
+    phase_revision = "20260911_020000_add_http_bridge_terminal_append_phase"
+    table = "http_bridge_operations"
+    column = "terminal_append_phase"
+
+    def _columns(sync_conn):
+        return {item["name"] for item in sa_inspect(sync_conn).get_columns(table)}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert column not in await conn.run_sync(_columns)
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_sessions (
+                        id, session_key_kind, session_key_value, session_key_hash,
+                        api_key_scope, owner_instance_id, owner_epoch, state,
+                        created_at, updated_at, last_seen_at
+                    ) VALUES (
+                        'legacy-session', 'conversation', 'legacy-conversation', 'legacy-hash',
+                        'legacy-scope', 'legacy-instance', 1, 'active',
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_operations (
+                        operation_id, session_id, request_fingerprint, state,
+                        event_bytes, event_spool_complete, spool_format,
+                        created_at, updated_at
+                    ) VALUES (
+                        'legacy-incomplete-terminal', 'legacy-session', 'fp-incomplete', 'completed',
+                        0, 0, 'rows_v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    ), (
+                        'legacy-replayable-terminal', 'legacy-session', 'fp-replayable', 'completed',
+                        12, 1, 'rows_v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, phase_revision, bootstrap_legacy=False))
+
+        async with engine.connect() as conn:
+            assert column in await conn.run_sync(_columns)
+            phase_rows = (
+                await conn.execute(text(f"SELECT operation_id, {column} FROM {table} ORDER BY operation_id"))
+            ).all()
+            phases = {str(row[0]): str(row[1]) for row in phase_rows}
+        # Neither legacy shape had recorded a terminal transcript outcome, so
+        # both stay appendable; the incomplete-spool row in particular must not
+        # be fenced out of its own terminal append.
+        assert phases == {
+            "legacy-incomplete-terminal": "pending",
+            "legacy-replayable-terminal": "pending",
+        }
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            assert column not in await conn.run_sync(_columns)
+    finally:
+        await engine.dispose()

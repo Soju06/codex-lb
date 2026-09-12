@@ -81,6 +81,10 @@ class DashboardUserUpdateRequest(DashboardModel):
     display_name: str | None = Field(default=None, max_length=128)
     email: str | None = Field(default=None, max_length=320)
     status: Literal["active", "disabled"] | None = None
+    #: The emergency-access designation (PLAN §4.2). Only meaningful on the
+    #: admin preset, and an account that carries it is always ``manual``:
+    #: no sign-in provider re-evaluation may move an emergency account.
+    is_break_glass: bool | None = None
     #: Take a role a sign-in provider manages over by hand: the change is
     #: applied and the account becomes ``manual``, so no later re-evaluation
     #: moves it again. Only meaningful together with ``roleId``.

@@ -14,7 +14,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.db.models import DashboardSettings, DashboardUser, ModelContextWindowOverride
+from app.db.models import DashboardSettings, DashboardUser, LocalLoginPolicy, ModelContextWindowOverride
 from app.modules.dashboard_users.repository import DashboardUsersRepository
 
 _SETTINGS_ID = 1
@@ -28,6 +28,27 @@ class SettingsRepository:
         """Accounts the TOTP requirements bind (roles loaded for the admin-level check)."""
 
         return await DashboardUsersRepository(self._session).list_active_local_password_users()
+
+    async def acquire_account_write_intent(self) -> None:
+        """Serialise this settings write against the account mutations it depends on.
+
+        The tightening gate counts qualifying emergency accounts and then
+        writes the policy; without the accounts lock a concurrent TOTP reset,
+        password removal or deactivation can take the last one away in between
+        and leave a restricted policy with no way back in.
+        """
+
+        await DashboardUsersRepository(self._session).acquire_write_intent()
+
+    async def count_qualifying_break_glass(self) -> int:
+        """Accounts that can still open the door once local sign-in is restricted."""
+
+        return await DashboardUsersRepository(self._session).count_qualifying_break_glass()
+
+    async def list_break_glass_designations(self) -> Sequence[DashboardUser]:
+        """Designated accounts, so a refusal can name the one an operator should enrol."""
+
+        return await DashboardUsersRepository(self._session).list_break_glass_designations()
 
     async def get_or_create(self) -> DashboardSettings:
         existing = await self._session.get(DashboardSettings, _SETTINGS_ID)
@@ -71,6 +92,7 @@ class SettingsRepository:
             import_without_overwrite=True,
             totp_required_on_login=False,
             totp_required_for_admin_role=False,
+            local_login_policy=LocalLoginPolicy.ENABLED.value,
             password_hash=None,
             guest_access_enabled=False,
             guest_password_hash=None,
@@ -177,6 +199,7 @@ class SettingsRepository:
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         totp_required_for_admin_role: bool | None = None,
+        local_login_policy: str | None = None,
         api_key_auth_enabled: bool | None = None,
         hide_upstream_quota_from_api_keys: bool | None = None,
         limit_warmup_enabled: bool | None = None,
@@ -374,6 +397,8 @@ class SettingsRepository:
             settings.totp_required_on_login = totp_required_on_login
         if totp_required_for_admin_role is not None:
             settings.totp_required_for_admin_role = totp_required_for_admin_role
+        if local_login_policy is not None:
+            settings.local_login_policy = local_login_policy
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
         if hide_upstream_quota_from_api_keys is not None:

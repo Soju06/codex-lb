@@ -304,3 +304,28 @@ describe("buildSettingsUpdateRequest subscription overflow", () => {
     expect(cleared.subscriptionOverflowSourceId).toBeNull();
   });
 });
+
+describe("buildSettingsUpdateRequest local login policy", () => {
+  it("never echoes the policy back, so an unrelated save cannot re-open local sign-in", () => {
+    // The response schema falls an unknown policy back to the most open value.
+    // Echoing that back would make every Settings save on a newer backend a
+    // silent relaxation; omitted means unchanged, which is the safe default.
+    const settings = DashboardSettingsSchema.parse({
+      ...createDashboardSettings(),
+      localLoginPolicy: "a_policy_this_build_does_not_know",
+    });
+    expect(settings.localLoginPolicy).toBe("enabled");
+
+    const payload = buildSettingsUpdateRequest(settings, { apiKeyAuthEnabled: false });
+
+    expect("localLoginPolicy" in payload).toBe(false);
+  });
+
+  it("still sends the policy the one card that owns it asks for", () => {
+    const payload = buildSettingsUpdateRequest(createDashboardSettings(), {
+      localLoginPolicy: "break_glass_only",
+    });
+
+    expect(payload.localLoginPolicy).toBe("break_glass_only");
+  });
+});

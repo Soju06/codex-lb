@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from time import time
 
@@ -104,6 +105,7 @@ from app.modules.dashboard_auth.service import (
     get_invite_accept_token_rate_limiter,
     get_invite_lookup_rate_limiter,
     get_login_failed_audit_rate_limiter,
+    get_password_address_rate_limiter,
     get_password_rate_limiter,
     get_step_up_cookie_store,
     get_totp_rate_limiter,
@@ -115,6 +117,10 @@ from app.modules.dashboard_auth.service import (
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
 from app.modules.dashboard_users.api import mapped_user_errors
+from app.modules.dashboard_users.break_glass import (
+    LastBreakGlassProtectedError,
+    local_login_admits,
+)
 from app.modules.dashboard_users.credentials import CredentialRequiredError
 from app.modules.dashboard_users.schemas import ProfileUpdateRequest
 from app.modules.dashboard_users.service import InviteNotFoundError, UsernameLockedError, invite_token_hash
@@ -134,6 +140,33 @@ def _client_host(request: Request) -> str | None:
 
 def _session_client_key(request: Request, *, prefix: str) -> str:
     return f"{prefix}:{request.client.host if request.client else 'unknown'}"
+
+
+def _password_login_address_key(request: Request) -> str:
+    """The coarse per-address failed-login budget (PLAN §4.4: ``password_login:{ip}``).
+
+    This is the endpoint's actual ceiling. The per-account bucket below is
+    deliberately local — a limit for one username at one address bars nothing
+    else — which on its own would let a single address mint an unlimited number
+    of buckets by inventing usernames, each of them costing a blocking
+    password-hash comparison. The two are added, never swapped.
+    """
+
+    return _session_client_key(request, prefix="password_login")
+
+
+def _password_login_key(request: Request, username: str | None) -> str:
+    """The failed-login budget: one bucket per (username, address) pair.
+
+    Keyed on the *normalized* username so case variants share a budget, and
+    hashed so the rate-limit table never holds a username in the clear. The
+    pair is what makes a limit local: eight failures for one account from one
+    address bar neither that account elsewhere nor another account from the
+    same address.
+    """
+
+    digest = hashlib.sha256((username or "").encode("utf-8")).hexdigest()
+    return f"{_password_login_address_key(request)}:{digest}"
 
 
 def _session_ttl_seconds(request: Request, user: DashboardUser, configured_ttl_seconds: int) -> int:
@@ -163,6 +196,7 @@ async def _create_user_session(
         ttl_seconds=ttl_seconds,
         auth_method=auth_method,
         step_up_verified_at=step_up_verified_at,
+        break_glass=user.is_break_glass,
     )
     return session_id, ttl_seconds
 
@@ -201,17 +235,27 @@ async def _decorate_session_response(
         has_pwd and resolved is not None and response.totp_required_on_login and not resolved.state.totp_verified
     )
     fully_authorized = has_pwd and not totp_pending and response.password_required
+    # Behind a reverse proxy the cookie only counts as a fallback while the
+    # local login policy admits the account -- the same call the session gate
+    # makes, so ``password_session_active`` never advertises a fallback the
+    # gate would refuse.
+    fallback_admitted = resolved is None or local_login_admits(
+        resolved.user, (await get_settings_cache().get()).local_login_policy
+    )
+    fallback_authorized = fully_authorized and fallback_admitted
 
     if request_auth is None:
         update: dict[str, object] = {
             "auth_mode": auth_mode,
             "password_management_enabled": password_management_enabled(auth_mode),
-            "password_session_active": fully_authorized,
+            "password_session_active": (
+                fallback_authorized if auth_mode == DashboardAuthMode.TRUSTED_HEADER else fully_authorized
+            ),
         }
         # Without the header only a password session gets in. When no account
         # holds a password (proxy-created accounts do not count) there is no
         # form to show: the client renders the reverse-proxy notice.
-        if auth_mode == DashboardAuthMode.TRUSTED_HEADER and not fully_authorized and not totp_pending:
+        if auth_mode == DashboardAuthMode.TRUSTED_HEADER and not fallback_authorized and not totp_pending:
             local_password_users = (await get_dashboard_users_cache().local_auth_state()).active_local_password_users
             if local_password_users == 0 or not response.password_required:
                 update["authenticated"] = False
@@ -229,22 +273,22 @@ async def _decorate_session_response(
                     "authenticated": False,
                     "password_required": False,
                     "auth_mode": DashboardAuthMode.TRUSTED_HEADER,
-                    "password_session_active": fully_authorized,
+                    "password_session_active": fallback_authorized,
                     **_UNAUTHENTICATED_ACCOUNT_FIELDS,
                 }
             )
-        if resolution.user is None and has_pwd:
+        if resolution.user is None and has_pwd and fallback_admitted:
             # Refused identity but a password cookie rides along: describe that
             # session (the break-glass admin stays reachable behind the proxy).
             return response.model_copy(
                 update={
                     "auth_mode": DashboardAuthMode.TRUSTED_HEADER,
                     "password_management_enabled": True,
-                    "password_session_active": fully_authorized,
+                    "password_session_active": fallback_authorized,
                 }
             )
         return await _trusted_header_session_response(
-            response, resolution, request=request, context=context, password_session_active=fully_authorized
+            response, resolution, request=request, context=context, password_session_active=fallback_authorized
         )
 
     # Disabled auth: the implicit admin holds every permission.
@@ -638,9 +682,23 @@ async def login_password(
         await _audit_username_required(request, context)
         raise DashboardValidationError(str(exc), code="username_required") from exc
 
+    # Two buckets, both spent by every attempt: the coarse per-address ceiling
+    # that bounds the endpoint, and the per-(address, username) budget that
+    # keeps one account's failures from barring another. No account is exempt
+    # from either. PLAN §4.4 exempted the emergency account from a limit it
+    # assumed was keyed on the username alone, which an attacker could exhaust
+    # from anywhere; both keys carry the client address, so an attacker
+    # hammering that username from their own address cannot touch the operator
+    # signing in from a different one. T13/T15 ("no remotely triggerable
+    # account lockout") therefore hold without an exemption -- and the
+    # exemption itself was an oracle, because whether the ninth failure for a
+    # username answers 429 or 401 named the emergency account to an
+    # unauthenticated caller.
+    address_limiter, address_key = get_password_address_rate_limiter(), _password_login_address_key(request)
     limiter = get_password_rate_limiter()
-    rate_key = _session_client_key(request, prefix="password_login")
+    rate_key = _password_login_key(request, target.username)
     try:
+        await address_limiter.check_and_increment(address_key, context.session)
         await limiter.check_and_increment(rate_key, context.session)
     except DashboardRateLimitError as exc:
         raise _rate_limit_error(exc, code="password_rate_limited") from exc
@@ -650,6 +708,13 @@ async def login_password(
     except InvalidCredentialsError as exc:
         raise DashboardAuthError(str(exc), code="invalid_credentials") from exc
 
+    # Only the per-account bucket is cleared. The coarse address bucket is the
+    # endpoint's only ceiling on *how many* usernames one address may try, and
+    # clearing it on success would hand that ceiling to anyone holding a single
+    # valid account: seven guesses at someone else's username, one sign-in of
+    # their own, seven more, for as long as they like. It is left to expire on
+    # its own window instead, which the person who just signed in never notices
+    # (60/60 s against one sign-in).
     await limiter.clear_for_key(rate_key, context.session)
     # Only last_login_at changed; nothing on the auth path reads it, so the users
     # cache stays warm.
@@ -664,10 +729,15 @@ async def _audit_username_required(request: Request, context: DashboardAuthConte
     already at the password limit gets no row, and a dedicated per-client
     budget (same 8/60 s shape, own counter) bounds the rows a client can add
     without ever touching the password limiter's counter.
+
+    The budget it reads is the per-address one, which is the bucket ordinary
+    logins from this client actually increment; a per-username key would be a
+    counter nothing ever advances, so the guard would let every refusal
+    through.
     """
 
     try:
-        await get_password_rate_limiter().check(_session_client_key(request, prefix="password_login"), context.session)
+        await get_password_address_rate_limiter().check(_password_login_address_key(request), context.session)
         await get_login_failed_audit_rate_limiter().check_and_increment(
             _session_client_key(request, prefix="login_failed_audit"), context.session
         )
@@ -785,6 +855,8 @@ async def remove_password(
         raise DashboardConflictError(str(exc), code="other_users_exist") from exc
     except CredentialRequiredError as exc:
         raise DashboardConflictError(str(exc), code="credential_required") from exc
+    except LastBreakGlassProtectedError as exc:
+        raise DashboardConflictError(str(exc), code="last_break_glass_protected") from exc
 
     await _invalidate_auth_caches()
     bootstrap_token = await ensure_auto_bootstrap_token()
@@ -969,6 +1041,10 @@ async def confirm_totp_setup(
 
     await limiter.clear_for_key(rate_key, context.session)
     await _invalidate_auth_caches()
+    # The enrolment itself does not mint a TOTP-verified session: whenever the
+    # new secret makes the second factor mandatory the account presents it
+    # once through ``/totp/verify``, which is the shape the enrolment gate
+    # already has for the global toggle.
     return JSONResponse(status_code=200, content={"status": "ok"})
 
 
@@ -1052,6 +1128,8 @@ async def disable_totp(
         raise DashboardBadRequestError(str(exc), code="invalid_totp_code") from exc
     except TotpNotConfiguredError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_code") from exc
+    except LastBreakGlassProtectedError as exc:
+        raise DashboardConflictError(str(exc), code="last_break_glass_protected") from exc
 
     await limiter.clear_for_key(rate_key, context.session)
     await _invalidate_auth_caches()

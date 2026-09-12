@@ -14,12 +14,13 @@ import { PendingIdentityScreen } from "@/features/auth/components/pending-identi
 import { TotpDialog } from "@/features/auth/components/totp-dialog";
 import { TotpEnrollmentForm } from "@/features/auth/components/totp-enrollment-form";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { isLocalLoginRequested, localFormDisclosure, LOCAL_LOGIN_ROUTE } from "@/features/auth/local-login";
 
 // Public routes render before the login branch: they must work for a visitor
 // without a session and for a signed-in account alike.
 export const INVITE_ROUTE_PATTERN = "/invite/:token";
 export const PENDING_IDENTITY_ROUTE = "/auth/pending";
-const LOCAL_LOGIN_ROUTE_PREFIX = "/login";
+const LOCAL_LOGIN_ROUTE_PREFIX = LOCAL_LOGIN_ROUTE;
 
 function isPublicRoute(pathname: string): boolean {
   return (
@@ -32,7 +33,7 @@ function isPublicRoute(pathname: string): boolean {
 
 export function AuthGate({ children }: PropsWithChildren) {
   const { t } = useTranslation();
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const navigate = useNavigate();
   const refreshSessionStable = useAuthStore((state) => state.refreshSession);
   const initialized = useAuthStore((state) => state.initialized);
@@ -49,6 +50,9 @@ export function AuthGate({ children }: PropsWithChildren) {
   const verifyTotp = useAuthStore((state) => state.verifyTotp);
   const error = useAuthStore((state) => state.error);
   const pendingIdentity = useAuthStore((state) => state.loginHint.pendingIdentity);
+  const localLoginPolicy = useAuthStore((state) => state.loginHint.localLogin);
+  // One decision, applied by every screen that can draw the local form.
+  const localForm = localFormDisclosure(localLoginPolicy, { localRequested: isLocalLoginRequested(search) });
 
   useEffect(() => {
     void refreshSessionStable();
@@ -85,7 +89,7 @@ export function AuthGate({ children }: PropsWithChildren) {
     !authenticated &&
     (pendingIdentity || (pathname === PENDING_IDENTITY_ROUTE && authMode === "trusted_header"))
   ) {
-    return <PendingIdentityScreen />;
+    return <PendingIdentityScreen localForm={localForm} />;
   }
 
   if (bootstrapRequired && !passwordRequired) {
@@ -101,7 +105,7 @@ export function AuthGate({ children }: PropsWithChildren) {
     }
     return (
       <AuthScreenFrame>
-        <LoginForm />
+        <LoginForm localForm={localForm} />
       </AuthScreenFrame>
     );
   }

@@ -496,6 +496,23 @@ def _account_selection_recovery_sleep_seconds_from_message(
 
 
 def _account_selection_recovery_sleep_seconds(selection: AccountSelection) -> float | None:
+    """The wait this selection failure earns before the caller re-selects.
+
+    ``hard_affinity_owner_excluded`` is the selector's proof that the hard
+    ``CODEX_SESSION`` owner it resolved is one of the caller's own
+    ``exclude_account_ids``. The owner cannot become selectable while that
+    exclusion holds and a hard row never spills to another account, so the
+    short owner-recovery window earns nothing here: every re-selection would
+    report the same ``hard_affinity_saturated`` until the request budget is
+    spent (7200s on the HTTP bridge), long after the client gave up. Fail
+    closed at once instead -- the same fail-closed the bridge already applies
+    when the request excludes the account its hard session is bound to
+    (``_require_http_bridge_bound_account_not_excluded``) -- and let the
+    client's own retry reach the owner with no exclusion. A genuinely
+    unavailable owner the caller did NOT exclude keeps its recovery wait.
+    """
+    if selection.hard_affinity_owner_excluded:
+        return None
     return _account_selection_recovery_sleep_seconds_from_message(
         selection.error_message,
         error_code=selection.error_code,
@@ -706,6 +723,7 @@ class _RefreshFailoverProxy(Protocol):
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
         retry_after_seconds: float | None = None,
         burst_cooldown_recorded: bool = False,
+        upstream_http_status: int | None = None,
     ) -> Any: ...
 
 
@@ -1176,9 +1194,6 @@ class _WebSocketRequestState:
     operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
-    # Immutable durable attempt generation. Recovery claims increment the
-    # operation's dispatch count before sending a replacement attempt.
-    operation_attempt_generation: int = 0
     # Last response identity successfully written to the durable operation.
     # Retry setup may clear the active response before a replacement is
     # acknowledged, but fallback settlement must still fence against this ID.

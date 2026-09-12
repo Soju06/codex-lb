@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core import startup as startup_module
 from app.core.config.settings import get_settings
 from app.core.config.spool_retention import (
@@ -21,6 +23,7 @@ from app.core.metrics.prometheus import (
     http_bridge_spool_cleanup_duration_seconds,
     http_bridge_spool_cleanup_runs_total,
 )
+from app.core.rate_limiter.db_rate_limiter import get_rate_limit_attempt_sweeper
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
@@ -200,6 +203,28 @@ def _merge_backlog_signal(previous: bool, attempted: bool | None) -> bool:
     return previous if attempted is None else attempted
 
 
+async def _purge_expired_rate_limit_attempts(session: AsyncSession) -> None:
+    """Age out ``rate_limit_attempts`` on every leader pass.
+
+    ``clear_for_key`` only runs on a *successful* sign-in, so failed attempts
+    have no other way out of the table, and the failed-login keys now carry a
+    caller-supplied username: without this the row count is the attacker's to
+    choose. It runs whatever the sticky-mapping toggle says, for the same
+    reason the operation retention sweep does, and its failure is contained so
+    it can never cost the rest of the pass.
+    """
+
+    try:
+        await get_rate_limit_attempt_sweeper().cleanup(session)
+    except Exception:
+        logger.exception("Rate-limit attempt retention failed")
+        # The rest of the pass must not inherit a half-finished transaction,
+        # and a rollback that fails on an already-broken session says nothing
+        # the log above has not already said.
+        with contextlib.suppress(Exception):
+            await session.rollback()
+
+
 def _abandoned_bridge_retention_seconds(dashboard_settings: DashboardSettings) -> float:
     """Retention for abandoned durable bridge rows.
 
@@ -372,6 +397,7 @@ class StickySessionCleanupScheduler:
             retention_attempted = False
             try:
                 async with get_background_session() as session:
+                    await _purge_expired_rate_limit_attempts(session)
                     settings_repo = SettingsRepository(session)
                     bridge_repo = DurableBridgeRepository(session)
                     sticky_repo = StickySessionsRepository(session)

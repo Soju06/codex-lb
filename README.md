@@ -331,6 +331,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Abaddollyon"><img src="https://avatars.githubusercontent.com/u/31712865?v=4?s=100" width="100px;" alt="Abaddollyon"/><br /><sub><b>Abaddollyon</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Abaddollyon" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Abaddollyon" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/mjakl"><img src="https://avatars.githubusercontent.com/u/40384?v=4?s=100" width="100px;" alt="Markus Jakl"/><br /><sub><b>Markus Jakl</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mjakl" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mjakl" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Amjakl" title="Bug reports">🐛</a></td>
     </tr>
   </tbody>
 </table>
